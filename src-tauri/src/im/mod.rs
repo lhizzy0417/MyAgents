@@ -610,8 +610,9 @@ pub struct ImBotInstance {
     heartbeat_config: Option<Arc<tokio::sync::RwLock<types::HeartbeatConfig>>>,
     /// JoinHandle for the sidecar-stop subscriber loop. Coupled to the bot
     /// lifecycle: on bot shutdown the watch flag flips and this task exits.
-    /// Held here (not detached) so a forced bot drop can't leak it.
-    #[allow(dead_code)]
+    /// Held here (not detached) so a forced bot drop can't leak it; also
+    /// explicitly aborted + awaited in `shutdown_bot_instance` for prompt
+    /// teardown.
     sidecar_stop_handle: tauri::async_runtime::JoinHandle<()>,
     /// Platform adapter (retained for graceful shutdown — e.g. dedup flush)
     pub(crate) adapter: Arc<AnyAdapter>,

@@ -666,8 +666,9 @@ impl SidecarManager {
             session_activations: HashMap::new(),
             port_counter: AtomicU16::new(BASE_PORT),
             sidecar_generations: HashMap::new(),
-            // Start at 1 so a freshly-defaulted u64 (0) cannot accidentally
-            // match a real generation — useful as a sentinel.
+            // Start at 1 so callers using `0` as an "unknown / not present"
+            // placeholder (see IM `sidecar_generation_initial.unwrap_or(0)`)
+            // never collide with a real allocated generation.
             instance_counter: AtomicU64::new(1),
             stop_events,
         }
