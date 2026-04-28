@@ -67,6 +67,16 @@ sysinfo = { version = "0.33", default-features = false, features = ["system"] }
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.29", default-features = false, features = ["signal"] }
 
+# macOS-only: re-apply wry PR #769 (2022) at runtime. wry 0.54.4 dropped that
+# fix during the objc2 migration, so with `tauri/unstable` enabled the
+# boundary-arrow private-use codepoint leak surfaces again. We add a
+# `keyDown:` IMP to wry's WryWebView class that swallows arrow keycodes
+# 123-126 without forwarding to NSResponder's default (which is what
+# routes them through `interpretKeyEvents:` → `insertText:`).
+# See tauri-apps/tauri#5685, tauri-apps/wry#769, tauri-apps/tauri#10194.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+
 # Pattern 5: Windows pid-liveness + start-time probe via OpenProcess +
 # GetProcessTimes (PROCESS_QUERY_LIMITED_INFORMATION). Minimal feature set —
 # version 0.59 is already pulled transitively, so no new lock entry.

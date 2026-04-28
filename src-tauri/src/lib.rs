@@ -11,6 +11,8 @@ pub mod im;
 pub mod local_http;
 pub mod logger;
 pub mod legacy_upgrade;
+#[cfg(target_os = "macos")]
+mod macos_arrow_filter;
 pub mod management_api;
 pub mod process_cleanup;
 pub mod process_cmd;
@@ -368,6 +370,15 @@ pub fn run() {
             legacy_upgrade::cmd_task_upgrade_legacy_cron,
         ])
         .setup(|app| {
+            // macOS WKWebView arrow-key tofu workaround — re-applies wry PR #769
+            // (regressed since wry 0.54). MUST run before the WKWebView is
+            // created (which happens later in setup) so the keyDown: IMP is
+            // already on the WryWebView class when the first instance spawns.
+            // No-op on Windows/Linux. See macos_arrow_filter.rs for full
+            // rationale.
+            #[cfg(target_os = "macos")]
+            macos_arrow_filter::install_arrow_key_filter();
+
             // Initialize logging FIRST — acquire_lock() and cleanup_stale_sidecars()
             // need a logger backend for their log::warn!/info! calls.
             use tauri_plugin_log::{Target, TargetKind};
