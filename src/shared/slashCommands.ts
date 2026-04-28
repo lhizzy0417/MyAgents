@@ -11,6 +11,7 @@ export interface SlashCommand {
     scope?: 'user' | 'project';  // Where the item is defined
     path?: string;          // File path for custom commands or skills
     folderName?: string;    // Folder name for skills (may differ from display name after rename)
+    fileName?: string;      // File name without .md for custom commands (may differ from display name when frontmatter overrides)
 }
 
 /**

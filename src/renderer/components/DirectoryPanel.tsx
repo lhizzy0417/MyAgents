@@ -50,6 +50,7 @@ import type {
   ExpandDirectoryResult,
 } from "../../shared/dir-types";
 import { isImageFile, isPreviewable } from "../../shared/fileTypes";
+import type { CapabilityInitialSelect } from "../../shared/skillsTypes";
 import { getFileIcon } from "@/utils/fileIcons";
 
 import { useImagePreview } from "@/context/ImagePreviewContext";
@@ -128,6 +129,7 @@ interface DirectoryPanelProps {
       prompt?: string;
       model?: string;
       scope?: "user" | "project";
+      folderName?: string;
     }
   >;
   enabledSkills?: Array<{
@@ -140,13 +142,15 @@ interface DirectoryPanelProps {
     name: string;
     description: string;
     scope?: "user" | "project";
+    fileName?: string;
   }>;
   /** Set of global skill folderNames (for hiding "sync to global" on already-global skills) */
   globalSkillFolderNames?: Set<string>;
   /** Insert /command into chat input */
   onInsertSlashCommand?: (command: string) => void;
-  /** Open settings panel (skills tab) */
-  onOpenSettings?: () => void;
+  /** Open settings panel (skills tab); when invoked from "设置" on a specific item,
+   *  the receiving panel uses `initialSelect` to open that item's detail directly. */
+  onOpenSettings?: (initialSelect?: CapabilityInitialSelect) => void;
   /** Copy a project skill to global skills */
   onSyncSkillToGlobal?: (folderName: string) => void;
   /** When provided, file clicks route to this callback instead of opening the modal.

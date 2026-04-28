@@ -5458,6 +5458,7 @@ async function main() {
                     source: 'custom',
                     scope,
                     path: filePath,
+                    fileName,  // Disk identifier — needed to route to detail panel
                   });
                 } catch (err) {
                   console.warn(`[api/commands] Error reading command ${file}:`, err);

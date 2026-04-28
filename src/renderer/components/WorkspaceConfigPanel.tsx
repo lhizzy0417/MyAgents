@@ -24,6 +24,7 @@ import type { AgentDetailPanelRef } from './AgentDetailPanel';
 import IntroductionPanel from './IntroductionPanel';
 import type { IntroductionPanelRef } from './IntroductionPanel';
 import { WorkspaceGeneralTab } from './AgentSettings';
+import type { CapabilityInitialSelect } from '../../shared/skillsTypes';
 
 interface WorkspaceConfigPanelProps {
     agentDir: string;
@@ -32,6 +33,9 @@ interface WorkspaceConfigPanelProps {
     refreshKey?: number;
     /** Initial tab to show when opening */
     initialTab?: Tab;
+    /** When set on first mount, open the matching item's detail view directly.
+     *  Project-scoped items only — global items are routed through the Settings page. */
+    initialSelect?: CapabilityInitialSelect;
     /** Called when the user clicks "智能生成" in the system-prompts empty state. The
      *  parent (Chat) is expected to close this overlay and dispatch `/init` to its
      *  current Tab session. Omit to hide the action. */
@@ -45,6 +49,22 @@ type DetailView =
     | { type: 'command'; name: string; scope: 'user' | 'project' }
     | { type: 'agent'; name: string; scope: 'user' | 'project'; isNewAgent?: boolean };
 
+/** Map a (kind, identifier, scope) selection to the matching DetailView shape.
+ *  Returns 'none' for selections this panel doesn't accept (e.g. user scope).
+ *  Exhaustive switch — adding a new CapabilityKind triggers a TS error here. */
+function detailViewForSelect(select: CapabilityInitialSelect | undefined): DetailView {
+    if (!select || select.scope !== 'project') return { type: 'none' };
+    switch (select.kind) {
+        case 'skill': return { type: 'skill', name: select.folderName, scope: 'project' };
+        case 'command': return { type: 'command', name: select.fileName, scope: 'project' };
+        case 'agent': return { type: 'agent', name: select.folderName, scope: 'project' };
+        default: {
+            const _exhaustive: never = select;
+            return _exhaustive;
+        }
+    }
+}
+
 const TAB_ITEMS: { key: Tab; label: string }[] = [
     { key: 'general', label: '通用' },
     { key: 'system-prompts', label: '系统提示词' },
@@ -52,7 +72,7 @@ const TAB_ITEMS: { key: Tab; label: string }[] = [
     { key: 'skills', label: '技能 Skills' },
 ];
 
-export default function WorkspaceConfigPanel({ agentDir, onClose, refreshKey: externalRefreshKey = 0, initialTab, onRequestInit }: WorkspaceConfigPanelProps) {
+export default function WorkspaceConfigPanel({ agentDir, onClose, refreshKey: externalRefreshKey = 0, initialTab, initialSelect, onRequestInit }: WorkspaceConfigPanelProps) {
     useCloseLayer(() => { onClose(); return true; }, 200);
     const toast = useToast();
     // Stabilize toast reference to avoid unnecessary effect re-runs
@@ -66,7 +86,10 @@ export default function WorkspaceConfigPanel({ agentDir, onClose, refreshKey: ex
     // Map legacy 'agent' tab to 'general' for backward compat (Settings page passes 'agent')
     const resolvedInitialTab: Tab = initialTab === 'agent' ? 'general' : (initialTab ?? 'general');
     const [activeTab, setActiveTab] = useState<Tab>(resolvedInitialTab);
-    const [detailView, setDetailView] = useState<DetailView>({ type: 'none' });
+    // Lazy-init from initialSelect — overlay re-mounts on each open, so first-mount
+    // capture is enough; the user cannot trigger a second "设置" while the overlay
+    // is up (it grabs focus via OverlayBackdrop).
+    const [detailView, setDetailView] = useState<DetailView>(() => detailViewForSelect(initialSelect));
     const [internalRefreshKey, setInternalRefreshKey] = useState(0);
 
     // Combine external and internal refresh keys

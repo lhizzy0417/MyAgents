@@ -17,23 +17,28 @@ import { track } from '@/analytics';
 import { CUSTOM_EVENTS } from '../../shared/constants';
 import { useToast } from '@/components/Toast';
 import ContextMenu, { type ContextMenuItem } from './ContextMenu';
+import type { CapabilityInitialSelect } from '../../shared/skillsTypes';
 
 interface CapabilityItem {
     name: string;
     description: string;
     scope?: 'user' | 'project';
     model?: string;
+    /** Skill: folder name on disk (used to route to detail panel) */
     folderName?: string;
+    /** Custom command: file name without .md (used to route to detail panel) */
+    fileName?: string;
 }
 
 interface AgentCapabilitiesPanelProps {
-    enabledAgents?: Record<string, { description: string; prompt?: string; model?: string; scope?: 'user' | 'project' }>;
+    enabledAgents?: Record<string, { description: string; prompt?: string; model?: string; scope?: 'user' | 'project'; folderName?: string }>;
     enabledSkills?: CapabilityItem[];
     enabledCommands?: CapabilityItem[];
     /** Insert /command into chat input */
     onInsertSlashCommand?: (command: string) => void;
-    /** Open settings panel (skills tab) */
-    onOpenSettings?: () => void;
+    /** Open settings panel (skills tab); when invoked from "设置" on a specific item,
+     *  the receiving panel uses `initialSelect` to open that item's detail directly. */
+    onOpenSettings?: (initialSelect?: CapabilityInitialSelect) => void;
     /** Set of global skill folderNames (for hiding "sync to global" on already-global skills) */
     globalSkillFolderNames?: Set<string>;
     /** Copy a project skill to global skills */
@@ -144,7 +149,8 @@ export default memo(function AgentCapabilitiesPanel({
         });
     }, []);
 
-    // Convert agents map to list
+    // Convert agents map to list. `folderName` rides through so the context-menu
+    // "设置" handler can route to the agent's detail panel without a second lookup.
     const agentList = useMemo<CapabilityItem[]>(() =>
         enabledAgents
             ? Object.entries(enabledAgents).map(([name, def]) => ({
@@ -152,6 +158,7 @@ export default memo(function AgentCapabilitiesPanel({
                 description: def.description || '',
                 model: def.model,
                 scope: def.scope,
+                folderName: def.folderName,
             }))
             : [],
     [enabledAgents]);
@@ -178,51 +185,50 @@ export default memo(function AgentCapabilitiesPanel({
         toastRef.current.info('该 Agent 已启用，AI 自主判断使用时机');
     }, []);
 
-    // Navigate to the correct settings panel based on scope
-    const openSettingsForScope = useCallback((scope: 'user' | 'project' | undefined, globalSection: string) => {
-        if (scope === 'user') {
-            // Global items → open global Settings page
-            window.dispatchEvent(new CustomEvent(CUSTOM_EVENTS.OPEN_SETTINGS, { detail: { section: globalSection } }));
+    // Map capability kind → Settings page section the global panel lives under.
+    // 'sub-agents' (not 'agents') is the canonical section name in
+    // Settings.tsx VALID_SECTIONS — passing 'agents' was a no-op before.
+    const sectionForKind = (kind: CapabilityInitialSelect['kind'] | undefined): 'skills' | 'sub-agents' =>
+        kind === 'agent' ? 'sub-agents' : 'skills';
+
+    // Route a selection to the right settings surface. `select` may be undefined
+    // (e.g. data still loading and the disk identifier wasn't available); in
+    // that case we still open the right surface based on `scope` so the user
+    // never sees a no-op "设置" click — they just land on the list view.
+    const openSettingsFor = useCallback((scope: 'user' | 'project' | undefined, select: CapabilityInitialSelect | undefined) => {
+        const effectiveScope = select?.scope ?? scope;
+        if (effectiveScope === 'user') {
+            window.dispatchEvent(new CustomEvent(CUSTOM_EVENTS.OPEN_SETTINGS, {
+                detail: { section: sectionForKind(select?.kind), selectItem: select },
+            }));
         } else {
-            // Project items → open project WorkspaceConfigPanel (skills tab)
-            onOpenSettings?.();
+            onOpenSettings?.(select);
         }
         setCtxMenu(null);
     }, [onOpenSettings]);
 
-    // Right-click handlers
-    const handleAgentContextMenu = useCallback((e: React.MouseEvent, scope?: 'user' | 'project') => {
+    // Right-click handlers — split per kind so each constructs the right
+    // discriminated payload (folderName vs fileName) and TS catches mismatches.
+    const handleAgentContextMenu = useCallback((e: React.MouseEvent, scope: 'user' | 'project' | undefined, folderName: string | undefined) => {
         e.preventDefault();
         e.stopPropagation();
+        const select: CapabilityInitialSelect | undefined =
+            scope && folderName ? { kind: 'agent', folderName, scope } : undefined;
         const items: ContextMenuItem[] = [
-            {
-                label: '设置',
-                icon: <Settings2 className="h-3.5 w-3.5" />,
-                onClick: () => openSettingsForScope(scope, 'agents'),
-            },
-            {
-                label: '刷新',
-                icon: <RefreshCw className="h-3.5 w-3.5" />,
-                onClick: () => onRefresh?.(),
-            },
+            { label: '设置', icon: <Settings2 className="h-3.5 w-3.5" />, onClick: () => openSettingsFor(scope, select) },
+            { label: '刷新', icon: <RefreshCw className="h-3.5 w-3.5" />, onClick: () => onRefresh?.() },
         ];
         setCtxMenu({ x: e.clientX, y: e.clientY, items });
-    }, [openSettingsForScope, onRefresh]);
+    }, [openSettingsFor, onRefresh]);
 
-    const handleSkillCommandContextMenu = useCallback((e: React.MouseEvent, scope?: 'user' | 'project', folderName?: string) => {
+    const handleSkillContextMenu = useCallback((e: React.MouseEvent, scope: 'user' | 'project' | undefined, folderName: string | undefined) => {
         e.preventDefault();
         e.stopPropagation();
+        const select: CapabilityInitialSelect | undefined =
+            scope && folderName ? { kind: 'skill', folderName, scope } : undefined;
         const items: ContextMenuItem[] = [
-            {
-                label: '设置',
-                icon: <Settings2 className="h-3.5 w-3.5" />,
-                onClick: () => openSettingsForScope(scope, 'skills'),
-            },
-            {
-                label: '刷新',
-                icon: <RefreshCw className="h-3.5 w-3.5" />,
-                onClick: () => onRefresh?.(),
-            },
+            { label: '设置', icon: <Settings2 className="h-3.5 w-3.5" />, onClick: () => openSettingsFor(scope, select) },
+            { label: '刷新', icon: <RefreshCw className="h-3.5 w-3.5" />, onClick: () => onRefresh?.() },
         ];
         // Project skills can be synced to global (hide if already exists globally)
         if (scope === 'project' && folderName && !globalSkillFolderNamesRef.current?.has(folderName)) {
@@ -236,7 +242,19 @@ export default memo(function AgentCapabilitiesPanel({
             });
         }
         setCtxMenu({ x: e.clientX, y: e.clientY, items });
-    }, [openSettingsForScope, onRefresh]);
+    }, [openSettingsFor, onRefresh]);
+
+    const handleCommandContextMenu = useCallback((e: React.MouseEvent, scope: 'user' | 'project' | undefined, fileName: string | undefined) => {
+        e.preventDefault();
+        e.stopPropagation();
+        const select: CapabilityInitialSelect | undefined =
+            scope && fileName ? { kind: 'command', fileName, scope } : undefined;
+        const items: ContextMenuItem[] = [
+            { label: '设置', icon: <Settings2 className="h-3.5 w-3.5" />, onClick: () => openSettingsFor(scope, select) },
+            { label: '刷新', icon: <RefreshCw className="h-3.5 w-3.5" />, onClick: () => onRefresh?.() },
+        ];
+        setCtxMenu({ x: e.clientX, y: e.clientY, items });
+    }, [openSettingsFor, onRefresh]);
 
     // Empty state
     if (totalCount === 0) {
@@ -292,7 +310,7 @@ export default memo(function AgentCapabilitiesPanel({
                                     <ItemTooltip key={`cmd-${item.name}`} scope={item.scope} description={item.description}>
                                         <button
                                             onClick={() => handleCommandClick(item.name)}
-                                            onContextMenu={e => handleSkillCommandContextMenu(e, item.scope)}
+                                            onContextMenu={e => handleCommandContextMenu(e, item.scope, item.fileName)}
                                             className="flex w-full items-center gap-2 rounded-md px-2 py-1 text-left hover:bg-[var(--hover-bg)] transition-colors"
                                         >
                                             <Terminal className="h-3 w-3 shrink-0 text-[var(--success)]" />
@@ -315,7 +333,7 @@ export default memo(function AgentCapabilitiesPanel({
                                     <ItemTooltip key={`skill-${item.name}`} scope={item.scope} description={item.description}>
                                         <button
                                             onClick={() => handleSkillClick(item.name)}
-                                            onContextMenu={e => handleSkillCommandContextMenu(e, item.scope, item.folderName)}
+                                            onContextMenu={e => handleSkillContextMenu(e, item.scope, item.folderName)}
                                             className="flex w-full items-center gap-2 rounded-md px-2 py-1 text-left hover:bg-[var(--hover-bg)] transition-colors"
                                         >
                                             <Sparkles className="h-3 w-3 shrink-0 text-amber-500" />
@@ -338,7 +356,7 @@ export default memo(function AgentCapabilitiesPanel({
                                     <ItemTooltip key={`agent-${item.name}`} scope={item.scope} description={item.description}>
                                         <button
                                             onClick={handleAgentClick}
-                                            onContextMenu={e => handleAgentContextMenu(e, item.scope)}
+                                            onContextMenu={e => handleAgentContextMenu(e, item.scope, item.folderName)}
                                             className="flex w-full items-center gap-2 rounded-md px-2 py-1 text-left hover:bg-[var(--hover-bg)] transition-colors"
                                         >
                                             <Bot className="h-3 w-3 shrink-0 text-violet-500" />

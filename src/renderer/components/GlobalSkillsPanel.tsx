@@ -13,20 +13,44 @@ import CommandDetailPanel from './CommandDetailPanel';
 import type { CommandDetailPanelRef } from './CommandDetailPanel';
 import { CreateDialog, NewSkillChooser, InstallFromUrlDialog, type InstallFromUrlResponse } from './SkillDialogs';
 import { SkillCard, CommandCard } from './SkillsCommandsList';
-import type { SkillItem, CommandItem } from '../../shared/skillsTypes';
+import type { SkillItem, CommandItem, CapabilityInitialSelect } from '../../shared/skillsTypes';
 
 type ViewState =
     | { type: 'list' }
     | { type: 'skill-detail'; name: string; isNewSkill?: boolean }
     | { type: 'command-detail'; name: string };
 
-export default function GlobalSkillsPanel({ onDetailChange }: { onDetailChange?: (inDetail: boolean) => void }) {
+/** Map an "open this item" intent to the matching detail ViewState.
+ *  Returns null for kinds this panel doesn't handle (e.g. 'agent').
+ *  Exhaustive switch — adding a new CapabilityKind triggers a TS error here. */
+function viewStateForSelect(select: CapabilityInitialSelect | undefined): ViewState | null {
+    if (!select || select.scope !== 'user') return null;
+    switch (select.kind) {
+        case 'skill': return { type: 'skill-detail', name: select.folderName };
+        case 'command': return { type: 'command-detail', name: select.fileName };
+        case 'agent': return null;
+        default: {
+            const _exhaustive: never = select;
+            return _exhaustive;
+        }
+    }
+}
+
+export default function GlobalSkillsPanel({
+    onDetailChange,
+    initialSelect,
+}: {
+    onDetailChange?: (inDetail: boolean) => void;
+    /** When set on first mount, open the matching detail view directly. */
+    initialSelect?: CapabilityInitialSelect;
+}) {
     const toast = useToast();
     // Stabilize toast reference to avoid unnecessary effect re-runs
     const toastRef = useRef(toast);
     toastRef.current = toast;
 
-    const [viewState, setViewState] = useState<ViewState>({ type: 'list' });
+    // Initialize from initialSelect on first mount; subsequent navigation is user-driven.
+    const [viewState, setViewState] = useState<ViewState>(() => viewStateForSelect(initialSelect) ?? { type: 'list' });
     const onDetailChangeRef = useRef(onDetailChange);
     onDetailChangeRef.current = onDetailChange;
     useEffect(() => { onDetailChangeRef.current?.(viewState.type !== 'list'); }, [viewState.type]);
@@ -68,6 +92,26 @@ export default function GlobalSkillsPanel({ onDetailChange }: { onDetailChange?:
         }
         return false;
     }, [viewState]);
+
+    // Ref-guarded "open this item" effect: navigate to detail when a *new*
+    // initialSelect arrives (each OPEN_SETTINGS dispatch is a fresh object,
+    // so referential identity discriminates new intents from unrelated
+    // re-renders / user-driven back-clicks). Editing-state guard mirrors the
+    // back button: never silently discard unsaved edits.
+    const lastConsumedSelectRef = useRef<CapabilityInitialSelect | undefined>(initialSelect);
+    const isAnyEditingRef = useRef(isAnyEditing);
+    isAnyEditingRef.current = isAnyEditing;
+    useEffect(() => {
+        if (initialSelect === lastConsumedSelectRef.current) return;
+        lastConsumedSelectRef.current = initialSelect;
+        const next = viewStateForSelect(initialSelect);
+        if (!next) return;
+        if (isAnyEditingRef.current()) {
+            toastRef.current.warning('请先保存或取消编辑');
+            return;
+        }
+        setViewState(next);
+    }, [initialSelect]);
 
     // Load skills and commands
     const loadData = useCallback(async () => {

@@ -89,3 +89,42 @@ export interface ApiSuccessResponse {
     folderName?: string;
     name?: string;
 }
+
+/**
+ * Capability kinds shown in AgentCapabilitiesPanel.
+ * Used to route a "drill into this item" intent from the chat sidebar
+ * to the right detail panel in Settings / WorkspaceConfig.
+ */
+export type CapabilityKind = 'skill' | 'command' | 'agent';
+
+/**
+ * Tells a settings panel "open already showing this item's detail".
+ *
+ * Discriminated by `kind`, so the on-disk identifier is paired with the
+ * kind that owns it — TS rejects mismatches at construction:
+ *   - skill   → folderName (e.g. "github")
+ *   - command → fileName without .md (e.g. "review")
+ *   - agent   → folderName (e.g. "code-reviewer")
+ *
+ * Display names can be overridden via frontmatter and are not stable —
+ * disk identifiers are. Compare with `SlashCommand.source` in `slashCommands.ts`,
+ * which has overlapping but narrower domain (no 'agent', plus 'builtin') and
+ * therefore can't be reused directly.
+ */
+export type CapabilityInitialSelect =
+    | { kind: 'skill'; folderName: string; scope: 'user' | 'project' }
+    | { kind: 'command'; fileName: string; scope: 'user' | 'project' }
+    | { kind: 'agent'; folderName: string; scope: 'user' | 'project' };
+
+/**
+ * Extracts the disk identifier regardless of kind. Use only when the
+ * receiving code genuinely doesn't care which kind it is (e.g. for logging);
+ * otherwise switch on `kind` so adding a new kind fails the build.
+ */
+export function capabilitySelectId(select: CapabilityInitialSelect): string {
+    switch (select.kind) {
+        case 'skill': return select.folderName;
+        case 'command': return select.fileName;
+        case 'agent': return select.folderName;
+    }
+}

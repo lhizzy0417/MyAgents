@@ -13,18 +13,43 @@ import type { AgentDetailPanelRef } from './AgentDetailPanel';
 import { AgentCard } from './AgentCards';
 import { CreateDialog } from './SkillDialogs';
 import type { AgentItem } from '../../shared/agentTypes';
+import type { CapabilityInitialSelect } from '../../shared/skillsTypes';
 import OverlayBackdrop from '@/components/OverlayBackdrop';
 
 type ViewState =
     | { type: 'list' }
     | { type: 'agent-detail'; name: string; isNewAgent?: boolean };
 
-export default function GlobalAgentsPanel({ onDetailChange }: { onDetailChange?: (inDetail: boolean) => void }) {
+/** Map an "open this item" intent to the matching detail ViewState.
+ *  Returns null for kinds this panel doesn't handle (skill/command).
+ *  Exhaustive switch — adding a new CapabilityKind triggers a TS error here. */
+function viewStateForSelect(select: CapabilityInitialSelect | undefined): ViewState | null {
+    if (!select || select.scope !== 'user') return null;
+    switch (select.kind) {
+        case 'agent': return { type: 'agent-detail', name: select.folderName };
+        case 'skill': return null;
+        case 'command': return null;
+        default: {
+            const _exhaustive: never = select;
+            return _exhaustive;
+        }
+    }
+}
+
+export default function GlobalAgentsPanel({
+    onDetailChange,
+    initialSelect,
+}: {
+    onDetailChange?: (inDetail: boolean) => void;
+    /** When set on first mount, open the matching agent's detail view directly. */
+    initialSelect?: CapabilityInitialSelect;
+}) {
     const toast = useToast();
     const toastRef = useRef(toast);
     toastRef.current = toast;
 
-    const [viewState, setViewState] = useState<ViewState>({ type: 'list' });
+    // Initialize from initialSelect on first mount; subsequent navigation is user-driven.
+    const [viewState, setViewState] = useState<ViewState>(() => viewStateForSelect(initialSelect) ?? { type: 'list' });
     const onDetailChangeRef = useRef(onDetailChange);
     onDetailChangeRef.current = onDetailChange;
     useEffect(() => { onDetailChangeRef.current?.(viewState.type !== 'list'); }, [viewState.type]);
@@ -58,6 +83,24 @@ export default function GlobalAgentsPanel({ onDetailChange }: { onDetailChange?:
         }
         return false;
     }, [viewState]);
+
+    // Ref-guarded "open this item" effect — see GlobalSkillsPanel for the full
+    // rationale. Editing-state guard mirrors the back button: never silently
+    // discard unsaved edits when a new dispatch arrives.
+    const lastConsumedSelectRef = useRef<CapabilityInitialSelect | undefined>(initialSelect);
+    const isAnyEditingRef = useRef(isAnyEditing);
+    isAnyEditingRef.current = isAnyEditing;
+    useEffect(() => {
+        if (initialSelect === lastConsumedSelectRef.current) return;
+        lastConsumedSelectRef.current = initialSelect;
+        const next = viewStateForSelect(initialSelect);
+        if (!next) return;
+        if (isAnyEditingRef.current()) {
+            toastRef.current.warning('请先保存或取消编辑');
+            return;
+        }
+        setViewState(next);
+    }, [initialSelect]);
 
     const loadData = useCallback(async () => {
         setLoading(true);

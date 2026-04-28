@@ -313,7 +313,10 @@ export function writeWorkspaceConfig(agentDir: string, config: AgentWorkspaceCon
  * this is what the model references when delegating via the Task tool.
  */
 type SdkAgentDef = ReturnType<typeof toSdkAgentDefinition>;
-type EnabledAgentDef = SdkAgentDef & { scope: 'user' | 'project' };
+// `folderName` lets the renderer route from the chat sidebar to the right
+// detail panel without a second display-name → folderName lookup. The SDK
+// ignores unknown fields, so it's safe to ride along.
+type EnabledAgentDef = SdkAgentDef & { scope: 'user' | 'project'; folderName: string };
 
 export function loadEnabledAgents(
     projectAgentsDir: string,
@@ -335,7 +338,7 @@ export function loadEnabledAgents(
             const content = readFileSync(agent.path, 'utf-8');
             const { frontmatter, body } = parseFullAgentContent(content);
             const agentName = frontmatter.name || agent.folderName;
-            result[agentName] = { ...toSdkAgentDefinition(frontmatter, body), scope: 'project' };
+            result[agentName] = { ...toSdkAgentDefinition(frontmatter, body), scope: 'project', folderName: agent.folderName };
         }
     }
 
@@ -352,7 +355,7 @@ export function loadEnabledAgents(
             const { frontmatter, body } = parseFullAgentContent(content);
             const resolvedName = frontmatter.name || agent.folderName;
             if (result[resolvedName]) continue;
-            result[resolvedName] = { ...toSdkAgentDefinition(frontmatter, body), scope: 'user' };
+            result[resolvedName] = { ...toSdkAgentDefinition(frontmatter, body), scope: 'user', folderName: agent.folderName };
         }
     }
 

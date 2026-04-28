@@ -34,6 +34,7 @@ import { updateSession } from '@/api/sessionClient';
 import { dismissTopmost } from '@/utils/closeLayer';
 import { forceFlushLogs, setLogServerUrl, clearLogServerUrl } from '@/utils/frontendLogger';
 import { CUSTOM_EVENTS, createPendingSessionId } from '../shared/constants';
+import type { CapabilityInitialSelect } from '../shared/skillsTypes';
 import { ensureSelfAwarenessWorkspace, resolveBuiltinSelection, pairBuiltinSelection } from '@/config/configService';
 import { getAgentByWorkspacePath, getAgentById } from '@/config/services/agentConfigService';
 import type { SessionMetadata } from '@/api/sessionClient';
@@ -66,6 +67,7 @@ interface TabContentProps {
   error: string | null;
   settingsInitialSection: string | undefined;
   settingsInitialMcpId: string | undefined;
+  settingsInitialSelect: CapabilityInitialSelect | undefined;
   // Launcher callbacks
   onLaunchProject: (project: Project, provider: Provider, sessionId?: string, initialMessage?: InitialMessage) => void;
   // Chat callbacks
@@ -98,7 +100,7 @@ const MemoizedTabContent = memo(function TabContent({
   onLaunchProject, onBack, onSwitchSession, onNewSession,
   onUpdateGenerating, onUpdateTitle, onUpdateUnread, onRenameSession, onForkSession, onUpdateSessionId, onClearInitialMessage,
   onClearJoinedExistingSidecar,
-  settingsInitialSection, settingsInitialMcpId, onSettingsSectionChange,
+  settingsInitialSection, settingsInitialMcpId, settingsInitialSelect, onSettingsSectionChange,
   updateReady, updateVersion, updateChecking, updateDownloading,
   onCheckForUpdate, onRestartAndUpdate,
   taskCenterPendingIntent,
@@ -119,6 +121,7 @@ const MemoizedTabContent = memo(function TabContent({
         <Settings
           initialSection={settingsInitialSection}
           initialMcpId={settingsInitialMcpId}
+          initialSelect={settingsInitialSelect}
           onSectionChange={onSettingsSectionChange}
           isActive={isActive}
           updateReady={updateReady}
@@ -167,6 +170,7 @@ const MemoizedTabContent = memo(function TabContent({
     prev.error === next.error &&
     prev.settingsInitialSection === next.settingsInitialSection &&
     prev.settingsInitialMcpId === next.settingsInitialMcpId &&
+    prev.settingsInitialSelect === next.settingsInitialSelect &&
     prev.updateReady === next.updateReady &&
     prev.updateVersion === next.updateVersion &&
     prev.updateChecking === next.updateChecking &&
@@ -209,6 +213,7 @@ export default function App() {
   // Settings initial section state (for deep linking to specific section)
   const [settingsInitialSection, setSettingsInitialSection] = useState<string | undefined>(undefined);
   const [settingsInitialMcpId, setSettingsInitialMcpId] = useState<string | undefined>(undefined);
+  const [settingsInitialSelect, setSettingsInitialSelect] = useState<CapabilityInitialSelect | undefined>(undefined);
 
   // Bug report overlay state (triggered from titlebar feedback button)
   const [showBugReport, setShowBugReport] = useState(false);
@@ -1487,13 +1492,19 @@ export default function App() {
 
   // Open Settings as a new tab (or switch to existing one)
   // Optional initialSection parameter to open a specific section (e.g., 'providers')
-  const handleOpenSettings = useCallback(async (initialSection?: string, mcpServerId?: string) => {
+  // Optional initialSelect to open a specific item's detail (skill/command/agent)
+  const handleOpenSettings = useCallback(async (
+    initialSection?: string,
+    mcpServerId?: string,
+    initialSelect?: CapabilityInitialSelect,
+  ) => {
     // Track settings_open event
     track('settings_open', { section: initialSection ?? null });
 
     // Set initial section for Settings component
     setSettingsInitialSection(initialSection);
     setSettingsInitialMcpId(mcpServerId);
+    setSettingsInitialSelect(initialSelect);
 
     // Check if there's already a Settings tab
     const currentTabs = tabsRef.current;
@@ -1526,8 +1537,12 @@ export default function App() {
 
   // Listen for OPEN_SETTINGS custom event from child components
   useEffect(() => {
-    const handleOpenSettingsEvent = (event: CustomEvent<{ section?: string; mcpServerId?: string }>) => {
-      handleOpenSettings(event.detail?.section, event.detail?.mcpServerId);
+    const handleOpenSettingsEvent = (event: CustomEvent<{
+      section?: string;
+      mcpServerId?: string;
+      selectItem?: CapabilityInitialSelect;
+    }>) => {
+      handleOpenSettings(event.detail?.section, event.detail?.mcpServerId, event.detail?.selectItem);
     };
     window.addEventListener(CUSTOM_EVENTS.OPEN_SETTINGS, handleOpenSettingsEvent as EventListener);
     return () => {
@@ -2009,6 +2024,7 @@ export default function App() {
   const handleSettingsSectionChange = useCallback(() => {
     setSettingsInitialSection(undefined);
     setSettingsInitialMcpId(undefined);
+    setSettingsInitialSelect(undefined);
   }, []);
 
   // System tray event handling (minimize to tray, exit confirmation)
@@ -2114,6 +2130,7 @@ export default function App() {
             onClearJoinedExistingSidecar={clearJoinedExistingSidecar}
             settingsInitialSection={tab.view === 'settings' ? settingsInitialSection : undefined}
             settingsInitialMcpId={tab.view === 'settings' ? settingsInitialMcpId : undefined}
+            settingsInitialSelect={tab.view === 'settings' ? settingsInitialSelect : undefined}
             onSettingsSectionChange={handleSettingsSectionChange}
             updateReady={updateReady}
             updateVersion={updateVersion}

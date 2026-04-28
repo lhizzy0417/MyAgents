@@ -48,6 +48,7 @@ import { patchAgentConfig, getAgentById } from '@/config/services/agentConfigSer
 import type { AgentConfig } from '../../shared/types/agent';
 import { BrowserPanelContext } from '@/context/BrowserPanelContext';
 import { CUSTOM_EVENTS, isPendingSessionId } from '../../shared/constants';
+import type { CapabilityInitialSelect } from '../../shared/skillsTypes';
 import { CC_MODELS, CC_PERMISSION_MODES, CODEX_PERMISSION_MODES, GEMINI_PERMISSION_MODES, getDefaultRuntimePermissionMode, getRuntimePermissionModes } from '../../shared/types/runtime';
 import type { RuntimeType, RuntimeDetections, RuntimeConfig } from '../../shared/types/runtime';
 import type { InitialMessage } from '@/types/tab';
@@ -589,13 +590,15 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
   const [workspaceRefreshTrigger, setWorkspaceRefreshTrigger] = useState(0);
 
   // Enabled sub-agents for sidebar display
-  const [enabledAgents, setEnabledAgents] = useState<Record<string, { description: string; prompt?: string; model?: string; scope?: 'user' | 'project' }> | undefined>();
+  const [enabledAgents, setEnabledAgents] = useState<Record<string, { description: string; prompt?: string; model?: string; scope?: 'user' | 'project'; folderName?: string }> | undefined>();
   // Enabled skills/commands for sidebar display
   const [enabledSkills, setEnabledSkills] = useState<Array<{ name: string; description: string; scope?: 'user' | 'project'; folderName?: string }>>([]);
-  const [enabledCommands, setEnabledCommands] = useState<Array<{ name: string; description: string; scope?: 'user' | 'project' }>>([]);
+  const [enabledCommands, setEnabledCommands] = useState<Array<{ name: string; description: string; scope?: 'user' | 'project'; fileName?: string }>>([]);
   const [globalSkillFolderNames, setGlobalSkillFolderNames] = useState<Set<string>>(new Set());
   // Initial tab for workspace config panel (set when opening from capabilities panel)
   const [workspaceConfigInitialTab, setWorkspaceConfigInitialTab] = useState<WorkspaceTab | undefined>();
+  // Initial item selection — when set, WorkspaceConfigPanel opens already showing that item's detail.
+  const [workspaceConfigInitialSelect, setWorkspaceConfigInitialSelect] = useState<CapabilityInitialSelect | undefined>();
 
   // Agent Runtime detection (v0.1.59)
   const [runtimeDetections, setRuntimeDetections] = useState<RuntimeDetections>({
@@ -808,8 +811,11 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     chatInputRef.current?.insertSlashCommand(command);
   }, []);
 
-  const handleOpenSettings = useCallback(() => {
+  const handleOpenSettings = useCallback((initialSelect?: CapabilityInitialSelect) => {
+    // All three kinds (skill/command/agent) live under the 'skills' tab in the
+    // project workspace — that tab renders SkillsCommandsList AND WorkspaceAgentsList.
     setWorkspaceConfigInitialTab('skills');
+    setWorkspaceConfigInitialSelect(initialSelect);
     setShowWorkspaceConfig(true);
   }, []);
 
@@ -1229,7 +1235,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
   // Load enabled agents and sync to backend
   const loadAndSyncAgents = useCallback(async () => {
     try {
-      const response = await apiGet<{ success: boolean; agents: Record<string, { description: string; prompt: string; model?: string; scope?: 'user' | 'project' }> }>('/api/agents/enabled');
+      const response = await apiGet<{ success: boolean; agents: Record<string, { description: string; prompt: string; model?: string; scope?: 'user' | 'project'; folderName?: string }> }>('/api/agents/enabled');
       if (response.success && response.agents) {
         setEnabledAgents(response.agents);
         // Skip push when joining existing sidecar to avoid overwriting session config
@@ -1253,10 +1259,10 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
   // Load skills/commands for sidebar display
   const loadSkillsAndCommands = useCallback(async () => {
     try {
-      const response = await apiGet<{ success: boolean; commands: Array<{ name: string; description: string; source: string; scope?: 'user' | 'project'; folderName?: string }>; globalSkillFolderNames?: string[] }>('/api/commands');
+      const response = await apiGet<{ success: boolean; commands: Array<{ name: string; description: string; source: string; scope?: 'user' | 'project'; folderName?: string; fileName?: string }>; globalSkillFolderNames?: string[] }>('/api/commands');
       if (response.success && response.commands) {
         setEnabledSkills(response.commands.filter(c => c.source === 'skill').map(c => ({ name: c.name, description: c.description, scope: c.scope, folderName: c.folderName })));
-        setEnabledCommands(response.commands.filter(c => c.source === 'custom').map(c => ({ name: c.name, description: c.description, scope: c.scope })));
+        setEnabledCommands(response.commands.filter(c => c.source === 'custom').map(c => ({ name: c.name, description: c.description, scope: c.scope, fileName: c.fileName })));
         setGlobalSkillFolderNames(new Set(response.globalSkillFolderNames || []));
       }
     } catch (err) {
@@ -3108,11 +3114,13 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
           onClose={() => {
             setShowWorkspaceConfig(false);
             setWorkspaceConfigInitialTab(undefined);
+            setWorkspaceConfigInitialSelect(undefined);
             // Refresh capabilities data in case settings were changed
             setWorkspaceRefreshTrigger(prev => prev + 1);
           }}
           refreshKey={workspaceRefreshKey}
           initialTab={workspaceConfigInitialTab}
+          initialSelect={workspaceConfigInitialSelect}
           onRequestInit={handleRequestInitFromSettings}
         />
       )}

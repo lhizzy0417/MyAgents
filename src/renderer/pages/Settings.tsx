@@ -60,6 +60,7 @@ import {
 } from '@/utils/developerMode';
 import { REACT_LOG_EVENT } from '@/utils/frontendLogger';
 import { CUSTOM_EVENTS } from '../../shared/constants';
+import type { CapabilityInitialSelect } from '../../shared/skillsTypes';
 import { isTauriEnvironment } from '@/utils/browserMock';
 import { getPlatform } from '@/analytics/device';
 import { shortenPathForDisplay } from '@/utils/pathDetection';
@@ -139,6 +140,8 @@ interface SettingsProps {
     initialSection?: string;
     /** MCP server ID to auto-open config dialog for */
     initialMcpId?: string;
+    /** When set, route the matching global panel into a specific item's detail view. */
+    initialSelect?: CapabilityInitialSelect;
     /** Callback when section changes (to clear initialSection) */
     onSectionChange?: () => void;
     /** Whether this tab is currently active/visible */
@@ -170,7 +173,7 @@ async function getPlaywrightDefaultArgs(): Promise<string[]> {
 /** Playwright device presets shared between parser and UI */
 const PLAYWRIGHT_DEVICE_PRESETS = ['iPhone 15 Pro', 'iPhone 15', 'iPhone SE', 'iPad Pro 11', 'Pixel 7', 'Galaxy S23'];
 
-export default function Settings({ initialSection, initialMcpId, onSectionChange, isActive, updateReady: propUpdateReady, updateVersion: propUpdateVersion, updateChecking, updateDownloading, onCheckForUpdate, onRestartAndUpdate }: SettingsProps) {
+export default function Settings({ initialSection, initialMcpId, initialSelect, onSectionChange, isActive, updateReady: propUpdateReady, updateVersion: propUpdateVersion, updateChecking, updateDownloading, onCheckForUpdate, onRestartAndUpdate }: SettingsProps) {
     const {
         apiKeys,
         saveApiKey,
@@ -2278,11 +2281,17 @@ export default function Settings({ initialSection, initialMcpId, onSectionChange
 
             {/* Right content area — h-full ensures height is explicit for WebKit scroll */}
             <div className="h-full flex-1 overflow-y-auto overscroll-contain">
-                {/* Skills + Sub-Agents section uses wider layout */}
+                {/* Skills + Sub-Agents section uses wider layout.
+                 *  initialSelect is passed unfiltered — each panel's viewStateForSelect
+                 *  is the single source of truth for which kinds it accepts. */}
                 {(activeSection === 'skills' || activeSection === 'sub-agents') && (
                     <div className="mx-auto max-w-4xl px-8 py-8 space-y-10">
-                        {!agentsInDetail && <GlobalSkillsPanel onDetailChange={setSkillsInDetail} />}
-                        {!skillsInDetail && <GlobalAgentsPanel onDetailChange={setAgentsInDetail} />}
+                        {!agentsInDetail && (
+                            <GlobalSkillsPanel onDetailChange={setSkillsInDetail} initialSelect={initialSelect} />
+                        )}
+                        {!skillsInDetail && (
+                            <GlobalAgentsPanel onDetailChange={setAgentsInDetail} initialSelect={initialSelect} />
+                        )}
                     </div>
                 )}
 
