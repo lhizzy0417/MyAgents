@@ -1119,27 +1119,27 @@ impl SidecarManager {
         }
 
         // 2. Migrate generation counter
-        let migrated_generation = self.sidecar_generations.remove(old_session_id);
-        if let Some(gen) = migrated_generation {
+        if let Some(gen) = self.sidecar_generations.remove(old_session_id) {
             self.sidecar_generations.insert(new_session_id.to_string(), gen);
         }
 
-        // Notify subscribers (IM consumer registry) that the (old_session_id,
-        // generation) identity is no longer valid — even though the underlying
-        // sidecar process is still alive under new_session_id. IM consumer
-        // entries are keyed on the old session_id and would otherwise persist
-        // across the upgrade silently, escaping future stop broadcasts that
-        // use new_session_id. The subscriber's `(sid, gen)` match will cancel
-        // them; the next message rebuilds with the upgraded session_id, no
-        // sidecar restart required (this RPC-level cleanup is decoupled from
-        // sidecar process lifecycle).
-        if upgraded {
-            if let Some(gen) = migrated_generation {
-                let _ = self
-                    .stop_events
-                    .send((old_session_id.to_string(), gen));
-            }
-        }
+        // Note: deliberately NOT broadcasting a stop event for
+        // (old_session_id, generation) here, even though the manager's key
+        // has rotated. An earlier iteration did broadcast and Codex r4
+        // caught the race: Message B may have already reused the OLD
+        // ImConsumerHandle and registered an in-flight ReplySlot before the
+        // upgrade (Message A's terminal triggered it); cancelling the old
+        // entry mid-flight strands B's slot in a router whose consumer was
+        // just terminated.
+        //
+        // The correctness invariant is upheld instead via
+        // `ensure_im_consumer`'s reuse-path `is_live` check: the next message
+        // (post-upgrade) sees `is_live(old_sid, gen) == false`, falls through
+        // to cancel + respawn against new_session_id. In-flight slots on the
+        // old entry continue draining naturally — the underlying sidecar
+        // process is alive, SSE keeps flowing, terminal events still reach
+        // the old router. After all slots terminate, the next ensure_im_consumer
+        // call replaces the entry. No leak, no premature cancellation.
 
         // 3. Upgrade in session_activations HashMap
         if let Some(mut activation) = self.session_activations.remove(old_session_id) {
