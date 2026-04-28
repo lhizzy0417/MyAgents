@@ -114,6 +114,12 @@ interface DirectoryPanelProps {
   isTauriDragActive?: boolean;
   /** Called when user clicks "引用" to insert @path reference into chat input */
   onInsertReference?: (paths: string[]) => void;
+  /** FilePreviewModal「引用文件」: append `@<path> ` to chat input. Forwarded to the
+   *  inline FilePreviewModal mounted by this panel (only used when `onFilePreviewExternal`
+   *  is not set — split-view path renders its own modal in Chat.tsx). */
+  onQuoteFile?: (path: string) => void;
+  /** FilePreviewModal selection-quote: append `@<path>#L<start>[-L<end>] ` to chat input. */
+  onQuoteSelection?: (path: string, startLine: number, endLine: number) => void;
   /** Enabled sub-agent definitions (from Chat.tsx) */
   enabledAgents?: Record<
     string,
@@ -200,6 +206,8 @@ const DirectoryPanel = memo(
       onRefreshAll,
       isTauriDragActive = false,
       onInsertReference,
+      onQuoteFile,
+      onQuoteSelection,
       enabledAgents,
       enabledSkills,
       enabledCommands,
@@ -1976,6 +1984,8 @@ const DirectoryPanel = memo(
                   setPreviewError(null);
                 }}
                 onSaved={refresh}
+                onQuoteFile={onQuoteFile}
+                onQuoteSelection={onQuoteSelection}
               />
             </Suspense>
           )}

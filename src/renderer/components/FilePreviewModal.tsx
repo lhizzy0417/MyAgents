@@ -12,7 +12,7 @@
  * 1. Tab API (useTabApiOptional) — when rendered inside a Tab context
  * 2. Explicit onSave/onRevealFile props — when caller provides save logic directly
  */
-import { Check, Edit2, Expand, Eye, FileText, FolderOpen, Loader2, X } from 'lucide-react';
+import { AtSign, Check, Edit2, Expand, Eye, FileText, FolderOpen, Loader2, X } from 'lucide-react';
 import Tip from './Tip';
 import { lazy, Suspense, useCallback, useEffect, useMemo, useState, useRef } from 'react';
 import { createPortal } from 'react-dom';
@@ -74,6 +74,15 @@ interface FilePreviewModalProps {
     onSwitchToBrowser?: () => void;
     /** Initial line to scroll to */
     initialLineNumber?: number;
+    /** When provided, renders a「引用文件」icon button in the toolbar that injects
+     *  `@<path>` into the chat input and closes the modal. Omit on non-chat surfaces
+     *  (settings panels, agent admin pages) — the button hides automatically. */
+    onQuoteFile?: (path: string) => void;
+    /** When provided, the Monaco editor (used for code files & markdown edit mode)
+     *  shows a floating「引用」menu on selection that injects `@<path>#L<start>[-L<end>]`
+     *  into the chat input. Markdown preview mode (rendered HTML) intentionally does
+     *  NOT surface this — line-mapping back to source is unreliable. */
+    onQuoteSelection?: (path: string, startLine: number, endLine: number, text: string) => void;
 }
 
 // Files above this threshold use plaintext mode (skip tokenization) to prevent UI freeze
@@ -173,6 +182,8 @@ export default function FilePreviewModal({
     onFullscreen,
     onSwitchToBrowser,
     initialLineNumber,
+    onQuoteFile,
+    onQuoteSelection,
 }: FilePreviewModalProps) {
     // Cmd+W dismissal: only register for fullscreen mode (z-[210]).
     // Embedded mode (split-panel) has no z-index overlay and is handled separately.
@@ -404,6 +415,46 @@ export default function FilePreviewModal({
     handleCloseRef.current = handleClose;
 
 
+    // ─── Quote handlers ──────────────────────────────────────────────────────
+    // Stable refs for quote callbacks: the Monaco selection listener registers once and
+    // reads via ref so callback identity changes upstream don't tear down the listener.
+    const onQuoteFileRef = useRef(onQuoteFile);
+    onQuoteFileRef.current = onQuoteFile;
+    const onQuoteSelectionRef = useRef(onQuoteSelection);
+    onQuoteSelectionRef.current = onQuoteSelection;
+
+    /** Toolbar「引用文件」: kick off any pending edit to disk, **await** the in-flight save
+     *  before appending `@<path>` to chat input + closing — without the await the user could
+     *  immediately hit ⏎ on the chat input while the file is still being written, causing the
+     *  model to read pre-edit content. Mounted-guard after await: handleClose may have run
+     *  via a different path (Cmd+W) during the save. */
+    const handleQuoteFileClick = useCallback(async () => {
+        if (!onQuoteFileRef.current) return;
+        if (isDirectEdit && editContentRef.current !== savedContentRef.current) {
+            // Kicks off save (no return value); awaits via inFlightPromiseRef below.
+            handleManualFlush();
+        }
+        if (inFlightPromiseRef.current) {
+            try { await inFlightPromiseRef.current; } catch { /* save errors already toast */ }
+        }
+        if (!isMountedRef.current) return;
+        onQuoteFileRef.current(pathRef.current);
+        // Close after quoting. handleClose handles autosave-aware close path; with the
+        // save now flushed, its dirty-check is a no-op (no duplicate save).
+        handleCloseRef.current();
+    }, [isDirectEdit, handleManualFlush]);
+
+    /** Monaco-side selection quote: forwards line range + text to caller. The toolbar
+     *  「引用文件」 path also closes the modal, but selection-quote intentionally does
+     *  NOT — users typically quote multiple ranges in succession when reading code. */
+    const handleMonacoQuote = useCallback((sel: { text: string; startLine: number; endLine: number }) => {
+        onQuoteSelectionRef.current?.(pathRef.current, sel.startLine, sel.endLine, sel.text);
+    }, []);
+
+    // Only pass the Monaco quote callback when the parent opted in — keeps the floating
+    // menu off non-chat surfaces (settings, etc.) for free.
+    const monacoQuote = onQuoteSelection ? handleMonacoQuote : undefined;
+
     const handleOpenInFinder = useCallback(async () => {
         if (!canReveal) return;
         try {
@@ -447,6 +498,7 @@ export default function FilePreviewModal({
                             language={effectiveMonacoLanguage}
                             onSave={handleManualFlush}
                             initialLineNumber={initialLineNumber}
+                            onQuote={monacoQuote}
                         />
                     </div>
                 </Suspense>
@@ -493,6 +545,7 @@ export default function FilePreviewModal({
                         readOnly={!isDirectEdit}
                         onSave={isDirectEdit ? handleManualFlush : undefined}
                         initialLineNumber={initialLineNumber}
+                        onQuote={monacoQuote}
                     />
                 </div>
             </Suspense>
@@ -528,6 +581,20 @@ export default function FilePreviewModal({
 
                     {/* Right: actions */}
                     <div className="flex flex-shrink-0 items-center justify-end gap-2">
+                        {/* Quote whole file into chat input — first slot (most-frequent action).
+                            `retainFocusOnMouseDown` so the click doesn't steal focus from the
+                            chat input on macOS WebKit (matches sibling preview/edit toggle). */}
+                        {onQuoteFile && (
+                            <Tip label="引用文件" position="bottom">
+                                <button type="button"
+                                    onClick={handleQuoteFileClick}
+                                    onMouseDown={retainFocusOnMouseDown}
+                                    className="rounded-md p-1 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]">
+                                    <AtSign className="h-3.5 w-3.5" />
+                                </button>
+                            </Tip>
+                        )}
+
                         {/* Switch to browser preview — only for HTML files with an active browser */}
                         {onSwitchToBrowser && (
                             <Tip label="网页预览" position="bottom">
@@ -621,6 +688,16 @@ export default function FilePreviewModal({
 
                     {/* Right: actions */}
                     <div className="flex flex-shrink-0 items-center justify-end gap-1.5">
+                        {onQuoteFile && (
+                            <Tip label="引用文件" position="bottom">
+                                <button type="button"
+                                    onClick={handleQuoteFileClick}
+                                    onMouseDown={retainFocusOnMouseDown}
+                                    className="rounded-md p-1.5 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]">
+                                    <AtSign className="h-4 w-4" />
+                                </button>
+                            </Tip>
+                        )}
                         <button
                             type="button"
                             onClick={handleClose}

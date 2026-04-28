@@ -54,6 +54,13 @@ interface FileActionProviderProps {
   refreshTrigger?: number;
   /** When provided, "预览" routes to this callback (split-view) instead of fullscreen modal. */
   onFilePreviewExternal?: (file: { name: string; content: string; size: number; path: string }) => void;
+  /** Append `@<path> ` to chat input — wired to FilePreviewModal's「引用文件」button.
+   *  Distinct from `onInsertReference` (cursor-insert, no trailing space) — the toolbar
+   *  button always appends to end with trailing space, matching the「丢进对话框继续聊」 UX. */
+  onQuoteFile?: (path: string) => void;
+  /** Append `@<path>#L<start>[-L<end>] ` to chat input — wired to FilePreviewModal's
+   *  Monaco selection-quote affordance. */
+  onQuoteSelection?: (path: string, startLine: number, endLine: number) => void;
 }
 
 // ---------- Context ----------
@@ -68,7 +75,7 @@ export function useFileAction(): FileActionContextValue | null {
 
 const BATCH_DELAY_MS = 50;
 
-export function FileActionProvider({ children, onInsertReference, refreshTrigger, onFilePreviewExternal }: FileActionProviderProps) {
+export function FileActionProvider({ children, onInsertReference, refreshTrigger, onFilePreviewExternal, onQuoteFile, onQuoteSelection }: FileActionProviderProps) {
   const { tabId, apiPost, apiGet } = useTabApi();
   const { openPreview: openImagePreview } = useImagePreview();
 
@@ -334,6 +341,8 @@ export function FileActionProvider({ children, onInsertReference, refreshTrigger
             isLoading={previewFile.isLoading}
             error={previewFile.error}
             onClose={() => setPreviewFile(null)}
+            onQuoteFile={onQuoteFile}
+            onQuoteSelection={onQuoteSelection}
           />
         </Suspense>
       )}

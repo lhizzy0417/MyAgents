@@ -183,6 +183,12 @@ export interface SimpleChatInputHandle {
   processDroppedFilePaths?: (paths: string[]) => Promise<void>;
   /** Insert @references at cursor position or end of input */
   insertReferences: (paths: string[]) => void;
+  /** Append a single reference token (e.g. `@path` or `@path#L7-L10`) to the END of input
+   *  with auto-padded leading space and a guaranteed trailing space. Cursor lands at end,
+   *  textarea scrolls to show the appended token. Used by file preview "引用文件" /
+   *  selection-quote — distinct from `insertReferences` which inserts at cursor without
+   *  trailing space. */
+  appendReferenceToken: (token: string) => void;
   /** Insert a /slash-command at cursor position or end of input */
   insertSlashCommand: (command: string) => void;
   /** Set the input value directly (used for restoring content after cron stop) */
@@ -902,6 +908,26 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
     }, 0);
   }, [textareaRef]);
 
+  // Append a reference token to the END of input with leading-space padding and
+  // guaranteed trailing space. Used by file-preview 「引用文件」/ 「引用」 selection.
+  // Distinct from `insertReferences` (insert at cursor, no trailing space) — appending
+  // and trailing-space matter for the file-preview UX where the user always wants a
+  // ready-to-type position right after the token.
+  const appendReferenceToken = useCallback((token: string) => {
+    if (!token) return;
+    const currentInput = inputValueRef.current;
+    const needsSpaceBefore = currentInput.length > 0 && !/\s$/.test(currentInput);
+    const newValue = `${currentInput}${needsSpaceBefore ? ' ' : ''}${token} `;
+    setInputValue(newValue);
+    setTimeout(() => {
+      const ta = textareaRef.current;
+      if (!ta) return;
+      ta.focus();
+      ta.setSelectionRange(newValue.length, newValue.length);
+      ta.scrollTop = ta.scrollHeight;
+    }, 0);
+  }, [textareaRef]);
+
   // Insert /slash-command at cursor position or end of input
   const insertSlashCommand = useCallback((command: string) => {
     if (!command.trim()) return;
@@ -934,12 +960,13 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
     processDroppedFiles,
     processDroppedFilePaths,
     insertReferences,
+    appendReferenceToken,
     insertSlashCommand,
     setValue,
     setImages,
     focus: () => textareaRef.current?.focus(),
     // eslint-disable-next-line react-hooks/exhaustive-deps -- textareaRef is stable
-  }), [processDroppedFiles, processDroppedFilePaths, insertReferences, insertSlashCommand, setValue]);
+  }), [processDroppedFiles, processDroppedFilePaths, insertReferences, appendReferenceToken, insertSlashCommand, setValue]);
 
   // Handle file input change
   const handleFileChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {

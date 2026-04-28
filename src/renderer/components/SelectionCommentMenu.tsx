@@ -11,12 +11,19 @@ import { useCloseLayer } from '@/hooks/useCloseLayer';
  * (via data-role="assistant"), and positions itself at the start of the selection range.
  */
 
+type SelectionAction = 'quote' | 'elaborate';
+
 interface SelectionCommentMenuProps {
   /** Append quoted text to input */
   onQuote: (selectedText: string) => void;
   /** Quote + auto-send */
   onElaborate: (selectedText: string) => void;
+  /** Which actions to render. Default: both. Pass `['quote']` for surfaces where
+   *  「深入讲讲」 doesn't apply (e.g. file viewer selection). */
+  actions?: readonly SelectionAction[];
 }
+
+const DEFAULT_ACTIONS: readonly SelectionAction[] = ['quote', 'elaborate'];
 
 /** Check if a node is inside an assistant message text area (select-text region) */
 function isInsideAssistantText(node: Node | null): boolean {
@@ -34,7 +41,10 @@ function isInsideAssistantText(node: Node | null): boolean {
 const SelectionCommentMenu = memo(function SelectionCommentMenu({
   onQuote,
   onElaborate,
+  actions = DEFAULT_ACTIONS,
 }: SelectionCommentMenuProps) {
+  const showQuote = actions.includes('quote');
+  const showElaborate = actions.includes('elaborate');
   const [visible, setVisible] = useState(false);
   const [pos, setPos] = useState({ x: 0, y: 0 });
   const [above, setAbove] = useState(true); // true = show above selection, false = below
@@ -153,23 +163,27 @@ const SelectionCommentMenu = memo(function SelectionCommentMenu({
         e.preventDefault();
       }}
     >
-      <button
-        type="button"
-        className="flex items-center gap-1 rounded-md px-2 py-1 text-[12px] font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]"
-        onClick={handleQuote}
-      >
-        <Quote className="h-3 w-3" />
-        引用
-      </button>
-      <div className="h-3.5 w-px bg-[var(--line)]" />
-      <button
-        type="button"
-        className="flex items-center gap-1 rounded-md px-2 py-1 text-[12px] font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]"
-        onClick={handleElaborate}
-      >
-        <Sparkles className="h-3 w-3" />
-        深入讲讲
-      </button>
+      {showQuote && (
+        <button
+          type="button"
+          className="flex items-center gap-1 rounded-md px-2 py-1 text-[12px] font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]"
+          onClick={handleQuote}
+        >
+          <Quote className="h-3 w-3" />
+          引用
+        </button>
+      )}
+      {showQuote && showElaborate && <div className="h-3.5 w-px bg-[var(--line)]" />}
+      {showElaborate && (
+        <button
+          type="button"
+          className="flex items-center gap-1 rounded-md px-2 py-1 text-[12px] font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]"
+          onClick={handleElaborate}
+        >
+          <Sparkles className="h-3 w-3" />
+          深入讲讲
+        </button>
+      )}
     </div>
   );
 });

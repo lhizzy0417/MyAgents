@@ -2164,6 +2164,26 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     void handleSendMessageRef.current(prompt);
   }, [formatQuote]);
 
+  // File preview「引用文件」: append `@<path> ` to chat input. Token-format matches existing
+  // `@file` mention (server's fallback-path collector treats literal `@path` as a file
+  // reference). Path normalised to POSIX so Windows backslashes don't reach the model —
+  // the @-mention parser and downstream tools both expect forward-slash paths.
+  const handleQuoteFile = useCallback((path: string) => {
+    const posix = path.replace(/\\/g, '/');
+    chatInputRef.current?.appendReferenceToken(`@${posix}`);
+  }, []);
+
+  // File preview selection-quote: append `@<path>#L<start>[-L<end>] ` to chat input.
+  // GitHub-permalink syntax — there is no server-side `#L` parsing; the model interprets
+  // the line range from prompt context (Claude is heavily exposed to GitHub permalinks in
+  // training data, so the convention reads naturally). Single-line selections collapse to
+  // `#L7` to match GitHub's convention. Path normalised to POSIX (Windows safety).
+  const handleQuoteFileSelection = useCallback((path: string, startLine: number, endLine: number) => {
+    const posix = path.replace(/\\/g, '/');
+    const range = startLine === endLine ? `L${startLine}` : `L${startLine}-L${endLine}`;
+    chatInputRef.current?.appendReferenceToken(`@${posix}#${range}`);
+  }, []);
+
   // Navigate to a specific query message (used by QueryNavigator with virtuoso)
   // Uses messagesRef to avoid invalidating the callback on every streaming token update
   const handleNavigateToQuery = useCallback((messageId: string) => {
@@ -2679,6 +2699,8 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
             onInsertReference={handleInsertReference}
             refreshTrigger={workspaceRefreshTrigger}
             onFilePreviewExternal={isSplitViewEnabled && !isNarrowLayout ? handleSplitFilePreview : undefined}
+            onQuoteFile={handleQuoteFile}
+            onQuoteSelection={handleQuoteFileSelection}
           >
             <MessageList
               historyMessages={historyMessages}
@@ -2817,6 +2839,8 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
               refreshTrigger={toolCompleteCount + workspaceRefreshTrigger}
               isTauriDragActive={isTauriDragging && activeZoneId === 'directory-panel'}
               onInsertReference={handleInsertReference}
+              onQuoteFile={handleQuoteFile}
+              onQuoteSelection={handleQuoteFileSelection}
               enabledAgents={enabledAgents}
               enabledSkills={enabledSkills}
               enabledCommands={enabledCommands}
@@ -2976,6 +3000,8 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
                       setFullscreenPreviewFile(file);
                     }}
                     onSwitchToBrowser={browserUrl ? handleEditorSwitchToBrowser : undefined}
+                    onQuoteFile={handleQuoteFile}
+                    onQuoteSelection={handleQuoteFileSelection}
                   />
                 </Suspense>
               </div>
@@ -3069,6 +3095,8 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
             path={fullscreenPreviewFile.path}
             onClose={() => setFullscreenPreviewFile(null)}
             onSaved={() => setWorkspaceRefreshTrigger(prev => prev + 1)}
+            onQuoteFile={handleQuoteFile}
+            onQuoteSelection={handleQuoteFileSelection}
           />
         </Suspense>
       )}
