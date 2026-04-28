@@ -30,7 +30,10 @@ export {
     isProviderAvailable,
     getFirstAvailableProvider,
     resolveProvider,
+    resolveBuiltinSelection,
+    pairBuiltinSelection,
 } from './services/providerService';
+export type { ProviderModelPair } from './services/providerService';
 
 // mcpService
 export {

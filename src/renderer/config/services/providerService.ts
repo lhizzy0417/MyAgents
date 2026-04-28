@@ -2,8 +2,9 @@
 import { exists, readDir, readTextFile, remove } from '@tauri-apps/plugin-fs';
 import { join } from '@tauri-apps/api/path';
 
-import type { Provider, ProviderVerifyStatus } from '../types';
+import type { Provider, ProviderVerifyStatus, AppConfig, Project } from '../types';
 import { PRESET_PROVIDERS } from '../types';
+import type { AgentConfig } from '../../../shared/types/agent';
 import {
     isBrowserDevMode,
     ensureConfigDir,
@@ -281,6 +282,93 @@ export function resolveProvider(
         if (exact && isProviderAvailable(exact, apiKeys, verifyStatus)) return exact;
     }
     return getFirstAvailableProvider(providers, apiKeys, verifyStatus);
+}
+
+// ===== Builtin Runtime (provider, model) Selection =====
+
+/** Paired (provider, model) result. Both fields are guaranteed valid by the helper:
+ *  - provider satisfies isProviderAvailable
+ *  - model is one of provider.models (or provider.primaryModel as fallback)
+ *  This is the only correct way to construct InitialMessage.builtinSelection. */
+export interface ProviderModelPair {
+    readonly provider: Provider;
+    readonly model: string;
+}
+
+/**
+ * Resolve a paired (provider, model) for builtin-runtime sessions.
+ *
+ * Provider priority: agent → workspace → config.defaultProviderId → first available.
+ * Each candidate is checked with isProviderAvailable; an unavailable candidate falls through
+ * to the next layer (it does NOT short-circuit to first-available — that was a logic bug
+ * in an earlier iteration).
+ *
+ * Model priority (after provider is selected): agent.model → workspace.model → provider.primaryModel.
+ * The first candidate that exists in provider.models is taken; otherwise primaryModel.
+ * (provider.primaryModel already has the user's providerPrimaryModels override applied
+ * by rebuildAndPersistAvailableProviders, so we don't read raw config here.)
+ *
+ * Returns undefined when no provider in the system is available — caller decides UX.
+ */
+export function resolveBuiltinSelection(
+    ctx: { agent?: AgentConfig; workspace?: Project },
+    config: AppConfig,
+    providers: Provider[],
+    apiKeys: Record<string, string>,
+    verifyStatus: Record<string, ProviderVerifyStatus>,
+): ProviderModelPair | undefined {
+    const candidates = [
+        ctx.agent?.providerId,
+        ctx.workspace?.providerId,
+        config.defaultProviderId,
+    ].filter((id): id is string => !!id);
+
+    let provider: Provider | undefined;
+    for (const id of candidates) {
+        const p = providers.find(x => x.id === id);
+        if (p && isProviderAvailable(p, apiKeys, verifyStatus)) {
+            provider = p;
+            break;
+        }
+    }
+    provider ??= getFirstAvailableProvider(providers, apiKeys, verifyStatus);
+    if (!provider) return undefined;
+
+    const modelSet = new Set(provider.models?.map(m => m.model) ?? []);
+    const modelCandidates = [
+        ctx.agent?.model,
+        ctx.workspace?.model,
+        provider.primaryModel,
+    ].filter((m): m is string => !!m);
+    const model = modelCandidates.find(m => modelSet.has(m)) ?? provider.primaryModel;
+
+    return { provider, model };
+}
+
+/**
+ * Pair a known provider with a model hint, enforcing the same model invariant as
+ * resolveBuiltinSelection: the returned model is guaranteed to be in provider.models
+ * (falling back to provider.primaryModel if the hint is stale or absent).
+ *
+ * Use this when the caller has already resolved a provider via UI state — e.g.
+ * Launcher's launcherProvider (computed from launcherProviderId/agent/workspace/default
+ * via useMemo) or BugReportOverlay's picked tuple. It closes the "stale model paired with
+ * fallback provider" hole identified in cross-review: when launcherProvider falls through
+ * to first-available because the primary provider's key was deleted, launcherSelectedModel
+ * may still be the original agent's model — incompatible with the fallback provider.
+ *
+ * Returns the InitialMessage.builtinSelection shape directly so call sites need no further
+ * transformation.
+ */
+export function pairBuiltinSelection(
+    provider: Provider,
+    modelHint: string | undefined,
+): { providerId: string; model: string } {
+    const ok = !!modelHint && (provider.models?.some(m => m.model === modelHint) ?? false);
+    return {
+        providerId: provider.id,
+        model: ok ? (modelHint as string) : provider.primaryModel,
+    };
 }
 
 /**
