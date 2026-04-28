@@ -621,14 +621,21 @@ pub struct SidecarManager {
     /// Session ID -> generation counter. Incremented each time a sidecar is created
     /// for a session. Used to detect replacements during lock-gap HTTP health checks.
     sidecar_generations: HashMap<String, u64>,
-    /// Broadcast sender — emits the sidecar session_id whenever a SessionSidecar
-    /// is removed (last owner released, runtime drift kill, explicit stop). Used
-    /// by IM ImEventConsumer registry to cancel its long-poll loop in lockstep
-    /// with sidecar lifecycle, instead of letting orphan consumers hammer a dead
-    /// port until the 60s idle collector or app shutdown notices.
-    /// Channel capacity 64 — one event per sidecar removal; multi-IM setups have
-    /// at most a few simultaneous removals during shutdown bursts.
-    stop_events: tokio::sync::broadcast::Sender<String>,
+    /// Broadcast sender — emits `(session_id, generation)` whenever a
+    /// SessionSidecar is removed (last owner released, runtime drift kill,
+    /// explicit stop, app shutdown). The generation is critical: a remove +
+    /// recreate under the same `session_id` (e.g. IM idle collector preserves
+    /// session_id, next message rebuilds sidecar) bumps generation, so a
+    /// stale stop event from the previous instance no longer matches the
+    /// fresh consumer entry. Used by IM ImEventConsumer registry to cancel
+    /// its long-poll loop in lockstep with sidecar lifecycle, instead of
+    /// letting orphan consumers hammer a dead port until the 60s idle
+    /// collector or app shutdown notices.
+    /// Channel capacity 64 — one event per sidecar removal; multi-IM setups
+    /// have at most a few simultaneous removals during shutdown bursts; on
+    /// `Lagged` subscribers do a full reconciliation sweep against
+    /// `live_sidecar_set()`.
+    stop_events: tokio::sync::broadcast::Sender<(String, u64)>,
 }
 
 impl SidecarManager {
@@ -647,11 +654,38 @@ impl SidecarManager {
         }
     }
 
-    /// Subscribe to sidecar-stop events. The returned receiver yields the
-    /// session_id of each removed SessionSidecar so the subscriber can clean
-    /// up any per-session state it owns (e.g. IM ImEventConsumer registry).
-    pub fn subscribe_stop_events(&self) -> tokio::sync::broadcast::Receiver<String> {
+    /// Subscribe to sidecar-stop events. The returned receiver yields
+    /// `(session_id, generation)` of each removed SessionSidecar so the
+    /// subscriber can clean up any per-session state it owns (e.g. IM
+    /// ImEventConsumer registry). Generation distinguishes a fresh sidecar
+    /// from a previous one bound to the same session_id.
+    pub fn subscribe_stop_events(&self) -> tokio::sync::broadcast::Receiver<(String, u64)> {
         self.stop_events.subscribe()
+    }
+
+    /// Snapshot of currently-live `(session_id, generation)` pairs. Subscribers
+    /// use this to recover from broadcast `Lagged` (skipped events) by
+    /// reconciling: any consumer entry whose `(session_id, generation)` is
+    /// *not* in this set was either stopped during the lag window or was
+    /// never installed against a live sidecar — either way, cancel it.
+    pub fn live_sidecar_set(&self) -> HashSet<(String, u64)> {
+        self.sidecars
+            .keys()
+            .map(|sid| {
+                let gen = self.sidecar_generations.get(sid).copied().unwrap_or(0);
+                (sid.clone(), gen)
+            })
+            .collect()
+    }
+
+    /// Public read of the generation counter for a session (0 if never created).
+    /// Used by IM `ensure_im_consumer` for a final-check inside its registry
+    /// lock: if the sidecar has been removed (or rotated) between
+    /// `ensure_sidecar` and the consumer-insert step, the captured generation
+    /// will not match the live one and the insert is aborted to avoid
+    /// reanimating a consumer against a dead port.
+    pub fn generation_for(&self, session_id: &str) -> u64 {
+        self.current_generation(session_id)
     }
 
     /// Increment and return the generation counter for a session.
@@ -753,6 +787,23 @@ impl SidecarManager {
             self.sidecars.len(),
             self.instances.len()
         );
+        // Broadcast stop for each live sidecar before clearing — covers callers
+        // that invoke stop_all while IM bots are still running (e.g. exposed
+        // `cmd_stop_all_sidecars` Tauri command). The app-exit path normally
+        // signals IM shutdown_rx first, but we don't rely on caller ordering.
+        let to_broadcast: Vec<(String, u64)> = self
+            .sidecars
+            .keys()
+            .map(|sid| {
+                (
+                    sid.clone(),
+                    self.sidecar_generations.get(sid).copied().unwrap_or(0),
+                )
+            })
+            .collect();
+        for ev in to_broadcast {
+            let _ = self.stop_events.send(ev);
+        }
         self.sidecars.clear(); // Session-centric Sidecars (Drop kills processes)
         self.instances.clear(); // Global Sidecar (Drop kills process)
         self.session_activations.clear();
@@ -876,15 +927,17 @@ impl SidecarManager {
 
     /// Remove a sidecar. Does NOT clear the generation counter — it must remain
     /// queryable across lock gaps (e.g. during HTTP health check windows).
-    /// Broadcasts the session_id on `stop_events` when the entry actually
-    /// existed, so subscribers (IM event-consumer registry) can cancel any
-    /// per-session resources synchronously with sidecar lifecycle.
+    /// Broadcasts `(session_id, generation)` on `stop_events` when the entry
+    /// actually existed, so subscribers (IM event-consumer registry) can
+    /// cancel resources tied to *this specific* sidecar instance — a stale
+    /// event from a previous instance won't match a freshly-recreated one.
     fn remove_sidecar(&mut self, session_id: &str) -> Option<SessionSidecar> {
+        let gen = self.current_generation(session_id);
         let removed = self.sidecars.remove(session_id);
         if removed.is_some() {
             // send() returns Err only when there are no subscribers — fine, we
             // don't require anyone listening for sidecar removal to be valid.
-            let _ = self.stop_events.send(session_id.to_string());
+            let _ = self.stop_events.send((session_id.to_string(), gen));
         }
         removed
     }

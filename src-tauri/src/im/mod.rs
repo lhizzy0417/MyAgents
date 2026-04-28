@@ -69,12 +69,17 @@ pub(crate) struct ImConsumerHandle {
     /// rotation — if the port changes, the old consumer must be cancelled
     /// and a new one spawned).
     pub(crate) sidecar_port: u16,
-    /// Sidecar session_id this consumer is bound to. Used to match sidecar-stop
-    /// broadcast events back to consumer entries: when a SessionSidecar is
-    /// removed (last owner released, drift kill, etc.), the registry sweeps
-    /// for handles whose `sidecar_session_id` matches the broadcast payload
-    /// and cancels them, preventing orphan reconnect loops against a dead port.
+    /// Sidecar session_id this consumer is bound to. Combined with
+    /// `sidecar_generation` to uniquely identify the specific sidecar
+    /// instance: a remove + recreate under the same session_id (idle
+    /// collector preserves session_id, next message rebuilds) gets a
+    /// fresh generation, so a stale stop event from the previous
+    /// instance no longer matches this entry.
     pub(crate) sidecar_session_id: String,
+    /// Sidecar generation at the time the consumer was spawned. Bumped
+    /// on every `insert_sidecar`. Match `(sidecar_session_id, sidecar_generation)`
+    /// pairs to map broadcast stop events to consumer entries.
+    pub(crate) sidecar_generation: u64,
     /// Join handle is kept alive for the consumer task lifetime; we don't
     /// await it but holding it ensures the task isn't immediately dropped.
     pub(crate) _join: tauri::async_runtime::JoinHandle<()>,
@@ -603,6 +608,11 @@ pub struct ImBotInstance {
     pub heartbeat_wake_tx: Option<mpsc::Sender<types::WakeReason>>,
     /// Shared heartbeat config (for hot updates)
     heartbeat_config: Option<Arc<tokio::sync::RwLock<types::HeartbeatConfig>>>,
+    /// JoinHandle for the sidecar-stop subscriber loop. Coupled to the bot
+    /// lifecycle: on bot shutdown the watch flag flips and this task exits.
+    /// Held here (not detached) so a forced bot drop can't leak it.
+    #[allow(dead_code)]
+    sidecar_stop_handle: tauri::async_runtime::JoinHandle<()>,
     /// Platform adapter (retained for graceful shutdown — e.g. dedup flush)
     pub(crate) adapter: Arc<AnyAdapter>,
     /// Bridge process handle (OpenClaw plugins only)
@@ -1234,40 +1244,73 @@ async fn create_bot_instance<R: Runtime>(
     // 60s idle collector or app shutdown would notice — and only if the
     // router-level last_active also crossed the idle threshold). Subscribe
     // once per IM bot; tokio broadcast handles fan-out to multiple bots.
+    //
+    // Match on (session_id, generation) — generation distinguishes a fresh
+    // sidecar from a previous instance bound to the same session_id (e.g.
+    // idle collector preserves session_id, next message rebuilds with a
+    // bumped generation). Without this, a stale stop event would kill the
+    // freshly-recreated consumer.
     let im_consumers_for_sidecar_stop = Arc::clone(&im_consumers);
+    let sidecar_manager_for_sidecar_stop = Arc::clone(sidecar_manager);
     let mut sidecar_stop_rx = sidecar_manager.lock().unwrap().subscribe_stop_events();
     let mut sidecar_stop_shutdown_rx = shutdown_rx.clone();
-    let _sidecar_stop_handle = tauri::async_runtime::spawn(async move {
+    let sidecar_stop_handle = tauri::async_runtime::spawn(async move {
         loop {
             tokio::select! {
                 evt = sidecar_stop_rx.recv() => {
                     match evt {
-                        Ok(stopped_session_id) => {
+                        Ok((stopped_session_id, stopped_gen)) => {
                             let mut guard = im_consumers_for_sidecar_stop.lock().await;
-                            // Sweep registry for any consumer bound to this sidecar
-                            // session_id. Multiple peer_session_keys can in principle
-                            // share a session_id (e.g. cross-runtime fork transitions
-                            // momentarily), so we collect all matches and cancel each.
+                            // Sweep registry for consumers bound to this *specific*
+                            // sidecar instance — both session_id and generation must
+                            // match. Multiple peer_session_keys can share a single
+                            // sidecar (e.g. cross-runtime fork transitions briefly
+                            // overlap), so we collect all matches and cancel each.
                             let to_remove: Vec<String> = guard.iter()
-                                .filter(|(_, h)| h.sidecar_session_id == stopped_session_id)
+                                .filter(|(_, h)| {
+                                    h.sidecar_session_id == stopped_session_id
+                                        && h.sidecar_generation == stopped_gen
+                                })
                                 .map(|(k, _)| k.clone())
                                 .collect();
                             for key in to_remove {
                                 if let Some(handle) = guard.remove(&key) {
                                     handle.cancel.store(true, std::sync::atomic::Ordering::SeqCst);
                                     ulog_info!(
-                                        "[im] Cancelled ImEventConsumer for {} (sidecar session {} stopped)",
-                                        key, stopped_session_id
+                                        "[im] Cancelled ImEventConsumer for {} (sidecar {}@gen{} stopped)",
+                                        key, stopped_session_id, stopped_gen
                                     );
                                 }
                             }
                         }
                         Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                            // Capacity 64 is enough for normal operation; bursty
+                            // shutdowns (many sidecars stopping at once) can exceed
+                            // it. Without compensation, those skipped events leak
+                            // consumers permanently — the exact bug we're fixing.
+                            // Reconcile: any consumer entry whose (session_id, gen)
+                            // is no longer in the manager's live set must be cancelled.
                             ulog_warn!(
-                                "[im] sidecar-stop subscriber lagged by {} events — may have leaked consumers",
+                                "[im] sidecar-stop subscriber lagged by {} events — reconciling against live set",
                                 n
                             );
-                            continue;
+                            let live = sidecar_manager_for_sidecar_stop.lock().unwrap().live_sidecar_set();
+                            let mut guard = im_consumers_for_sidecar_stop.lock().await;
+                            let to_remove: Vec<String> = guard.iter()
+                                .filter(|(_, h)| {
+                                    !live.contains(&(h.sidecar_session_id.clone(), h.sidecar_generation))
+                                })
+                                .map(|(k, _)| k.clone())
+                                .collect();
+                            for key in to_remove {
+                                if let Some(handle) = guard.remove(&key) {
+                                    handle.cancel.store(true, std::sync::atomic::Ordering::SeqCst);
+                                    ulog_info!(
+                                        "[im] Cancelled ImEventConsumer for {} (lag-reconcile: sidecar not in live set)",
+                                        key
+                                    );
+                                }
+                            }
                         }
                         Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                     }
@@ -2504,6 +2547,15 @@ async fn create_bot_instance<R: Runtime>(
                             .get_peer_session(&session_key)
                             .map(|p| p.session_id.clone())
                             .unwrap_or_else(|| session_key.clone());
+                        // Capture the sidecar generation at this exact moment so
+                        // ensure_im_consumer can detect drift (sidecar removed +
+                        // recreated under same session_id between here and the
+                        // consumer-insert step). Generation is always non-zero
+                        // for a live sidecar (insert_sidecar bumps it).
+                        let sidecar_generation_initial = task_manager
+                            .lock()
+                            .unwrap()
+                            .generation_for(&sidecar_session_id_initial);
                         let on_terminal: Arc<dyn Fn(String, reply_router::TerminalOutcome) + Send + Sync> = {
                             let router = Arc::clone(&task_router);
                             let manager = Arc::clone(&task_manager);
@@ -2558,9 +2610,11 @@ async fn create_bot_instance<R: Runtime>(
                         };
                         let reply_router_arc = ensure_im_consumer(
                             &task_consumers,
+                            &task_manager,
                             &session_key,
                             port,
                             &sidecar_session_id_initial,
+                            sidecar_generation_initial,
                             Arc::clone(&task_adapter),
                             Arc::clone(&task_pending_approvals),
                             task_stream_client.clone(),
@@ -3084,6 +3138,9 @@ async fn create_bot_instance<R: Runtime>(
         group_history,
         // OpenClaw Bridge process
         bridge_process: bridge_process_handle.map(tokio::sync::Mutex::new),
+        // Sidecar-stop subscriber loop — held to bot lifecycle, exits when
+        // shutdown_rx flips or broadcast Sender drops.
+        sidecar_stop_handle,
         // Agent link (set after moving into AgentInstance)
         agent_link,
     };
@@ -3218,11 +3275,22 @@ pub async fn get_all_bots_status(im_state: &ManagedImBots) -> HashMap<String, Im
 /// Lazily ensure an `ImEventConsumer` task is running for `session_key`.
 /// Detects Sidecar rotation (port change) and respawns when needed.
 /// Returns the consumer handle so the caller can register a new ReplySlot.
+///
+/// `sidecar_manager` is consulted in a final-check inside the registry lock:
+/// the (session_id, generation) captured by the caller must still be live
+/// when we're about to insert. Otherwise (sidecar removed during the gap
+/// between caller's `ensure_sidecar` and our lock acquisition) we abort the
+/// insert and return a fresh-but-unregistered router — this avoids
+/// installing an orphan consumer that hammers a dead port until the next
+/// idle collector tick. The caller's next message will retry through a
+/// fresh `ensure_sidecar` and re-enter this function with a new generation.
 async fn ensure_im_consumer<A>(
     consumers: &ImConsumers,
+    sidecar_manager: &ManagedSidecarManager,
     session_key: &str,
     sidecar_port: u16,
     sidecar_session_id: &str,
+    sidecar_generation: u64,
     adapter: Arc<A>,
     pending_approvals: PendingApprovals,
     stream_client: Client,
@@ -3233,12 +3301,36 @@ where
 {
     let mut guard = consumers.lock().await;
     if let Some(existing) = guard.get(session_key) {
-        if existing.sidecar_port == sidecar_port && !existing.cancel.load(std::sync::atomic::Ordering::SeqCst) {
+        if existing.sidecar_port == sidecar_port
+            && existing.sidecar_generation == sidecar_generation
+            && !existing.cancel.load(std::sync::atomic::Ordering::SeqCst)
+        {
             return Arc::clone(&existing.reply_router);
         }
-        // Sidecar rotated or consumer dead — cancel old before respawn.
+        // Sidecar rotated (port or generation changed) or consumer dead —
+        // cancel old before respawn.
         existing.cancel.store(true, std::sync::atomic::Ordering::SeqCst);
         guard.remove(session_key);
+    }
+
+    // Final-check: is the captured (session_id, generation) still live? If a
+    // stop broadcast is in flight (between caller's ensure_sidecar return
+    // and our lock acquisition), the subscriber may not have processed it
+    // yet — without this check we'd spawn an orphan against a dead port.
+    {
+        let mgr = sidecar_manager.lock().unwrap();
+        let live_gen = mgr.generation_for(sidecar_session_id);
+        if live_gen != sidecar_generation {
+            ulog_warn!(
+                "[im] ensure_im_consumer aborting insert for {} — sidecar generation drift (expected={}, live={}). Caller should retry on next message.",
+                session_key, sidecar_generation, live_gen
+            );
+            // Return an unregistered router. The caller's reply slot will be
+            // attached to it but no consumer is listening; the slot times out
+            // naturally and the next message reruns ensure_sidecar →
+            // ensure_im_consumer with the fresh generation.
+            return reply_router::shared_router(pending_approvals);
+        }
     }
 
     let cancel: event_consumer::CancelFlag = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -3259,6 +3351,7 @@ where
             reply_router: Arc::clone(&reply_router),
             sidecar_port,
             sidecar_session_id: sidecar_session_id.to_string(),
+            sidecar_generation,
             _join: join,
         },
     );
