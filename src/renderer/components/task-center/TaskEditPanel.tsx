@@ -34,6 +34,8 @@ import {
 } from './editors/EndConditionsEditor';
 import { ExecutionModeEditor } from './editors/ExecutionModeEditor';
 import { INPUT_CLS, toLocalDateTimeString } from './editors/controls';
+import { TaskAdvancedConfigEditor } from './editors/TaskAdvancedConfigEditor';
+import type { RuntimeType } from '@/../shared/types/runtime';
 import { extractErrorMessage } from './errors';
 
 /** Which section/field the edit panel should scroll to + focus on open.
@@ -69,8 +71,11 @@ interface Draft {
   maxExecutions: string;
   aiCanExit: boolean;
   notification: NotificationConfig;
-  model: string;
-  permissionMode: string;
+  // Advanced overrides — `undefined` means "follow Agent". (PRD 0.2.4 §需求 4)
+  runtime: RuntimeType | undefined;
+  model: string | undefined;
+  permissionMode: string | undefined;
+  mcpEnabledServers: string[] | undefined;
 }
 
 function taskToDraft(task: Task, taskMd: string): Draft {
@@ -101,8 +106,15 @@ function taskToDraft(task: Task, taskMd: string): Draft {
     maxExecutions: ec?.maxExecutions ? String(ec.maxExecutions) : '',
     aiCanExit: ec?.aiCanExit ?? true,
     notification: task.notification ?? { desktop: true },
-    model: task.model ?? '',
-    permissionMode: task.permissionMode ?? 'auto',
+    runtime: task.runtime,
+    // Empty string from disk = "no override"; surface as undefined so the
+    // advanced editor's "跟随 Agent" sentinel is respected.
+    model: task.model && task.model.length > 0 ? task.model : undefined,
+    permissionMode:
+      task.permissionMode && task.permissionMode.length > 0
+        ? task.permissionMode
+        : undefined,
+    mcpEnabledServers: task.mcpEnabledServers,
   };
 }
 
@@ -359,10 +371,27 @@ export function TaskEditPanel({
       }
     }
 
-    // Execution overrides.
-    if (draft.model !== (task.model ?? '')) payload.model = draft.model;
-    if (draft.permissionMode !== (task.permissionMode ?? 'auto'))
-      payload.permissionMode = draft.permissionMode;
+    // Execution overrides — diff against the persisted Task. Sending an
+    // empty string clears (Rust `update()` treats `Some("")` as
+    // `permission_mode = None`); sending undefined leaves the field untouched.
+    const draftModel = draft.model ?? '';
+    if (draftModel !== (task.model ?? '')) payload.model = draftModel;
+    const draftPermissionMode = draft.permissionMode ?? '';
+    if (draftPermissionMode !== (task.permissionMode ?? '')) {
+      payload.permissionMode = draftPermissionMode;
+    }
+    if ((draft.runtime ?? '') !== (task.runtime ?? '')) {
+      payload.runtime = draft.runtime;
+    }
+    // mcpEnabledServers diff. Send an actual array when there's a change;
+    // mapping "follow Agent" (draft = undefined) → `[]` since Rust's
+    // `update()` treats an empty vec as "clear override". A real tri-state
+    // for "explicitly run with no MCP" is out of scope for v0.2.4.
+    const initialMcp = JSON.stringify(task.mcpEnabledServers ?? []);
+    const draftMcp = JSON.stringify(draft.mcpEnabledServers ?? []);
+    if (initialMcp !== draftMcp) {
+      payload.mcpEnabledServers = draft.mcpEnabledServers ?? [];
+    }
 
     const initialNotification = JSON.stringify(task.notification ?? null);
     const nextNotification = JSON.stringify(draft.notification);
@@ -548,6 +577,27 @@ export function TaskEditPanel({
 
       <div className="border-t border-[var(--line-subtle)]" />
 
+      {/* 高级配置 — runtime / model / permission / MCP overrides */}
+      <section>
+        <div className="pl-1">
+          <TaskAdvancedConfigEditor
+            workspaceLabel={workspaceDisplayName(task)}
+            runtime={draft.runtime}
+            setRuntime={(v) => setDraft((d) => ({ ...d, runtime: v }))}
+            model={draft.model}
+            setModel={(v) => setDraft((d) => ({ ...d, model: v }))}
+            permissionMode={draft.permissionMode}
+            setPermissionMode={(v) => setDraft((d) => ({ ...d, permissionMode: v }))}
+            mcpEnabledServers={draft.mcpEnabledServers}
+            setMcpEnabledServers={(v) =>
+              setDraft((d) => ({ ...d, mcpEnabledServers: v }))
+            }
+          />
+        </div>
+      </section>
+
+      <div className="border-t border-[var(--line-subtle)]" />
+
       {/* 执行模式 */}
       <section>
         <h3 className="mb-3 text-[14px] font-semibold text-[var(--ink)]">
@@ -596,13 +646,10 @@ export function TaskEditPanel({
 
       <div className="border-t border-[var(--line-subtle)]" />
 
-      {/* 执行覆盖 — hidden in v0.1.69 UI. Model / permissionMode overrides
-          are still carried on the Task row and honored by the scheduler
-          (ensure_cron_for_task reads Task.model / Task.permissionMode);
-          we just don't expose a field for them in this editor yet. The
-          `draft.model` / `draft.permissionMode` state initial values
-          come from the Task, so a task with existing overrides will
-          keep them. */}
+      {/* v0.2.4: model / permissionMode / runtime / mcpEnabledServers
+          overrides moved into the dedicated 「高级配置」 section above.
+          The scheduler still reads them from Task.* (ensure_cron_for_task)
+          so existing tasks keep working. */}
 
       {/* 通知 */}
       <section ref={notificationRef}>
@@ -643,6 +690,16 @@ export function TaskEditPanel({
       </div>
     </div>
   );
+}
+
+/** Best-effort label for the task's workspace (path basename). The
+ *  TaskEditPanel doesn't have direct access to the projects list, but a
+ *  basename is enough context for the advanced editor's hint copy. */
+function workspaceDisplayName(task: Task): string | undefined {
+  const raw = task.workspacePath;
+  if (!raw) return undefined;
+  const parts = raw.replace(/\\/g, '/').split('/').filter(Boolean);
+  return parts[parts.length - 1] ?? raw;
 }
 
 function Field({

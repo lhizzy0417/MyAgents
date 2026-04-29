@@ -311,6 +311,11 @@ pub struct Task {
     pub runtime: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime_config: Option<serde_json::Value>,
+    /// Per-task MCP enable list override (PRD 0.2.4 §需求 4). When `None`
+    /// the executor falls back to the Agent workspace's `mcpEnabledServers`.
+    /// `Some(vec![])` means "explicitly run with no MCP servers".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mcp_enabled_servers: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_thought_id: Option<String>,
     #[serde(default)]
@@ -433,6 +438,9 @@ pub struct TaskCreateDirectInput {
     pub runtime: Option<String>,
     #[serde(default)]
     pub runtime_config: Option<serde_json::Value>,
+    /// Per-task MCP enable list override (PRD 0.2.4 §需求 4).
+    #[serde(default)]
+    pub mcp_enabled_servers: Option<Vec<String>>,
     #[serde(default)]
     pub source_thought_id: Option<String>,
     #[serde(default)]
@@ -478,6 +486,9 @@ pub struct TaskCreateFromAlignmentInput {
     pub runtime: Option<String>,
     #[serde(default)]
     pub runtime_config: Option<serde_json::Value>,
+    /// Per-task MCP enable list override (PRD 0.2.4 §需求 4).
+    #[serde(default)]
+    pub mcp_enabled_servers: Option<Vec<String>>,
     #[serde(default)]
     pub source_thought_id: Option<String>,
     #[serde(default)]
@@ -536,6 +547,11 @@ pub struct TaskUpdateInput {
     pub runtime: Option<String>,
     #[serde(default)]
     pub runtime_config: Option<serde_json::Value>,
+    /// Per-task MCP enable list override (PRD 0.2.4 §需求 4).
+    /// `Some(vec![])` clears overrides (= follow Agent); `None` = leave
+    /// existing override untouched.
+    #[serde(default)]
+    pub mcp_enabled_servers: Option<Vec<String>>,
     #[serde(default)]
     pub tags: Option<Vec<String>>,
     #[serde(default)]
@@ -983,6 +999,7 @@ impl TaskStore {
             preselected_session_id: input.preselected_session_id,
             runtime: input.runtime,
             runtime_config: input.runtime_config,
+            mcp_enabled_servers: input.mcp_enabled_servers,
             source_thought_id: input.source_thought_id,
             session_ids: Vec::new(),
             status: TaskStatus::Todo,
@@ -1115,6 +1132,7 @@ impl TaskStore {
             preselected_session_id: input.preselected_session_id,
             runtime: input.runtime,
             runtime_config: input.runtime_config,
+            mcp_enabled_servers: input.mcp_enabled_servers,
             source_thought_id: input.source_thought_id,
             session_ids: Vec::new(),
             status: initial_status,
@@ -1298,6 +1316,7 @@ impl TaskStore {
             preselected_session_id: None,
             runtime: input.runtime,
             runtime_config: input.runtime_config,
+            mcp_enabled_servers: input.mcp_enabled_servers,
             source_thought_id,
             session_ids: Vec::new(),
             status: TaskStatus::Todo,
@@ -1499,6 +1518,14 @@ impl TaskStore {
         if let Some(v) = input.runtime_config {
             updated.runtime_config = Some(v);
         }
+        if let Some(v) = input.mcp_enabled_servers {
+            // Empty vec from the renderer means "explicitly run with no
+            // MCP servers"; treat that as a clear (= follow Agent default)
+            // by mapping it to None — the UI surfaces this via the user
+            // toggling the override OFF, which sends `mcpEnabledServers: []`.
+            // A non-empty list snapshots the chosen servers onto the task.
+            updated.mcp_enabled_servers = if v.is_empty() { None } else { Some(v) };
+        }
         if let Some(v) = input.tags {
             updated.tags = v;
         }
@@ -1689,13 +1716,22 @@ impl TaskStore {
                     );
                 }
                 if existing.permission_mode != updated.permission_mode {
+                    // PRD 0.2.4 §需求 4 (4b): unset = runtime maximum
+                    // permission, NOT "auto". Unattended task dispatch
+                    // would otherwise block on the first tool call.
+                    // For the SDK builtin runtime the legacy fallback
+                    // "auto" was wrong; we now project to the explicit
+                    // bypass-permissions sentinel which the cron exec
+                    // path translates into the right runtime-specific
+                    // value. (See `/cron/execute-sync` permission
+                    // resolution in `src/server/index.ts`.)
                     patch.insert(
                         "permissionMode".to_string(),
                         serde_json::Value::String(
                             updated
                                 .permission_mode
                                 .clone()
-                                .unwrap_or_else(|| "auto".to_string()),
+                                .unwrap_or_else(|| "fullAgency".to_string()),
                         ),
                     );
                 }
@@ -3024,6 +3060,7 @@ mod tests {
             preselected_session_id: None,
             runtime: None,
             runtime_config: None,
+            mcp_enabled_servers: None,
             source_thought_id: Some("thought-1".to_string()),
             tags: vec!["MyAgents".to_string()],
             notification: None,
@@ -3307,6 +3344,7 @@ mod tests {
                 preselected_session_id: None,
                 runtime: None,
                 runtime_config: None,
+                mcp_enabled_servers: None,
                 tags: None,
                 notification: None,
                 prompt: None,

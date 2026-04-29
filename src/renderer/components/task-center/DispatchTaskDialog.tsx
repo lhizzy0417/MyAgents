@@ -35,9 +35,11 @@ import type {
   TaskExecutionMode,
   TaskRunMode,
 } from '@/../shared/types/task';
+import type { RuntimeType } from '@/../shared/types/runtime';
 import { ExecutionModeEditor } from './editors/ExecutionModeEditor';
 import { EndConditionsEditor, type EndConditionMode } from './editors/EndConditionsEditor';
 import { INPUT_CLS, ToggleSwitch, toLocalDateTimeString } from './editors/controls';
+import { TaskAdvancedConfigEditor } from './editors/TaskAdvancedConfigEditor';
 import { extractErrorMessage } from './errors';
 
 function SectionHeader({
@@ -155,6 +157,12 @@ export function DispatchTaskDialog({
   const [notifyEnabled, setNotifyEnabled] = useState(true);
   const [deliveryBotId, setDeliveryBotId] = useState('');
 
+  // Advanced overrides (PRD 0.2.4 §需求 4) — undefined means "follow Agent".
+  const [advRuntime, setAdvRuntime] = useState<RuntimeType | undefined>(undefined);
+  const [advModel, setAdvModel] = useState<string | undefined>(undefined);
+  const [advPermissionMode, setAdvPermissionMode] = useState<string | undefined>(undefined);
+  const [advMcpEnabledServers, setAdvMcpEnabledServers] = useState<string[] | undefined>(undefined);
+
   const [busy, setBusy] = useState(false);
 
   // Keep runMode aligned with PRD §9.2 defaults when the user flips modes.
@@ -270,6 +278,11 @@ export function DispatchTaskDialog({
         intervalMinutes: isRecurring && !advancedCron ? intervalMinutes : undefined,
         cronExpression: isRecurring && advancedCron ? advancedCron : undefined,
         cronTimezone: isRecurring && advancedCron ? cronTimezone || undefined : undefined,
+        // Advanced overrides — `undefined` is forwarded as "follow Agent".
+        runtime: advRuntime,
+        model: advModel,
+        permissionMode: advPermissionMode,
+        mcpEnabledServers: advMcpEnabledServers,
         sourceThoughtId: thought?.id,
         tags,
         notification: buildNotification(),
@@ -316,6 +329,10 @@ export function DispatchTaskDialog({
     buildNotification,
     toast,
     onDispatched,
+    advRuntime,
+    advModel,
+    advPermissionMode,
+    advMcpEnabledServers,
   ]);
 
   return (
@@ -382,9 +399,22 @@ export function DispatchTaskDialog({
                   placeholder="选择工作区"
                 />
                 <p className="mt-2 text-[13px] text-[var(--ink-muted)]">
-                  使用该 Agent 的默认模型与权限配置。默认按想法标签匹配工作区。
+                  默认使用该 Agent 的 runtime / 模型 / 权限 / MCP 工具。可在下方「高级配置」单独覆盖。
                 </p>
               </div>
+
+              {/* 高级配置 — runtime / model / permission / MCP overrides */}
+              <TaskAdvancedConfigEditor
+                workspaceLabel={workspace?.displayName || workspace?.name}
+                runtime={advRuntime}
+                setRuntime={setAdvRuntime}
+                model={advModel}
+                setModel={setAdvModel}
+                permissionMode={advPermissionMode}
+                setPermissionMode={setAdvPermissionMode}
+                mcpEnabledServers={advMcpEnabledServers}
+                setMcpEnabledServers={setAdvMcpEnabledServers}
+              />
 
               <div>
                 <label className="mb-2 block text-[13px] font-medium text-[var(--ink-secondary)]">

@@ -320,6 +320,108 @@ impl ThoughtStore {
         &self.root
     }
 
+    /// Merge multiple thoughts into a brand-new thought, then delete the
+    /// originals. The merged thought is created fresh (new id, new
+    /// `created_at`) so the result is a clean replacement rather than an
+    /// in-place mutation of any source — see PRD 0.2.4 §需求 2.
+    ///
+    /// Composition rules (locked at PRD design time):
+    /// * `content` = `sources` joined by `\n—\n` (Em Dash, U+2014). Order
+    ///   follows the input vec; the renderer sends ids in the on-screen
+    ///   list order so a top-down read of the merged note matches what the
+    ///   user saw in the panel.
+    /// * `tags` = union of source `tags`, dedup preserving first-seen order
+    ///   across sources. Inline `#xxx` runs in the body are NOT re-parsed
+    ///   (the user's body text is treated as opaque), so a tag that only
+    ///   appears in one source's frontmatter stays surfaced even if the
+    ///   joined body never literally writes it.
+    /// * `images` = concatenation of source `images`, dedup preserving
+    ///   first-seen order.
+    /// * `converted_task_ids` = union, dedup preserving first-seen order;
+    ///   keeps the "已派生 N 个任务" pointer alive on the merged card.
+    ///
+    /// Atomicity: create-then-delete. If create fails, no source is touched.
+    /// If a source delete fails after create succeeds, the new thought is
+    /// rolled back (also deleted) and the error is returned — leaving the
+    /// user with the original cards intact rather than a "phantom merged
+    /// note + half-deleted sources" mess.
+    pub async fn merge(&self, source_ids: Vec<String>) -> Result<Thought, String> {
+        if source_ids.len() < 2 {
+            return Err("merge requires at least 2 source thoughts".to_string());
+        }
+        // Snapshot all sources up-front so we can compose the merged content
+        // without holding the write lock across atomic disk writes.
+        let snapshots: Vec<Thought> = {
+            let inner = self.inner.read().await;
+            let mut out: Vec<Thought> = Vec::with_capacity(source_ids.len());
+            for id in &source_ids {
+                let (t, _) = inner
+                    .get(id)
+                    .ok_or_else(|| format!("Thought not found: {}", id))?;
+                out.push(t.clone());
+            }
+            out
+        };
+
+        // Compose merged body / tags / images / converted task ids.
+        let separator = "\n—\n";
+        let merged_content: String = snapshots
+            .iter()
+            .map(|t| t.content.as_str())
+            .collect::<Vec<_>>()
+            .join(separator);
+        let merged_tags = dedup_preserving_order(snapshots.iter().flat_map(|t| t.tags.clone()));
+        let merged_images =
+            dedup_preserving_order(snapshots.iter().flat_map(|t| t.images.clone()));
+        let merged_converted = dedup_preserving_order(
+            snapshots.iter().flat_map(|t| t.converted_task_ids.clone()),
+        );
+
+        // Build the new thought directly so we can override `tags` (the
+        // default `Thought::new` would re-parse `merged_content` for tags;
+        // we want the union of source frontmatter tags instead).
+        let now = now_ms();
+        let new_thought = Thought {
+            id: Uuid::new_v4().to_string(),
+            content: merged_content,
+            tags: merged_tags,
+            images: merged_images,
+            created_at: now,
+            updated_at: now,
+            converted_task_ids: merged_converted,
+        };
+        let new_path = self.file_path_for(&new_thought);
+        let serialized = serialize_thought(&new_thought);
+        self.write_atomic(&new_path, &serialized)?;
+
+        {
+            let mut inner = self.inner.write().await;
+            inner.insert(new_thought.id.clone(), (new_thought.clone(), new_path.clone()));
+        }
+
+        // Delete sources. If any delete fails, roll back the new thought
+        // so the user is left with the originals intact.
+        for id in &source_ids {
+            if let Err(e) = self.delete(id).await {
+                ulog_warn!(
+                    "[thought] merge: rolling back new={} because delete of source {} failed: {}",
+                    new_thought.id,
+                    id,
+                    e
+                );
+                let _ = self.delete(&new_thought.id).await;
+                return Err(format!("delete source {}: {}", id, e));
+            }
+        }
+
+        ulog_info!(
+            "[thought] merged sources={:?} into new={}",
+            source_ids,
+            new_thought.id
+        );
+        Ok(new_thought)
+    }
+
     pub async fn delete(&self, id: &str) -> Result<(), String> {
         let mut inner = self.inner.write().await;
         // Peek without removing — we want disk-first so a failed unlink doesn't
@@ -347,6 +449,25 @@ impl ThoughtStore {
 
 fn now_ms() -> i64 {
     Utc::now().timestamp_millis()
+}
+
+/// Collect into a Vec keeping first occurrence of each item, dropping
+/// later duplicates. Used by `ThoughtStore::merge` to fuse `tags` /
+/// `images` / `converted_task_ids` without changing the user's intent
+/// about ordering (which sees the first source's items first).
+fn dedup_preserving_order<I, T>(iter: I) -> Vec<T>
+where
+    I: IntoIterator<Item = T>,
+    T: Eq + std::hash::Hash + Clone,
+{
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for item in iter {
+        if seen.insert(item.clone()) {
+            out.push(item);
+        }
+    }
+    out
 }
 
 /// Parse inline `#xxx` tags. A tag starts at `#` that is either at the beginning
@@ -586,6 +707,17 @@ pub async fn cmd_thought_delete(
     state.delete(&id).await
 }
 
+/// Merge `sourceIds` into a single new thought, then delete the sources.
+/// See `ThoughtStore::merge` for composition semantics. The renderer
+/// passes ids in on-screen list order (top → bottom).
+#[tauri::command]
+pub async fn cmd_thought_merge(
+    state: tauri::State<'_, ManagedThoughtStore>,
+    source_ids: Vec<String>,
+) -> Result<Thought, String> {
+    state.merge(source_ids).await
+}
+
 /// Reveal `~/.myagents/thoughts/` in the OS file manager so users can
 /// inspect / back-up the raw `.md` files. The path is sourced from the
 /// managed `ThoughtStore`, so the renderer can't coerce us into opening
@@ -777,5 +909,69 @@ mod tests {
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].content, "persistent #save");
         assert_eq!(listed[0].tags, vec!["save".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn merge_creates_new_thought_and_drops_sources() {
+        let dir = tempdir().unwrap();
+        let store = ThoughtStore::new(dir.path().to_path_buf());
+
+        let a = store.create(ThoughtCreateInput {
+            content: "first body #alpha".to_string(),
+            images: vec!["a.png".to_string()],
+        }).await.unwrap();
+        // Tiny sleep so updated_at differs deterministically
+        tokio::time::sleep(tokio::time::Duration::from_millis(2)).await;
+        let b = store.create(ThoughtCreateInput {
+            content: "second body #beta".to_string(),
+            images: vec!["b.png".to_string(), "a.png".to_string()],
+        }).await.unwrap();
+        tokio::time::sleep(tokio::time::Duration::from_millis(2)).await;
+        let c = store.create(ThoughtCreateInput {
+            content: "third body #alpha #gamma".to_string(),
+            images: vec![],
+        }).await.unwrap();
+        store.link_task(&a.id, "task-1").await.unwrap();
+        store.link_task(&b.id, "task-2").await.unwrap();
+        store.link_task(&c.id, "task-1").await.unwrap();
+
+        let merged = store
+            .merge(vec![a.id.clone(), b.id.clone(), c.id.clone()])
+            .await
+            .unwrap();
+
+        // Combined body uses Em-dash separator joining sources in input order.
+        assert_eq!(
+            merged.content,
+            "first body #alpha\n—\nsecond body #beta\n—\nthird body #alpha #gamma"
+        );
+        // Tags from frontmatter unioned, dedup preserving first-seen order.
+        assert_eq!(merged.tags, vec!["alpha", "beta", "gamma"]);
+        // Images dedup'd, preserving first-seen order.
+        assert_eq!(merged.images, vec!["a.png", "b.png"]);
+        // Converted task ids unioned and dedup'd.
+        assert_eq!(merged.converted_task_ids, vec!["task-1", "task-2"]);
+        // Source thoughts deleted.
+        assert!(store.get(&a.id).await.is_none());
+        assert!(store.get(&b.id).await.is_none());
+        assert!(store.get(&c.id).await.is_none());
+        // Merged is the only thought left.
+        let listed = store.list(ThoughtListFilter::default()).await;
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id, merged.id);
+    }
+
+    #[tokio::test]
+    async fn merge_rejects_lt_two_sources() {
+        let dir = tempdir().unwrap();
+        let store = ThoughtStore::new(dir.path().to_path_buf());
+        let a = store.create(ThoughtCreateInput {
+            content: "alone".to_string(),
+            images: vec![],
+        }).await.unwrap();
+        let err = store.merge(vec![a.id.clone()]).await.unwrap_err();
+        assert!(err.contains("at least 2"));
+        // Source untouched.
+        assert!(store.get(&a.id).await.is_some());
     }
 }

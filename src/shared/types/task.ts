@@ -128,12 +128,17 @@ export interface Task {
   dispatchAt?: number;
   /** Per-task model override. When absent, the Agent's default model is used. */
   model?: string;
-  /** Per-task permission mode (auto / plan / fullAgency / …). Defaults to the Agent's default. */
+  /** Per-task permission mode (auto / plan / fullAgency / …). Defaults to
+   *  the **runtime maximum** (e.g. SDK builtin → `bypassPermissions`) rather
+   *  than the Agent's default — see PRD 0.2.4 §需求 4 (4b note). */
   permissionMode?: string;
   /** For `single-session` run mode: id of a pre-existing SDK session to continue. */
   preselectedSessionId?: string;
   runtime?: RuntimeType;
   runtimeConfig?: RuntimeConfigSnapshot;
+  /** Per-task MCP enable list override. `undefined` = follow Agent workspace.
+   *  `[]` = explicitly run with no MCP servers. PRD 0.2.4 §需求 4 (4a). */
+  mcpEnabledServers?: string[];
   /** Set only when the task was created from a Thought (v0.1.69 softened: Thought ↔ Task is loosely coupled). */
   sourceThoughtId?: string;
   sessionIds: string[];
@@ -204,6 +209,8 @@ export interface TaskCreateDirectInput {
   preselectedSessionId?: string;
   runtime?: RuntimeType;
   runtimeConfig?: RuntimeConfigSnapshot;
+  /** Per-task MCP enable list override (PRD 0.2.4 §需求 4). */
+  mcpEnabledServers?: string[];
   sourceThoughtId?: string;
   tags?: string[];
   notification?: NotificationConfig;
@@ -229,6 +236,8 @@ export interface TaskCreateFromAlignmentInput {
   permissionMode?: string;
   runtime?: RuntimeType;
   runtimeConfig?: RuntimeConfigSnapshot;
+  /** Per-task MCP enable list override (PRD 0.2.4 §需求 4). */
+  mcpEnabledServers?: string[];
   sourceThoughtId?: string;
   tags?: string[];
   notification?: NotificationConfig;
@@ -258,6 +267,10 @@ export interface TaskUpdateInput {
   preselectedSessionId?: string;
   runtime?: RuntimeType;
   runtimeConfig?: RuntimeConfigSnapshot;
+  /** Per-task MCP enable list override. Empty array clears (= follow
+   *  Agent); a populated array snapshots the chosen server ids. Rust
+   *  `update_task` normalises an empty vec → None on persistence. */
+  mcpEnabledServers?: string[];
   tags?: string[];
   notification?: NotificationConfig;
   /**

@@ -56,6 +56,15 @@ export function thoughtDelete(id: string): Promise<void> {
   return inv('cmd_thought_delete', { id });
 }
 
+/**
+ * Merge multiple thoughts into one new thought, then delete the originals.
+ * `sourceIds` MUST be ordered top→bottom as displayed; the merged content
+ * is joined with `\n—\n` separators in that order. See PRD 0.2.4 §需求 2.
+ */
+export function thoughtMerge(sourceIds: string[]): Promise<Thought> {
+  return inv('cmd_thought_merge', { sourceIds });
+}
+
 /** Reveal `~/.myagents/thoughts/` in the OS file manager (Finder/Explorer). */
 export function thoughtOpenDir(): Promise<void> {
   return inv('cmd_thought_open_dir');

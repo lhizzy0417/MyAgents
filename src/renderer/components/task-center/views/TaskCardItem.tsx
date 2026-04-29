@@ -19,10 +19,11 @@
 // needs a separate "遗留" pill — see <TaskCategoryBadge legacy />.
 
 import { useEffect, useState } from 'react';
-import { Folder } from 'lucide-react';
+import { Folder, MessageCircle } from 'lucide-react';
 
 import { taskGetRunStats } from '@/api/taskCenter';
 import type { Task, TaskExecutionMode, TaskRunStats } from '@/../shared/types/task';
+import { CUSTOM_EVENTS } from '@/../shared/constants';
 import { humanizeCron, relativeTime } from '@/utils/taskCenterUtils';
 import { TaskCategoryBadge } from '../TaskCategoryBadge';
 import { TaskStatusBadge } from '../TaskStatusBadge';
@@ -114,7 +115,8 @@ export function TaskCardItem(props: TaskCardItemProps) {
       <div className="flex w-full items-center gap-1.5">
         <TaskStatusBadge status={status} />
         <TaskCategoryBadge mode={category} legacy={isLegacy} />
-        <div className="ml-auto shrink-0">
+        <div className="ml-auto flex shrink-0 items-center gap-1">
+          <ViewSessionButton task={task} />
           <TaskItemActions
             variant={isLegacy ? 'legacy' : 'task'}
             status={status}
@@ -311,6 +313,41 @@ function formatAbsolute(ts: number): string {
 // the chip picker emits (daily / weekdays / specific weekdays / weekly /
 // monthly) plus interval mode; anything else (custom cron the user typed)
 // falls back to the raw string so we stay honest rather than mis-translate.
+/**
+ * Hover-only chip that opens the task's most-recent SDK session in a new
+ * Chat tab. Renders nothing when the task has no recorded sessions yet
+ * (PRD 0.2.4 §需求 5: 「无数据不渲染」). The "most recent" is the last
+ * id appended to `task.sessionIds` — `task.rs::append_session` appends
+ * in execution order so the tail is authoritative.
+ *
+ * Shared by both TaskCardItem and TaskListRow so the affordance is
+ * placed identically (immediately left of the ⋯ overflow trigger).
+ */
+export function ViewSessionButton({ task }: { task?: Task }) {
+  if (!task || task.sessionIds.length === 0) return null;
+  const sessionId = task.sessionIds[task.sessionIds.length - 1];
+  const handleClick = (e: React.MouseEvent<HTMLButtonElement>) => {
+    e.stopPropagation();
+    if (!task.workspacePath) return;
+    window.dispatchEvent(
+      new CustomEvent(CUSTOM_EVENTS.OPEN_SESSION_IN_NEW_TAB, {
+        detail: { sessionId, workspacePath: task.workspacePath },
+      }),
+    );
+  };
+  return (
+    <button
+      type="button"
+      onClick={handleClick}
+      title="查看任务会话"
+      aria-label="查看任务会话"
+      className="flex h-5 w-5 items-center justify-center rounded-md text-[var(--ink-muted)]/70 opacity-0 transition-[opacity,colors] hover:bg-[var(--paper-inset)] hover:text-[var(--accent-cool)] group-hover:opacity-100 group-focus-within:opacity-100"
+    >
+      <MessageCircle className="h-3.5 w-3.5" strokeWidth={1.5} />
+    </button>
+  );
+}
+
 function formatRecurring(task?: Task): string | null {
   if (!task) return null;
   if (task.cronExpression) {

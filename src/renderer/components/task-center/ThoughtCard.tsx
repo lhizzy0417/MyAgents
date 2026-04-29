@@ -18,6 +18,8 @@ import {
   useState,
 } from 'react';
 import {
+  CheckSquare,
+  Check,
   MessageSquare,
   MoreHorizontal,
   Pencil,
@@ -32,6 +34,10 @@ import { getFolderName } from '@/types/tab';
 import type { Project } from '@/config/types';
 import type { Thought } from '@/../shared/types/thought';
 import { splitWithTagHighlights } from '@/utils/parseThoughtTags';
+import {
+  findHighlightRanges,
+  renderTextWithHighlights,
+} from '@/utils/highlightSearchMatches';
 
 interface Props {
   thought: Thought;
@@ -42,6 +48,21 @@ interface Props {
   onDiscuss?: (t: Thought, workspaceId: string) => void;
   /** Click handler for inline tag chips — wires into the panel's tag filter. */
   onTagClick?: (tag: string) => void;
+  /** Active search query from the panel — when non-empty, every match in the
+   *  thought body is wrapped in a `<mark>` span. Tag pills stay tag-coloured
+   *  and are not double-highlighted. */
+  searchQuery?: string;
+  /** When true, the card renders in selection-mode skin: hover actions are
+   *  hidden, the entire body becomes a click target that toggles selection,
+   *  and a checkbox is shown at the bottom-right corner. */
+  selectMode?: boolean;
+  /** Whether this card is currently in the selected set. */
+  selected?: boolean;
+  /** Called when the card body is clicked while `selectMode` is true. */
+  onToggleSelect?: () => void;
+  /** Called from the ⋯ menu's "多选" item — parent enters select mode and
+   *  pre-selects this card. */
+  onEnterSelectMode?: () => void;
 }
 
 const VIEW_CLAMP_LINES = 5;
@@ -53,6 +74,11 @@ export function ThoughtCard({
   onDispatch,
   onDiscuss,
   onTagClick,
+  searchQuery,
+  selectMode = false,
+  selected = false,
+  onToggleSelect,
+  onEnterSelectMode,
 }: Props) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(thought.content);
@@ -176,6 +202,22 @@ export function ThoughtCard({
 
   const convertedCount = thought.convertedTaskIds?.length ?? 0;
 
+  // Multi-select skin — the entire card becomes a click target that toggles
+  // selection. We render via `<div role="button">` rather than a real
+  // `<button>` because the card already nests a textarea (in edit mode) and
+  // a popover trigger; nesting interactive elements inside a `<button>` is
+  // invalid HTML and causes accessibility-tree noise.
+  const handleCardClick = (e: React.MouseEvent<HTMLDivElement>) => {
+    if (!selectMode) return;
+    // Tag pills inside the body call `e.stopPropagation()` so they don't
+    // toggle selection when filtering by tag — but in selectMode we want
+    // the whole card to be a select target; the renderer above already
+    // suppresses `onTagClick` in selectMode, so this branch only sees
+    // bare clicks. Defensive guard for future divergence:
+    if ((e.target as HTMLElement).closest('[data-thought-card-no-toggle]')) return;
+    onToggleSelect?.();
+  };
+
   return (
     // Card rhythm (DESIGN.md §6.2 compact card):
     //   p-4          — 16px all sides (border → inner content gutter)
@@ -185,7 +227,16 @@ export function ThoughtCard({
     //   mt-3 between body and footer (expand toggle / inline-edit
     //                  action bar) — 12px, the larger step that visually
     //                  separates "read" from "act".
-    <div className="group rounded-[var(--radius-lg)] bg-[var(--paper-elevated)] p-4 transition-shadow hover:shadow-sm">
+    <div
+      onClick={handleCardClick}
+      className={`group relative rounded-[var(--radius-lg)] bg-[var(--paper-elevated)] p-4 transition-shadow hover:shadow-sm ${
+        selectMode ? 'cursor-pointer' : ''
+      } ${
+        selected
+          ? 'ring-1 ring-[var(--accent-warm)] bg-[var(--accent-warm-subtle)]'
+          : ''
+      }`}
+    >
       {/* Top meta row — time + derived-task count on the left, action
           cluster on the right. Moved from the bottom of the card (prior
           iteration) so status reads first, before the user commits to
@@ -213,7 +264,7 @@ export function ThoughtCard({
             </span>
           )}
         </span>
-        {!editing && (
+        {!editing && !selectMode && (
           <div className="flex shrink-0 items-center gap-1">
             {/* Primary actions (AI 讨论 / 派发) — hover-only to keep the
                  resting card uncluttered. Each button owns a local
@@ -336,6 +387,19 @@ export function ThoughtCard({
                 <Pencil className="h-3.5 w-3.5" strokeWidth={1.5} />
                 编辑
               </button>
+              {onEnterSelectMode && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowMenu(false);
+                    onEnterSelectMode();
+                  }}
+                  className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[12px] text-[var(--ink-secondary)] hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]"
+                >
+                  <CheckSquare className="h-3.5 w-3.5" strokeWidth={1.5} />
+                  多选
+                </button>
+              )}
               <button
                 type="button"
                 onClick={() => void handleDelete()}
@@ -379,9 +443,31 @@ export function ThoughtCard({
                   overflow: 'hidden',
                 }
           }
-          onDoubleClick={enterEdit}
+          onDoubleClick={selectMode ? undefined : enterEdit}
         >
-          {renderWithTagHighlights(thought.content, onTagClick)}
+          {renderWithTagHighlights(
+            thought.content,
+            selectMode ? undefined : onTagClick,
+            searchQuery,
+          )}
+        </div>
+      )}
+
+      {/* Bottom-right select indicator. Rendered only in selectMode so the
+          resting card doesn't carry an extra glyph. The card body's onClick
+          is the actual toggle target — the checkbox is a visual receipt
+          (and a separate click target for users who specifically aim at it). */}
+      {selectMode && (
+        <div className="pointer-events-none absolute bottom-2 right-2">
+          <div
+            className={`flex h-5 w-5 items-center justify-center rounded-full border transition-colors ${
+              selected
+                ? 'border-[var(--accent-warm)] bg-[var(--accent-warm)] text-white'
+                : 'border-[var(--line-strong)] bg-[var(--paper-elevated)] text-transparent'
+            }`}
+          >
+            <Check className="h-3 w-3" strokeWidth={3} />
+          </div>
         </div>
       )}
 
@@ -433,6 +519,7 @@ export function ThoughtCard({
 function renderWithTagHighlights(
   content: string,
   onTagClick?: (tag: string) => void,
+  searchQuery?: string,
 ) {
   // Pill styling matches the ThoughtInput overlay — single source of truth
   // for what a `#tag` looks like across authoring & display. Parser is
@@ -440,6 +527,10 @@ function renderWithTagHighlights(
   const parts = splitWithTagHighlights(content);
   const pillCls =
     'rounded-[var(--radius-sm)] bg-[var(--accent-warm-subtle)] px-1 text-[var(--accent-warm)]';
+  // Search-keyword highlight is intentionally only applied to non-tag
+  // segments. Tag pills are already a coloured block; layering a `<mark>`
+  // inside them doubles the visual emphasis and looks broken.
+  const q = searchQuery?.trim() ?? '';
   return parts.map((p, i) => {
     if (p.type === 'tag' && p.tag) {
       const body = p.tag;
@@ -460,6 +551,12 @@ function renderWithTagHighlights(
           {p.value}
         </span>
       );
+    }
+    if (q.length > 0) {
+      const ranges = findHighlightRanges(p.value, q);
+      if (ranges.length > 0) {
+        return <span key={i}>{renderTextWithHighlights(p.value, ranges)}</span>;
+      }
     }
     return <span key={i}>{p.value}</span>;
   });

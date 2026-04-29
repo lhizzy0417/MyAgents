@@ -22,6 +22,12 @@ import { modelSupportsModality } from '@/config/services/providerService';
 import RuntimeSelector from '@/components/RuntimeSelector';
 import { Popover } from '@/components/ui/Popover';
 import type { RuntimeType, RuntimeDetections } from '../../shared/types/runtime';
+import { thoughtList, taskCenterAvailable } from '@/api/taskCenter';
+import type { Thought } from '@/../shared/types/thought';
+import {
+  findHighlightRanges,
+  renderTextWithHighlights,
+} from '@/utils/highlightSearchMatches';
 
 // ===== Module-level pure helpers (extracted from render body) =====
 
@@ -384,6 +390,18 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
   const [selectedFileIndex, setSelectedFileIndex] = useState(0);
   const [atPosition, setAtPosition] = useState<number | null>(null);
   const [isFileSearching, setIsFileSearching] = useState(false); // Track if actively searching
+
+  // @ picker tab — files vs. thoughts. Persisted only for the lifetime of
+  // this SimpleChatInput instance (per-tab) so re-opening @ in the same
+  // chat session lands the user back in the picker they last used. PRD 0.2.4
+  // §需求 3 (3c).
+  const [mentionTab, setMentionTab] = useState<'file' | 'thought'>('file');
+  // Thought results for the @ picker. `null` = no fetch yet; an empty array
+  // is a real state ("0 results"). Soft cap of 50 — see §需求 3 (3d).
+  const [thoughtResults, setThoughtResults] = useState<Thought[]>([]);
+  const [isThoughtSearching, setIsThoughtSearching] = useState(false);
+  const THOUGHT_SOFT_CAP = 50;
+  const THOUGHT_RECENT_LIMIT = 5;
 
   // /slash command search
   const [showSlashMenu, setShowSlashMenu] = useState(false);
@@ -1030,6 +1048,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
   // Debounced file search
   useEffect(() => {
     if (!showFileSearch) return;
+    if (mentionTab !== 'file') return;
 
     // Set searching state immediately when query changes (to avoid flash of 'not found')
     if (fileSearchQuery.length > 0) {
@@ -1041,7 +1060,44 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
     }, 150);
 
     return () => clearTimeout(timer);
-  }, [fileSearchQuery, showFileSearch, searchFiles]);
+  }, [fileSearchQuery, showFileSearch, searchFiles, mentionTab]);
+
+  // Debounced thought search. Mirrors the file path: empty query → most
+  // recent N (PRD 5 default), otherwise full-text via `thoughtList({query})`
+  // capped at the soft limit. Reuses the same `fileSearchQuery` state so
+  // typing inside the picker drives both tabs without a separate buffer.
+  useEffect(() => {
+    if (!showFileSearch) return;
+    if (mentionTab !== 'thought') return;
+    if (!taskCenterAvailable()) {
+      setThoughtResults([]);
+      return;
+    }
+    setIsThoughtSearching(true);
+    let cancelled = false;
+    const timer = setTimeout(() => {
+      const filter = fileSearchQuery.length === 0
+        ? { limit: THOUGHT_RECENT_LIMIT }
+        : { query: fileSearchQuery, limit: THOUGHT_SOFT_CAP };
+      thoughtList(filter)
+        .then((rows) => {
+          if (cancelled) return;
+          setThoughtResults(rows);
+          setSelectedFileIndex(0);
+        })
+        .catch((err) => {
+          console.error('[SimpleChatInput] thought search failed', err);
+          if (!cancelled) setThoughtResults([]);
+        })
+        .finally(() => {
+          if (!cancelled) setIsThoughtSearching(false);
+        });
+    }, 150);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [fileSearchQuery, showFileSearch, mentionTab]);
 
   // Handle text input change (detect @ and / and backspace)
   const handleInputChange = useCallback((e: React.ChangeEvent<HTMLTextAreaElement>) => {
@@ -1304,36 +1360,66 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
       }
     }
 
-    // File search navigation
-    if (showFileSearch && fileSearchResults.length > 0) {
-      if (event.key === 'ArrowDown') {
+    // @ picker keyboard nav (file or thought tab) — owns ↑↓/Enter/Tab/Esc
+    // and ←/→ switches between tabs.
+    if (showFileSearch) {
+      // ←/→ + Cmd/Ctrl switches tabs. Without a modifier we'd swallow the
+      // user's caret navigation while editing the query (e.g. backing up
+      // to fix a typo in `@partial`). PRD 0.2.4 §需求 3 (3b) — "仅当焦点
+      // 在 picker 时" — interpreted here as "explicit modifier intent".
+      if (
+        (event.key === 'ArrowLeft' || event.key === 'ArrowRight')
+        && (event.metaKey || event.ctrlKey)
+      ) {
         event.preventDefault();
-        setSelectedFileIndex((i) => Math.min(i + 1, fileSearchResults.length - 1));
+        setMentionTab((t) => (t === 'file' ? 'thought' : 'file'));
+        setSelectedFileIndex(0);
         return;
       }
-      if (event.key === 'ArrowUp') {
-        event.preventDefault();
-        setSelectedFileIndex((i) => Math.max(i - 1, 0));
-        return;
-      }
-      // Tab or Enter to select file
-      if (event.key === 'Enter' || event.key === 'Tab') {
-        event.preventDefault();
-        // Same rationale as the slash-menu path above — stop native
-        // bubble so window-level Tab handlers (BrandSection's mode
-        // toggle) don't fire when the file-search menu is the owner
-        // of this Tab keystroke.
-        event.stopPropagation();
-        const selected = fileSearchResults[selectedFileIndex];
-        if (selected && atPosition !== null) {
-          // Replace @query with @path
+
+      const activeResults = mentionTab === 'thought' ? thoughtResults : fileSearchResults;
+      if (activeResults.length > 0) {
+        if (event.key === 'ArrowDown') {
+          event.preventDefault();
+          setSelectedFileIndex((i) => Math.min(i + 1, activeResults.length - 1));
+          return;
+        }
+        if (event.key === 'ArrowUp') {
+          event.preventDefault();
+          setSelectedFileIndex((i) => Math.max(i - 1, 0));
+          return;
+        }
+        // Tab or Enter to commit selection. File tab inserts `@<path> `;
+        // thought tab inserts the full markdown body of the thought —
+        // PRD 0.2.4 §需求 3 (3a) — replacing the `@<query>` trigger so the
+        // `@` glyph itself is gone (thoughts don't carry a path-style
+        // reference for the LLM to dereference).
+        if (event.key === 'Enter' || event.key === 'Tab') {
+          event.preventDefault();
+          event.stopPropagation();
+          if (atPosition === null) return;
+          const selectionEnd =
+            textareaRef.current?.selectionStart
+            ?? atPosition + 1 + fileSearchQuery.length;
           const before = inputValue.slice(0, atPosition);
-          const after = inputValue.slice(textareaRef.current?.selectionStart || atPosition + fileSearchQuery.length + 1);
-          setInputValue(`${before}@${selected.path} ${after}`);
+          const after = inputValue.slice(selectionEnd);
+          if (mentionTab === 'file') {
+            const selected = fileSearchResults[selectedFileIndex];
+            if (selected) {
+              setInputValue(`${before}@${selected.path} ${after}`);
+            }
+          } else {
+            const thought = thoughtResults[selectedFileIndex];
+            if (thought) {
+              // Drop the leading `@` since thoughts are inserted as raw
+              // content rather than as references the AI will dereference.
+              setInputValue(`${before}${thought.content} ${after}`);
+            }
+          }
           setShowFileSearch(false);
           setAtPosition(null);
+          return;
         }
-        return;
       }
       if (event.key === 'Escape') {
         event.preventDefault();
@@ -1361,7 +1447,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
       }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps -- textareaRef is stable
-  }, [cyclePermissionMode, undoStack, apiPost, showSlashMenu, filteredSlashCommands, slashSearchQuery, selectedSlashIndex, slashPosition, showFileSearch, fileSearchResults, selectedFileIndex, inputValue, atPosition, fileSearchQuery, images.length, handleSend, handleSkillSelect]);
+  }, [cyclePermissionMode, undoStack, apiPost, showSlashMenu, filteredSlashCommands, slashSearchQuery, selectedSlashIndex, slashPosition, showFileSearch, fileSearchResults, selectedFileIndex, inputValue, atPosition, fileSearchQuery, images.length, handleSend, handleSkillSelect, mentionTab, thoughtResults]);
 
   // Handler for selecting a slash command from the menu
   const handleSlashSelect = useCallback((cmd: SlashCommand) => {
@@ -1501,9 +1587,11 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
               }}
             />
 
-            {/* @file search popup. Keyboard is owned by the textarea
-                (↑↓/Enter/Esc), so we disable the Popover's own Escape
-                handler to avoid double-fire. */}
+            {/* @ picker — segmented tabs let the user switch between
+                workspace files and thoughts. Keyboard is owned by the
+                textarea (↑↓/Enter/Esc + ←/→ for tab switch), so we disable
+                Popover's own Escape handler to avoid double-fire. PRD 0.2.4
+                §需求 3. */}
             <Popover
               open={showFileSearch}
               onClose={() => setShowFileSearch(false)}
@@ -1511,43 +1599,123 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
               placement="top-start"
               offset={8}
               closeOnEscape={false}
-              className="w-80 max-h-64 overflow-auto"
+              className="w-96 max-h-80 flex flex-col"
             >
-              {fileSearchQuery.length === 0 ? (
-                <div className="px-3 py-2 text-sm text-[var(--ink-muted)]">
-                  输入文件名搜索...
-                </div>
-              ) : isFileSearching ? (
-                <div className="px-3 py-2 text-sm text-[var(--ink-muted)]">
-                  搜索中...
-                </div>
-              ) : fileSearchResults.length === 0 ? (
-                <div className="px-3 py-2 text-sm text-[var(--ink-muted)]">
-                  未找到文件
-                </div>
-              ) : (
-                fileSearchResults.map((file, idx) => (
-                  <div
-                    key={file.path}
-                    className={`flex items-center gap-2 px-3 py-2 cursor-pointer text-sm ${idx === selectedFileIndex
-                      ? 'bg-[var(--accent)]/10 text-[var(--ink)]'
-                      : 'text-[var(--ink-muted)] hover:bg-[var(--hover-bg)]'
-                      }`}
-                    onClick={() => {
-                      if (atPosition !== null) {
-                        const before = inputValue.slice(0, atPosition);
-                        const after = inputValue.slice(textareaRef.current?.selectionStart || atPosition + fileSearchQuery.length + 1);
-                        setInputValue(`${before}@${file.path} ${after}`);
-                        setShowFileSearch(false);
-                        setAtPosition(null);
-                      }
-                    }}
-                  >
-                    <FileText className="h-4 w-4 flex-shrink-0" />
-                    <span className="truncate">{file.path}</span>
-                  </div>
-                ))
-              )}
+              {/* Tabs header */}
+              <div className="flex shrink-0 items-center gap-1 border-b border-[var(--line-subtle)] bg-[var(--paper)] p-1">
+                <MentionTabButton
+                  label="工作区文件"
+                  active={mentionTab === 'file'}
+                  onClick={() => {
+                    setMentionTab('file');
+                    setSelectedFileIndex(0);
+                  }}
+                />
+                <MentionTabButton
+                  label="想法"
+                  active={mentionTab === 'thought'}
+                  onClick={() => {
+                    setMentionTab('thought');
+                    setSelectedFileIndex(0);
+                  }}
+                />
+                <span className="ml-auto pr-2 text-[10px] text-[var(--ink-muted)]/60">
+                  ⌘/Ctrl + ←/→ 切换
+                </span>
+              </div>
+
+              <div className="flex-1 overflow-auto">
+                {mentionTab === 'file' ? (
+                  fileSearchQuery.length === 0 ? (
+                    <div className="px-3 py-2 text-sm text-[var(--ink-muted)]">
+                      输入文件名搜索...
+                    </div>
+                  ) : isFileSearching ? (
+                    <div className="px-3 py-2 text-sm text-[var(--ink-muted)]">
+                      搜索中...
+                    </div>
+                  ) : fileSearchResults.length === 0 ? (
+                    <div className="px-3 py-2 text-sm text-[var(--ink-muted)]">
+                      未找到文件
+                    </div>
+                  ) : (
+                    fileSearchResults.map((file, idx) => (
+                      <div
+                        key={file.path}
+                        className={`flex items-center gap-2 px-3 py-2 cursor-pointer text-sm ${
+                          idx === selectedFileIndex
+                            ? 'bg-[var(--accent)]/10 text-[var(--ink)]'
+                            : 'text-[var(--ink-muted)] hover:bg-[var(--hover-bg)]'
+                        }`}
+                        onClick={() => {
+                          if (atPosition !== null) {
+                            const before = inputValue.slice(0, atPosition);
+                            // `??` (not `||`) so a legitimate caret-at-start
+                            // position (`selectionStart === 0`) doesn't get
+                            // overwritten by the synthetic fallback.
+                            const after = inputValue.slice(
+                              textareaRef.current?.selectionStart
+                              ?? atPosition + fileSearchQuery.length + 1,
+                            );
+                            setInputValue(`${before}@${file.path} ${after}`);
+                            setShowFileSearch(false);
+                            setAtPosition(null);
+                          }
+                        }}
+                      >
+                        <FileText className="h-4 w-4 flex-shrink-0" />
+                        <span className="truncate">{file.path}</span>
+                      </div>
+                    ))
+                  )
+                ) : (
+                  // Thought tab
+                  isThoughtSearching ? (
+                    <div className="px-3 py-2 text-sm text-[var(--ink-muted)]">
+                      搜索中...
+                    </div>
+                  ) : thoughtResults.length === 0 ? (
+                    <div className="px-3 py-3 text-sm text-[var(--ink-muted)]">
+                      {fileSearchQuery.length === 0
+                        ? '暂无想法，先在「任务中心」记录吧'
+                        : '没有匹配的想法'}
+                    </div>
+                  ) : (
+                    <>
+                      {fileSearchQuery.length === 0 && (
+                        <div className="px-3 pt-2 pb-1 text-[10px] font-semibold uppercase tracking-wider text-[var(--ink-muted)]/60">
+                          最近 {Math.min(thoughtResults.length, THOUGHT_RECENT_LIMIT)} 条想法
+                        </div>
+                      )}
+                      {thoughtResults.map((thought, idx) => (
+                        <ThoughtPickerRow
+                          key={thought.id}
+                          thought={thought}
+                          query={fileSearchQuery}
+                          active={idx === selectedFileIndex}
+                          onClick={() => {
+                            if (atPosition === null) return;
+                            const before = inputValue.slice(0, atPosition);
+                            const after = inputValue.slice(
+                              textareaRef.current?.selectionStart
+                              ?? atPosition + fileSearchQuery.length + 1,
+                            );
+                            setInputValue(`${before}${thought.content} ${after}`);
+                            setShowFileSearch(false);
+                            setAtPosition(null);
+                          }}
+                        />
+                      ))}
+                      {fileSearchQuery.length > 0
+                        && thoughtResults.length >= THOUGHT_SOFT_CAP && (
+                          <div className="border-t border-[var(--line-subtle)] px-3 py-2 text-[11px] text-[var(--ink-muted)]/70">
+                            已显示前 {THOUGHT_SOFT_CAP} 条匹配，请输入更精确的关键词
+                          </div>
+                        )}
+                    </>
+                  )
+                )}
+              </div>
             </Popover>
 
             {/* /slash command popup. Same ownership pattern — textarea owns
@@ -2090,3 +2258,110 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
 }));
 
 export default SimpleChatInput;
+
+// ─── @ picker helpers (PRD 0.2.4 §需求 3) ────────────────────────────
+
+/**
+ * Segmented-tab button used in the @ picker header. Pattern matches the
+ * launcher's mode toggle (background pill + active inset paper) so the two
+ * surfaces feel related rather than ad-hoc.
+ */
+function MentionTabButton({
+  label,
+  active,
+  onClick,
+}: {
+  label: string;
+  active: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={`rounded-full px-3 py-1 text-[12px] transition-colors ${
+        active
+          ? 'bg-[var(--paper-elevated)] text-[var(--ink)] shadow-sm'
+          : 'text-[var(--ink-muted)] hover:bg-[var(--hover-bg)]'
+      }`}
+    >
+      {label}
+    </button>
+  );
+}
+
+/**
+ * Thought picker row — at-least-2-line affordance. Layout (top-down):
+ *   • meta line (relative time + 0–3 tags)
+ *   • body preview (line-clamp 2)
+ * Search-keyword highlights mirror the left-panel ThoughtCard semantics
+ * so the picker reads as a smaller mirror of the same data.
+ */
+function ThoughtPickerRow({
+  thought,
+  query,
+  active,
+  onClick,
+}: {
+  thought: Thought;
+  query: string;
+  active: boolean;
+  onClick: () => void;
+}) {
+  const ranges = query.trim().length > 0
+    ? findHighlightRanges(thought.content, query)
+    : [];
+  const tags = (thought.tags ?? []).slice(0, 3);
+  return (
+    <div
+      onClick={onClick}
+      className={`cursor-pointer border-b border-[var(--line-subtle)] px-3 py-2 transition-colors ${
+        active
+          ? 'bg-[var(--accent)]/10'
+          : 'hover:bg-[var(--hover-bg)]'
+      }`}
+    >
+      <div className="mb-1 flex items-center gap-2 text-[11px] text-[var(--ink-muted)]">
+        <span>{formatThoughtTime(thought.updatedAt)}</span>
+        {tags.length > 0 && (
+          <div className="flex items-center gap-1">
+            {tags.map((t) => (
+              <span
+                key={t}
+                className="rounded-[var(--radius-sm)] bg-[var(--accent-warm-subtle)] px-1.5 py-px text-[10px] text-[var(--accent-warm)]"
+              >
+                #{t}
+              </span>
+            ))}
+          </div>
+        )}
+      </div>
+      <div
+        className="text-[13px] leading-snug text-[var(--ink-secondary)]"
+        style={{
+          display: '-webkit-box',
+          WebkitLineClamp: 2,
+          WebkitBoxOrient: 'vertical',
+          overflow: 'hidden',
+          minHeight: '34px',
+        }}
+      >
+        {ranges.length > 0
+          ? renderTextWithHighlights(thought.content, ranges)
+          : thought.content}
+      </div>
+    </div>
+  );
+}
+
+function formatThoughtTime(ts: number): string {
+  const diff = Date.now() - ts;
+  const mins = Math.floor(diff / 60_000);
+  if (mins < 1) return '刚刚';
+  if (mins < 60) return `${mins} 分钟前`;
+  const hrs = Math.floor(mins / 60);
+  if (hrs < 24) return `${hrs} 小时前`;
+  const days = Math.floor(hrs / 24);
+  if (days < 7) return `${days} 天前`;
+  return new Date(ts).toLocaleDateString();
+}

@@ -1577,10 +1577,14 @@ async fn ensure_cron_for_task(ta: &task::Task) -> Result<String, String> {
         .map(cron_task::EndConditions::from)
         .unwrap_or_default();
     let desired_model = ta.model.clone();
+    // PRD 0.2.4 §需求 4 (4b): unset = runtime maximum permission, NOT
+    // "auto". Unattended task dispatch would otherwise block on the
+    // first tool call. The cron exec path translates `fullAgency` into
+    // the runtime-specific bypass mode.
     let desired_permission_mode = ta
         .permission_mode
         .clone()
-        .unwrap_or_else(|| "auto".to_string());
+        .unwrap_or_else(|| "fullAgency".to_string());
 
     // Candidate IDs: the Task's own cached `cron_task_id`, and any other
     // CronTask that carries this Task's id as a back-pointer (defensive —

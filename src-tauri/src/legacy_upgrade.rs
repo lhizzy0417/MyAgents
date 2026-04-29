@@ -234,6 +234,9 @@ pub async fn upgrade_legacy_cron(
         preselected_session_id: Some(cron.session_id.clone()),
         runtime: cron.runtime.clone(),
         runtime_config: cron.runtime_config.clone(),
+        // Legacy crons predate the per-task MCP override (PRD 0.2.4 §需求 4)
+        // — `None` means "follow Agent workspace MCP enable list".
+        mcp_enabled_servers: None,
         // Legacy crons have no source Thought and we don't mint one —
         // synthetic thoughts pollute the user's thought stream without
         // carrying any of the "captured a raw idea" meaning the field

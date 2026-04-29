@@ -351,6 +351,7 @@ pub fn run() {
             thought::cmd_thought_get,
             thought::cmd_thought_update,
             thought::cmd_thought_delete,
+            thought::cmd_thought_merge,
             thought::cmd_thought_open_dir,
             // Task Center — Task commands (v0.1.69)
             task::cmd_task_create_direct,

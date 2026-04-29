@@ -5,10 +5,19 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { FolderOpen, Lightbulb, X } from 'lucide-react';
-import { thoughtList, thoughtOpenDir, taskCenterAvailable } from '@/api/taskCenter';
+import {
+  thoughtList,
+  thoughtOpenDir,
+  thoughtMerge,
+  thoughtDelete,
+  taskCenterAvailable,
+} from '@/api/taskCenter';
 import { SearchPill } from './SearchPill';
 import { ThoughtInput } from './ThoughtInput';
 import { ThoughtCard } from './ThoughtCard';
+import { ThoughtBulkBar } from './ThoughtBulkBar';
+import ConfirmDialog from '@/components/ConfirmDialog';
+import { useToast } from '@/components/Toast';
 import { useConfig } from '@/hooks/useConfig';
 // `projects` (not `config.agents`) feeds the # picker — see
 // useThoughtTagCandidates for the rationale.
@@ -49,6 +58,16 @@ export function ThoughtPanel({
   // a cloud tag doesn't get swallowed.
   const [searchFocused, setSearchFocused] = useState(false);
   const searchInputRef = useRef<HTMLInputElement>(null);
+
+  // Multi-select mode (PRD 0.2.4 §需求 2). `selectMode` flips the entire
+  // panel into a bulk-action surface; `selectedIds` holds the membership
+  // set. Both reset when the user changes the active tag / query so a
+  // selected row that filters out doesn't become a phantom selection.
+  const [selectMode, setSelectMode] = useState(false);
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set());
+  const [bulkBusy, setBulkBusy] = useState(false);
+  const [confirmDeleteOpen, setConfirmDeleteOpen] = useState(false);
+  const toast = useToast();
 
   const reload = useCallback(async () => {
     setLoading(true);
@@ -96,12 +115,71 @@ export function ThoughtPanel({
     (prevId: string, next: Thought | null) => {
       if (next === null) {
         setThoughts((prev) => prev.filter((x) => x.id !== prevId));
+        setSelectedIds((s) => {
+          if (!s.has(prevId)) return s;
+          const next = new Set(s);
+          next.delete(prevId);
+          return next;
+        });
       } else {
         setThoughts((prev) => prev.map((x) => (x.id === prevId ? next : x)));
       }
     },
     [],
   );
+
+  const enterSelectMode = useCallback((seedId?: string) => {
+    setSelectMode(true);
+    if (seedId) setSelectedIds(new Set([seedId]));
+    else setSelectedIds(new Set());
+  }, []);
+
+  const exitSelectMode = useCallback(() => {
+    setSelectMode(false);
+    setSelectedIds(new Set());
+  }, []);
+
+  const toggleSelect = useCallback((id: string) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }, []);
+
+  // Esc key exits select mode (matches the panel's other "close current
+  // mode" affordances). Listener only attaches while in select mode so
+  // we don't compete with other Escape consumers (e.g. open dialogs).
+  useEffect(() => {
+    if (!selectMode) return;
+    const handler = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && !confirmDeleteOpen) {
+        e.stopPropagation();
+        exitSelectMode();
+      }
+    };
+    document.addEventListener('keydown', handler);
+    return () => document.removeEventListener('keydown', handler);
+  }, [selectMode, confirmDeleteOpen, exitSelectMode]);
+
+  // Resetting selection on filter change avoids "I selected 5 thoughts
+  // then switched to #维护 and now my action bar says '5 selected' but
+  // I only see 2 cards" — a confusing state that's hard to recover from.
+  // The ref guards against firing on the initial render after entering
+  // select mode (which would wipe the seed thought passed by the ⋯ menu).
+  const filterSnapshotRef = useRef({ tag: activeTag, q: query });
+  useEffect(() => {
+    if (!selectMode) {
+      filterSnapshotRef.current = { tag: activeTag, q: query };
+      return;
+    }
+    const prev = filterSnapshotRef.current;
+    if (prev.tag !== activeTag || prev.q !== query) {
+      filterSnapshotRef.current = { tag: activeTag, q: query };
+      setSelectedIds(new Set());
+    }
+  }, [activeTag, query, selectMode]);
 
   // History-only tag list — drives the search-box tag cloud below, which is
   // an inventory of tags the user has *actually used*. Including agent names
@@ -147,6 +225,68 @@ export function ThoughtPanel({
     setQuery('');
     searchInputRef.current?.blur();
   }, []);
+
+  const handleMerge = useCallback(async () => {
+    if (bulkBusy) return;
+    // Walk the filtered list in display order and pick out selected ids.
+    // This makes "merge follows top-to-bottom display order" robust to
+    // tag filters and search queries — what the user sees is what gets
+    // merged.
+    const orderedIds = filtered
+      .filter((t) => selectedIds.has(t.id))
+      .map((t) => t.id);
+    if (orderedIds.length < 2) {
+      toast.error('请选择至少 2 条想法再合并');
+      return;
+    }
+    setBulkBusy(true);
+    try {
+      const merged = await thoughtMerge(orderedIds);
+      // Update local state: drop sources, prepend merged thought.
+      setThoughts((prev) => {
+        const dropped = prev.filter((t) => !orderedIds.includes(t.id));
+        return [merged, ...dropped];
+      });
+      setSelectedIds(new Set());
+      setSelectMode(false);
+      toast.success(`已合并 ${orderedIds.length} 条想法`);
+    } catch (e) {
+      toast.error(`合并失败：${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setBulkBusy(false);
+    }
+  }, [bulkBusy, selectedIds, toast, filtered]);
+
+  const handleBulkDelete = useCallback(async () => {
+    if (bulkBusy) return;
+    const ids = Array.from(selectedIds);
+    if (ids.length === 0) return;
+    setBulkBusy(true);
+    try {
+      let failures = 0;
+      // Run deletes in parallel — thought.delete is idempotent and
+      // independent across ids; serial would just be slower with no
+      // additional safety.
+      const results = await Promise.allSettled(ids.map((id) => thoughtDelete(id)));
+      for (const r of results) if (r.status === 'rejected') failures += 1;
+      const succeeded = ids.filter((_, i) => results[i].status === 'fulfilled');
+      if (succeeded.length > 0) {
+        setThoughts((prev) => prev.filter((t) => !succeeded.includes(t.id)));
+      }
+      setConfirmDeleteOpen(false);
+      setSelectedIds(new Set());
+      setSelectMode(false);
+      if (failures === 0) {
+        toast.success(`已删除 ${succeeded.length} 条想法`);
+      } else if (succeeded.length === 0) {
+        toast.error('删除失败');
+      } else {
+        toast.error(`已删除 ${succeeded.length} 条，${failures} 条失败`);
+      }
+    } finally {
+      setBulkBusy(false);
+    }
+  }, [bulkBusy, selectedIds, toast]);
 
   return (
     <div className="flex h-full flex-col">
@@ -338,6 +478,36 @@ export function ThoughtPanel({
         <div />
       </div>
 
+      {/* Bulk-select dynamic header — when `selectMode` is on, replace the
+          standard count/filter bar with a "已进入多选模式" affordance and a
+          quick "全选当前列表" / "取消选择" pair. We keep the row in the same
+          place so the layout doesn't shift when the user opts in. The
+          floating ThoughtBulkBar at the bottom of the screen carries the
+          actual confirm/cancel actions. */}
+      {selectMode && (
+        <div className="flex min-h-[34px] items-center justify-between border-t border-[var(--line-subtle)] bg-[var(--accent-warm-subtle)]/40 px-4 py-1.5 text-[11px] text-[var(--ink-secondary)]">
+          <span className="font-semibold uppercase tracking-[0.12em] text-[var(--accent-warm)]">
+            多选模式
+          </span>
+          <div className="flex items-center gap-3">
+            <button
+              type="button"
+              onClick={() => setSelectedIds(new Set(filtered.map((t) => t.id)))}
+              className="text-[var(--ink-secondary)] hover:text-[var(--accent-warm)]"
+            >
+              全选当前列表
+            </button>
+            <button
+              type="button"
+              onClick={() => setSelectedIds(new Set())}
+              className="text-[var(--ink-muted)] hover:text-[var(--ink)]"
+            >
+              清除
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* List */}
       <div className="flex-1 overflow-y-auto px-4 py-3">
         {loading ? (
@@ -357,14 +527,47 @@ export function ThoughtPanel({
                 key={t.id}
                 thought={t}
                 onChanged={(next) => handleCardChanged(t.id, next)}
-                onDispatch={onDispatchThought}
-                onDiscuss={onDiscussThought}
+                onDispatch={selectMode ? undefined : onDispatchThought}
+                onDiscuss={selectMode ? undefined : onDiscussThought}
                 onTagClick={setActiveTag}
+                searchQuery={query}
+                selectMode={selectMode}
+                selected={selectedIds.has(t.id)}
+                onToggleSelect={() => toggleSelect(t.id)}
+                onEnterSelectMode={() => enterSelectMode(t.id)}
               />
             ))}
           </div>
         )}
       </div>
+
+      {/* Floating multi-select bar — bottom-of-screen pill. Only mounted in
+          select mode so it doesn't accidentally swallow clicks the rest of
+          the time. */}
+      {selectMode && (
+        <ThoughtBulkBar
+          count={selectedIds.size}
+          onMerge={() => void handleMerge()}
+          onDelete={() => setConfirmDeleteOpen(true)}
+          onCancel={exitSelectMode}
+          busy={bulkBusy}
+        />
+      )}
+
+      {/* Delete confirmation — merge does NOT need confirmation per PRD,
+          but bulk delete does. */}
+      {confirmDeleteOpen && (
+        <ConfirmDialog
+          title="删除选中的想法？"
+          message={`将永久删除 ${selectedIds.size} 条想法，操作不可恢复。`}
+          confirmText="删除"
+          cancelText="取消"
+          confirmVariant="danger"
+          loading={bulkBusy}
+          onConfirm={() => void handleBulkDelete()}
+          onCancel={() => setConfirmDeleteOpen(false)}
+        />
+      )}
     </div>
   );
 }

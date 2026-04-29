@@ -12,6 +12,7 @@ import { relativeTime } from '@/utils/taskCenterUtils';
 import { TaskCategoryBadge } from '../TaskCategoryBadge';
 import { TaskStatusBadge } from '../TaskStatusBadge';
 import { TaskItemActions, deriveTaskRowStatus } from './TaskItemActions';
+import { ViewSessionButton } from './TaskCardItem';
 import type { LegacyCronRow } from './types';
 
 export interface TaskListRowProps {
@@ -67,6 +68,7 @@ export function TaskListRow(props: TaskListRowProps) {
       <span className="w-[80px] shrink-0 text-right text-[11px] text-[var(--ink-muted)]/80">
         {relativeTime(updatedAt)}
       </span>
+      <ViewSessionButton task={task} />
       <TaskItemActions
         variant={isLegacy ? 'legacy' : 'task'}
         status={status}
