@@ -21,9 +21,9 @@ import { useConfig } from '@/hooks/useConfig';
 import {
   RUNTIME_DISPLAY_NAMES,
   VALID_RUNTIMES,
+  getRuntimePermissionModes,
   type RuntimeType,
 } from '@/../shared/types/runtime';
-import { PERMISSION_MODES } from '@/config/types';
 import type { McpServerDefinition } from '@/config/types';
 import { getAllMcpServersFromConfig } from '@/config/services/mcpService';
 
@@ -100,22 +100,40 @@ export function TaskAdvancedConfigEditor(props: Props) {
   const agentRuntimeLabel = RUNTIME_DISPLAY_NAMES[agentRuntime] ?? agentRuntime;
   const effectiveRuntimeLabel = RUNTIME_DISPLAY_NAMES[effectiveRuntime] ?? effectiveRuntime;
 
-  // Wrap `setRuntime` so switching to a non-builtin EFFECTIVE runtime also
-  // clears model + MCP overrides — those fields apply only to the builtin
-  // SDK; external runtimes (Claude Code CLI / Codex / Gemini) self-manage.
-  // The check uses the new effective runtime (override OR Agent fallback)
-  // so toggling override = "follow Agent" while Agent is external also
-  // strips stale model/MCP rather than silently keeping them.
+  // Wrap `setRuntime` to clear runtime-specific stale fields on switch:
+  //   - Model / MCP only apply to the builtin SDK (external runtimes
+  //     self-manage), so we drop those when switching off builtin.
+  //   - PermissionMode strings are runtime-specific (builtin uses
+  //     `auto`/`plan`/`fullAgency`; CC uses `default`/`acceptEdits`/…;
+  //     Codex uses `suggest`/`auto-edit`/…). Carrying a permissionMode
+  //     across a runtime switch leaves a value the new runtime can't
+  //     interpret — clear so the user reselects from the right list.
+  // Compares the NEW effective runtime to the OLD one so a no-op toggle
+  // (override → "follow Agent" but Agent is the same kind) doesn't
+  // gratuitously clear good values.
   const setRuntime = useCallback(
     (next: RuntimeType | undefined) => {
       setRuntimeRaw(next);
       const nextEffective: RuntimeType = next ?? agentRuntime;
+      if (nextEffective !== effectiveRuntime) {
+        if (permissionMode !== undefined) setPermissionMode(undefined);
+      }
       if (nextEffective !== 'builtin') {
         if (model !== undefined) setModel(undefined);
         if (mcpEnabledServers !== undefined) setMcpEnabledServers(undefined);
       }
     },
-    [setRuntimeRaw, setModel, setMcpEnabledServers, model, mcpEnabledServers, agentRuntime],
+    [
+      setRuntimeRaw,
+      setModel,
+      setPermissionMode,
+      setMcpEnabledServers,
+      model,
+      permissionMode,
+      mcpEnabledServers,
+      agentRuntime,
+      effectiveRuntime,
+    ],
   );
 
   // Workspace project — used to resolve provider/model fallback when the
@@ -227,20 +245,23 @@ export function TaskAdvancedConfigEditor(props: Props) {
     [agentRuntimeLabel],
   );
 
-  // Permission-mode options — only consumed when the EFFECTIVE runtime is
-  // builtin (the FieldRow is hidden for external runtimes downstream). So
-  // we just hard-code the builtin trio + "follow default" sentinel here;
-  // no need to branch on `effectiveRuntime` since the off-builtin branch
-  // would be dead code.
+  // Permission-mode options — runtime-specific. Each runtime defines its
+  // own set of permission strings (builtin: auto/plan/fullAgency/custom;
+  // CC: default/acceptEdits/bypassPermissions/plan/dontAsk/auto;
+  // Codex: suggest/auto-edit/full-auto/no-restrictions; Gemini:
+  // default/autoEdit/yolo/plan). Sourcing from the canonical
+  // `getRuntimePermissionModes` registry means adding a new runtime's
+  // perm modes only requires updating that one switch — the picker here
+  // surfaces them automatically.
   const permissionOptions = useMemo(
     () => [
       { value: FOLLOW_VALUE, label: '跟随默认（最大权限）' },
-      ...PERMISSION_MODES.map((m) => ({
+      ...getRuntimePermissionModes(effectiveRuntime).map((m) => ({
         value: m.value,
-        label: `${m.label} · ${m.description}`,
+        label: m.description ? `${m.label} · ${m.description}` : m.label,
       })),
     ],
-    [],
+    [effectiveRuntime],
   );
 
   // Toggle a single MCP server in the override list (PRD 0.2.4 §需求 4).
@@ -321,11 +342,27 @@ export function TaskAdvancedConfigEditor(props: Props) {
             <p className="rounded-[var(--radius-md)] bg-[var(--accent-warm-subtle)] px-3.5 py-2.5 text-[12px] leading-relaxed text-[var(--ink-muted)]">
               当前任务的运行环境为
               <span className="mx-1 font-medium text-[var(--ink-secondary)]">{effectiveRuntimeLabel}</span>
-              ，模型 / 权限 / MCP 工具均由 {effectiveRuntimeLabel} 自身管理。如需调整请在该 CLI 的配置中修改，或将 Runtime 改为
-              <span className="mx-1 font-medium text-[var(--ink-secondary)]">{RUNTIME_DISPLAY_NAMES.builtin}</span>
-              以启用任务级覆盖。
+              ，模型 / MCP 工具由 {effectiveRuntimeLabel} 自身管理。下方权限模式为该 runtime 的可选项，可单独覆盖。
             </p>
           )}
+
+          {/* Permission mode — visible for EVERY runtime. The option list
+              pivots on the effective runtime via getRuntimePermissionModes
+              (builtin: auto/plan/fullAgency/custom; CC: default/acceptEdits/…;
+              Codex: suggest/auto-edit/…; Gemini: default/autoEdit/yolo/plan).
+              "跟随默认（最大权限）" sentinel means: at execution time, fall
+              back to the runtime's max permission (cron is unattended). */}
+          <FieldRow
+            label="权限模式"
+            hint="不选择时使用所选 runtime 的最大权限（无人值守任务默认）；选择后强制使用该模式"
+          >
+            <CustomSelect
+              value={permissionMode ?? FOLLOW_VALUE}
+              options={permissionOptions}
+              onChange={(v) => setPermissionMode(v ? v : undefined)}
+              placeholder="跟随默认（最大权限）"
+            />
+          </FieldRow>
 
           {/* Model — only meaningful when builtin runtime is effective.
               External runtimes resolve their own model from the runtime
@@ -351,22 +388,7 @@ export function TaskAdvancedConfigEditor(props: Props) {
             </FieldRow>
           )}
 
-          {/* Permission mode — builtin only (external runtimes own this) */}
-          {isBuiltin && (
-            <FieldRow
-              label="权限模式"
-              hint="不选择时使用所选 runtime 的最大权限（默认 bypassPermissions），适合无人值守任务"
-            >
-              <CustomSelect
-                value={permissionMode ?? FOLLOW_VALUE}
-                options={permissionOptions}
-                onChange={(v) => setPermissionMode(v ? v : undefined)}
-                placeholder="跟随默认（最大权限）"
-              />
-            </FieldRow>
-          )}
-
-          {/* MCP enable list */}
+          {/* MCP enable list — builtin only */}
           {isBuiltin && (
             <FieldRow
               label="MCP 工具"
