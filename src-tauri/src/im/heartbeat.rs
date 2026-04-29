@@ -16,10 +16,10 @@ use crate::{ulog_info, ulog_warn, ulog_debug};
 
 use super::adapter::push_text_preferring_stream;
 use super::router::{EnsureSidecarPrep, SessionRouter};
-use super::types::{ActiveHours, HeartbeatConfig, WakeReason};
+use super::types::{ActiveHours, HeartbeatConfig, PendingCronEvent, WakeReason};
 use super::{AnyAdapter, PeerLocks};
 
-/// Response from Bun /api/im/heartbeat endpoint
+/// Response from sidecar /api/im/heartbeat endpoint
 #[derive(Debug, Deserialize)]
 struct HeartbeatResponse {
     status: String,       // "silent" | "content" | "error"
@@ -28,7 +28,7 @@ struct HeartbeatResponse {
     reason: Option<String>,
 }
 
-/// Heartbeat prompt sent to Bun
+/// Heartbeat prompt sent to sidecar
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct HeartbeatRequest {
@@ -39,6 +39,14 @@ struct HeartbeatRequest {
     is_high_priority: bool,
     runtime: String,
     runtime_config: Option<serde_json::Value>,
+    /// Pending cron events held by Rust as the authoritative payload (v0.2.4).
+    /// When non-empty, the sidecar handler MUST use these instead of (or in
+    /// addition to) the in-memory `systemEventQueue` — sidecar-side queue is
+    /// downgraded to a transport buffer for legacy callers and is not durable
+    /// across sidecar restarts. Serialized as `pendingCronEvents` (camelCase).
+    /// Always sent (possibly empty) so the sidecar can detect "no body events,
+    /// fall back to queue" by checking length, no `Option` wrapper needed.
+    pending_cron_events: Vec<PendingCronEvent>,
 }
 
 /// HeartbeatRunner manages the periodic heartbeat loop for an IM Bot.
@@ -58,6 +66,21 @@ pub struct HeartbeatRunner {
     // Memory auto-update (v0.1.43)
     memory_update_config: Arc<RwLock<Option<super::types::MemoryAutoUpdateConfig>>>,
     memory_update_running: Arc<AtomicBool>,
+    /// Pending cron events shared with `ImBotInstance` (v0.2.4). Snapshot in
+    /// run_once → ship to sidecar via HeartbeatRequest body → clear delivered
+    /// entries only after IM push success. Same Arc as the bot instance, so
+    /// deliver-side appends and runner-side clears coordinate without IPC.
+    pending_cron_events: Arc<Mutex<Vec<PendingCronEvent>>>,
+    /// Self-wake channel (clone of the same `mpsc::Sender` whose `Receiver`
+    /// drives `run_loop`). Used at the end of `run_once` to cascade-trigger
+    /// the next iteration when there are still pending cron events: the
+    /// run_once contract is "process at most one cron event per cycle" (so
+    /// the AI can't accidentally drop a relay by under-quoting a multi-event
+    /// prompt), and without cascade the second event would wait a full
+    /// heartbeat interval. `try_send` with the existing 64-slot buffer is
+    /// fine — pending is durable, so missing a wake just means waiting one
+    /// interval tick instead of immediate processing.
+    self_wake_tx: mpsc::Sender<WakeReason>,
 }
 
 impl HeartbeatRunner {
@@ -72,6 +95,8 @@ impl HeartbeatRunner {
         runtime: Arc<RwLock<String>>,
         runtime_config: Arc<RwLock<Option<serde_json::Value>>>,
         memory_update_config: Option<super::types::MemoryAutoUpdateConfig>,
+        pending_cron_events: Arc<Mutex<Vec<PendingCronEvent>>>,
+        self_wake_tx: mpsc::Sender<WakeReason>,
     ) -> (Self, Arc<RwLock<HeartbeatConfig>>, Arc<RwLock<Option<super::types::MemoryAutoUpdateConfig>>>, Arc<AtomicBool>) {
         let config = Arc::new(RwLock::new(config));
         let mau_config = Arc::new(RwLock::new(memory_update_config));
@@ -90,6 +115,8 @@ impl HeartbeatRunner {
             runtime_config,
             memory_update_config: Arc::clone(&mau_config),
             memory_update_running: Arc::clone(&mau_running),
+            pending_cron_events,
+            self_wake_tx,
         };
         (runner, config, mau_config, mau_running)
     }
@@ -418,8 +445,10 @@ impl HeartbeatRunner {
         // Build heartbeat prompt — a FIXED template.
         // The actual checklist lives in HEARTBEAT.md in the workspace root.
         // AI reads the file itself via tool use; we don't inject file content here.
-        // System events (cron completion, etc.) are appended by the Bun endpoint
-        // via drainSystemEvents() to avoid duplication.
+        // Cron-completion events are shipped via the `pending_cron_events` body
+        // field (Rust-side truth source, see PendingCronEvent doc); legacy
+        // non-cron system events still flow through the sidecar's in-memory
+        // `systemEventQueue` and get drained server-side.
         let now_text = chrono::Local::now().format("%Y-%m-%d %H:%M (%Z)").to_string();
         let prompt = format!(
             "This is a heartbeat from the system.\n\
@@ -434,7 +463,28 @@ impl HeartbeatRunner {
 
         let ack_max_chars = config.ack_max_chars.unwrap_or(300);
 
-        // Call Bun heartbeat endpoint (peer_lock is held — no concurrent IM chat possible)
+        // Snapshot at most ONE pending cron event under the lock, then release.
+        // The single-event-per-cycle rule defends against AI partial-relay: if
+        // we batched 3 events into one prompt and the AI happened to relay only
+        // 2, our success-clears-all logic would silently drop the third. By
+        // forcing one event per heartbeat we make every push correspond to a
+        // single (task_id, timestamp) ack — the AI can't accidentally drop
+        // anything we've claimed to deliver. When pending has more entries,
+        // the cascade self-wake at the end of run_once schedules the next one
+        // immediately; n events drain in n heartbeat cycles, not n intervals.
+        let pending_snapshot: Vec<PendingCronEvent> = {
+            let pending = self.pending_cron_events.lock().await;
+            pending.first().cloned().map(|e| vec![e]).unwrap_or_default()
+        };
+        if !pending_snapshot.is_empty() {
+            let total_pending = self.pending_cron_events.lock().await.len();
+            ulog_info!(
+                "[heartbeat] Shipping cron event task_id={} to sidecar (1 of {} pending)",
+                pending_snapshot[0].task_id, total_pending
+            );
+        }
+
+        // Call sidecar heartbeat endpoint (peer_lock is held — no concurrent IM chat possible)
         let request = HeartbeatRequest {
             prompt,
             source: source.clone(),
@@ -443,6 +493,7 @@ impl HeartbeatRunner {
             is_high_priority,
             runtime: self.runtime.read().await.clone(),
             runtime_config: self.runtime_config.read().await.clone(),
+            pending_cron_events: pending_snapshot.clone(),
         };
 
         let url = format!("http://127.0.0.1:{}/api/im/heartbeat", port);
@@ -481,6 +532,16 @@ impl HeartbeatRunner {
             }
         };
 
+        // Did this cycle successfully ack a cron event? Set inside the "content"
+        // arm when push to IM succeeded AND the snapshotted event was cleared
+        // from pending. Used only by the cascade-wake decision below: cascade
+        // means "we just made progress, immediately try the next pending event";
+        // without progress (silent/error/push fail), we fall back to the
+        // normal interval tick which gives the IM platform/AI room to recover
+        // instead of hot-looping. This is the natural backoff for both AI
+        // dropped-relay and IM platform outage.
+        let mut cron_event_acked_this_cycle = false;
+
         // Handle response (still under peer_lock — IM message send is safe)
         let success = match result.status.as_str() {
             "silent" => {
@@ -489,16 +550,75 @@ impl HeartbeatRunner {
             }
             "content" => {
                 if let Some(text) = &result.text {
-                    // Dedup check
+                    let is_cron_triggered = !pending_snapshot.is_empty();
                     let mut last_push = self.last_push_text.lock().await;
-                    if last_push.as_deref() == Some(text.as_str()) {
+
+                    // Dedup is for chatty heartbeat content (e.g. HEARTBEAT.md telling
+                    // the AI to keep reminding the user about the same thing). It
+                    // MUST NOT apply to cron-triggered cycles: cron payloads carry a
+                    // fresh task_id+timestamp every time, but the AI may produce
+                    // textually-identical relays for templated daily reports. Treating
+                    // dedup-hit as "delivered" would clear pending and silently drop
+                    // today's report; instead, cron cycles always attempt the push
+                    // and let the platform decide.
+                    let dedup_hit = !is_cron_triggered
+                        && last_push.as_deref() == Some(text.as_str());
+
+                    let push_succeeded = if dedup_hit {
                         ulog_debug!("[heartbeat] Dedup suppressed (same content as last push)");
+                        false
                     } else {
                         ulog_info!("[heartbeat] Pushing content to IM (len={})", text.len());
-                        if let Err(e) = push_text_preferring_stream(adapter.as_ref(), &source_id, text).await {
-                            ulog_warn!("[heartbeat] Failed to send IM message: {}", e);
+                        // Only commit to dedup AFTER the IM platform actually accepted
+                        // the push. Writing `last_push` on failure turns dedup into a
+                        // dead-letter — the next heartbeat carrying the same content
+                        // would be silently suppressed.
+                        match push_text_preferring_stream(adapter.as_ref(), &source_id, text).await {
+                            Ok(_) => {
+                                *last_push = Some(text.clone());
+                                true
+                            }
+                            Err(e) => {
+                                ulog_warn!("[heartbeat] Failed to send IM message: {}", e);
+                                false
+                            }
                         }
-                        *last_push = Some(text.clone());
+                    };
+                    drop(last_push);
+
+                    // Cron→IM at-least-once: clear the snapshotted event from the
+                    // pending vec ONLY on confirmed `push_text_preferring_stream`
+                    // success. Push failure / dedup suppression / sidecar restart
+                    // (which we'd never reach here) all leave pending intact, and
+                    // the next heartbeat retries with the same payload until the IM
+                    // platform actually accepts it (or the bot is restarted).
+                    //
+                    // Match by (task_id, timestamp) so concurrent appends made after
+                    // our snapshot are not affected — only the specific entry we
+                    // shipped to the sidecar gets cleared.
+                    if is_cron_triggered {
+                        if push_succeeded {
+                            let mut pending = self.pending_cron_events.lock().await;
+                            let before = pending.len();
+                            pending.retain(|p| {
+                                !pending_snapshot
+                                    .iter()
+                                    .any(|s| s.task_id == p.task_id && s.timestamp == p.timestamp)
+                            });
+                            let cleared = before - pending.len();
+                            if cleared > 0 {
+                                cron_event_acked_this_cycle = true;
+                                ulog_info!(
+                                    "[heartbeat] Acked {} cron event(s); {} still pending",
+                                    cleared, pending.len()
+                                );
+                            }
+                        } else {
+                            ulog_warn!(
+                                "[heartbeat] Cron event task_id={} held in pending — push not confirmed",
+                                pending_snapshot[0].task_id
+                            );
+                        }
                     }
                 }
                 true
@@ -516,6 +636,39 @@ impl HeartbeatRunner {
 
         // Release executing flag (peer_lock is dropped automatically when _peer_guard goes out of scope)
         *self.executing.lock().await = false;
+
+        // Cascade-wake: only trigger an immediate next heartbeat if THIS cycle
+        // actually made progress (acked at least one cron event) AND there are
+        // still events waiting. Without the progress check we'd hot-loop on
+        // persistent failure modes (AI giving silent for cron, or IM platform
+        // refusing pushes), each cycle costing AI tokens or hammering the
+        // platform. Falling back to the regular interval tick gives natural
+        // backoff (30 min by default). Pending is durable across the wait, so
+        // nothing is lost — just deferred.
+        //
+        // `Manual` (not `CronComplete`) because the wake reason is just a
+        // trigger; the actual payload lives in `self.pending_cron_events`,
+        // which is the single source of truth that run_once snapshots.
+        if cron_event_acked_this_cycle {
+            let still_pending = self.pending_cron_events.lock().await.len();
+            if still_pending > 0 {
+                match self.self_wake_tx.try_send(WakeReason::Manual) {
+                    Ok(_) => ulog_info!(
+                        "[heartbeat] Cascade-wake scheduled — {} cron event(s) still pending",
+                        still_pending
+                    ),
+                    Err(mpsc::error::TrySendError::Full(_)) => {
+                        // Queue capacity is 64 — full means a wake storm; existing
+                        // wakes will drain pending eventually.
+                        ulog_debug!("[heartbeat] Cascade-wake skipped: wake channel full");
+                    }
+                    Err(mpsc::error::TrySendError::Closed(_)) => {
+                        // Receiver dropped → runner is shutting down; nothing to do.
+                        ulog_debug!("[heartbeat] Cascade-wake skipped: wake channel closed");
+                    }
+                }
+            }
+        }
 
         // Memory auto-update check (v0.1.43)
         // Lightweight check after heartbeat — spawns independent task if conditions met

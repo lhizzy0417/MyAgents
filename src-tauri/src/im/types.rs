@@ -657,6 +657,36 @@ impl Default for MemoryAutoUpdateConfig {
     }
 }
 
+/// A cron task completion event awaiting IM delivery (Rust-side truth source).
+///
+/// Lives in `ImBotInstance.pending_cron_events` from the moment
+/// `deliver_cron_result_to_bot` records it until the heartbeat runner confirms
+/// the IM platform actually accepted the AI-relayed text. Not cleared by the
+/// sidecar-side `drainSystemEvents()` call (which is downgraded to a transport
+/// buffer): the sidecar will re-receive the same payload via heartbeat HTTP body
+/// on every retry until Rust pops the entry. This is what makes cron→IM
+/// at-least-once delivery — sidecar process death, AI silent reply, and
+/// `push_text_preferring_stream` failure all leave the entry intact for the next
+/// heartbeat to retry.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PendingCronEvent {
+    /// Always `"cron_complete"`. Kept as a tagged-union discriminator so the
+    /// sidecar handler can stay symmetric with the legacy `systemEventQueue`
+    /// path (which carries other event kinds for non-cron callers).
+    pub event: String,
+    /// Cron task id. Identifies the source task; together with `timestamp`
+    /// uniquely identifies this delivery instance for clear-on-success.
+    pub task_id: String,
+    /// Raw cron result body (already includes whatever the cron AI emitted);
+    /// the next heartbeat AI turn relays this to the user with friendly framing.
+    pub content: String,
+    /// Unix-millis timestamp at the moment of `deliver_cron_result_to_bot`.
+    /// Acts as the disambiguator when the same task fires twice before the
+    /// first delivery clears (rare, but keeps `retain` idempotent).
+    pub timestamp: u64,
+}
+
 /// Reason for heartbeat wake-up
 #[derive(Debug, Clone)]
 pub enum WakeReason {

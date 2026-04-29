@@ -608,6 +608,15 @@ pub struct ImBotInstance {
     pub heartbeat_wake_tx: Option<mpsc::Sender<types::WakeReason>>,
     /// Shared heartbeat config (for hot updates)
     heartbeat_config: Option<Arc<tokio::sync::RwLock<types::HeartbeatConfig>>>,
+    /// Pending cron-completion events waiting to be relayed to IM (v0.2.4).
+    /// Source of truth for cron→IM hand-off: `deliver_cron_result_to_bot` pushes
+    /// here, the heartbeat runner ships a snapshot to the sidecar via heartbeat
+    /// HTTP body, then clears the snapshot only after `push_text_preferring_stream`
+    /// confirms the IM platform accepted the relay text. Survives sidecar
+    /// process restarts (queue lives in Rust, not in the Node sidecar's memory).
+    /// Shared with the heartbeat runner via Arc clone — both sides hold the same
+    /// Vec, so deliver-side appends are visible to the runner without any IPC.
+    pub pending_cron_events: Arc<Mutex<Vec<types::PendingCronEvent>>>,
     /// JoinHandle for the sidecar-stop subscriber loop. Coupled to the bot
     /// lifecycle: on bot shutdown the watch flag flips and this task exits.
     /// Held here (not detached) so a forced bot drop can't leak it; also
@@ -3123,10 +3132,23 @@ async fn create_bot_instance<R: Runtime>(
         bind_code: bind_code_for_status,
     };
 
+    // ===== Cron event pending vec (v0.2.4) =====
+    // Truth source for cron→IM hand-off (see ImBotInstance.pending_cron_events
+    // doc). Initialized empty; populated by `deliver_cron_result_to_bot`,
+    // drained by the heartbeat runner once IM push succeeds. Both sides hold
+    // the same Arc — the runner gets a clone below, the bot instance keeps
+    // its own clone for cron-deliver lookups.
+    let pending_cron_events: Arc<Mutex<Vec<types::PendingCronEvent>>> =
+        Arc::new(Mutex::new(Vec::new()));
+
     // ===== Heartbeat Runner (v0.1.21) =====
     let (heartbeat_handle, heartbeat_wake_tx, heartbeat_config_arc) = {
         let hb_config = config.heartbeat_config.clone().unwrap_or_default();
         let hb_bot_label = bot_username_for_url.clone().unwrap_or_else(|| bot_id.to_string());
+        // Build the wake channel BEFORE the runner so we can hand the runner a
+        // clone of the sender (used for self-cascade when more cron events
+        // remain after a single-event run_once cycle).
+        let (wake_tx, wake_rx) = mpsc::channel::<types::WakeReason>(64);
         let (runner, config_arc, _mau_config_arc, _mau_running_arc) = heartbeat::HeartbeatRunner::new(
             hb_config,
             hb_bot_label,
@@ -3136,8 +3158,9 @@ async fn create_bot_instance<R: Runtime>(
             Arc::clone(&runtime),
             Arc::clone(&runtime_config),
             None, // Memory auto-update: not used for per-channel heartbeat (Agent-level only)
+            Arc::clone(&pending_cron_events),
+            wake_tx.clone(),
         );
-        let (wake_tx, wake_rx) = mpsc::channel::<types::WakeReason>(64);
 
         let hb_shutdown_rx = shutdown_rx.clone();
         let hb_router = Arc::clone(&router);
@@ -3184,6 +3207,7 @@ async fn create_bot_instance<R: Runtime>(
         heartbeat_handle,
         heartbeat_wake_tx,
         heartbeat_config: heartbeat_config_arc,
+        pending_cron_events,
         adapter: Arc::clone(&adapter),
         // Hot-reloadable config (Arc clones shared with processing loop)
         current_model,
