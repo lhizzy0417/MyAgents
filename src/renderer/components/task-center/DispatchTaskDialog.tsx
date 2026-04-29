@@ -424,7 +424,7 @@ export function DispatchTaskDialog({
                 <textarea
                   value={taskMd}
                   onChange={(e) => setTaskMd(e.target.value)}
-                  rows={6}
+                  rows={12}
                   className={`${INPUT_CLS} resize-none`}
                 />
                 <p className="mt-2 text-[13px] text-[var(--ink-muted)]">
@@ -519,6 +519,7 @@ export function DispatchTaskDialog({
                     options={deliveryOptions}
                     onChange={setDeliveryBotId}
                     placeholder="桌面通知（默认）"
+                    size="md"
                   />
                 </div>
               )}
