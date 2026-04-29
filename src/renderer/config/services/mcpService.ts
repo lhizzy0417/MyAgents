@@ -1,5 +1,5 @@
 // MCP server management — CRUD, env, args, effective servers
-import type { McpServerDefinition } from '../types';
+import type { AppConfig, McpServerDefinition } from '../types';
 import { PRESET_MCP_SERVERS } from '../types';
 import { withProjectsLock } from './configStore';
 import { loadAppConfig, atomicModifyConfig } from './appConfigService';
@@ -32,12 +32,21 @@ function getPlatformFilteredPresets(): McpServerDefinition[] {
 }
 
 /**
- * Get all available MCP servers (preset + custom), with user-configured args/env merged in.
- * Defensive: all disk-loaded array fields are validated with Array.isArray() before spread,
- * because config.json is a trust boundary — TypeScript types don't constrain raw JSON.
+ * Synchronous variant — merges preset + custom MCP servers from an
+ * already-loaded `AppConfig`. Same semantics as `getAllMcpServers` (custom
+ * overrides preset on id collision; user args/env merged in; presets
+ * filtered by host platform), but takes the config as a parameter so
+ * callers that already hold an in-memory snapshot (`useConfig().config`)
+ * don't pay the disk-read round-trip and don't need an async hook.
+ *
+ * Single source of truth for "what MCP catalogue does the renderer
+ * consider available right now" — both `getAllMcpServers` (async / disk)
+ * and renderer components (sync / in-memory) go through this. Without
+ * the shared core, components were duplicating preset+custom merge logic
+ * (and silently dropping args/env overrides; see TaskAdvancedConfigEditor
+ * v0.2.4 review).
  */
-export async function getAllMcpServers(): Promise<McpServerDefinition[]> {
-    const config = await loadAppConfig();
+export function getAllMcpServersFromConfig(config: AppConfig): McpServerDefinition[] {
     const customServers = Array.isArray(config.mcpServers) ? config.mcpServers : [];
     // Deduplicate: custom servers with the same ID as a preset override the preset
     // (aligned with server-side getAllMcpServers in admin-config.ts)
@@ -61,6 +70,20 @@ export async function getAllMcpServers(): Promise<McpServerDefinition[]> {
             ...(extraEnv && typeof extraEnv === 'object' && !Array.isArray(extraEnv) && { env: { ...server.env, ...extraEnv } }),
         };
     });
+}
+
+/**
+ * Async variant — loads the config from disk and returns the merged MCP
+ * catalogue. Use when the caller has no in-memory config (most legacy
+ * callers); for components inside `<ConfigProvider>` prefer the sync
+ * `getAllMcpServersFromConfig(config)` to avoid the disk round-trip.
+ *
+ * Defensive: all disk-loaded array fields are validated with Array.isArray()
+ * before spread, because config.json is a trust boundary.
+ */
+export async function getAllMcpServers(): Promise<McpServerDefinition[]> {
+    const config = await loadAppConfig();
+    return getAllMcpServersFromConfig(config);
 }
 
 export async function getEnabledMcpServerIds(): Promise<string[]> {

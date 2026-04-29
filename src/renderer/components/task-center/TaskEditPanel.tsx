@@ -582,7 +582,6 @@ export function TaskEditPanel({
         <div className="pl-1">
           <TaskAdvancedConfigEditor
             workspacePath={task.workspacePath}
-            workspaceLabel={workspaceDisplayName(task)}
             runtime={draft.runtime}
             setRuntime={(v) => setDraft((d) => ({ ...d, runtime: v }))}
             model={draft.model}
@@ -691,16 +690,6 @@ export function TaskEditPanel({
       </div>
     </div>
   );
-}
-
-/** Best-effort label for the task's workspace (path basename). The
- *  TaskEditPanel doesn't have direct access to the projects list, but a
- *  basename is enough context for the advanced editor's hint copy. */
-function workspaceDisplayName(task: Task): string | undefined {
-  const raw = task.workspacePath;
-  if (!raw) return undefined;
-  const parts = raw.replace(/\\/g, '/').split('/').filter(Boolean);
-  return parts[parts.length - 1] ?? raw;
 }
 
 function Field({

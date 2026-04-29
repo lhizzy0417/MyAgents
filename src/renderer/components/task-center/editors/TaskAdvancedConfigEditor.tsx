@@ -21,11 +21,11 @@ import { useConfig } from '@/hooks/useConfig';
 import {
   RUNTIME_DISPLAY_NAMES,
   VALID_RUNTIMES,
-  getRuntimePermissionModes,
   type RuntimeType,
 } from '@/../shared/types/runtime';
-import { PERMISSION_MODES, PRESET_MCP_SERVERS } from '@/config/types';
+import { PERMISSION_MODES } from '@/config/types';
 import type { McpServerDefinition } from '@/config/types';
+import { getAllMcpServersFromConfig } from '@/config/services/mcpService';
 
 // "跟随" sentinel: an empty-string value selected from <CustomSelect>
 // translates back to `undefined` on the wrapper level. Using `''` rather
@@ -33,30 +33,12 @@ import type { McpServerDefinition } from '@/config/types';
 // `<CustomSelect value={…}>` contract (which doesn't tolerate `undefined`).
 const FOLLOW_VALUE = '';
 
-/**
- * Best-effort renderer-side platform detection for filtering MCP presets
- * that declare a `platforms` whitelist. Mirrors the helper inside
- * `mcpService.ts` (intentionally not exported there). When `navigator` is
- * unavailable (SSR, headless test env), default to darwin — the picker
- * surface is desktop-only so the choice is safe.
- */
-function detectRendererPlatform(): NodeJS.Platform {
-  if (typeof navigator !== 'undefined') {
-    if (/Win/i.test(navigator.platform)) return 'win32';
-    if (/Mac/i.test(navigator.platform)) return 'darwin';
-    if (/Linux/i.test(navigator.platform)) return 'linux';
-  }
-  return 'darwin';
-}
-
 interface Props {
   /** Workspace path the task is bound to — used to resolve the workspace's
-   *  provider so the model picker can populate from the right model list,
-   *  and as a hint in placeholder copy (e.g. "跟随 Agent 工作区当前模型"). */
+   *  Agent (runtime / model / MCP defaults) and provider (model picker).
+   *  Display name for hint copy is derived internally from the resolved
+   *  project so callers don't need to thread it through separately. */
   workspacePath?: string;
-  /** Optional display label for the workspace (used in hint copy when
-   *  `workspacePath` doesn't resolve to a known project). */
-  workspaceLabel?: string;
 
   // ─── Runtime / model / permission mode ───────────────────────────────
   runtime?: RuntimeType;
@@ -75,7 +57,6 @@ interface Props {
 export function TaskAdvancedConfigEditor(props: Props) {
   const {
     workspacePath,
-    workspaceLabel,
     runtime,
     setRuntime: setRuntimeRaw,
     model,
@@ -138,11 +119,19 @@ export function TaskAdvancedConfigEditor(props: Props) {
   );
 
   // Workspace project — used to resolve provider/model fallback when the
-  // Agent's `model` is unset.
+  // Agent's `model` is unset, and to derive the display name for hint copy.
   const workspaceProject = useMemo(() => {
     if (!workspacePath) return null;
     return projects.find((p) => p.path === workspacePath) ?? null;
   }, [workspacePath, projects]);
+
+  // Workspace display label — derived locally from the resolved project so
+  // the parent dialog doesn't have to thread a separate `workspaceLabel`
+  // prop. Mirrors the precedence used elsewhere (Launcher / DispatchTaskDialog).
+  const workspaceDisplayName =
+    workspaceProject?.displayName
+    || workspaceProject?.name
+    || '';
 
   // Resolve the workspace's provider — mirrors WorkspaceBasicsSection's
   // precedence exactly so the "current model" hint here matches the model
@@ -204,29 +193,18 @@ export function TaskAdvancedConfigEditor(props: Props) {
     return opts;
   }, [workspaceProvider, workspaceDefaultModelLabel, model]);
 
-  // MCP catalogue — preset MCPs bundled with the app (Playwright /
-  // DuckDuckGo / EdgeTTS / etc.) **plus** the user's custom servers.
-  // Mirrors `mcpService.getAllMcpServers` semantics: a custom server with
-  // the same id as a preset overrides the preset. Without merging presets,
-  // a fresh install (no custom servers) would show "尚未安装任何 MCP" even
-  // though Playwright et al. are clearly available — the original bug a
-  // user reported on 2026-04-29.
+  // MCP catalogue — single source of truth via the shared
+  // `getAllMcpServersFromConfig` helper (preset + custom merge, platform
+  // filter, args/env overrides). Without this, the editor used to
+  // duplicate the preset+custom merge inline and silently dropped the
+  // args/env override layer that production execution actually applies —
+  // the picker would visually claim a server "is enabled" while the
+  // running cron tick used a different env. PRD 0.2.4 §3.6.
   const mcpCatalogue: McpServerDefinition[] = useMemo(() => {
-    const customServers = Array.isArray(config?.mcpServers) ? config.mcpServers : [];
-    const customIds = new Set(customServers.map((s) => s.id));
-    // Filter presets by current platform so we don't surface MCPs that
-    // can't actually run here (e.g. Cuse on Windows). The renderer-side
-    // platform check is intentionally minimal — the canonical filter
-    // lives in admin-config.ts; this is just to keep the picker honest.
-    const platform = detectRendererPlatform();
-    const presets = PRESET_MCP_SERVERS.filter(
-      (p) => !p.platforms || p.platforms.includes(platform),
+    if (!config) return [];
+    return getAllMcpServersFromConfig(config).slice().sort(
+      (a, b) => a.name.localeCompare(b.name, 'zh-Hans-CN'),
     );
-    const merged = [
-      ...presets.filter((p) => !customIds.has(p.id)),
-      ...customServers,
-    ];
-    return [...merged].sort((a, b) => a.name.localeCompare(b.name, 'zh-Hans-CN'));
   }, [config]);
 
   const runtimeOptions = useMemo(
@@ -236,10 +214,10 @@ export function TaskAdvancedConfigEditor(props: Props) {
         // Inline the Agent's actual current runtime in the option label
         // (consistent with the model picker's "跟随 Agent（当前 X）" shape)
         // so the user can see what "follow" resolves to without scanning a
-        // separate hint line.
-        label: agentRuntimeLabel
-          ? `跟随 Agent 工作区（当前 ${agentRuntimeLabel}）`
-          : '跟随 Agent 工作区',
+        // separate hint line. `agentRuntimeLabel` is always truthy because
+        // the fallback chain (`RUNTIME_DISPLAY_NAMES[r] ?? r`) covers every
+        // possible RuntimeType.
+        label: `跟随 Agent 工作区（当前 ${agentRuntimeLabel}）`,
       },
       ...VALID_RUNTIMES.map((r) => ({
         value: r,
@@ -249,31 +227,21 @@ export function TaskAdvancedConfigEditor(props: Props) {
     [agentRuntimeLabel],
   );
 
-  // Permission-mode options pivot on the EFFECTIVE runtime (Agent's runtime
-  // when no override, override otherwise). When the picker is shown the
-  // effective runtime is always 'builtin' (the entire below panel is hidden
-  // for external runtimes), but we still derive defensively.
-  const permissionOptions = useMemo(() => {
-    const modes = getRuntimePermissionModes(effectiveRuntime);
-    if (effectiveRuntime === 'builtin') {
-      // Builtin uses the trio from `PERMISSION_MODES` (auto/plan/fullAgency)
-      // for label consistency with the chat UI.
-      return [
-        { value: FOLLOW_VALUE, label: '跟随默认（最大权限）' },
-        ...PERMISSION_MODES.map((m) => ({
-          value: m.value,
-          label: `${m.label} · ${m.description}`,
-        })),
-      ];
-    }
-    return [
+  // Permission-mode options — only consumed when the EFFECTIVE runtime is
+  // builtin (the FieldRow is hidden for external runtimes downstream). So
+  // we just hard-code the builtin trio + "follow default" sentinel here;
+  // no need to branch on `effectiveRuntime` since the off-builtin branch
+  // would be dead code.
+  const permissionOptions = useMemo(
+    () => [
       { value: FOLLOW_VALUE, label: '跟随默认（最大权限）' },
-      ...modes.map((m) => ({
+      ...PERMISSION_MODES.map((m) => ({
         value: m.value,
-        label: m.description ? `${m.label} · ${m.description}` : m.label,
+        label: `${m.label} · ${m.description}`,
       })),
-    ];
-  }, [effectiveRuntime]);
+    ],
+    [],
+  );
 
   // Toggle a single MCP server in the override list (PRD 0.2.4 §需求 4).
   //
@@ -324,12 +292,14 @@ export function TaskAdvancedConfigEditor(props: Props) {
         <div className="space-y-5 border-t border-[var(--line-subtle)] px-4 py-4">
           {/* Runtime — always visible. The "（当前 X）" suffix lives in the
               "跟随 Agent" option label itself (see runtimeOptions), so the
-              hint here just describes the field semantically. */}
+              hint here just describes the field semantically. The workspace
+              display name is derived from the resolved project (no extra
+              prop) so callers don't have to thread it through. */}
           <FieldRow
             label="Runtime"
             hint={
-              workspaceLabel
-                ? `不选择时跟随 ${workspaceLabel}`
+              workspaceDisplayName
+                ? `不选择时跟随 ${workspaceDisplayName}`
                 : '不选择时跟随 Agent 工作区'
             }
           >

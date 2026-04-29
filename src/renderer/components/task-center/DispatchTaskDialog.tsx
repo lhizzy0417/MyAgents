@@ -406,7 +406,6 @@ export function DispatchTaskDialog({
               {/* 高级配置 — runtime / model / permission / MCP overrides */}
               <TaskAdvancedConfigEditor
                 workspacePath={workspace?.path}
-                workspaceLabel={workspace?.displayName || workspace?.name}
                 runtime={advRuntime}
                 setRuntime={setAdvRuntime}
                 model={advModel}
