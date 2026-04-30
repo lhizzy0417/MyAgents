@@ -371,15 +371,6 @@ pub fn run() {
             legacy_upgrade::cmd_task_upgrade_legacy_cron,
         ])
         .setup(|app| {
-            // macOS WKWebView arrow-key tofu workaround — re-applies wry PR #769
-            // (regressed since wry 0.54). Tauri creates config windows before
-            // this user setup hook runs; that is still fine because ObjC method
-            // lookup is dynamic, so adding keyDown: to the WryWebView class
-            // here affects already-created instances before the user can type.
-            // No-op on Windows/Linux. See macos_arrow_filter.rs for full rationale.
-            #[cfg(target_os = "macos")]
-            macos_arrow_filter::install_arrow_key_filter();
-
             // Initialize logging before acquire_lock() and cleanup_stale_sidecars()
             // because those paths need a logger backend for log::warn!/info! calls.
             use tauri_plugin_log::{Target, TargetKind};
@@ -407,6 +398,15 @@ pub fn run() {
             // calls (extremely early startup) fall back to a synchronous
             // append protected by a mutex.
             logger::init_buffered_writer();
+
+            // macOS WKWebView function-key tofu workaround. Tauri creates
+            // config windows before this user setup hook runs; that is still
+            // fine because ObjC method lookup is dynamic, so adding methods to
+            // the WryWebView class here affects already-created instances
+            // before the user can type. Install after unified logging is ready
+            // so diagnostics land in ~/.myagents/logs/unified-YYYY-MM-DD.log.
+            #[cfg(target_os = "macos")]
+            macos_arrow_filter::install_arrow_key_filter();
 
             // Acquire PID lock — kills any stale instance that macOS auto-restarted
             // (e.g., after build_dev.sh pkill). Must run before cleanup_stale_sidecars
