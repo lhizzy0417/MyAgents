@@ -203,13 +203,23 @@ struct CronTaskSummary {
 
 impl From<CronTask> for CronTaskSummary {
     fn from(t: CronTask) -> Self {
+        // PRD 0.2.5 R9 — translate the underlying enum values into the
+        // scheduler-semantic vocabulary at the API boundary. Both CLI
+        // plain-text and `--json` output flow through this struct, so the
+        // vocabulary is uniform across modes (matters for AI agents that
+        // consume both forms in the same session). Persistence
+        // (`cron_tasks.json`) and Tauri IPC keep the raw enum
+        // (`Running` / `Stopped`) — no schema migration, frontend untouched.
+        let status = match t.status {
+            cron_task::TaskStatus::Running => "enabled".to_string(),
+            cron_task::TaskStatus::Stopped => "disabled".to_string(),
+        };
+
         Self {
             id: t.id,
             name: t.name,
             prompt: t.prompt,
-            status: serde_json::to_value(&t.status)
-                .and_then(|v| Ok(v.as_str().unwrap_or("unknown").to_string()))
-                .unwrap_or_else(|_| "unknown".to_string()),
+            status,
             schedule: t.schedule,
             interval_minutes: t.interval_minutes,
             execution_count: t.execution_count,
@@ -481,14 +491,17 @@ async fn status_cron_handler(
     };
 
     let total = tasks.len();
-    let running = tasks.iter().filter(|t| t.status == cron_task::TaskStatus::Running).count();
+    // PRD 0.2.5 R9 — vocabulary uniform with `cron list`. `enabledTasks`
+    // counts tasks whose scheduler is active (raw enum: Running). Both
+    // CLI plain text and `--json` consumers see the same field name.
+    let enabled = tasks.iter().filter(|t| t.status == cron_task::TaskStatus::Running).count();
     let last_executed = tasks.iter().filter_map(|t| t.last_executed_at).max();
     let next_execution = tasks.iter().filter_map(|t| t.next_execution_at.clone()).min();
 
     Json(serde_json::json!({
         "ok": true,
         "totalTasks": total,
-        "runningTasks": running,
+        "enabledTasks": enabled,
         "lastExecutedAt": last_executed,
         "nextExecutionAt": next_execution,
     }))

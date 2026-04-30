@@ -741,14 +741,10 @@ function printCronList(tasks: Array<Record<string, unknown>>): void {
   }
   const pad = (s: string, n: number) => s.padEnd(n);
 
-  // R9: Display layer remap. Underlying enum stays Running/Stopped (avoid
-  // schema migration); CLI surfaces the scheduler-semantic terms.
-  const displayStatus = (raw: unknown): string => {
-    const s = String(raw);
-    if (s === 'Running' || s === 'running') return 'enabled';
-    if (s === 'Stopped' || s === 'stopped') return 'disabled';
-    return s.toLowerCase();
-  };
+  // R9: status vocabulary is translated server-side in
+  // `CronTaskSummary::from` (management_api.rs) so plain-text and `--json`
+  // modes stay consistent. CLI just displays whatever it got.
+  const displayStatus = (raw: unknown): string => String(raw);
 
   // R6: short time format for "Next" / "Last" columns. Locale-independent,
   // fixed width (16 chars), readable.
@@ -801,7 +797,7 @@ function printCronList(tasks: Array<Record<string, unknown>>): void {
       String(t.name ?? (t.prompt as string)?.slice(0, 40) ?? '')
     );
   }
-  const enabled = tasks.filter(t => t.status === 'Running' || t.status === 'running').length;
+  const enabled = tasks.filter(t => t.status === 'enabled').length;
   console.log(`\n${tasks.length} cron tasks (${enabled} enabled)`);
 }
 
@@ -850,7 +846,7 @@ function printCronRuns(runs: Array<Record<string, unknown>>, full: boolean = fal
 
 function printCronStatus(data: Record<string, unknown>): void {
   console.log(`Total tasks: ${data.totalTasks ?? 0}`);
-  console.log(`Running: ${data.runningTasks ?? 0}`);
+  console.log(`Enabled:     ${data.enabledTasks ?? 0}`);
   if (data.lastExecutedAt) console.log(`Last executed: ${data.lastExecutedAt}`);
   if (data.nextExecutionAt) console.log(`Next execution: ${data.nextExecutionAt}`);
 }
