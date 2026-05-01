@@ -197,7 +197,9 @@ echo -e "${GREEN}✓ TypeScript 检查通过${NC}"
 echo ""
 
 # 下载最新 cuse 二进制 (computer-use MCP)
-# 每次构建都拉取最新 release — cuse 更新 → 你打 tag → 我们构建就带上
+# 每次构建都拉取最新 release —— cuse 私有仓库的 release.yml 自动构建并发到 GH Release，
+# 维护者再跑 MyAgents-Cuse/publish_r2.sh 把产物镜像到 R2（`download.myagents.io/cuse/...`），
+# 此脚本从 R2 公网拉取，无需 gh CLI / 无需访问私有仓库。
 echo -e "${BLUE}[4.5/7] 拉取最新 cuse 二进制...${NC}"
 if ! "${PROJECT_DIR}/scripts/download_cuse.sh"; then
     echo -e "${RED}✗ cuse 下载失败，无法继续构建${NC}"

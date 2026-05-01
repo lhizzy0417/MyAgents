@@ -11,16 +11,27 @@
 ## 架构概览
 
 ```
-应用启动 → 延迟5秒 → 静默检查更新
+应用启动 → 延迟 60s → 静默检查更新
                          ↓
-                   有新版本? → 静默后台下载 (用户无感知)
+                   有新版本? → emit updater:download-started (UI 隐藏按钮)
                          ↓
-                   下载完成 → 顶栏显示「重启更新」按钮
+                   后台下载 (macOS/Linux: 在内存替换；Windows: 写 pending 字节到磁盘)
                          ↓
-                   用户点击 → 重启并应用更新
+                   成功 → emit updater:ready-to-restart (UI 显示新版本「重启更新」按钮)
+                   失败 → emit updater:download-failed (UI 恢复显示前一版本按钮)
+                         ↓
+                   用户点击 → cmd_shutdown_for_update → relaunch
                    或
-                   下次启动 → 自动应用更新
+                   下次启动 → 自动应用 pending 更新 (Windows 走启动期对话框)
 ```
+
+**平台路径差异：**
+
+| 平台 | 下载阶段 | 安装阶段 |
+|------|---------|---------|
+| macOS | `download_and_install` 内存中替换 .app 字节 | `relaunch` 直接生效 |
+| Linux | `download_and_install` 在原地覆盖 AppImage | `relaunch` 直接生效 |
+| Windows | `save_pending_update_to_disk` 写入 NSIS installer 字节 | 必须先停 Sidecar 再 `Update::install(bytes)`；启动时若发现 pending 字节会弹对话框引导用户安装 |
 
 ## 技术实现
 
@@ -38,35 +49,42 @@
 
 | 文件 | 说明 |
 |------|------|
-| `src/renderer/hooks/useUpdater.ts` | 监听更新就绪事件、提供重启方法 |
-| `src/renderer/components/CustomTitleBar.tsx` | 显示「重启更新」按钮 |
+| `src/renderer/hooks/useUpdater.ts` | 监听 download-started / download-failed / ready-to-restart 三事件、维护 `preparing` 互斥标志、提供 `restartAndUpdate()` |
+| `src/renderer/components/CustomTitleBar.tsx` | 顶栏「重启更新」按钮（`preparing` 时隐藏） |
+| `src/renderer/pages/Settings.tsx` | 设置页同款按钮 |
+| `src/renderer/App.tsx` | Windows 启动期 pending 更新对话框（在 `useUpdater.checkPendingUpdate()` 之上） |
 
 ### 核心流程
 
 ```typescript
 // Rust 侧 (updater.rs)
 check_update_on_startup()
-  → sleep(5秒)
+  → sleep(60s)                            // 早于这之前用户的首次操作还没落
   → check_and_download_silently()
-    → 检查 https://download.myagents.io/update/darwin-aarch64.json
-    → 如有更新，静默下载 (只记日志，无 UI 事件)
-    → 下载完成后 emit("updater:ready-to-restart", { version })
+    → updater.check() → Update 对象 (含 version)
+    → emit("updater:download-started", { version })   // UI 互斥锁：隐藏按钮
+    → 下载阶段 (平台路径差异见上表)
+    → 成功 → cache_update(update) + emit("updater:ready-to-restart", { version })
+       失败 → emit("updater:download-failed", { version })  // UI 恢复前一版本按钮
 
 // 前端侧 (useUpdater.ts)
-listen("updater:ready-to-restart")
-  → setUpdateReady(true)
-  → setUpdateVersion(version)
-
-// UI (CustomTitleBar.tsx)
-if (updateReady) → 显示「重启更新」按钮
-onClick → restartAndUpdate() → relaunch()
+listen("updater:download-started") → setPreparing(true)
+listen("updater:download-failed")  → setPreparing(false)
+listen("updater:ready-to-restart") → setUpdateReady(true) + setPreparing(false)
+restartAndUpdate() → cmd_shutdown_for_update → relaunch()  (Windows 还要先 invoke install)
 ```
+
+### 关键不变量
+
+- **cache=disk 一致性**: `LATEST_UPDATE` 内存缓存与磁盘 pending 字节版本必须始终一致。`cache_update()` 只能在以下三个时机调用：①latest-wins 跳过同版本下载、②Windows 检测 disk 已有相同版本短路、③Windows `save_pending_update_to_disk()` 成功之后。**不可**在 `updater.check()` 之后无条件调用——会出现"内存指 v_NEW 但磁盘还是 v_OLD"的窗口期，导致用户在替换中点击破坏 v_OLD 字节。
+- **UI 互斥**: `preparing=true` 期间所有「重启更新」入口必须隐藏（顶栏 / Settings / Windows 启动对话框）。下载替换的临界区不允许用户点击。
+- **clear_pending_update_from_disk()** 必须同步 reset `DOWNLOADED_VERSION` 和 `LATEST_UPDATE`，否则 stale latest-wins 决策会用旧缓存填回空磁盘。
 
 ### 更新检查策略
 
-- **启动时检查**: 应用启动后延迟 5 秒，静默检查并下载
-- **定时检查**: 每 4 小时检查一次 (如果还没有待安装的更新)
-- **完全静默**: 检查和下载过程用户完全无感知
+- **启动时检查**: 应用启动后延迟 **60 秒**（避开冷启动重负载 + 用户首次操作）
+- **定时检查**: 前端每 **30 分钟** 触发一次 `cmd_check_and_download_silently`（`CHECK_INTERVAL_MS` 常量）；即便已有 pending 更新仍会查询，latest-wins 协议保证更新版本会被替换（v_NEW 替换 cached v_OLD 不需要用户重启）
+- **完全静默**: 检查/下载阶段对用户无感；只在 ready-to-restart 时才出现按钮
 
 ---
 
@@ -326,6 +344,12 @@ const downloadUrl = isMacARM
 
 ### 「重启更新」按钮不显示
 
-1. 检查 Console 是否有 `[useUpdater] Update ready:` 日志
-2. 检查 Rust 日志是否有下载完成的记录
-3. 确认 `updater:ready-to-restart` 事件被正确发送
+1. 检查 Console 是否有 `Event received: updater:ready-to-restart` 日志
+2. 检查 Rust 日志 `[Updater]` 是否有 `Emitting 'updater:ready-to-restart' event` 行
+3. 如果按钮一闪即消，看是不是又触发了 `updater:download-started` —— 新版本正在替换旧版本字节，等下载完成会再显示
+
+### 点击「重启更新」无效（Windows）
+
+1. 必须先停 Sidecar 才能写 NSIS installer 字节，看 Rust 日志有没有 `cmd_shutdown_for_update` 完成
+2. 网络异常导致 `tauri-plugin-updater::check()` flaky 时 `Update::install(bytes)` 会失败 —— 现在前端会把 outcome 走 toast 反馈给用户（详见 `CustomTitleBar` 的错误处理）
+3. 检查 `~/.myagents/updater_pending/` 是否有 pending 字节文件残留

@@ -120,10 +120,12 @@ export interface TabContextValue extends TabState {
     // v0.1.69 session snapshot — call after PATCH /sessions/:id to refresh derivation source
     setSessionMeta: Dispatch<SetStateAction<SessionMetadata | null>>;
 
-    // SSE connection management
+    // SSE connection state — TabProvider owns the lifecycle internally; this
+    // flag is the only piece of SSE state external consumers should depend on.
+    // (Connect/disconnect are no longer exposed: a session-aware useEffect in
+    // TabProvider drives both initial connect and session-switch reconnect, so
+    // outside callers cannot accidentally race the owner.)
     isConnected: boolean;
-    connectSse: () => Promise<void>;
-    disconnectSse: () => void;
 
     // Chat actions
     sendMessage: (text: string, images?: ImageAttachment[], permissionMode?: PermissionMode, model?: string, providerEnv?: { baseUrl?: string; apiKey?: string; authType?: 'auth_token' | 'api_key' | 'both' | 'auth_token_clear_api_key'; apiProtocol?: 'anthropic' | 'openai'; maxOutputTokens?: number; maxOutputTokensParamName?: 'max_tokens' | 'max_completion_tokens' | 'max_output_tokens'; upstreamFormat?: 'chat_completions' | 'responses' }, isCron?: boolean) => Promise<boolean>;
@@ -196,8 +198,6 @@ const defaultContextValue: TabContextValue = {
     setAgentError: () => { },
     setLastTerminalReason: () => { },
     setSessionMeta: () => { },
-    connectSse: async () => { },
-    disconnectSse: () => { },
     sendMessage: async () => false,
     stopResponse: async () => false,
     loadSession: async () => false,

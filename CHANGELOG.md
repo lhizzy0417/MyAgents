@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.2.6] - 2026-05-02
+
+### Fixed
+
+- **同 Tab 内切到另一段历史会话后，新消息能正常发送并收到流式回复**：0.2.5 在同一个 Tab 里跳到另一段历史会话后发消息没有结果，要重新加载历史才能看到。
+- **从 Chat 顶部 banner / MCP 对话框唤起 MA 小助理时，正确加载 helper 自己的工作区设置**：之前可能误用当前 Tab 的工作区，导致 helper 看不到自己的 skills / agents。
+- **删除一个内置 helper agent 时 picker 选项偶发错位**：删除项时不再误带走相邻项。
+- **`~/.myagents/skills/` 里有断链 symlink 时全局 sidecar 启动崩溃**：升级到 Node v24 后，任何残留的指向已删目录的 symlink 都会让 sidecar 反复 abort、Tauri 健康检查反复重启，陷入死循环。现在启动时会安全清理这类断链。
+- **静默更新偶发卡死或失败**：静默下载和点击下载共用同一份缓存；更新流程的 UI 锁定路径修整，Tauri updater 在弱网下不再静默失败。
+
+---
+
 ## [0.2.5] - 2026-05-01
 
 ### Fixed

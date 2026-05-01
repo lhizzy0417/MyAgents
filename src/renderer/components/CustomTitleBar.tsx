@@ -23,6 +23,14 @@ interface CustomTitleBarProps {
     updateReady?: boolean;
     /** Version of the update ready to install */
     updateVersion?: string | null;
+    /** Whether an install is currently in flight (post-click). When true the
+     *  button shows a spinner and is disabled to prevent double-clicks. */
+    updateInstalling?: boolean;
+    /** Whether a silent download is replacing the pending bytes. When true
+     *  the button hides entirely — clicking install mid-replacement would
+     *  land on inconsistent cache/disk state. The button reappears with the
+     *  new version once the replacement commits. */
+    updatePreparing?: boolean;
     /** Callback when user clicks "Restart to Update" */
     onRestartAndUpdate?: () => void;
 }
@@ -39,6 +47,8 @@ export default function CustomTitleBar({
     onOpenBugReport,
     updateReady,
     updateVersion,
+    updateInstalling,
+    updatePreparing,
     onRestartAndUpdate,
 }: CustomTitleBarProps) {
     const [isFullscreen, setIsFullscreen] = useState(false);
@@ -174,15 +184,25 @@ export default function CustomTitleBar({
                 className="flex flex-shrink-0 items-center gap-1 px-3 h-full"
                 data-no-drag
             >
-                {/* Update button - only shown when update is ready */}
-                {updateReady && (
+                {/* Update button - only shown when update is ready AND no
+                    silent replacement download is in flight. Spinner +
+                    disabled state during install so the user sees immediate
+                    feedback on click. Hidden during silent download because
+                    the pending bytes are about to be replaced — clicking
+                    install mid-replacement could land on inconsistent
+                    cache/disk state. Reappears automatically when the
+                    replacement commits (with the new version). */}
+                {updateReady && !updatePreparing && (
                     <button
-                        onClick={onRestartAndUpdate}
-                        className="flex h-7 items-center gap-1.5 px-3 rounded-full text-xs font-medium text-white bg-[var(--success)] shadow-sm transition-all hover:bg-[var(--success)] active:scale-95"
-                        title={updateVersion ? `更新到 v${updateVersion}` : '重启并更新'}
+                        onClick={updateInstalling ? undefined : onRestartAndUpdate}
+                        disabled={updateInstalling}
+                        className="flex h-7 items-center gap-1.5 px-3 rounded-full text-xs font-medium text-white bg-[var(--success)] shadow-sm transition-all hover:bg-[var(--success)] active:scale-95 disabled:opacity-80 disabled:cursor-wait"
+                        title={updateInstalling
+                            ? '正在安装更新…'
+                            : (updateVersion ? `更新到 v${updateVersion}` : '重启并更新')}
                     >
-                        <RefreshCw className="h-3.5 w-3.5" />
-                        <span>重启更新</span>
+                        <RefreshCw className={`h-3.5 w-3.5 ${updateInstalling ? 'animate-spin' : ''}`} />
+                        <span>{updateInstalling ? '安装中…' : '重启更新'}</span>
                     </button>
                 )}
                 {/* Feedback button + popover */}

@@ -339,6 +339,7 @@ export default function TabProvider({
 
     // Sync currentSessionId when prop changes (e.g., from parent re-initializing)
     useEffect(() => {
+        currentSessionIdRef.current = sessionId;
         setCurrentSessionId(sessionId);
     }, [sessionId]);
 
@@ -374,6 +375,11 @@ export default function TabProvider({
 
     // Refs for SSE handling
     const sseRef = useRef<SseConnection | null>(null);
+    // The sessionId used by the currently connected SSE stream. App.tsx can
+    // switch a tab to a new Session Sidecar without remounting this provider,
+    // so "SSE connected" alone is not enough; it must be connected to THIS session.
+    const connectedSseSessionIdRef = useRef<string | null>(null);
+    const sseReconnectGenerationRef = useRef(0);
     const isStreamingRef = useRef(false);
     // Tracks whether the backend session is actively processing (system-init received → idle).
     // Separate from isStreamingRef which means "a streaming message exists in React state".
@@ -988,7 +994,7 @@ export default function TabProvider({
                 if (isNewSessionRef.current || isLoadingSessionRef.current) {
                     break;
                 }
-                const payload = data as { message: { id: string; role: 'user' | 'assistant'; content: string | ContentBlock[]; timestamp: string; sdkUuid?: string; metadata?: { source: 'desktop' | 'telegram_private' | 'telegram_group'; sourceId?: string; senderName?: string } } } | null;
+                const payload = data as { message: { id: string; role: 'user' | 'assistant'; content: string | ContentBlock[]; timestamp: string; sdkUuid?: string; metadata?: Message['metadata'] } } | null;
                 if (!payload?.message) break;
                 const msg = payload.message;
                 if (seenIdsRef.current.has(msg.id)) break;
@@ -2097,6 +2103,14 @@ export default function TabProvider({
     const MAX_RECOVERY_ATTEMPTS = 3;
     // Stable ref for connectSse (avoids circular dependency: recoverSessionSidecar → connectSse → recoverSessionSidecar)
     const connectSseRef = useRef<() => Promise<void>>(() => Promise.resolve());
+    // Connect serializer: each caller's task chains onto the *previous*
+    // task, not just whatever was in flight when this call entered. This
+    // gives true sequential semantics — `recoverSessionSidecar` racing with
+    // the [agentDir, sessionId] effect, plus pending->real id upgrades, can
+    // all queue up safely without producing two concurrent SseConnection
+    // instances on the same tab. See specs/ARCHITECTURE.md §"通信模式 / SSE
+    // 流式事件" — per-Tab single-subscription invariant.
+    const connectSseTailRef = useRef<Promise<void> | null>(null);
     // Unmount guard for async recovery
     const isMountedRef = useRef(true);
     useEffect(() => { return () => { isMountedRef.current = false; }; }, []);
@@ -2116,13 +2130,13 @@ export default function TabProvider({
     // Called when SSE retries exhaust OR when Rust health monitor restarts the sidecar.
     const recoverSessionSidecar = useCallback(async () => {
         if (recoveryInFlightRef.current) return; // Deduplicate concurrent calls
-        if (sseRef.current?.isConnected()) return; // Already recovered
+        const sid = currentSessionIdRef.current;
+        if (!sid) return;
+        if (sseRef.current?.isConnected() && connectedSseSessionIdRef.current === sid) return; // Already recovered
         if (recoveryAttemptsRef.current >= MAX_RECOVERY_ATTEMPTS) {
             console.error(`[TabProvider ${tabId}] Max recovery attempts (${MAX_RECOVERY_ATTEMPTS}) reached, giving up`);
             return;
         }
-        const sid = currentSessionIdRef.current;
-        if (!sid) return;
         recoveryInFlightRef.current = true;
         recoveryAttemptsRef.current++;
         try {
@@ -2143,6 +2157,7 @@ export default function TabProvider({
                 await sseRef.current.disconnect();
                 sseRef.current = null;
             }
+            connectedSseSessionIdRef.current = null;
             if (!isMountedRef.current) return;
             await connectSseRef.current();
             if (!isMountedRef.current) return;
@@ -2165,13 +2180,31 @@ export default function TabProvider({
     // (Chat mounts before `ensureSessionSidecar` finishes) is absorbed at
     // the `tauriClient` layer so every consumer — SSE, HTTP, DirectoryPanel,
     // model push — is automatically correct. See `tauriClient.getTabServerUrl`.
-    const connectSse = useCallback(async () => {
-        if (sseRef.current?.isConnected()) return;
+    const connectSseImpl = useCallback(async () => {
+        const connectingSessionId = currentSessionIdRef.current;
+        if (sseRef.current?.isConnected()) {
+            if (connectedSseSessionIdRef.current === connectingSessionId) return;
+            console.log(`[TabProvider ${tabId}] SSE is connected to ${connectedSseSessionIdRef.current ?? 'none'}, reconnecting for ${connectingSessionId ?? 'none'}`);
+            connectedSseSessionIdRef.current = null;
+            setIsConnected(false);
+            resetTabServerUrlCache(tabId);
+            await sseRef.current.disconnect();
+            sseRef.current = null;
+        } else {
+            connectedSseSessionIdRef.current = null;
+            setIsConnected(false);
+            if (sseRef.current) {
+                await sseRef.current.disconnect();
+                sseRef.current = null;
+            }
+        }
 
         const sse = createSseConnection(tabId, currentSessionIdRef);
         sse.setEventHandler(handleSseEvent);
         sse.setStatusHandler((status) => {
+            if (sseRef.current !== sse) return;
             if (status === 'disconnected' || status === 'failed') {
+                connectedSseSessionIdRef.current = null;
                 setIsConnected(false);
                 setIsLoading(false);
             }
@@ -2187,24 +2220,123 @@ export default function TabProvider({
 
         try {
             await sse.connect();
+            // sse.connect() resolves cleanly even when the connect was
+            // cancelled mid-flight via shouldReconnect=false (it returns
+            // without flipping tauriConnected). Three things can leave us
+            // here without a live connection:
+            //   1. A newer connect superseded us → sseRef.current !== sse
+            //   2. The provider unmounted in flight → isMountedRef false
+            //   3. A racing disconnect cancelled us → sse.isConnected() false
+            // In any of these cases, drop the stale instance instead of
+            // marking the tab "connected" when no SSE stream actually exists.
+            if (sseRef.current !== sse || !isMountedRef.current || !sse.isConnected()) {
+                await sse.disconnect();
+                return;
+            }
+            connectedSseSessionIdRef.current = connectingSessionId ?? currentSessionIdRef.current ?? null;
             setIsConnected(true);
             // Note: Log server URL is set once in App.tsx using global sidecar
             // Tab sidecars should not override it to avoid URL switching issues
         } catch (error) {
+            if (sseRef.current === sse) {
+                sseRef.current = null;
+                connectedSseSessionIdRef.current = null;
+                setIsConnected(false);
+            }
             console.error(`[TabProvider ${tabId}] SSE connect failed:`, error);
             throw error;
         }
     }, [tabId, handleSseEvent, recoverSessionSidecar]);
+
+    // Public connectSse — every caller chains its own task onto the
+    // previous task's tail, giving true serial execution. Without chaining,
+    // multiple callers awaiting the same in-flight promise would all race
+    // past the post-await short-circuit and start concurrent connectSseImpls.
+    const connectSse = useCallback(async () => {
+        const previous = connectSseTailRef.current;
+        const task = (async () => {
+            if (previous) {
+                try { await previous; } catch { /* ignore — chained task runs regardless */ }
+            }
+            // After the chain ahead of us has settled, the prior task may
+            // have already produced the connection we wanted; skip in that case.
+            const sid = currentSessionIdRef.current;
+            if (sseRef.current?.isConnected() && connectedSseSessionIdRef.current === sid) return;
+            await connectSseImpl();
+        })();
+        connectSseTailRef.current = task;
+        try {
+            await task;
+        } finally {
+            if (connectSseTailRef.current === task) {
+                connectSseTailRef.current = null;
+            }
+        }
+    }, [connectSseImpl]);
     connectSseRef.current = connectSse;
 
-    // Disconnect SSE
-    const disconnectSse = useCallback(() => {
-        if (sseRef.current) {
-            void sseRef.current.disconnect();
-            sseRef.current = null;
-            setIsConnected(false);
+    // App.tsx switches Session Sidecars without remounting TabProvider. Keep the
+    // event stream attached to the current session, otherwise /chat/send can
+    // persist successfully while the visible tab waits on an old/dead SSE stream.
+    //
+    // Load-bearing invariant: this effect drives SSE connect on initial mount
+    // and on session switch — the only OTHER caller is recoverSessionSidecar()
+    // (Rust health-monitor restart path), which goes through the same
+    // connectSseRef and the same chained serializer. App.tsx assigns a
+    // sessionId (real or `pending-...`) on every chat-view transition, so
+    // `sessionId` truthy here covers initial mount as well. If a future code
+    // path opens a chat tab without setting sessionId, SSE will silently
+    // never connect — keep that invariant intact.
+    useEffect(() => {
+        if (!agentDir || !sessionId) return;
+
+        const connectedSessionId = connectedSseSessionIdRef.current;
+        const isConnectedToAnySession = sseRef.current?.isConnected() ?? false;
+
+        if (isConnectedToAnySession && connectedSessionId === sessionId) return;
+
+        // Pending -> real id upgrade during an active turn keeps the same sidecar.
+        // Reconnecting here can briefly drop streaming events; just re-label the
+        // live stream so the load guard below knows it belongs to the real session.
+        if (
+            isConnectedToAnySession &&
+            connectedSessionId &&
+            isPendingSessionId(connectedSessionId) &&
+            !isPendingSessionId(sessionId) &&
+            (isSessionActiveRef.current || isStreamingRef.current)
+        ) {
+            connectedSseSessionIdRef.current = sessionId;
+            return;
         }
-    }, []);
+
+        const generation = ++sseReconnectGenerationRef.current;
+        let cancelled = false;
+
+        void (async () => {
+            if (isConnectedToAnySession) {
+                console.log(`[TabProvider ${tabId}] SessionId changed from ${connectedSessionId ?? 'none'} to ${sessionId}, reconnecting SSE`);
+                connectedSseSessionIdRef.current = null;
+                setIsConnected(false);
+                resetTabServerUrlCache(tabId);
+                const oldSse = sseRef.current;
+                sseRef.current = null;
+                if (oldSse) {
+                    await oldSse.disconnect();
+                }
+            }
+
+            if (cancelled || !isMountedRef.current || sseReconnectGenerationRef.current !== generation) return;
+            await connectSseRef.current();
+        })().catch((error) => {
+            if (!cancelled) {
+                console.error(`[TabProvider ${tabId}] SSE reconnect for session ${sessionId} failed:`, error);
+            }
+        });
+
+        return () => {
+            cancelled = true;
+        };
+    }, [agentDir, sessionId, tabId]);
 
     // Cleanup on unmount - disconnect SSE and clear pending timers
     // NOTE: Sidecar lifecycle is now managed by App.tsx performCloseTab(),
@@ -2216,6 +2348,7 @@ export default function TabProvider({
                 void sseRef.current.disconnect();
                 sseRef.current = null;  // Allow garbage collection
             }
+            connectedSseSessionIdRef.current = null;
             if (stopTimeoutRef.current) {
                 clearTimeout(stopTimeoutRef.current);
                 stopTimeoutRef.current = null;
@@ -2465,8 +2598,28 @@ export default function TabProvider({
     // session loading effect.
     const loadSession = useCallback(async (
         targetSessionId: string,
-        options?: { skipLoadingReset?: boolean }
+        options?: { skipLoadingReset?: boolean; previousSessionId?: string | null }
     ): Promise<boolean> => {
+        // Rollback target for the prop-sync ref/state move (line 340-344). Prop
+        // sync fires synchronously when tab.sessionId changes, moving
+        // `currentSessionIdRef` to target before /sessions/switch is verified.
+        // On switch failure, restore so context.sessionId stays consistent with
+        // the visible history (which we deliberately don't replace on failure).
+        //
+        // Scope-of-rollback note: only Provider-internal ref/state is reverted.
+        // `tab.sessionId` (App-level) and the Rust-side sidecar swap that
+        // App.handleSwitchSession performed before this loadSession ran are NOT
+        // unwound. PRD 0.2.6 §5.3 step 5 explicitly accepts this: on rare
+        // /sessions/switch failure, surface an error and keep the visible UI
+        // stable, but do not implement a four-layer two-phase commit. Users
+        // retry; closing/reopening the Tab fully resets state.
+        const rollbackSessionId = options?.previousSessionId ?? null;
+        const rollbackOnSwitchFailure = () => {
+            if (rollbackSessionId && rollbackSessionId !== targetSessionId) {
+                currentSessionIdRef.current = rollbackSessionId;
+                setCurrentSessionId(rollbackSessionId);
+            }
+        };
         try {
             console.log(`[TabProvider ${tabId}] Loading session: ${targetSessionId}`);
             isLoadingSessionRef.current = true;
@@ -2499,7 +2652,7 @@ export default function TabProvider({
             // startReached handler pulls older history lazily via `?before=<id>`
             // as the user scrolls up. Keeps first-paint JSON body tiny on 600+
             // message sessions.
-            const response = await apiGetJson<{ success: boolean; session?: { title?: string; titleSource?: string; runtime?: string; liveSessionState?: SessionState; liveStreamingMessage?: { id: string; role: 'assistant'; content: string; timestamp: string; sdkUuid?: string }; messages: Array<{ id: string; role: 'user' | 'assistant'; content: string; timestamp: string; sdkUuid?: string; attachments?: Array<{ id: string; name: string; mimeType: string; path: string; previewUrl?: string }>; metadata?: { source: 'desktop' | 'telegram_private' | 'telegram_group'; sourceId?: string; senderName?: string } }>; totalCount?: number; hasMoreBefore?: boolean } }>(`/sessions/${targetSessionId}?limit=${INITIAL_PAGE_SIZE}`);
+            const response = await apiGetJson<{ success: boolean; session?: { title?: string; titleSource?: string; runtime?: string; liveSessionState?: SessionState; liveStreamingMessage?: { id: string; role: 'assistant'; content: string; timestamp: string; sdkUuid?: string }; messages: Array<{ id: string; role: 'user' | 'assistant'; content: string; timestamp: string; sdkUuid?: string; attachments?: Array<{ id: string; name: string; mimeType: string; path: string; previewUrl?: string }>; metadata?: Message['metadata'] }>; totalCount?: number; hasMoreBefore?: boolean } }>(`/sessions/${targetSessionId}?limit=${INITIAL_PAGE_SIZE}`);
 
             if (!response.success || !response.session) {
                 // Session not found is not necessarily an error - it may have been deleted
@@ -2507,6 +2660,32 @@ export default function TabProvider({
                 console.log(`[TabProvider ${tabId}] Session ${targetSessionId} not found in storage (may be deleted or empty)`);
                 isLoadingSessionRef.current = false;
                 setIsSessionLoading(false);
+                return false;
+            }
+
+            // Confirm the sidecar runtime has switched before replacing the
+            // visible message history. Otherwise a failed /sessions/switch can
+            // leave the UI showing target history while subsequent send/SSE
+            // traffic still belongs to the previous session.
+            let switchResult: { success: boolean; error?: string };
+            try {
+                switchResult = await postJson<{ success: boolean; error?: string }>('/sessions/switch', { sessionId: targetSessionId });
+            } catch (error) {
+                const message = error instanceof Error ? error.message : String(error);
+                console.warn(`[TabProvider ${tabId}] Session switch failed for ${targetSessionId}: ${message}`);
+                setAgentError(message);
+                isLoadingSessionRef.current = false;
+                setIsSessionLoading(false);
+                rollbackOnSwitchFailure();
+                return false;
+            }
+            if (!switchResult.success) {
+                const message = switchResult.error || 'Session switch failed.';
+                console.warn(`[TabProvider ${tabId}] Session switch rejected for ${targetSessionId}: ${message}`);
+                setAgentError(message);
+                isLoadingSessionRef.current = false;
+                setIsSessionLoading(false);
+                rollbackOnSwitchFailure();
                 return false;
             }
 
@@ -2674,9 +2853,6 @@ export default function TabProvider({
                 onTitleChangeRef.current?.(response.session.title);
             }
 
-            // Notify backend about session switch (fire-and-forget — UI is already updated)
-            void postJson('/sessions/switch', { sessionId: targetSessionId });
-
             console.log(`[TabProvider ${tabId}] Loaded ${loadedMessages.length} messages from session`);
             return true;
         } catch (error) {
@@ -2717,7 +2893,7 @@ export default function TabProvider({
                         timestamp: string;
                         sdkUuid?: string;
                         attachments?: Array<{ id: string; name: string; mimeType: string; path: string }>;
-                        metadata?: { source: 'desktop' | 'telegram_private' | 'telegram_group'; sourceId?: string; senderName?: string };
+                        metadata?: Message['metadata'];
                     }>;
                     hasMoreBefore?: boolean;
                 };
@@ -2833,7 +3009,7 @@ export default function TabProvider({
                                 timestamp: string;
                                 sdkUuid?: string;
                                 attachments?: Array<{ id: string; name: string; mimeType: string; path: string }>;
-                                metadata?: { source: 'desktop' | 'telegram_private' | 'telegram_group'; sourceId?: string; senderName?: string };
+                                metadata?: Message['metadata'];
                             }>;
                         }>(`/sessions/${encodeURIComponent(internalSessionId)}/since/${encodeURIComponent(last.id)}`);
 
@@ -2913,6 +3089,9 @@ export default function TabProvider({
     // Unified session loading effect - handles both initial load and session changes
     useEffect(() => {
         const prevSessionId = prevSessionIdRef.current;
+        const isPendingSession = isPendingSessionId(sessionId);
+        const wasPendingSession = isPendingSessionId(prevSessionId);
+        const sessionChanged = prevSessionId !== sessionId;
         prevSessionIdRef.current = sessionId;
 
         // No sessionId - reset flag and return
@@ -2921,13 +3100,17 @@ export default function TabProvider({
             return;
         }
 
+        // A real session switch must be allowed to load after SSE reattaches.
+        // Preserve the pending->real loaded flag because that path represents
+        // the same live sidecar/session becoming durable, not a user switch.
+        if (sessionChanged && !(wasPendingSession && !isPendingSession)) {
+            initialSessionLoadedRef.current = false;
+        }
+
         // Not connected yet - wait
         if (!isConnected) {
             return;
         }
-
-        const isPendingSession = isPendingSessionId(sessionId);
-        const wasPendingSession = isPendingSessionId(prevSessionId);
 
         // Case 1: Current sessionId is pending - skip (doesn't exist in backend yet)
         if (isPendingSession) {
@@ -2954,11 +3137,21 @@ export default function TabProvider({
                 return;
             }
 
+            if (connectedSseSessionIdRef.current !== sessionId) {
+                console.log(`[TabProvider ${tabId}] Waiting for SSE to attach to session ${sessionId} before loadSession`);
+                return;
+            }
+
             // Case 2c: Switching from an unused pending session to a real session - need to load data
             // This happens when user selects a history session while current tab has unused pending session
             console.log(`[TabProvider ${tabId}] Switching from unused pending to ${sessionId}, loading session`);
             initialSessionLoadedRef.current = true;
-            void loadSession(sessionId);
+            void loadSession(sessionId, { previousSessionId: prevSessionId ?? null });
+            return;
+        }
+
+        if (connectedSseSessionIdRef.current !== sessionId) {
+            console.log(`[TabProvider ${tabId}] Waiting for SSE to attach to session ${sessionId} before loadSession`);
             return;
         }
 
@@ -2992,7 +3185,7 @@ export default function TabProvider({
             console.log(`[TabProvider ${tabId}] Initial session load: ${sessionId}`);
         }
         initialSessionLoadedRef.current = true;
-        void loadSession(sessionId);
+        void loadSession(sessionId, { previousSessionId: prevSessionId ?? null });
     }, [sessionId, isConnected, tabId, loadSession]);
 
     // Cancel a queued message — returns the original text (for restoring to input)
@@ -3118,8 +3311,6 @@ export default function TabProvider({
         setAgentError,
         setLastTerminalReason,
         setSessionMeta,
-        connectSse,
-        disconnectSse,
         sendMessage,
         stopResponse,
         loadSession,
@@ -3140,7 +3331,7 @@ export default function TabProvider({
     }), [
         tabId, agentDir, currentSessionId, messages, historyMessages, streamingMessage, firstItemIndex, hasMoreBefore, isLoading, isSessionLoading, sessionState, sessionRuntime, sessionMeta,
         logs, unifiedLogs, systemInitInfo, agentError, systemStatus, lastTerminalReason, pendingPermission, pendingAskUserQuestion, pendingExitPlanMode, pendingEnterPlanMode, toolCompleteCount, queuedMessages, isConnected,
-        setMessages, appendLog, appendUnifiedLog, clearUnifiedLogs, connectSse, disconnectSse, sendMessage, stopResponse, loadSession, loadOlderMessages, resetSession,
+        setMessages, appendLog, appendUnifiedLog, clearUnifiedLogs, sendMessage, stopResponse, loadSession, loadOlderMessages, resetSession,
         apiGetJson, postJson, apiPutJson, apiDeleteJson, respondPermission, respondAskUserQuestion, respondExitPlanMode, cancelQueuedMessage, forceExecuteQueuedMessage
     ]);
 

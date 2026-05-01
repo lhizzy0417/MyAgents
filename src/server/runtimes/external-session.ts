@@ -481,6 +481,17 @@ export function restoreExternalSessionState(
       .reverse()
       .find((msg) => msg.role === 'assistant' && msg.usage?.model)?.usage?.model
     || '';
+  // Rehydrate model/permission from session snapshot so a Tab that joins an
+  // idle external Sidecar via /sessions/switch can adopt the session's last
+  // known config via /api/session/config. Without this, a fresh switch into
+  // an existing session (sidecar process not yet running) leaves
+  // lastModel/lastPermissionMode empty and adoption silently no-ops.
+  if (meta?.model) {
+    lastModel = meta.model;
+  }
+  if (meta?.permissionMode) {
+    lastPermissionMode = meta.permissionMode;
+  }
   console.log(`[external-session] Restored state for session ${sessionId}, runtimeSessionId=${lastRuntimeSessionId} (${allSessionMessages.length} messages)`);
 }
 
@@ -608,6 +619,14 @@ export function getExternalPendingInteractiveRequests(): ExternalPendingInteract
 
 export function getExternalSessionId(): string {
   return lastSessionId;
+}
+
+export function getExternalSessionModel(): string | null {
+  return lastRuntimeReportedModel || lastModel || null;
+}
+
+export function getExternalSessionPermissionMode(): string | null {
+  return lastPermissionMode || null;
 }
 
 function buildCurrentAssistantSnapshotContent(): string | null {

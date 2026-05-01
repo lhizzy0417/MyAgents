@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Fetch the latest cuse (computer-use MCP) binary from GitHub Releases and
+# Fetch the latest cuse (computer-use MCP) binary from Cloudflare R2 and
 # install it under src-tauri/binaries/ using Tauri's externalBin naming
 # convention (binary-<target-triple>).
 #
@@ -7,19 +7,28 @@
 # Mach-O binary. We copy that binary twice (aarch64 + x86_64 target triples)
 # so both Tauri build targets pick it up without per-arch duplication.
 #
+# Source of truth for cuse releases is GitHub
+# (https://github.com/hAcKlyc/MyAgents-Cuse), but that repo is PRIVATE.
+# The cuse maintainer mirrors each release onto R2 (see
+# MyAgents-Cuse/publish_r2.sh) so this script can pull artifacts over plain
+# HTTPS without any auth — fork / contributor / public CI all work.
+#
 # Usage:
-#   ./scripts/download_cuse.sh                 # Download latest release for macOS
-#   ./scripts/download_cuse.sh --version v0.2.0  # Download specific version
+#   ./scripts/download_cuse.sh                 # Latest version (reads R2 latest.json)
+#   ./scripts/download_cuse.sh --version v0.2.0  # Pin a specific version
 #   ./scripts/download_cuse.sh --force         # Re-download even if up-to-date
 #   ./scripts/download_cuse.sh --clean         # Remove existing binaries first
 #
 # Requirements:
-#   - gh CLI authenticated to a GitHub account with access to
-#     hAcKlyc/MyAgents-Cuse (works for both public and private visibility)
+#   - curl, tar, shasum (all macOS-default)
+#   - No `gh` / no auth — public CDN
 
 set -euo pipefail
 
-REPO="hAcKlyc/MyAgents-Cuse"
+DOWNLOAD_BASE_URL="https://download.myagents.io"
+LATEST_URL="${DOWNLOAD_BASE_URL}/cuse/latest.json"
+RELEASES_BASE_URL="${DOWNLOAD_BASE_URL}/cuse/releases"
+
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BINARIES_DIR="${PROJECT_DIR}/src-tauri/binaries"
 VERSION_MARKER="${BINARIES_DIR}/.cuse-version"
@@ -29,7 +38,6 @@ RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
-CYAN='\033[0;36m'
 NC='\033[0m'
 
 log_info()  { echo -e "${BLUE}[cuse]${NC} $1"; }
@@ -49,7 +57,7 @@ while [[ $# -gt 0 ]]; do
         --force)   FORCE=true; shift ;;
         --clean)   CLEAN=true; shift ;;
         --help|-h)
-            sed -n '2,20p' "$0"
+            sed -n '2,25p' "$0"
             exit 0
             ;;
         *) log_error "Unknown option: $1"; exit 1 ;;
@@ -58,17 +66,19 @@ done
 
 # ── Preflight ─────────────────────────────────────────────────────────────
 
-if ! command -v gh &>/dev/null; then
-    log_error "gh CLI not found. Install: https://cli.github.com/"
-    exit 1
-fi
-
-if ! gh auth status &>/dev/null; then
-    log_error "gh not authenticated. Run: gh auth login"
-    exit 1
-fi
+for cmd in curl tar shasum; do
+    if ! command -v "$cmd" &>/dev/null; then
+        log_error "Required tool not found: $cmd"
+        exit 1
+    fi
+done
 
 mkdir -p "$BINARIES_DIR"
+
+# Sweep stale `.tmp.<pid>` orphans from prior runs killed mid-install. They
+# are inert (Tauri externalBin matches exact filenames, not glob), but they
+# accumulate if --clean isn't run regularly and clutter `ls`.
+rm -f "${BINARIES_DIR}"/cuse-*.tmp.* 2>/dev/null || true
 
 if [[ "$CLEAN" == true ]]; then
     log_info "Cleaning existing cuse binaries..."
@@ -79,10 +89,21 @@ fi
 # ── Resolve version ───────────────────────────────────────────────────────
 
 if [[ -z "$VERSION" ]]; then
-    log_info "Querying latest cuse release from $REPO..."
-    VERSION=$(gh release view --repo "$REPO" --json tagName -q .tagName 2>/dev/null || true)
+    log_info "Querying latest cuse version from ${LATEST_URL}..."
+    LATEST_JSON=$(curl -fsSL --retry 3 --retry-delay 2 --max-time 30 "$LATEST_URL" 2>/dev/null || true)
+    if [[ -z "$LATEST_JSON" ]]; then
+        log_error "Failed to fetch ${LATEST_URL}. Check network or pin --version."
+        exit 1
+    fi
+    # Parse "version" without jq (jq not guaranteed on contributor machines).
+    # `|| true` keeps `set -o pipefail` from silently killing the script when
+    # latest.json is malformed (CDN-cached HTML 404, half-published stub,
+    # schema drift). The empty-VERSION check below then surfaces a useful
+    # diagnostic instead of a bare `exit 1`.
+    VERSION=$(echo "$LATEST_JSON" | grep -m1 '"version"' | sed 's/.*"version" *: *"\([^"]*\)".*/\1/' || true)
     if [[ -z "$VERSION" ]]; then
-        log_error "Failed to query latest release. Check gh auth and repo access."
+        log_error "Could not parse 'version' from latest.json. Response was:"
+        log_error "  $(echo "$LATEST_JSON" | head -c 200)"
         exit 1
     fi
 fi
@@ -93,6 +114,9 @@ if [[ ! "$VERSION" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.]+)?$ ]]; then
     log_error "Refusing unsafe version string: $VERSION"
     exit 1
 fi
+
+# Normalize to v-prefixed form for URL composition.
+[[ "$VERSION" =~ ^v ]] || VERSION="v$VERSION"
 
 log_info "Target version: $VERSION"
 
@@ -120,17 +144,22 @@ fi
 # ── Download ──────────────────────────────────────────────────────────────
 
 ARCHIVE_NAME="cuse-${VERSION}-macos-universal.tar.gz"
+ARCHIVE_URL="${RELEASES_BASE_URL}/${VERSION}/${ARCHIVE_NAME}"
+SHA_URL="${ARCHIVE_URL}.sha256"
+
 TMP_DIR=$(mktemp -d)
 trap 'rm -rf "$TMP_DIR"' EXIT
 
 log_info "Downloading ${ARCHIVE_NAME} + .sha256..."
-if ! gh release download "$VERSION" \
-        --repo "$REPO" \
-        --pattern "$ARCHIVE_NAME" \
-        --pattern "${ARCHIVE_NAME}.sha256" \
-        --dir "$TMP_DIR" \
-        --clobber; then
-    log_error "Download failed. Asset may not exist for $VERSION."
+if ! curl -fsSL --retry 3 --retry-delay 2 --max-time 300 \
+        -o "${TMP_DIR}/${ARCHIVE_NAME}" "$ARCHIVE_URL"; then
+    log_error "Archive download failed: $ARCHIVE_URL"
+    log_error "  (Maintainer may have forgotten to run publish_r2.sh after the GH Release.)"
+    exit 1
+fi
+if ! curl -fsSL --retry 3 --retry-delay 2 --max-time 30 \
+        -o "${TMP_DIR}/${ARCHIVE_NAME}.sha256" "$SHA_URL"; then
+    log_error "SHA-256 sidecar download failed: $SHA_URL"
     exit 1
 fi
 
@@ -138,6 +167,13 @@ fi
 
 log_info "Verifying SHA-256..."
 EXPECTED_HASH=$(awk '{print $1}' "${TMP_DIR}/${ARCHIVE_NAME}.sha256")
+# Defensive: a corrupt/empty .sha256 file (truncated download, BSD-style
+# format, etc) silently turns into a "mismatch" with a useless first
+# token. Fail with a clear diagnostic instead.
+if [[ ! "$EXPECTED_HASH" =~ ^[a-fA-F0-9]{64}$ ]]; then
+    log_error "Malformed .sha256 sidecar (expected 64 hex chars, got: '${EXPECTED_HASH:0:80}')"
+    exit 1
+fi
 ACTUAL_HASH=$(shasum -a 256 "${TMP_DIR}/${ARCHIVE_NAME}" | awk '{print $1}')
 
 if [[ "$EXPECTED_HASH" != "$ACTUAL_HASH" ]]; then
@@ -159,9 +195,16 @@ if [[ ! -f "$SRC_BIN" ]]; then
     exit 1
 fi
 
-# Sanity check: must be a Mach-O universal binary
+# Sanity check: must be a Mach-O universal binary. This MUST fail loudly,
+# not warn — the up-to-date short-circuit above explicitly re-downloads when
+# this check fails on a previously-installed binary, so accepting a thin
+# binary on first install would create an infinite re-download loop on
+# subsequent build runs.
 if ! file "$SRC_BIN" | grep -q "Mach-O universal binary"; then
-    log_warn "Binary is not a universal Mach-O — got: $(file "$SRC_BIN")"
+    log_error "Downloaded binary is not a Mach-O universal binary:"
+    log_error "  $(file "$SRC_BIN")"
+    log_error "Archive may have been built with the wrong build.sh flags. Aborting."
+    exit 1
 fi
 
 # Install atomically: write to per-PID tmp files alongside the targets on

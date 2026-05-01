@@ -138,7 +138,9 @@ try {
         throw "请先安装缺失的依赖"
     }
 
-    # 每次构建都拉取最新 cuse release — 与 macOS 构建保持一致
+    # 每次构建都拉取最新 cuse release — 从 Cloudflare R2 拉取（公网公开），
+    # 不再依赖 gh CLI / 私有仓库访问权限。cuse 维护者负责在 GH Release 之后跑
+    # MyAgents-Cuse/publish_r2.sh 镜像产物到 R2（`download.myagents.io/cuse/...`）。
     # 直接在当前 shell 里运行 .ps1，不走 `pwsh -File` ——
     # 这样 Windows PowerShell 5.1（Windows 自带）和 PowerShell 7+ 都能工作，
     # 避免用户没装 pwsh 时 preflight 直接失败。
@@ -151,7 +153,7 @@ try {
         Write-Host "  cuse OK" -ForegroundColor Green
     } catch {
         Write-Host "  cuse 下载失败: $_" -ForegroundColor Red
-        Write-Host "    检查 gh CLI 已登录 (gh auth login)" -ForegroundColor Yellow
+        Write-Host "    检查网络连通性: curl https://download.myagents.io/cuse/latest.json" -ForegroundColor Yellow
         $depOk = $false
     }
 

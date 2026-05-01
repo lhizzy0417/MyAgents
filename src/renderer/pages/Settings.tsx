@@ -154,6 +154,11 @@ interface SettingsProps {
     updateChecking?: boolean;
     /** Whether an update is being downloaded (from useUpdater) */
     updateDownloading?: boolean;
+    /** Whether an install is currently in flight (post-click, from useUpdater) */
+    updateInstalling?: boolean;
+    /** Whether a silent download is replacing pending bytes (from useUpdater).
+     *  When true the install button hides — see CustomTitleBar prop comment. */
+    updatePreparing?: boolean;
     /** Trigger manual update check. Returns result for toast feedback. */
     onCheckForUpdate?: () => Promise<'up-to-date' | 'downloading' | 'error'>;
     /** Restart and install update (from useUpdater) */
@@ -173,7 +178,7 @@ async function getPlaywrightDefaultArgs(): Promise<string[]> {
 /** Playwright device presets shared between parser and UI */
 const PLAYWRIGHT_DEVICE_PRESETS = ['iPhone 15 Pro', 'iPhone 15', 'iPhone SE', 'iPad Pro 11', 'Pixel 7', 'Galaxy S23'];
 
-export default function Settings({ initialSection, initialMcpId, initialSelect, onSectionChange, isActive, updateReady: propUpdateReady, updateVersion: propUpdateVersion, updateChecking, updateDownloading, onCheckForUpdate, onRestartAndUpdate }: SettingsProps) {
+export default function Settings({ initialSection, initialMcpId, initialSelect, onSectionChange, isActive, updateReady: propUpdateReady, updateVersion: propUpdateVersion, updateChecking, updateDownloading, updateInstalling, updatePreparing, onCheckForUpdate, onRestartAndUpdate }: SettingsProps) {
     const {
         apiKeys,
         saveApiKey,
@@ -498,12 +503,14 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
             `请帮助用户安装 \`${command}\`，安装完成后告知用户回到设置页面重新启用 MCP 服务。`,
         ].join('\n');
 
-        const availableProvider = providers.find(p => p.models.length > 0 && isProviderAvailable(p, apiKeys, providerVerifyStatus));
-
+        // Don't pass providerId/model — the LAUNCH_BUG_REPORT handler will fall through
+        // to the helper Agent's persisted (providerId, model), matching the user's
+        // intent that "summon helper" always opens with the helper Agent's workspace
+        // settings, not whatever provider this dialog could find first.
         window.dispatchEvent(new CustomEvent(CUSTOM_EVENTS.LAUNCH_BUG_REPORT, {
-            detail: { description: prompt, providerId: availableProvider?.id, appVersion },
+            detail: { description: prompt, appVersion },
         }));
-    }, [runtimeDialog, appVersion, providers, apiKeys, providerVerifyStatus]);
+    }, [runtimeDialog, appVersion]);
 
     // Track which MCP servers need configuration (missing required fields)
     const [mcpNeedsConfig, setMcpNeedsConfig] = useState<Record<string, boolean>>({});
@@ -3019,15 +3026,19 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                             )}
                                         </div>
                                     )}
-                                    {propUpdateReady && propUpdateVersion && (
+                                    {/* Hidden during silent replacement (updatePreparing) for the
+                                        same reason CustomTitleBar hides its button: pending bytes
+                                        are mid-replacement, click would hit inconsistent state. */}
+                                    {propUpdateReady && propUpdateVersion && !updatePreparing && (
                                         <div className="mt-3 flex items-center gap-2">
                                             <span className="text-sm text-[var(--success)]">发现新版本 v{propUpdateVersion}</span>
                                             <button
                                                 type="button"
-                                                onClick={onRestartAndUpdate}
-                                                className="rounded-lg bg-[var(--success)] px-3 py-1.5 text-xs font-medium text-white transition-colors hover:opacity-90"
+                                                onClick={updateInstalling ? undefined : onRestartAndUpdate}
+                                                disabled={updateInstalling}
+                                                className="rounded-lg bg-[var(--success)] px-3 py-1.5 text-xs font-medium text-white transition-colors hover:opacity-90 disabled:opacity-80 disabled:cursor-wait"
                                             >
-                                                重启安装
+                                                {updateInstalling ? '安装中…' : '重启安装'}
                                             </button>
                                         </div>
                                     )}

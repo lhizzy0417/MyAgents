@@ -1,4 +1,4 @@
-import { appendFileSync, cpSync, existsSync, mkdirSync, readdirSync, readFileSync, readlinkSync, statSync, unlinkSync, writeFileSync , rmSync, renameSync } from 'fs';
+import { appendFileSync, cpSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, statSync, unlinkSync, writeFileSync , rmSync, renameSync } from 'fs';
 import { copyFile as copyFileAsync, glob as nodeGlob, readdir as readdirAsync, readFile, rename, rm, stat, writeFile } from 'fs/promises';
 import { spawn as subprocessSpawn, fireAndForget } from './utils/subprocess';
 import { fileResponse, sniffMime } from './utils/file-response';
@@ -326,6 +326,8 @@ import {
   getExternalPendingInteractiveRequests,
   getExternalSessionId,
   getExternalLiveAssistantMessage,
+  getExternalSessionModel,
+  getExternalSessionPermissionMode,
   prewarmExternalSession,
   awaitExternalSessionStarting,
 } from './runtimes/external-session';
@@ -644,12 +646,43 @@ function seedBundledSkills(): void {
         continue;
       }
       const dst = join(userSkillsDir, folder);
-      // Re-seed if marked as seeded but directory was deleted
-      if (config.seeded.includes(folder) && existsSync(dst)) continue;
+
+      // Detect broken symlinks at dst BEFORE any operation that resolves the
+      // path. Node v24's cpSync C++ implementation calls
+      // `std::filesystem::equivalent(src, dst)` for src/dst equality
+      // detection; on a broken symlink that throws an uncaught C++ exception
+      // (`libc++abi: ... filesystem error: in equivalent: Operation not
+      // supported`) which terminates the entire sidecar — JS try/catch
+      // cannot intercept it. existsSync follows the link and returns false,
+      // hiding the symlink from every guard below, so we must lstat first.
+      // Repro: `node -e 'fs.cpSync("/tmp/src", "/tmp/dangling", {recursive:true})'`
+      // where /tmp/dangling -> /nonexistent. Reported as user crash on v0.2.5
+      // (~/.myagents/skills/docx pointed at a deleted target).
+      let dstLstat: ReturnType<typeof lstatSync> | null = null;
+      try {
+        dstLstat = lstatSync(dst);
+      } catch {
+        // dst doesn't exist — fall through to seed path
+      }
+      const dstExists = existsSync(dst); // follows symlinks
+      const isBrokenSymlink = dstLstat?.isSymbolicLink() && !dstExists;
+
+      if (isBrokenSymlink) {
+        try {
+          unlinkSync(dst);
+          console.warn(`[seed] Removed broken symlink at ${dst} so the bundled skill can seed`);
+        } catch (err) {
+          console.warn(`[seed] Failed to remove broken symlink ${dst}, skipping:`, err);
+          continue;
+        }
+      }
+
+      // Re-seed if marked as seeded but directory was deleted (or was a broken symlink we just cleared)
+      if (config.seeded.includes(folder) && dstExists) continue;
 
       const src = join(bundledDir, folder);
       // Skip if destination already exists (don't overwrite user's custom content)
-      if (existsSync(dst)) {
+      if (dstExists) {
         config.seeded.push(folder);
         changed = true;
         console.log(`[seed] Skipped existing folder: ${folder}`);
@@ -7860,6 +7893,17 @@ async function main() {
       // the session's config instead of pushing their own.
       if (pathname === '/api/session/config' && request.method === 'GET') {
         try {
+          if (shouldUseExternalRuntime()) {
+            return jsonResponse({
+              success: true,
+              runtime: getActiveRuntimeType(),
+              model: getExternalSessionModel(),
+              mcpServerIds: null,
+              agentNames: null,
+              permissionMode: getExternalSessionPermissionMode(),
+            });
+          }
+
           const { getSessionModel, getMcpServers, getAgents, getSessionPermissionMode } = await import('./agent-session');
           const model = getSessionModel();
           const mcpServers = getMcpServers();
@@ -7867,6 +7911,7 @@ async function main() {
           const permissionMode = getSessionPermissionMode();
           return jsonResponse({
             success: true,
+            runtime: 'builtin',
             model: model ?? null,
             mcpServerIds: mcpServers?.map(s => s.id) ?? null,
             agentNames: agents ? Object.keys(agents) : null,

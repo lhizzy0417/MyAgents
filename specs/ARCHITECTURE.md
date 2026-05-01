@@ -370,6 +370,14 @@ SDK subprocess → ANTHROPIC_BASE_URL=127.0.0.1:${sidecarPort}
 | 3 | 同 Tab 切换到定时任务 Session | 跳转 / 连接到 CronTask Sidecar |
 | 4 | 同 Tab 切换到无人使用的 Session | **Handover**：Sidecar 资源复用 |
 
+**编排收敛**（PRD 0.2.6）：所有切换入口（`handleSwitchSession` / `handleLaunchProject` / `OPEN_SESSION_IN_NEW_TAB`）MUST 通过纯函数 `src/renderer/utils/sessionOpenPlan.ts::planSessionOpen()` 拿到统一 plan 类型（`jump-to-tab` / `open-new-tab` / `attach-existing-sidecar` / `switch-current-tab`）再执行。**plan 内 cron-attach 必须排在 runtime-mismatch 检查前**——否则 cron-owned session 会被路由到 new-tab 路径丢失 task_id 激活。
+
+**Cross-runtime 检测**：比较**目标 session.runtime vs 当前 Tab 已加载 session.runtime**（agent template 仅在没有当前 session 时 fallback）。Agent.runtime 可从 Tab 已冻结的 session.runtime 漂移，旧实现以 agent 为基准会让漂移触发不必要的 fork。
+
+**Loading 安全**：`TabProvider.loadSession()` MUST `await /sessions/switch` 成功后再替换 history；失败时保留可见 messages、回滚 `currentSessionIdRef`，让 UI 与后端始终一致。
+
+**Live config 采纳**：Tab 加入活跃 IM/Cron Sidecar 时，`/api/session/config` 返回 sidecar 的 runtime + external-runtime model + permissionMode，Tab 采纳 live config 而非 push 自己的；Chat 用 sticky `adoptedSessionRef` 防止 sessionMeta hydration 覆盖已采纳的值。
+
 **分层 Config Snapshot：** Session 创建时按 Owner 类型选择 config 快照策略：
 
 | Owner 类型 | Snapshot helper | 策略 |
@@ -589,7 +597,7 @@ installer.ts         — 扫描 SKILL.md / marketplace.json → InstallAnalysis
 
 | 二进制 | 用途 | 来源 | 打包位置 |
 |--------|------|------|---------|
-| **cuse** | 预置 Computer-Use MCP（截图/点击/输入/滚动，仅 macOS/Windows） | `hAcKlyc/MyAgents-Cuse` GitHub Release | `src-tauri/binaries/cuse-*-<triple>[.exe]` |
+| **cuse** | 预置 Computer-Use MCP（截图/点击/输入/滚动，仅 macOS/Windows） | Cloudflare R2: `https://download.myagents.io/cuse/...`（源头是私有 `hAcKlyc/MyAgents-Cuse` GH Release，由该仓库的 `publish_r2.sh` 镜像到 R2 供本开源 repo build 使用） | `src-tauri/binaries/cuse-*-<triple>[.exe]` |
 
 新增同类二进制约定：
 - 注册到 `PRESET_MCP_SERVERS` 时用 `command: '__bundled_xxx__'` 哨兵

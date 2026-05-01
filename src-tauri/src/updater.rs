@@ -18,14 +18,58 @@ use crate::logger;
 use crate::proxy_config;
 use serde::Serialize;
 use std::sync::atomic::{AtomicBool, Ordering};
-use tauri::{AppHandle, Emitter};
-use tauri_plugin_updater::UpdaterExt;
+use tauri::{AppHandle, Emitter, State};
+use tauri_plugin_updater::{Update, UpdaterExt};
+
+use crate::sidecar::ManagedSidecar;
 
 /// Global flag to prevent concurrent update checks/downloads
 static UPDATE_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
 
 /// Track the version of the latest downloaded update (latest-wins: skip re-download if same)
 static DOWNLOADED_VERSION: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+/// Cache the most recent `Update` object obtained via `updater.check()`.
+///
+/// **Why this exists:** Tauri's `Update::install(bytes)` is a method on `Update`,
+/// but the only public way to obtain an `Update` is `updater.check().await`,
+/// which makes a fresh HTTPS round-trip to `download.myagents.io`. On Windows
+/// (where the install path is split across download → click → install), this
+/// extra round-trip at click-time means a flaky/blocked network silently kills
+/// the install — the user sees the "重启更新" button do nothing.
+///
+/// By caching the `Update` object every time `check()` succeeds during the
+/// session, we eliminate the network requirement on the install path: the
+/// click-handler can just reuse the cached `Update` and call `install(bytes)`.
+/// The bytes themselves were signature-verified at download time, so this is
+/// strictly safer than a network call (which can be intercepted/timed-out).
+///
+/// Falls back to a fresh `check()` when the cache is empty (e.g., user
+/// clicked the startup pending-update dialog before the 5s background check
+/// had a chance to populate the cache).
+static LATEST_UPDATE: std::sync::Mutex<Option<Update>> = std::sync::Mutex::new(None);
+
+fn cache_update(update: Update) {
+    if let Ok(mut guard) = LATEST_UPDATE.lock() {
+        *guard = Some(update);
+    }
+}
+
+/// Return a clone of the cached `Update` if its version matches `wanted`.
+/// Returns None if cache is empty or version differs (stale cache).
+///
+/// Currently only used by the Windows install path (macOS install happens
+/// inline during `download_and_install`, so the cache is never read there).
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn cached_update_for(wanted: &str) -> Option<Update> {
+    let guard = LATEST_UPDATE.lock().ok()?;
+    let cached = guard.as_ref()?;
+    if cached.version == wanted {
+        Some(cached.clone())
+    } else {
+        None
+    }
+}
 
 /// Metadata persisted to disk alongside the update binary
 #[cfg(target_os = "windows")]
@@ -68,13 +112,24 @@ fn save_pending_update_to_disk(version: &str, bytes: &[u8]) -> Result<(), String
     Ok(())
 }
 
-/// Remove pending update files from disk
+/// Remove pending update files from disk AND reset the related in-memory
+/// trackers (DOWNLOADED_VERSION + LATEST_UPDATE cache).
+///
+/// All three are bound by the same invariant — they describe "the bytes
+/// currently waiting to be installed". Resetting only one when the others
+/// are still set lets stale latest-wins decisions or stale cache hits
+/// re-introduce the cache==disk inconsistency this whole module is trying
+/// to prevent. Bundle the reset so callers can't forget.
 #[cfg(target_os = "windows")]
 fn clear_pending_update_from_disk() {
     if let Ok(dir) = get_myagents_dir() {
         let _ = std::fs::remove_file(dir.join("pending_update.bin"));
         let _ = std::fs::remove_file(dir.join("pending_update.bin.tmp"));
         let _ = std::fs::remove_file(dir.join("pending_update.json"));
+    }
+    *DOWNLOADED_VERSION.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    if let Ok(mut guard) = LATEST_UPDATE.lock() {
+        *guard = None;
     }
 }
 
@@ -143,7 +198,12 @@ pub struct DownloadProgress {
 /// - No proxy configured → inherit system network behavior (respect system proxy)
 fn build_updater_with_proxy(app: &AppHandle) -> Result<tauri_plugin_updater::Updater, String> {
     let target = get_update_target();
-    let mut builder = app.updater_builder().target(target.to_string());
+    // 15s per-request timeout. Without this, a blackholed connection (TCP SYN
+    // with no response) leaves the install retry loop hung — defeats the
+    // entire point of the 3-attempt fallback in `resolve_update_with_retries`.
+    let mut builder = app.updater_builder()
+        .target(target.to_string())
+        .timeout(std::time::Duration::from_secs(15));
 
     if let Some(proxy_settings) = proxy_config::read_proxy_settings() {
         let proxy_url = proxy_config::get_proxy_url(&proxy_settings)?;
@@ -163,8 +223,10 @@ fn build_updater_with_proxy(app: &AppHandle) -> Result<tauri_plugin_updater::Upd
 /// Check for updates on startup and silently download if available
 /// This is the main entry point called from setup hook
 pub async fn check_update_on_startup(app: AppHandle) {
-    // Wait 5 seconds before checking to let the app fully initialize
-    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+    // Wait 60 seconds before checking — startup is heavy enough without an
+    // updater HTTPS round-trip racing the user's first action. Periodic
+    // checks (every 30 min) catch up after this initial window.
+    tokio::time::sleep(std::time::Duration::from_secs(60)).await;
 
     logger::info(&app, "[Updater] Starting background update check...");
 
@@ -246,6 +308,18 @@ async fn check_and_download_silently(app: &AppHandle) -> Result<Option<String>, 
         }
     };
 
+    // Invariant: LATEST_UPDATE cache must only hold an Update whose `version`
+    // matches what's currently on disk in pending_update.bin/json. Otherwise a
+    // user click during the silent-download window (cache=NEW, disk=OLD) hits
+    // `cached_update_for(disk_version)` → miss → falls back to a fresh
+    // updater.check() → server returns NEW → version mismatch → install path
+    // CLEARS the OLD disk bytes, killing the user's pending install before
+    // the NEW download has even finished writing. Pre-replace clicks must
+    // install whatever's on disk.
+    //
+    // So: do NOT cache here. Cache only at the points where we've confirmed
+    // disk and Update.version are aligned (each early-return branch + after
+    // save_pending_update_to_disk succeeds).
     let version = update.version.clone();
 
     // Defensive guard: reject downgrades even if server/CDN returns a stale version.
@@ -271,6 +345,9 @@ async fn check_and_download_silently(app: &AppHandle) -> Result<Option<String>, 
                     app,
                     format!("[Updater] v{} already downloaded, skipping re-download", version),
                 );
+                // DOWNLOADED_VERSION is set only after save_pending_update_to_disk
+                // succeeds (line 440), so disk == version here. Cache aligned.
+                cache_update(update.clone());
                 return Ok(None);
             }
             if !is_version_greater(&version, dv) {
@@ -278,6 +355,10 @@ async fn check_and_download_silently(app: &AppHandle) -> Result<Option<String>, 
                     app,
                     format!("[Updater] v{} not newer than already downloaded v{}, skipping", version, dv),
                 );
+                // Disk holds `dv`, server returned `version` (older/equal). The
+                // Update object we have describes `version`, NOT `dv` — caching
+                // it here would violate the cache==disk invariant. Leave any
+                // pre-existing cache for `dv` alone.
                 return Ok(None);
             }
             logger::info(
@@ -352,14 +433,28 @@ async fn check_and_download_silently(app: &AppHandle) -> Result<Option<String>, 
                     app,
                     format!("[Updater] Windows: v{} already cached on disk, skipping re-download", version),
                 );
+                // Disk == version; safe to align cache.
+                cache_update(update.clone());
                 return Ok(Some(version));
             }
         }
 
-        let bytes = update
-            .download(on_chunk, || {})
-            .await
-            .map_err(|e| format!("Silent download failed: {}", e))?;
+        // Tell the renderer we're entering the actual download phase. The
+        // titlebar / Settings "重启更新" button hides while this is in flight
+        // because the version that the button claims is "ready" may be about
+        // to be replaced. Clicking install mid-download lands on inconsistent
+        // cache/disk state — better to hide. The button reappears on
+        // `updater:ready-to-restart` (new bytes committed) or
+        // `updater:download-failed` (kept old bytes, no replacement).
+        let _ = app.emit("updater:download-started", UpdateReadyInfo { version: version.clone() });
+
+        let bytes = match update.download(on_chunk, || {}).await {
+            Ok(b) => b,
+            Err(e) => {
+                let _ = app.emit("updater:download-failed", UpdateReadyInfo { version: version.clone() });
+                return Err(format!("Silent download failed: {}", e));
+            }
+        };
 
         logger::info(
             app,
@@ -369,16 +464,31 @@ async fn check_and_download_silently(app: &AppHandle) -> Result<Option<String>, 
         // Save to disk — install_pending_update will read from here
         if let Err(e) = save_pending_update_to_disk(&version, &bytes) {
             logger::error(app, format!("[Updater] Failed to save update to disk: {}", e));
+            let _ = app.emit("updater:download-failed", UpdateReadyInfo { version: version.clone() });
             return Err(format!("Failed to persist update: {}", e));
         }
+
+        // CRITICAL: align cache only AFTER disk write commits. The atomic
+        // tmp+rename inside save_pending_update_to_disk means
+        // read_pending_update_version() now sees `version`, so cached
+        // `Update` for the same `version` is safe. Doing this BEFORE
+        // save_pending_update_to_disk (or before the download) is the bug
+        // we're avoiding: it widens the cache=NEW/disk=OLD window so a
+        // pre-replace install click would re-fetch and DELETE the OLD bytes.
+        cache_update(update.clone());
     }
 
     #[cfg(not(target_os = "windows"))]
     {
-        update
-            .download_and_install(on_chunk, || {})
-            .await
-            .map_err(|e| format!("Silent download failed: {}", e))?;
+        // Same UI mutex applies on macOS — relaunch path uses bytes installed
+        // by `download_and_install`, but during this window the .app on disk
+        // is being swapped, so a click that triggers `relaunch()` could race.
+        let _ = app.emit("updater:download-started", UpdateReadyInfo { version: version.clone() });
+
+        if let Err(e) = update.download_and_install(on_chunk, || {}).await {
+            let _ = app.emit("updater:download-failed", UpdateReadyInfo { version: version.clone() });
+            return Err(format!("Silent download failed: {}", e));
+        }
     }
 
     // Track this version as the latest downloaded (latest-wins protocol)
@@ -442,6 +552,19 @@ pub fn check_pending_update(app: AppHandle) -> Option<String> {
                     clear_pending_update_from_disk();
                     return None;
                 }
+                // Pending update exists → warm the LATEST_UPDATE cache in the
+                // background so a click on the startup pending dialog can hit
+                // the network-free install path. Without this, the user would
+                // race the 5s `check_update_on_startup` delay and a fast click
+                // would still hit `resolve_update_with_retries`.
+                let app_for_warmup = app.clone();
+                tauri::async_runtime::spawn(async move {
+                    if LATEST_UPDATE.lock().map(|g| g.is_some()).unwrap_or(false) {
+                        return;  // already warm
+                    }
+                    logger::info(&app_for_warmup, "[Updater] Warming LATEST_UPDATE cache for pending install");
+                    let _ = check_and_download_silently(&app_for_warmup).await;
+                });
                 Some(version)
             }
             None => {
@@ -453,14 +576,30 @@ pub fn check_pending_update(app: AppHandle) -> Option<String> {
     }
 }
 
-/// Command: Install a previously downloaded update (Windows only)
-/// Reads bytes from disk, verifies version matches server, then calls update.install()
-/// which launches NSIS + exit(0). Requires network to obtain Update object for install().
+/// Command: Install a previously downloaded update (Windows only).
+///
+/// Resolves the `Update` object (preferring an in-memory cache populated during
+/// background `check()` calls, falling back to a fresh `check()` with retries),
+/// then shuts down all sidecar/SDK/MCP processes (so NSIS can overwrite their
+/// binaries) and finally calls `update.install(bytes)` which spawns the NSIS
+/// installer and calls `exit(0)`.
+///
+/// **Why the cache matters:** on a flaky/blocked network the legacy code path
+/// — which always required `updater.check().await` — silently failed because
+/// the JS side only `console.warn`-ed. Worse, the renderer had already called
+/// `cmd_shutdown_for_update` first, so a network failure left the user with
+/// dead sidecars and a "button doesn't do anything" UX. Now we (a) try the
+/// cache first (zero network), (b) retry the network fallback, (c) only kill
+/// sidecars once we're committed to running the installer.
 #[tauri::command]
-pub async fn install_pending_update(app: AppHandle) -> Result<(), String> {
+pub async fn install_pending_update(
+    app: AppHandle,
+    state: State<'_, ManagedSidecar>,
+) -> Result<(), String> {
     #[cfg(not(target_os = "windows"))]
     {
         let _ = app;
+        let _ = state;
         return Err("install_pending_update is only supported on Windows".to_string());
     }
 
@@ -487,25 +626,21 @@ pub async fn install_pending_update(app: AppHandle) -> Result<(), String> {
             format!("[Updater] Read {} bytes for v{} from disk", bytes.len(), pending_version),
         );
 
-        // Step 2: Build updater and check for latest version to get Update object
-        // Note: This requires network. If offline, the user will need to connect first.
-        let updater = build_updater_with_proxy(&app)?;
-
-        let update = match updater.check().await {
-            Ok(Some(update)) => update,
-            Ok(None) => {
-                // Server says no update available — our cached bytes are stale
-                logger::info(&app, "[Updater] No update available from server, clearing stale pending update");
-                clear_pending_update_from_disk();
-                return Err("VERSION_MISMATCH".to_string());
-            }
-            Err(e) => {
-                logger::error(
-                    &app,
-                    format!("[Updater] Cannot verify update (network required): {}", e),
-                );
-                return Err("NETWORK_ERROR".to_string());
-            }
+        // Step 2: Resolve the Update object. Cache hit → zero network.
+        // Cache miss → retry the HTTPS check up to 3 times to ride out
+        // transient flakiness (DNS hiccups, proxy reconnect, captive portal).
+        let update = if let Some(cached) = cached_update_for(&pending_version) {
+            logger::info(
+                &app,
+                format!("[Updater] Using cached Update for v{} (no network needed)", pending_version),
+            );
+            cached
+        } else {
+            logger::info(
+                &app,
+                format!("[Updater] No cached Update for v{}, falling back to network check", pending_version),
+            );
+            resolve_update_with_retries(&app, &pending_version, 3).await?
         };
 
         // Step 3: Version match check — if server has newer version than our cached bytes, discard
@@ -521,17 +656,94 @@ pub async fn install_pending_update(app: AppHandle) -> Result<(), String> {
             return Err("VERSION_MISMATCH".to_string());
         }
 
-        // Step 4: Install — on Windows this launches NSIS installer and calls exit(0)
-        // This function will NOT return on success
+        // Step 4: Now we're committed to installing. Shut down sidecars so NSIS
+        // can overwrite bun.exe / SDK binaries. This was previously done from
+        // the renderer BEFORE step 2, which meant a network failure would kill
+        // the user's session for nothing. Doing it here keeps the user's state
+        // intact on every failure path above.
+        logger::info(&app, "[Updater] Shutting down sidecars before NSIS install...");
+        if let Err(e) = crate::sidecar::shutdown_for_update(&state) {
+            // Don't bail — NSIS will retry the file overwrite a few times,
+            // and most of the time taskkill /T /F gets there. Log loudly.
+            logger::error(&app, format!("[Updater] Sidecar shutdown returned error: {} (continuing with install)", e));
+        }
+
+        // Step 5: Install — spawns NSIS installer and calls exit(0).
+        // This function will NOT return on success.
+        //
+        // Do NOT clear pending_update.bin / pending_update.json before this
+        // call: if `install()` fails (e.g., extract/temp-write error after
+        // the bytes were written to disk), we want to keep the bytes around
+        // so the user can retry without re-downloading. On the success path
+        // the new app version replaces the old one and the next startup's
+        // `check_pending_update` clears stale-by-version entries automatically.
         logger::info(&app, format!("[Updater] Installing v{}...", pending_version));
-        clear_pending_update_from_disk();
         update
             .install(bytes)
             .map_err(|e| format!("Installation failed: {}", e))?;
 
-        // If we get here (unlikely on Windows), the install completed without exit
+        // Unreachable on success (install_inner exit(0)s the process).
         Ok(())
     }
+}
+
+/// Build an `Update` via `updater.check()` with retries — used as the fallback
+/// when no cached Update is available (e.g., user clicked startup pending dialog
+/// before the 5s background check populated the cache).
+///
+/// Each attempt uses the user's proxy config. Retries with 1s linear backoff.
+/// Maps tauri-plugin-updater errors to caller-friendly strings:
+/// - All attempts network-failed → `"NETWORK_ERROR"`
+/// - Server returned no update → `"VERSION_MISMATCH"` (and clears disk cache)
+#[cfg(target_os = "windows")]
+async fn resolve_update_with_retries(
+    app: &AppHandle,
+    expected_version: &str,
+    attempts: u32,
+) -> Result<Update, String> {
+    let mut last_err: Option<String> = None;
+    for attempt in 1..=attempts {
+        let updater = build_updater_with_proxy(app)?;
+        match updater.check().await {
+            Ok(Some(update)) => {
+                cache_update(update.clone());
+                logger::info(
+                    app,
+                    format!("[Updater] Network check succeeded on attempt {}/{} (server v{})", attempt, attempts, update.version),
+                );
+                return Ok(update);
+            }
+            Ok(None) => {
+                // Server explicitly says nothing newer than current_version is
+                // available. Our cached bytes are stale — the user must have
+                // upgraded by other means, or the CDN regressed to an old JSON.
+                logger::info(
+                    app,
+                    format!("[Updater] Server returned no update on attempt {}/{}; clearing stale pending v{}", attempt, attempts, expected_version),
+                );
+                clear_pending_update_from_disk();
+                return Err("VERSION_MISMATCH".to_string());
+            }
+            Err(e) => {
+                let msg = format!("attempt {}/{}: {}", attempt, attempts, e);
+                logger::error(app, format!("[Updater] Network check failed ({})", msg));
+                last_err = Some(msg);
+                if attempt < attempts {
+                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                }
+            }
+        }
+    }
+    logger::error(
+        app,
+        format!(
+            "[Updater] All {} network check attempts failed for v{}: {}",
+            attempts,
+            expected_version,
+            last_err.as_deref().unwrap_or("unknown"),
+        ),
+    );
+    Err("NETWORK_ERROR".to_string())
 }
 
 /// Expected JSON structure for Tauri v2 updater (per-platform file)

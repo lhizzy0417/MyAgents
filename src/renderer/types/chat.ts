@@ -133,6 +133,14 @@ export interface MessageAttachment {
   isImage?: boolean;
 }
 
+export type MessageSource = 'desktop' | `${string}_private` | `${string}_group`;
+
+export interface MessageMetadata {
+  source: MessageSource;
+  sourceId?: string;
+  senderName?: string;
+}
+
 export interface Message {
   id: string;
   role: 'user' | 'assistant';
@@ -141,9 +149,5 @@ export interface Message {
   sdkUuid?: string;  // SDK 分配的 UUID，用于 resumeSessionAt / rewindFiles
   attachments?: MessageAttachment[];
   /** Message source metadata (IM integration) */
-  metadata?: {
-    source: 'desktop' | 'telegram_private' | 'telegram_group' | 'feishu_private' | 'feishu_group';
-    sourceId?: string;
-    senderName?: string;
-  };
+  metadata?: MessageMetadata;
 }

@@ -354,6 +354,15 @@ pub fn cmd_initialize_bundled_workspace<R: Runtime>(
     let home_dir = dirs::home_dir().ok_or("Failed to get home dir")?;
     let mino_dest = home_dir.join(".myagents").join("projects").join("mino");
 
+    // NOTE: Path::exists() follows symlinks, so a dangling
+    // ~/.myagents/projects/mino link returns false here and we'd fall
+    // through to copy_dir_recursive — which fails on EEXIST and surfaces
+    // a workspace-init error to the user every launch until they clear
+    // the link by hand. Same family as the cpSync crash fixed in
+    // seedBundledSkills / cmd_sync_system_skills (CLAUDE.md red-line:
+    // "用 existsSync / Path::exists() 当存在性探针"). Single fixed path
+    // and graceful error → not crashing in production, so left as TODO
+    // to avoid scope creep on the v0.2.6 hotfix.
     if mino_dest.exists() {
         return Ok(InitBundledWorkspaceResult {
             path: mino_dest.to_string_lossy().to_string(),
@@ -1177,15 +1186,38 @@ pub fn cmd_sync_system_skills<R: Runtime>(
             missing.push(skill_name.to_string());
             continue;
         }
-        // Remove any existing target directory so stale files (e.g.
-        // renamed .md, old examples) don't linger. `merge_dir_recursive`
-        // only overwrites files it encounters; it can't delete removed
-        // ones, and SYSTEM_SKILLS_VERSION bumps specifically mean "the
-        // whole skill snapshot is new, replace it wholesale".
-        if dst.exists() {
-            if let Err(e) = fs::remove_dir_all(&dst) {
+        // Remove any existing target so stale files don't linger.
+        // SYSTEM_SKILLS_VERSION bumps specifically mean "the whole skill
+        // snapshot is new, replace it wholesale".
+        //
+        // Path::exists() follows symlinks → returns false for broken links,
+        // so a dangling `~/.myagents/skills/<name>` left by the user (e.g.
+        // pointing at a moved repo) would slip past this guard and then
+        // trip `fs::create_dir_all` in `merge_dir_recursive` with EEXIST,
+        // failing the whole startup sync. symlink_metadata() does NOT
+        // follow, so it's the right probe for "is there anything at this
+        // path, even a dangling link?".
+        match fs::symlink_metadata(&dst) {
+            Ok(meta) => {
+                let removed = if meta.file_type().is_symlink() || meta.is_file() {
+                    fs::remove_file(&dst)
+                } else {
+                    fs::remove_dir_all(&dst)
+                };
+                if let Err(e) = removed {
+                    ulog_warn!(
+                        "[system-skills] failed to clear {}: {} — falling back to merge",
+                        skill_name,
+                        e
+                    );
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                // Nothing there, fresh seed below.
+            }
+            Err(e) => {
                 ulog_warn!(
-                    "[system-skills] failed to clear {}: {} — falling back to merge",
+                    "[system-skills] symlink_metadata({}) failed: {} — falling back to merge",
                     skill_name,
                     e
                 );

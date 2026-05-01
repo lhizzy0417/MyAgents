@@ -149,6 +149,21 @@ export class SseConnection {
     }
 
     /**
+     * Tear down all registered Tauri listeners idempotently.
+     * Safe to call multiple times — `splice(0)` empties the array atomically
+     * so re-entrant calls see nothing to clean up.
+     */
+    private cleanupTauriListeners(): void {
+        for (const unlisten of this.tauriUnlisteners.splice(0)) {
+            try {
+                unlisten();
+            } catch (error) {
+                console.warn(`[SSE ${this.connectionId}] unlisten failed:`, error);
+            }
+        }
+    }
+
+    /**
      * Handle SSE event - parse and emit to handler
      */
     private handleSseEvent(eventName: string, data: string): void {
@@ -255,43 +270,81 @@ export class SseConnection {
 
         // Use Tab-specific server URL (or fixed port if provided)
         const serverUrl = await this.getServerUrl();
+        // Cancellation checkpoint — disconnect() flips shouldReconnect=false; a
+        // concurrent caller's disconnect must be able to cancel an in-flight
+        // connect, otherwise listeners registered below leak past disconnect().
+        if (!this.shouldReconnect) return;
         const sseUrl = `${serverUrl}/chat/stream`;
 
         console.debug(`[SSE ${this.connectionId}] Connecting Tauri SSE proxy:`, sseUrl);
 
-        // Set up listeners for Tab-prefixed SSE event types
-        // Events are now: sse:tabId:chat:init, sse:tabId:chat:message-chunk, etc.
-        for (const eventName of ALL_EVENTS) {
-            // Listen for events with this Tab's prefix
-            const tauriEventName = `sse:${this.connectionId}:${eventName}`;
-            const unlisten = await listen<string>(tauriEventName, (event) => {
-                this.handleSseEvent(eventName, event.payload);
-            });
-            this.tauriUnlisteners.push(unlisten);
-        }
-
-        // Listen for Tab-specific SSE proxy errors
-        const errorUnlisten = await listen<string>(`sse:${this.connectionId}:error`, (event) => {
-            console.error(`[SSE ${this.connectionId}] Proxy error:`, event.payload);
-            // Trigger reconnection on Tauri SSE errors
-            if (this.shouldReconnect && !this.isReconnecting) {
-                this.scheduleTauriReconnect();
+        // Set up listeners for Tab-prefixed SSE event types.
+        // The whole listen-loop is wrapped in try/catch so that a rejection
+        // from any single listen() call (e.g. Tauri IPC dropped mid-loop)
+        // tears down the listeners we already registered. Without this,
+        // partial registration would leak the same way the original guard
+        // bug did — just driven by errors instead of races.
+        try {
+            for (const eventName of ALL_EVENTS) {
+                const tauriEventName = `sse:${this.connectionId}:${eventName}`;
+                const unlisten = await listen<string>(tauriEventName, (event) => {
+                    this.handleSseEvent(eventName, event.payload);
+                });
+                // Cancellation checkpoint — listen() has resolved so the
+                // listener IS installed; if disconnect raced us, unlisten
+                // this one + the ones we already pushed, then bail.
+                if (!this.shouldReconnect) {
+                    try { unlisten(); } catch { /* best-effort */ }
+                    this.cleanupTauriListeners();
+                    return;
+                }
+                this.tauriUnlisteners.push(unlisten);
             }
-        });
-        this.tauriUnlisteners.push(errorUnlisten);
+
+            // Listen for Tab-specific SSE proxy errors
+            const errorUnlisten = await listen<string>(`sse:${this.connectionId}:error`, (event) => {
+                console.error(`[SSE ${this.connectionId}] Proxy error:`, event.payload);
+                // Trigger reconnection on Tauri SSE errors
+                if (this.shouldReconnect && !this.isReconnecting) {
+                    this.scheduleTauriReconnect();
+                }
+            });
+            if (!this.shouldReconnect) {
+                try { errorUnlisten(); } catch { /* best-effort */ }
+                this.cleanupTauriListeners();
+                return;
+            }
+            this.tauriUnlisteners.push(errorUnlisten);
+        } catch (error) {
+            console.error(`[SSE ${this.connectionId}] listen() registration failed:`, error);
+            this.cleanupTauriListeners();
+            throw error;
+        }
 
         // Start the Rust SSE proxy with Tab ID
         try {
             await invoke('start_sse_proxy', { url: sseUrl, tabId: this.connectionId });
-            this.tauriConnected = true;
-            this.reconnectAttempts = 0;
-            this.isReconnecting = false;
-            this.notifyStatus('connected');
-            console.debug(`[SSE ${this.connectionId}] Tauri SSE proxy started`);
         } catch (error) {
             console.error(`[SSE ${this.connectionId}] Failed to start Tauri SSE proxy:`, error);
+            // start failed → no proxy held; just clean up the listeners we
+            // already registered and surface the error to the caller.
+            this.cleanupTauriListeners();
             throw error;
         }
+        // Even on a successful start, a racing disconnect may have already
+        // flipped shouldReconnect to false; tear down the proxy we just
+        // started and our listeners so nothing leaks.
+        if (!this.shouldReconnect) {
+            try { await invoke('stop_sse_proxy', { tabId: this.connectionId }); }
+            catch (error) { console.error(`[SSE ${this.connectionId}] stop_sse_proxy after cancel failed:`, error); }
+            this.cleanupTauriListeners();
+            return;
+        }
+        this.tauriConnected = true;
+        this.reconnectAttempts = 0;
+        this.isReconnecting = false;
+        this.notifyStatus('connected');
+        console.debug(`[SSE ${this.connectionId}] Tauri SSE proxy started`);
     }
 
     /**
@@ -313,37 +366,48 @@ export class SseConnection {
      * Safe to call multiple times - subsequent calls are no-ops
      */
     async disconnect(): Promise<void> {
-        // Guard: if already disconnected (or never connected), do nothing
-        // This prevents duplicate cleanup work and duplicate logs
-        if (!this.tauriConnected && !this.eventSource) {
+        // Flip shouldReconnect FIRST so any in-flight connectTauri() observes
+        // it at its next await checkpoint and bails out cleanly. Even when
+        // the early-exit guard below fires (nothing yet to tear down), we
+        // keep shouldReconnect=false: if a connect IS racing us, this is the
+        // signal that cancels it. A subsequent connect() will set it back
+        // to true at the top of its own body.
+        this.shouldReconnect = false;
+
+        // Idempotent guard: only skip when there is genuinely nothing to clean
+        // up. Note tauriUnlisteners.length: connectTauri() may have already
+        // pushed listeners while tauriConnected is still false.
+        if (
+            !this.tauriConnected
+            && !this.eventSource
+            && this.tauriUnlisteners.length === 0
+        ) {
             return;
         }
 
         console.debug(`[SSE ${this.connectionId}] Disconnecting`);
 
-        // Stop any pending reconnection attempts
-        this.shouldReconnect = false;
         if (this.reconnectTimer) {
             clearTimeout(this.reconnectTimer);
             this.reconnectTimer = null;
         }
         this.isReconnecting = false;
 
-        // Disconnect Tauri SSE proxy
+        // Stop the Rust SSE proxy if we ever started it.
         if (this.tauriConnected) {
             try {
                 await invoke('stop_sse_proxy', { tabId: this.connectionId });
             } catch (error) {
                 console.error(`[SSE ${this.connectionId}] Failed to stop Tauri SSE proxy:`, error);
             }
-
-            // Unregister all Tauri event listeners
-            for (const unlisten of this.tauriUnlisteners) {
-                unlisten();
-            }
-            this.tauriUnlisteners = [];
             this.tauriConnected = false;
         }
+
+        // Always tear down listeners we registered, regardless of whether
+        // start_sse_proxy completed — connectTauri() may have queued listeners
+        // before flipping tauriConnected, and our cancellation checkpoints
+        // also rely on this method to clean up partial state.
+        this.cleanupTauriListeners();
 
         // Disconnect browser EventSource
         if (this.eventSource) {
@@ -452,11 +516,9 @@ export class SseConnection {
                     await invoke('stop_sse_proxy', { tabId: this.connectionId });
                     this.tauriConnected = false;
                 }
-                // Clear listeners
-                for (const unlisten of this.tauriUnlisteners) {
-                    unlisten();
-                }
-                this.tauriUnlisteners = [];
+                // Clear listeners (uses the same idempotent helper as
+                // disconnect()/connectTauri() cancellation paths).
+                this.cleanupTauriListeners();
 
                 const attempts = this.reconnectAttempts;
                 await this.connectTauri();

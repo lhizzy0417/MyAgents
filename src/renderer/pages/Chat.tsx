@@ -187,8 +187,6 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     setIsLoading,
     setAgentError,
     setLastTerminalReason,
-    connectSse,
-    disconnectSse,
     sendMessage,
     stopResponse,
     loadSession,
@@ -599,6 +597,15 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
   // When true, mount effects skip config push and adopt sidecar's config instead.
   const joinedExistingSidecarRef = useRef(joinedExistingSidecar ?? false);
   joinedExistingSidecarRef.current = joinedExistingSidecar ?? false;
+
+  // Sessions whose live sidecar config has been adopted (joined-sidecar flow).
+  // Snapshot sync uses this as a sticky guard: even after `joinedExistingSidecar`
+  // is cleared, persisted sessionMeta must not overwrite the adopted runtime/model/
+  // permission/MCP — the live sidecar is the truth. Race fixed: adoption finishes
+  // and clears the flag before sessionMeta hydration commits, so a flag-only guard
+  // misses the sessionMeta dispatch and reintroduces the "joined sidecar overwrite"
+  // class of bug.
+  const adoptedSessionRef = useRef<string | null>(null);
 
   // Ref for chat content area (for Tauri drop zone)
   const chatContentRef = useRef<HTMLDivElement>(null);
@@ -1466,6 +1473,11 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
   useEffect(() => {
     if (!sessionMeta) return;  // Not loaded yet — keep mount-time defaults
     if (joinedExistingSidecarRef.current) return;  // Adoption effect handles it
+    // Sticky guard: adoption may have already completed and cleared the flag
+    // BEFORE this sessionMeta dispatch arrived (loadSession sets sessionMeta after
+    // /api/session/config returns). Re-applying persisted snapshot here would
+    // overwrite the just-adopted live sidecar config.
+    if (adoptedSessionRef.current && adoptedSessionRef.current === sessionMeta.id) return;
     // Field-by-field merge: `session ?? agent` (Option C). Missing snapshot fields
     // re-derive from the agent — this is the write-read symmetry of IM live-follow.
     const model = sessionMeta.model ?? currentAgent?.model;
@@ -1549,6 +1561,15 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     if (!runtimeResolved) return;
     // IM Bot / cross-session join — adoption effect mirrors sidecar config
     // back into our state; we must NOT overwrite the live sidecar's model.
+    //
+    // Note: this effect intentionally does NOT use the snapshot-sync's
+    // `adoptedSessionRef` sticky guard. That guard exists to prevent persisted
+    // sessionMeta from clobbering the adopted live config — it must persist
+    // beyond adoption-complete because the racing dispatch comes from outside
+    // this component's control. THIS effect, by contrast, fires from the
+    // user's own state changes (selectedModel/runtimeModel/permission). After
+    // adoption clears the flag, the user's later edits SHOULD reach the
+    // sidecar — applying a sticky guard here would silently swallow them.
     if (joinedExistingSidecarRef.current) return;
 
     const modelToPush = isExternalRuntime ? runtimeModel : selectedModel;
@@ -1573,13 +1594,53 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
   onJoinedExistingSidecarHandledRef.current = onJoinedExistingSidecarHandled;
   useEffect(() => {
     if (!joinedExistingSidecar) return;
+    // Capture the session this adoption is for; after the await, sessionId may
+    // have advanced (user switched again), and we must not record adoption
+    // ownership for a session whose live config we never actually read.
+    const adoptingSessionId = sessionId;
 
     const adoptConfig = async () => {
       try {
-        const config = await apiGet<{ success: boolean; model?: string | null }>('/api/session/config');
-        if (config.success && config.model) {
-          setSelectedModel(config.model);
-          console.log('[Chat] Adopted sidecar config: model=' + config.model);
+        const config = await apiGet<{
+          success: boolean;
+          runtime?: RuntimeType;
+          model?: string | null;
+          mcpServerIds?: string[] | null;
+          permissionMode?: string | null;
+        }>('/api/session/config');
+        if (config.success) {
+          // Server now always returns `runtime`; the `?? currentRuntime` is a
+          // backward-compat hedge for older sidecars that pre-date the field.
+          // Keep the fallback so a stale-binary sidecar doesn't crash adoption.
+          const sidecarRuntime = config.runtime ?? currentRuntime;
+          const sidecarIsExternal = sidecarRuntime !== 'builtin';
+
+          if (config.model) {
+            if (sidecarIsExternal) {
+              setRuntimeModel(config.model);
+            } else {
+              setSelectedModel(config.model);
+            }
+          }
+          if (config.permissionMode) {
+            if (sidecarIsExternal) {
+              setRuntimePermissionMode(config.permissionMode);
+            } else {
+              setPermissionMode(config.permissionMode as PermissionMode);
+            }
+          }
+          if (Array.isArray(config.mcpServerIds)) {
+            setWorkspaceMcpEnabled(config.mcpServerIds);
+          }
+          if (adoptingSessionId) {
+            adoptedSessionRef.current = adoptingSessionId;
+          }
+          console.log('[Chat] Adopted sidecar config:', {
+            runtime: sidecarRuntime,
+            model: config.model,
+            permissionMode: config.permissionMode,
+            mcpServerIds: config.mcpServerIds,
+          });
         }
       } catch (err) {
         console.error('[Chat] Failed to read sidecar config:', err);
@@ -1708,20 +1769,6 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     setWorkspaceRefreshTrigger(prev => prev + 1);
     // eslint-disable-next-line react-hooks/exhaustive-deps -- providers.length is only used for debug logging
   }, [isActive, refreshProviderData, currentProject?.mcpEnabledServers, apiPost]);
-
-  // Connect SSE when component mounts
-  useEffect(() => {
-    // Only connect if we have a valid agentDir
-    if (!agentDir) return;
-
-    void connectSse();
-
-    // Cleanup: disconnect SSE on unmount
-    return () => {
-      disconnectSse();
-    };
-    // connectSse/disconnectSse are stable from TabProvider's useCallback
-  }, [agentDir, connectSse, disconnectSse]);
 
   // Listen for skill copy events to refresh DirectoryPanel (file tree shows .claude/skills/)
   // Note: WorkspaceConfigPanel has its own event listener for internalRefreshKey
