@@ -18,6 +18,7 @@ import { ChevronUp } from 'lucide-react';
 import type { Provider, ProviderVerifyStatus } from '@/config/types';
 import { isProviderAvailable } from '@/config/configService';
 import { Popover } from '@/components/ui/Popover';
+import { ModalityBadges } from '@/components/ModalityBadges';
 
 export interface HelperModelPickerValue {
     providerId: string;
@@ -165,13 +166,14 @@ export function HelperModelPicker({
                                             onChange(provider.id, model.model);
                                             setOpen(false);
                                         }}
-                                        className={`w-full rounded-md px-3 py-1.5 text-left text-[12px] transition-colors ${
+                                        className={`flex w-full items-center rounded-md px-3 py-1.5 text-left text-[12px] transition-colors ${
                                             isSelected
                                                 ? 'bg-[var(--accent)]/10 font-medium text-[var(--accent)]'
                                                 : 'text-[var(--ink)] hover:bg-[var(--paper-inset)]'
                                         }`}
                                     >
-                                        {model.modelName}
+                                        <span className="truncate">{model.modelName}</span>
+                                        <ModalityBadges modalities={model.inputModalities} className="ml-2" />
                                     </button>
                                 );
                             })}

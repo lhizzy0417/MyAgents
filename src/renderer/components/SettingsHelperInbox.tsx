@@ -20,7 +20,7 @@ import { dispatchHelperRequest } from '@/utils/dispatchHelperRequest';
 import { track } from '@/analytics';
 
 const PLACEHOLDER =
-    '告诉 MA 小助理想做什么，配模型、加 MCP、查问题、吐槽反馈，提出你的要求，附上网页链接或截图，小助理都能帮你直接搞定！';
+    '告诉 AI 小助理想做什么，配模型、加 MCP、查问题、吐槽反馈，提出你的要求，附上网页链接或截图，小助理都能帮你直接搞定！';
 
 interface SettingsHelperInboxProps {
     providers: Provider[];
@@ -143,9 +143,11 @@ export default function SettingsHelperInbox({
 
     return (
         <div className="mb-8">
-            <h3 className="mb-3 text-[11px] font-semibold uppercase tracking-[0.12em] text-[var(--ink-muted)]">
-                MA 小助理 · 帮你完成配置
-            </h3>
+            {/* Title matches the "模型供应商" h2 below — same visual weight to
+                signal "this is a peer section, not a subtitle". */}
+            <h2 className="mb-4 text-lg font-semibold text-[var(--ink)]">
+                AI 小助理
+            </h2>
             <div
                 className={`relative rounded-[var(--radius-xl)] bg-[var(--paper-elevated)] p-5 shadow-xs transition-shadow duration-150 hover:shadow-sm focus-within:shadow-sm ${
                     isDragging ? 'ring-2 ring-[var(--accent-warm)]/40' : ''
@@ -197,12 +199,12 @@ export default function SettingsHelperInbox({
                     }}
                 />
 
-                <div className="mt-4 flex items-center justify-between border-t border-[var(--line-subtle)] pt-3">
-                    <div className="flex items-center gap-2">
+                <div className="mt-3 flex items-center justify-between border-t border-[var(--line-subtle)] pt-2">
+                    <div className="flex items-center gap-1">
                         <button
                             type="button"
                             onClick={() => fileInputRef.current?.click()}
-                            className="flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-[13px] font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
+                            className="flex items-center rounded-lg p-1.5 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
                             title="添加图片"
                         >
                             <Paperclip className="h-3.5 w-3.5" />
@@ -227,7 +229,7 @@ export default function SettingsHelperInbox({
                         onClick={handleSend}
                         disabled={!canSend}
                         title={submitTitle}
-                        className="flex items-center gap-1.5 rounded-full bg-[var(--button-primary-bg)] px-4 py-2 text-[13px] font-medium text-[var(--button-primary-text)] transition-colors hover:bg-[var(--button-primary-bg-hover)] disabled:cursor-not-allowed disabled:opacity-50"
+                        className="flex items-center gap-1.5 rounded-full bg-[var(--button-primary-bg)] px-3.5 py-1.5 text-[13px] font-medium text-[var(--button-primary-text)] transition-colors hover:bg-[var(--button-primary-bg-hover)] disabled:cursor-not-allowed disabled:opacity-50"
                     >
                         {isSending ? (
                             <Loader2 className="h-3.5 w-3.5 animate-spin" />
