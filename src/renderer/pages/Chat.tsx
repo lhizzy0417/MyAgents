@@ -187,8 +187,6 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     setIsLoading,
     setAgentError,
     setLastTerminalReason,
-    connectSse,
-    disconnectSse,
     sendMessage,
     stopResponse,
     loadSession,
@@ -1771,20 +1769,6 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     setWorkspaceRefreshTrigger(prev => prev + 1);
     // eslint-disable-next-line react-hooks/exhaustive-deps -- providers.length is only used for debug logging
   }, [isActive, refreshProviderData, currentProject?.mcpEnabledServers, apiPost]);
-
-  // Connect SSE when component mounts
-  useEffect(() => {
-    // Only connect if we have a valid agentDir
-    if (!agentDir) return;
-
-    void connectSse();
-
-    // Cleanup: disconnect SSE on unmount
-    return () => {
-      disconnectSse();
-    };
-    // connectSse/disconnectSse are stable from TabProvider's useCallback
-  }, [agentDir, connectSse, disconnectSse]);
 
   // Listen for skill copy events to refresh DirectoryPanel (file tree shows .claude/skills/)
   // Note: WorkspaceConfigPanel has its own event listener for internalRefreshKey

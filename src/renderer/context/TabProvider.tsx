@@ -2103,6 +2103,14 @@ export default function TabProvider({
     const MAX_RECOVERY_ATTEMPTS = 3;
     // Stable ref for connectSse (avoids circular dependency: recoverSessionSidecar → connectSse → recoverSessionSidecar)
     const connectSseRef = useRef<() => Promise<void>>(() => Promise.resolve());
+    // Connect serializer: each caller's task chains onto the *previous*
+    // task, not just whatever was in flight when this call entered. This
+    // gives true sequential semantics — `recoverSessionSidecar` racing with
+    // the [agentDir, sessionId] effect, plus pending->real id upgrades, can
+    // all queue up safely without producing two concurrent SseConnection
+    // instances on the same tab. See specs/ARCHITECTURE.md §"通信模式 / SSE
+    // 流式事件" — per-Tab single-subscription invariant.
+    const connectSseTailRef = useRef<Promise<void> | null>(null);
     // Unmount guard for async recovery
     const isMountedRef = useRef(true);
     useEffect(() => { return () => { isMountedRef.current = false; }; }, []);
@@ -2172,7 +2180,7 @@ export default function TabProvider({
     // (Chat mounts before `ensureSessionSidecar` finishes) is absorbed at
     // the `tauriClient` layer so every consumer — SSE, HTTP, DirectoryPanel,
     // model push — is automatically correct. See `tauriClient.getTabServerUrl`.
-    const connectSse = useCallback(async () => {
+    const connectSseImpl = useCallback(async () => {
         const connectingSessionId = currentSessionIdRef.current;
         if (sseRef.current?.isConnected()) {
             if (connectedSseSessionIdRef.current === connectingSessionId) return;
@@ -2212,6 +2220,19 @@ export default function TabProvider({
 
         try {
             await sse.connect();
+            // sse.connect() resolves cleanly even when the connect was
+            // cancelled mid-flight via shouldReconnect=false (it returns
+            // without flipping tauriConnected). Three things can leave us
+            // here without a live connection:
+            //   1. A newer connect superseded us → sseRef.current !== sse
+            //   2. The provider unmounted in flight → isMountedRef false
+            //   3. A racing disconnect cancelled us → sse.isConnected() false
+            // In any of these cases, drop the stale instance instead of
+            // marking the tab "connected" when no SSE stream actually exists.
+            if (sseRef.current !== sse || !isMountedRef.current || !sse.isConnected()) {
+                await sse.disconnect();
+                return;
+            }
             connectedSseSessionIdRef.current = connectingSessionId ?? currentSessionIdRef.current ?? null;
             setIsConnected(true);
             // Note: Log server URL is set once in App.tsx using global sidecar
@@ -2226,21 +2247,46 @@ export default function TabProvider({
             throw error;
         }
     }, [tabId, handleSseEvent, recoverSessionSidecar]);
-    connectSseRef.current = connectSse;
 
-    // Disconnect SSE
-    const disconnectSse = useCallback(() => {
-        if (sseRef.current) {
-            void sseRef.current.disconnect();
-            sseRef.current = null;
-            connectedSseSessionIdRef.current = null;
-            setIsConnected(false);
+    // Public connectSse — every caller chains its own task onto the
+    // previous task's tail, giving true serial execution. Without chaining,
+    // multiple callers awaiting the same in-flight promise would all race
+    // past the post-await short-circuit and start concurrent connectSseImpls.
+    const connectSse = useCallback(async () => {
+        const previous = connectSseTailRef.current;
+        const task = (async () => {
+            if (previous) {
+                try { await previous; } catch { /* ignore — chained task runs regardless */ }
+            }
+            // After the chain ahead of us has settled, the prior task may
+            // have already produced the connection we wanted; skip in that case.
+            const sid = currentSessionIdRef.current;
+            if (sseRef.current?.isConnected() && connectedSseSessionIdRef.current === sid) return;
+            await connectSseImpl();
+        })();
+        connectSseTailRef.current = task;
+        try {
+            await task;
+        } finally {
+            if (connectSseTailRef.current === task) {
+                connectSseTailRef.current = null;
+            }
         }
-    }, []);
+    }, [connectSseImpl]);
+    connectSseRef.current = connectSse;
 
     // App.tsx switches Session Sidecars without remounting TabProvider. Keep the
     // event stream attached to the current session, otherwise /chat/send can
     // persist successfully while the visible tab waits on an old/dead SSE stream.
+    //
+    // Load-bearing invariant: this effect drives SSE connect on initial mount
+    // and on session switch — the only OTHER caller is recoverSessionSidecar()
+    // (Rust health-monitor restart path), which goes through the same
+    // connectSseRef and the same chained serializer. App.tsx assigns a
+    // sessionId (real or `pending-...`) on every chat-view transition, so
+    // `sessionId` truthy here covers initial mount as well. If a future code
+    // path opens a chat tab without setting sessionId, SSE will silently
+    // never connect — keep that invariant intact.
     useEffect(() => {
         if (!agentDir || !sessionId) return;
 
@@ -3265,8 +3311,6 @@ export default function TabProvider({
         setAgentError,
         setLastTerminalReason,
         setSessionMeta,
-        connectSse,
-        disconnectSse,
         sendMessage,
         stopResponse,
         loadSession,
@@ -3287,7 +3331,7 @@ export default function TabProvider({
     }), [
         tabId, agentDir, currentSessionId, messages, historyMessages, streamingMessage, firstItemIndex, hasMoreBefore, isLoading, isSessionLoading, sessionState, sessionRuntime, sessionMeta,
         logs, unifiedLogs, systemInitInfo, agentError, systemStatus, lastTerminalReason, pendingPermission, pendingAskUserQuestion, pendingExitPlanMode, pendingEnterPlanMode, toolCompleteCount, queuedMessages, isConnected,
-        setMessages, appendLog, appendUnifiedLog, clearUnifiedLogs, connectSse, disconnectSse, sendMessage, stopResponse, loadSession, loadOlderMessages, resetSession,
+        setMessages, appendLog, appendUnifiedLog, clearUnifiedLogs, sendMessage, stopResponse, loadSession, loadOlderMessages, resetSession,
         apiGetJson, postJson, apiPutJson, apiDeleteJson, respondPermission, respondAskUserQuestion, respondExitPlanMode, cancelQueuedMessage, forceExecuteQueuedMessage
     ]);
 
