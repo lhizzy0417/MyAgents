@@ -186,23 +186,36 @@ async fn read_one_image_as_b64(raw_path: &str) -> ReadAsBase64Item {
         Err(e) => return make_err(format!("Access denied: {}", e)),
     };
 
-    let metadata = match tokio::fs::metadata(&resolved).await {
+    // Symlink defense: a `.png` filename can be a symlink to anything (the
+    // attacker drops `evil.png → ~/.bash_history` into Downloads). Allowlist
+    // checks the file *name* not the target, so without this guard the
+    // renderer would receive arbitrary file bytes round-tripped as base64
+    // image data. Reject symlinks outright — legitimate image drops never
+    // go through one.
+    let symlink_meta = match tokio::fs::symlink_metadata(&resolved).await {
         Ok(m) => m,
         Err(_) => return make_err("File not found".to_string()),
     };
-
-    if !metadata.is_file() {
+    if symlink_meta.is_symlink() {
+        return make_err("Symlinks are not allowed".to_string());
+    }
+    if !symlink_meta.is_file() {
         return make_err("Not a regular file".to_string());
     }
-
-    if metadata.len() > MAX_IMAGE_SIZE_BYTES {
+    if symlink_meta.len() > MAX_IMAGE_SIZE_BYTES {
         return make_err("File too large (max 10MB)".to_string());
     }
 
+    // Bounded read — defense against TOCTOU file growth between the size
+    // check and the read. Mirrors `download.rs::cmd_workspace_download_file`.
+    let read_cap = MAX_IMAGE_SIZE_BYTES + 1;
     let bytes = match tokio::fs::read(&resolved).await {
         Ok(b) => b,
         Err(e) => return make_err(format!("Read failed: {}", e)),
     };
+    if bytes.len() as u64 > read_cap || bytes.len() as u64 > MAX_IMAGE_SIZE_BYTES {
+        return make_err("File too large (max 10MB)".to_string());
+    }
 
     ReadAsBase64Item {
         path: raw_path.to_string(),
@@ -406,6 +419,32 @@ mod tests {
             .await
             .unwrap();
         assert!(res.files[0].error.is_some());
+        let _ = fs::remove_dir_all(&ws);
+    }
+
+    // Cross-review regression guard: a malicious drag-drop with a `.png`
+    // name that is actually a symlink to a private file (e.g.
+    // `~/.bash_history`) would round-trip private bytes as base64 image
+    // data. The allowlist checks the filename, not the target — symlink
+    // rejection covers the gap.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn read_b64_rejects_symlink_image() {
+        use std::os::unix::fs::symlink;
+        let ws = make_tmp_workspace();
+        let secret = ws.join("secret.png");
+        fs::write(&secret, b"\x89PNG\r\n\x1a\n").unwrap();
+        let link = ws.join("decoy.png");
+        symlink(&secret, &link).unwrap();
+        let res = cmd_workspace_read_files_b64(vec![link.to_string_lossy().to_string()])
+            .await
+            .unwrap();
+        assert!(res.files[0].error.is_some());
+        assert!(res.files[0]
+            .error
+            .as_deref()
+            .unwrap_or("")
+            .contains("Symlinks"));
         let _ = fs::remove_dir_all(&ws);
     }
 

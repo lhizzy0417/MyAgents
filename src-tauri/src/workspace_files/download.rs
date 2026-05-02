@@ -13,7 +13,7 @@ use std::io::Read;
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use serde::Serialize;
 
-use super::path_safety::{resolve_inside_workspace, validate_workspace_root};
+use super::path_safety::{resolve_existing_inside_workspace, validate_workspace_root};
 
 const MAX_DOWNLOAD_BYTES: u64 = 25 * 1024 * 1024;
 
@@ -35,7 +35,10 @@ pub async fn cmd_workspace_download_file(
         return Err("Missing path".to_string());
     }
     let workspace_root = validate_workspace_root(&workspace)?;
-    let resolved = resolve_inside_workspace(&workspace_root, &path)?;
+    // Phase D.5: canonicalize-and-prefix-check blocks symlink escape via
+    // `evil_link → /etc/...`. download.rs returns raw bytes; without this
+    // a malicious repo could exfiltrate arbitrary files via the preview UI.
+    let resolved = resolve_existing_inside_workspace(&workspace_root, &path)?;
 
     let metadata = fs::metadata(&resolved).map_err(|_| "File not found".to_string())?;
     if !metadata.is_file() {
@@ -169,5 +172,33 @@ mod tests {
         .await;
         assert!(res.is_err());
         let _ = fs::remove_dir_all(&ws);
+    }
+
+    // Phase D.5 regression: download returns raw bytes. A symlink inside the
+    // workspace pointing to an out-of-workspace file must not be downloadable
+    // through this command — the canonicalize check in
+    // `resolve_existing_inside_workspace` blocks the lexical-resolve bypass.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn rejects_symlink_escape() {
+        use std::os::unix::fs::symlink;
+        let ws = make_test_workspace("download_symlink_escape");
+        let outside = std::env::temp_dir().join(format!(
+            "download_outside_{}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&outside).unwrap();
+        let secret = outside.join("secret.png");
+        fs::write(&secret, b"\x89PNG\rTOP-SECRET-BYTES").unwrap();
+        symlink(&secret, ws.join("evil_link.png")).unwrap();
+
+        let res = cmd_workspace_download_file(
+            ws.to_string_lossy().to_string(),
+            "evil_link.png".to_string(),
+        )
+        .await;
+        assert!(res.is_err());
+        let _ = fs::remove_dir_all(&ws);
+        let _ = fs::remove_dir_all(&outside);
     }
 }

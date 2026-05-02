@@ -138,13 +138,22 @@ fn copy_one_path(
     })
 }
 
+/// Symlink-aware "is this slot occupied" — `Path::exists()` follows symlinks,
+/// returning false for a broken symlink. CLAUDE.md v0.2.5 red-line: relying on
+/// follow-symlink existence checks before destructive ops causes confusing
+/// `fs::copy` / `fs::rename` failures (and on some kernels writes through the
+/// symlink to its target). Mirrors `crud.rs::slot_occupied`.
+fn slot_occupied(path: &Path) -> bool {
+    fs::symlink_metadata(path).is_ok()
+}
+
 fn unique_target_name(
     target_root: &Path,
     name: &str,
     auto_rename: bool,
 ) -> Result<(String, bool), String> {
     let candidate_path = target_root.join(name);
-    if !candidate_path.exists() {
+    if !slot_occupied(&candidate_path) {
         return Ok((name.to_string(), false));
     }
     if !auto_rename {
@@ -158,7 +167,7 @@ fn unique_target_name(
 
     for counter in 1..=MAX_COLLISION_SUFFIX {
         let candidate = format!("{}_{}{}", stem, counter, ext_with_dot);
-        if !target_root.join(&candidate).exists() {
+        if !slot_occupied(&target_root.join(&candidate)) {
             return Ok((candidate, true));
         }
     }
@@ -276,6 +285,45 @@ mod tests {
             fs::read(ws.join("imp").join("project").join("sub").join("b.txt")).unwrap(),
             b"b"
         );
+        let _ = fs::remove_dir_all(&ws);
+        let _ = fs::remove_dir_all(&src_root);
+    }
+
+    // Cross-review regression guard: pre-fix `unique_target_name` used
+    // `Path::exists()` which follows symlinks. A broken symlink at the target
+    // slot returned false → caller proceeded into `fs::copy` / `fs::rename`
+    // and got a confusing error or wrote through the symlink. CLAUDE.md
+    // v0.2.5 red-line. `slot_occupied` (mirroring `crud.rs`) uses
+    // `fs::symlink_metadata` so the slot is correctly seen as occupied.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn collision_check_handles_broken_symlink() {
+        use std::os::unix::fs::symlink;
+        let ws = make_tmp_dir("ws");
+        let src_root = make_tmp_dir("src");
+        let src_file = src_root.join("foo.txt");
+        fs::write(&src_file, b"abc").unwrap();
+
+        // Pre-place a broken symlink at the target slot.
+        fs::create_dir_all(ws.join("dir")).unwrap();
+        symlink("/nonexistent/target", ws.join("dir").join("foo.txt")).unwrap();
+
+        let res = cmd_workspace_copy_paths(
+            ws.to_string_lossy().to_string(),
+            vec![src_file.to_string_lossy().to_string()],
+            "dir".to_string(),
+            Some(true),
+        )
+        .await
+        .unwrap();
+
+        // Auto-renamed instead of overwriting the symlink.
+        assert!(res.copied_files[0].renamed);
+        assert_eq!(res.copied_files[0].target_path, "dir/foo_1.txt");
+        // Original broken symlink left untouched.
+        assert!(fs::symlink_metadata(ws.join("dir").join("foo.txt"))
+            .map(|m| m.is_symlink())
+            .unwrap_or(false));
         let _ = fs::remove_dir_all(&ws);
         let _ = fs::remove_dir_all(&src_root);
     }

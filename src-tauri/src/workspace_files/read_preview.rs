@@ -11,10 +11,11 @@
 //! `FilePreviewModal` consumer doesn't need a parallel branch.
 
 use std::fs;
+use std::io::Read;
 
 use serde::Serialize;
 
-use super::path_safety::{resolve_inside_workspace, validate_workspace_root};
+use super::path_safety::{resolve_existing_inside_workspace, validate_workspace_root};
 
 const MAX_PREVIEW_BYTES: u64 = 512 * 1024;
 
@@ -35,16 +36,12 @@ pub async fn cmd_workspace_read_preview(
         return Err("Missing path".to_string());
     }
     let workspace_root = validate_workspace_root(&workspace)?;
-    let resolved = resolve_inside_workspace(&workspace_root, &path)?;
-    let metadata = fs::symlink_metadata(&resolved)
-        .map_err(|_| "File not found".to_string())?;
-    if metadata.is_symlink() {
-        // Resolve once for size + previewability.
-        let stat = fs::metadata(&resolved).map_err(|_| "Symlink target missing".to_string())?;
-        if !stat.is_file() {
-            return Err("Not a regular file".to_string());
-        }
-    } else if !metadata.is_file() {
+    // resolve_existing_inside_workspace canonicalizes through any symlinks and
+    // verifies the result stays inside workspace_root — blocks the
+    // `evil_link → /etc/passwd` escape (Phase D.5).
+    let resolved = resolve_existing_inside_workspace(&workspace_root, &path)?;
+    let metadata = fs::metadata(&resolved).map_err(|_| "File not found".to_string())?;
+    if !metadata.is_file() {
         return Err("Not a regular file".to_string());
     }
 
@@ -62,9 +59,28 @@ pub async fn cmd_workspace_read_preview(
         return Err("File too large to preview".to_string());
     }
 
-    let content = fs::read_to_string(&resolved)
+    // Bounded read — TOCTOU between the size check above and the read here:
+    // the file may grow under us (active log, racing writer). Cap at MAX+1
+    // bytes; if we hit MAX+1 the size check raced and we reject. Mirrors
+    // `download.rs::cmd_workspace_download_file` which got this defense
+    // earlier in the cross-review.
+    let mut file = fs::File::open(&resolved).map_err(|e| format!("Open failed: {}", e))?;
+    let mut bytes = Vec::with_capacity(size as usize);
+    let read_cap = MAX_PREVIEW_BYTES + 1;
+    file.by_ref()
+        .take(read_cap)
+        .read_to_end(&mut bytes)
         .map_err(|e| format!("Failed to read {}: {}", path, e))?;
-    Ok(PreviewResult { content, name, size })
+    if bytes.len() as u64 > MAX_PREVIEW_BYTES {
+        return Err("File too large to preview".to_string());
+    }
+    let content = String::from_utf8(bytes)
+        .map_err(|e| format!("File is not valid UTF-8: {}", e))?;
+    Ok(PreviewResult {
+        content,
+        name,
+        size: size.min(MAX_PREVIEW_BYTES),
+    })
 }
 
 /// Mirrors `src/shared/fileTypes.ts::isPreviewable`: **binary-blocklist** strategy.
@@ -77,18 +93,16 @@ pub async fn cmd_workspace_read_preview(
 /// must agree. Set must stay in sync with `src/shared/fileTypes.ts` BINARY_EXTENSIONS.
 fn is_previewable(name: &str) -> bool {
     let lower = name.to_ascii_lowercase();
+    // No dot, or a trailing dot with no real extension → extensionless file
+    // (Makefile, LICENSE, `foo.`) — previewable. For dotfiles (`.zshrc`,
+    // `.gitignore`) `rsplit_once` returns `("", "zshrc")` — `e` is non-empty
+    // and we then check the binary blocklist, matching `src/shared/fileTypes.ts`
+    // exactly: `.zshrc` is previewable (zshrc not binary), `.exe` is not
+    // (exe in BINARY_EXTENSIONS).
     let ext = match lower.rsplit_once('.') {
         Some((_, e)) if !e.is_empty() => e,
-        // No dot at all → extensionless file (Makefile, LICENSE, …) — previewable.
-        // A leading-dot dotfile (`.zshrc`, `.gitignore`) gets `_` empty / the rest
-        // as ext via rsplit_once, but our heuristic above mirrors fileTypes.ts:93
-        // (`if (!ext || ext === filename.toLowerCase()) return true`) — when the
-        // extension equals the whole filename (no real ext), treat as previewable.
         _ => return true,
     };
-    if ext == lower {
-        return true;
-    }
     !BINARY_EXTENSIONS.contains(&ext)
 }
 
@@ -234,6 +248,38 @@ mod tests {
         .await;
         assert!(res.is_ok(), "unknown extension should default to previewable");
         let _ = fs::remove_dir_all(&ws);
+    }
+
+    // Phase D.5 regression: a malicious repo containing a symlink to `/etc`
+    // (or any out-of-workspace file) MUST NOT be readable through the
+    // preview command. The lexical resolve passes (the symlink is at
+    // `<ws>/evil_link` which starts_with workspace), so the canonicalize
+    // check in `resolve_existing_inside_workspace` is the load-bearing gate.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn rejects_symlink_escape() {
+        use std::os::unix::fs::symlink;
+        let ws = make_test_workspace("preview_symlink_escape");
+        let outside = std::env::temp_dir().join(format!(
+            "preview_outside_{}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&outside).unwrap();
+        let secret = outside.join("secret.txt");
+        fs::write(&secret, "TOP SECRET").unwrap();
+        symlink(&secret, ws.join("evil_link.txt")).unwrap();
+
+        let res = cmd_workspace_read_preview(
+            ws.to_string_lossy().to_string(),
+            "evil_link.txt".to_string(),
+        )
+        .await;
+        assert!(res.is_err());
+        // Make sure the response does NOT contain the secret bytes — defense
+        // against a future regression that returns content + error.
+        assert!(!format!("{:?}", res).contains("TOP SECRET"));
+        let _ = fs::remove_dir_all(&ws);
+        let _ = fs::remove_dir_all(&outside);
     }
 
     #[tokio::test]

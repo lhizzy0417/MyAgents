@@ -14,13 +14,25 @@
 //! Centralizing these rules means a future "ah, also block X" only happens once.
 //! Callers MUST go through `resolve_inside_workspace`; bypassing it is a bug.
 //!
-//! Symlink note: we deliberately do NOT canonicalize-then-prefix-check, because
-//! canonicalize errors on non-existent paths (which is fine for read but breaks
-//! write). Instead we resolve `..`/`.` lexically, then check `starts_with`. A
-//! symlink inside the workspace pointing outside is therefore reachable through
-//! these commands — that's consistent with the prior sidecar behavior and with
-//! what users expect when they put a symlink in their own project.
+//! Symlink note (Phase D + Phase D.5):
+//! - **Lexical resolve** (`resolve_inside_workspace`): for write-side commands
+//!   (`new_file`, `new_folder`, `rename`, `move`, gitignore append, etc.) the
+//!   target may not exist yet, so we resolve `..`/`.` lexically and check
+//!   `starts_with(workspace_root)`. A symlink inside the workspace pointing
+//!   outside is reachable — consistent with the prior sidecar behavior and
+//!   with what users expect when they put a symlink in their own project.
+//! - **Canonical resolve** (`resolve_existing_inside_workspace`): for read-side
+//!   commands (`read_preview`, `download_file`) we canonicalize the resolved
+//!   path AND the workspace root, then re-check `starts_with`. This blocks
+//!   the "malicious repo with `evil_link → /etc/passwd`" attack: cloning a
+//!   repo means the workspace root is trusted, but individual symlinks
+//!   inside it are not. Read-only commands have no legitimate need to follow
+//!   them outside.
+//!
+//! The same canonicalize trick can't apply to write-side commands because
+//! `fs::canonicalize` fails on paths that don't exist yet.
 
+use std::fs;
 use std::path::{Component, Path, PathBuf};
 
 use crate::commands::validate_file_path as system_blacklist_check;
@@ -95,6 +107,48 @@ pub fn validate_external_read_path(absolute_path: &str) -> WfResult<PathBuf> {
     system_blacklist_check(absolute_path)
 }
 
+/// Stricter variant of `resolve_inside_workspace` for **read-side** commands:
+/// resolves any symlinks via `fs::canonicalize` and verifies the canonical
+/// path is still inside the canonical workspace root. Blocks the "malicious
+/// `evil_link → /etc/passwd` checked into a repo" attack from leaking content
+/// out of the workspace.
+///
+/// Behavior:
+/// - If the resolved path doesn't exist, returns `Err("File not found")` (the
+///   read command was going to error anyway — surfacing the same error here
+///   makes the failure mode uniform regardless of whether the path is missing
+///   or rejected for being a symlink escape).
+/// - If the path exists but resolves outside the workspace via symlink, returns
+///   `Err("Path escapes workspace root via symlink")`.
+/// - If the workspace root itself isn't canonicalizable (rare — race with
+///   directory deletion), returns `Err("Workspace root canonicalize failed")`
+///   rather than silently downgrading to lexical-only.
+///
+/// **Do not** use for write/create commands — `fs::canonicalize` fails on
+/// paths that don't exist, so `new_file`/`new_folder` etc. must use the
+/// lexical helper.
+pub fn resolve_existing_inside_workspace(workspace_root: &Path, relative: &str) -> WfResult<PathBuf> {
+    // Lexical pre-check first — same `..`/absolute/blacklist rules.
+    let lexical = resolve_inside_workspace(workspace_root, relative)?;
+
+    // Canonicalize the workspace root once. If this fails the workspace was
+    // moved/deleted under us — fail closed rather than fall through.
+    let canonical_root = fs::canonicalize(workspace_root)
+        .map_err(|_| "Workspace root canonicalize failed".to_string())?;
+
+    // Canonicalize the candidate. Failure means the path doesn't exist (or is
+    // unreadable for permission reasons) — the caller would surface an error
+    // either way, so collapse this branch into a uniform "not found".
+    let canonical = fs::canonicalize(&lexical)
+        .map_err(|_| "File not found".to_string())?;
+
+    if !canonical.starts_with(&canonical_root) {
+        return Err("Path escapes workspace root via symlink".to_string());
+    }
+
+    Ok(canonical)
+}
+
 /// Reject filenames that would break on Windows or hide the file (`.`, `..`,
 /// names beginning with whitespace, names containing path separators, NTFS
 /// reserved names, and the Windows reserved character set).
@@ -126,10 +180,13 @@ pub fn validate_item_name(name: &str) -> WfResult<()> {
 }
 
 fn is_windows_reserved_name(name: &str) -> bool {
-    let stem = name
-        .split_once('.')
-        .map(|(s, _)| s)
-        .unwrap_or(name)
+    // Windows silently strips trailing dots and spaces from filenames during
+    // normalization, so `CON.`, `CON `, `CON. ` all resolve to the device
+    // `CON`. Strip them before comparing the stem. (NUL bytes / control chars
+    // in the stem are caught earlier by `validate_item_name`.)
+    let stem_raw = name.split_once('.').map(|(s, _)| s).unwrap_or(name);
+    let stem = stem_raw
+        .trim_end_matches(|c: char| c == ' ' || c == '.')
         .to_ascii_uppercase();
     matches!(
         stem.as_str(),
@@ -257,6 +314,24 @@ mod tests {
         assert!(validate_item_name("LPT1.log").is_err());
     }
 
+    // Cross-review regression guard: Windows normalizes `CON.`, `CON `,
+    // `COM1   . ` etc. to the underlying device. The reserved-name check
+    // must trim trailing dots/spaces before comparing the stem, otherwise a
+    // user-typed name slips past validation but still resolves to the
+    // device on Windows.
+    #[test]
+    fn validate_item_name_rejects_windows_reserved_with_trailing_chars() {
+        assert!(validate_item_name("CON.").is_err());
+        assert!(validate_item_name("CON ").is_err());
+        assert!(validate_item_name("COM1.").is_err());
+        assert!(validate_item_name("PRN. .").is_err());
+        // Make sure regular names with trailing dot in stem still pass the
+        // reserved-name gate (other rules may still reject them, but not
+        // this one). `foo.txt` has stem "foo" which trims to "foo".
+        // `foo.` has stem "foo" too — should pass reserved-name gate.
+        assert!(validate_item_name("foo.").is_ok());
+    }
+
     #[test]
     fn validate_item_name_rejects_control_chars() {
         assert!(validate_item_name("a\x00b").is_err());
@@ -273,5 +348,96 @@ mod tests {
     fn sanitize_falls_back_to_untitled() {
         assert_eq!(sanitize_filename(""), "untitled");
         assert_eq!(sanitize_filename("   "), "untitled");
+    }
+
+    // ── resolve_existing_inside_workspace — Phase D.5 symlink hardening ──
+
+    #[test]
+    fn resolve_existing_finds_real_file() {
+        let ws = make_tmp_workspace();
+        fs::write(ws.join("foo.txt"), "x").unwrap();
+        let resolved = resolve_existing_inside_workspace(&ws, "foo.txt").unwrap();
+        // Both should canonicalize to the same path.
+        assert_eq!(resolved, fs::canonicalize(ws.join("foo.txt")).unwrap());
+        let _ = fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn resolve_existing_rejects_missing() {
+        let ws = make_tmp_workspace();
+        let res = resolve_existing_inside_workspace(&ws, "nope.txt");
+        assert!(res.is_err());
+        assert!(res.unwrap_err().contains("File not found"));
+        let _ = fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn resolve_existing_rejects_traversal() {
+        let ws = make_tmp_workspace();
+        let res = resolve_existing_inside_workspace(&ws, "../etc");
+        assert!(res.is_err());
+        let _ = fs::remove_dir_all(&ws);
+    }
+
+    // The headline regression guard: a malicious symlink inside the
+    // workspace pointing outside (e.g. cloned repo with `evil_link → /etc`)
+    // must be rejected by read-side commands. Lexical resolve passes — the
+    // link IS at `<ws>/evil_link` which starts_with workspace — so we rely
+    // on the canonicalize check to catch the escape.
+    #[cfg(unix)]
+    #[test]
+    fn resolve_existing_rejects_symlink_escape() {
+        use std::os::unix::fs::symlink;
+        let ws = make_tmp_workspace();
+        // Target outside the workspace.
+        let outside_dir = std::env::temp_dir().join(format!(
+            "ws_outside_{}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&outside_dir).unwrap();
+        let outside_file = outside_dir.join("secret.txt");
+        fs::write(&outside_file, "secret").unwrap();
+        // Symlink inside ws → outside file.
+        symlink(&outside_file, ws.join("evil_link")).unwrap();
+
+        let res = resolve_existing_inside_workspace(&ws, "evil_link");
+        assert!(res.is_err());
+        assert!(
+            res.unwrap_err().contains("symlink"),
+            "expected symlink-escape error"
+        );
+        let _ = fs::remove_dir_all(&ws);
+        let _ = fs::remove_dir_all(&outside_dir);
+    }
+
+    // Symlinks INSIDE the workspace pointing to other files INSIDE the
+    // workspace should still be allowed — they're a legitimate user pattern
+    // (e.g. linking `current → builds/v3`). Canonicalize collapses them but
+    // both ends remain inside the canonical root.
+    #[cfg(unix)]
+    #[test]
+    fn resolve_existing_allows_internal_symlink() {
+        use std::os::unix::fs::symlink;
+        let ws = make_tmp_workspace();
+        fs::write(ws.join("real.txt"), "ok").unwrap();
+        symlink(ws.join("real.txt"), ws.join("link.txt")).unwrap();
+        let resolved = resolve_existing_inside_workspace(&ws, "link.txt").unwrap();
+        // Should resolve to the real file (canonicalize follows the link).
+        assert_eq!(resolved, fs::canonicalize(ws.join("real.txt")).unwrap());
+        let _ = fs::remove_dir_all(&ws);
+    }
+
+    // Broken symlink inside workspace — canonicalize fails → "File not found".
+    // This is the right behavior: the read commands would error on read
+    // anyway, and surfacing it here is uniform.
+    #[cfg(unix)]
+    #[test]
+    fn resolve_existing_handles_broken_symlink() {
+        use std::os::unix::fs::symlink;
+        let ws = make_tmp_workspace();
+        symlink("/nonexistent/target", ws.join("broken")).unwrap();
+        let res = resolve_existing_inside_workspace(&ws, "broken");
+        assert!(res.is_err());
+        let _ = fs::remove_dir_all(&ws);
     }
 }
