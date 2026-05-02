@@ -478,7 +478,7 @@ export function UnifiedLogsPanel({ sseLogs, isVisible, onClose, onClearAll }: Un
                 <div className="flex items-center justify-between border-t border-[var(--line)] bg-[var(--paper-inset)] px-6 py-2 text-xs text-[var(--ink-muted)]">
                     <div className="flex gap-3">
                         <span className="text-blue-600 dark:text-blue-400">REACT: {logCounts.react}</span>
-                        <span className="text-green-600 dark:text-green-400">BUN: {logCounts.bun}</span>
+                        <span className="text-green-600 dark:text-green-400">NODE: {logCounts.bun}</span>
                         <span className="text-orange-600 dark:text-orange-400">RUST: {logCounts.rust}</span>
                         <span className="text-[var(--ink-muted)]">Total: {allLogs.length}</span>
                     </div>

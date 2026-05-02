@@ -1114,7 +1114,7 @@ function buildCronEventPrompt(
 /**
  * Write a startup beacon directly to unified log file (bypasses initLogger).
  * This is critical for diagnosing Windows startup hangs where initLogger
- * may not be reached yet and zero BUN logs appear.
+ * may not be reached yet and zero NODE logs appear.
  */
 function startupBeacon(step: string): void {
   // Write to stderr — captured by Rust drain thread → unified log
@@ -1135,7 +1135,7 @@ function startupBeacon(step: string): void {
     const s = String(now.getSeconds()).padStart(2, '0');
     const ms = String(now.getMilliseconds()).padStart(3, '0');
     const ts = `${y}-${m}-${d} ${h}:${mi}:${s}.${ms}`;
-    appendFileSync(filePath, `${ts} [BUN  ] [INFO ] [startup] ${step}\n`);
+    appendFileSync(filePath, `${ts} [NODE ] [INFO ] [startup] ${step}\n`);
   } catch { /* ignore */ }
 }
 

@@ -85,9 +85,20 @@ function getLogFilePath(): string {
 }
 
 // ── Formatting ─────────────────────────────────────────────────────────
+// Map of internal discriminant → on-disk source label. The discriminant
+// `'bun'` is kept as a discriminant for backward-compat parsing of pre-0.2.0
+// unified-log files (see `LogSource` type in `shared/types/log.ts`), but
+// from v0.2.0 the sidecar runs on Node.js and the on-disk log line MUST say
+// `[NODE ]` — both to match reality and because greps in tech_docs already
+// use `[NODE ]`. (See unified log line 92 comment for the intent.)
+const SOURCE_LABEL: Record<string, string> = {
+  bun: 'NODE',
+};
+
 function formatLogEntry(entry: LogEntry): string {
   const level = entry.level.toUpperCase().padEnd(5);
-  const source = entry.source.toUpperCase().padEnd(5);
+  const labeled = SOURCE_LABEL[entry.source] ?? entry.source.toUpperCase();
+  const source = labeled.padEnd(5);
   // Correlation fields are emitted as a compact bracketed suffix when
   // present — keeps existing greps for `[NODE ] [INFO ]` working while
   // making `sessionId=...` filterable. Order is fixed (sessionId → turnId
