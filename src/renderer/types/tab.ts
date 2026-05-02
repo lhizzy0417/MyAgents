@@ -22,6 +22,19 @@ export interface InitialMessageCron {
      *  pass it through unchanged so `CronTaskConfig` consumers don't need to
      *  re-derive from the schedule. */
     intervalMinutes: number;
+    /** UI-level distinction between "run inline in the current chat" and
+     *  "spawn a standalone background task". Mirrors `runMode` semantically
+     *  but is what the modal's edit form needs to round-trip correctly:
+     *  the modal computes `runMode` from this (modulo `schedule.kind ===
+     *  'loop'` which forces `single_session`), so when re-opening the
+     *  editor without this field we'd default to `current_session` and
+     *  silently rewrite a "新开对话" task as "当前对话".
+     *
+     *  Launcher-only path also branches on this — `executionTarget ===
+     *  'new_task'` short-circuits in `Launcher.handleBrandSend` to create
+     *  the task directly without opening a chat tab (matching the modal's
+     *  promise: "创建独立定时任务，不占用当前对话"). */
+    executionTarget?: 'current_session' | 'new_task';
 }
 
 /** Message data passed from Launcher to Chat for auto-send on workspace open.

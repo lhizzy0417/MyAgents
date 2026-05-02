@@ -117,15 +117,25 @@ function CronTaskSettingsForm({
   const [deliveryBotId, setDeliveryBotId] = useState(initialConfig?.delivery?.botId ?? '');
   const { options: deliveryOptions, hasChannels, resolveDelivery } = useDeliveryChannels(workspacePath);
 
-  // End conditions — pre-compute initial values to avoid purity issues
+  // End conditions — pre-compute initial values to avoid purity issues.
+  //
+  // `!= null` (loose) instead of `!== undefined` (strict) is load-bearing:
+  // an EndConditions blob round-tripped through Rust may contain explicit
+  // `null` for missing optional fields if Rust serialized without
+  // `skip_serializing_if`. `null !== undefined` is true in JS, so a
+  // "永久运行" task (all None on Rust side) would mistakenly read as
+  // "条件停止 + 执行次数 10" here. Rust now skips None fields for
+  // EndConditions, but this defense-in-depth keeps the modal correct
+  // even if some other producer (admin CLI, future migration) emits
+  // explicit null.
   const [endCondInit] = useState(() => {
     const ec = initialConfig?.endConditions;
-    const hasCond = ec && (ec.deadline || ec.maxExecutions !== undefined || ec.aiCanExit);
+    const hasCond = ec && (ec.deadline || ec.maxExecutions != null || ec.aiCanExit);
     return {
       mode: (hasCond ? 'conditional' : 'forever') as EndMode,
       useDeadline: !!ec?.deadline,
       deadline: ec?.deadline ? toLocalDateTimeString(new Date(ec.deadline)) : toLocalDateTimeString(new Date(Date.now() + 86400000)),
-      useMaxExec: ec?.maxExecutions !== undefined,
+      useMaxExec: ec?.maxExecutions != null,
       maxExec: ec?.maxExecutions ?? 10,
       aiCanExit: ec?.aiCanExit ?? false,
     };

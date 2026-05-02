@@ -293,6 +293,12 @@ export default memo(function BrandSection({
                       delivery: stagedCron.delivery,
                       name: stagedCron.name,
                       intervalMinutes: stagedCron.intervalMinutes,
+                      // Carry executionTarget through to Launcher (which
+                      // short-circuits on `new_task` to create a background
+                      // task) and to the chat-side cron state (so re-opening
+                      // the editor shows the user's actual choice, not the
+                      // 'current_session' default).
+                      executionTarget: stagedCron.executionTarget,
                   }
                 : undefined;
             onSend(text, images, cron);

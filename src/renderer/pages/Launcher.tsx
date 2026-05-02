@@ -19,7 +19,7 @@ import { AddWorkspaceMenu, BrandSection, RecentTasks, TemplateLibraryDialog, Wor
 import WorkspaceConfigPanel from '@/components/WorkspaceConfigPanel';
 import { useConfig } from '@/hooks/useConfig';
 import { useTaskCenterData } from '@/hooks/useTaskCenterData';
-import { type Project, type PermissionMode, type McpServerDefinition } from '@/config/types';
+import { type Project, type PermissionMode, type McpServerDefinition, getEffectiveModelAliases } from '@/config/types';
 import { CUSTOM_EVENTS } from '../../shared/constants';
 import {
     getAllMcpServers,
@@ -29,6 +29,7 @@ import {
 } from '@/config/configService';
 import { patchAgentConfig, getAgentById } from '@/config/services/agentConfigService';
 import { persistInputOptionChange } from '@/api/persistInputOption';
+import { createCronTask, startCronTask, startCronScheduler } from '@/api/cronTaskClient';
 import type { RuntimeType, RuntimeModelInfo, RuntimePermissionMode, RuntimeDetections } from '../../shared/types/runtime';
 import { CC_MODELS, CC_PERMISSION_MODES, CODEX_PERMISSION_MODES, GEMINI_PERMISSION_MODES } from '../../shared/types/runtime';
 import { apiGetJson } from '@/api/apiFetch';
@@ -444,10 +445,92 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
 
         setLaunchingProjectId(selectedWorkspace.id);
         touchProject(selectedWorkspace.id).catch(() => {});
+
+        // Bug 1 fix — "新开对话" launcher cron should NOT pop a chat tab.
+        // The modal's promise to the user: "创建独立定时任务，不占用当前对话".
+        // Chat.tsx already has the in-chat equivalent (line ~2056: when
+        // `executionTarget === 'new_task'` it creates a standalone task and
+        // toasts "定时任务已创建" instead of dispatching as a chat message).
+        // Mirror that behavior here so the launcher path honors the same
+        // user-visible promise.
+        //
+        // Path:
+        //   1. createCronTask with a freshly-minted standalone session id
+        //      (matches `cron-standalone-<uuid>` convention from Chat.tsx)
+        //   2. startCronTask (status=running) + startCronScheduler
+        //   3. toast + clear loading; stay on launcher
+        // Failure → fall through to the regular tab-launch path so the user
+        // doesn't lose their input — same recovery contract Chat.tsx
+        // autoSend uses.
+        if (cron && cron.executionTarget === 'new_task') {
+            try {
+                const standaloneSessionId = `cron-standalone-${crypto.randomUUID()}`;
+                // Build providerEnv inline (mirrors Chat.tsx::buildProviderEnv).
+                // Subscription auth and external runtimes both leave providerEnv
+                // undefined — same gating Chat.tsx:938 uses.
+                const aliases = launcherProvider
+                    ? getEffectiveModelAliases(launcherProvider, config.providerModelAliases)
+                    : null;
+                const providerEnv = (!isExternalRuntime && launcherProvider && launcherProvider.type !== 'subscription')
+                    ? {
+                        baseUrl: launcherProvider.config.baseUrl,
+                        apiKey: apiKeys[launcherProvider.id],
+                        authType: launcherProvider.authType,
+                        apiProtocol: launcherProvider.apiProtocol,
+                        maxOutputTokens: launcherProvider.maxOutputTokens,
+                        maxOutputTokensParamName: launcherProvider.maxOutputTokensParamName,
+                        upstreamFormat: launcherProvider.upstreamFormat,
+                        ...(aliases ? { modelAliases: aliases } : {}),
+                    }
+                    : undefined;
+                const created = await createCronTask({
+                    workspacePath: selectedWorkspace.path,
+                    sessionId: standaloneSessionId,
+                    prompt: text,
+                    intervalMinutes: cron.intervalMinutes,
+                    endConditions: cron.endConditions,
+                    runMode: 'new_session',
+                    notifyEnabled: cron.notifyEnabled,
+                    schedule: cron.schedule,
+                    delivery: cron.delivery,
+                    name: cron.name,
+                    permissionMode: launcherPermissionMode,
+                    model: builtinSelection?.model ?? runtimeModel,
+                    providerEnv,
+                    runtime: launcherRuntime,
+                    runtimeConfig: isExternalRuntime ? runtimeConfigRef.current : undefined,
+                    // Snapshot the launcher's MCP selection so the cron task's
+                    // own override branch fires at execute-sync time. The
+                    // perf shortcut in /cron/execute-sync (preferring
+                    // currentMcpServers shape) only helps the in-Chat handoff
+                    // path where /api/mcp/set has run; standalone-cron from
+                    // launcher has no Tab pre-warm, so first fire still
+                    // self-resolves. Field is still recorded for parity with
+                    // the Chat.tsx new_task path (Chat.tsx:2033).
+                    mcpEnabledServers: launcherWorkspaceMcpEnabled,
+                });
+                await startCronTask(created.id);
+                await startCronScheduler(created.id);
+                track('launcher_cron_create_standalone', {
+                    interval_minutes: cron.intervalMinutes,
+                    schedule_kind: cron.schedule.kind,
+                });
+                toastRef.current.success('独立定时任务已创建，可在任务中心查看');
+                setLaunchingProjectId(null);
+                return;
+            } catch (err) {
+                console.error('[Launcher] Failed to create standalone cron task:', err);
+                toastRef.current.error(`创建定时任务失败：${err instanceof Error ? err.message : String(err)}`);
+                setLaunchingProjectId(null);
+                return;
+            }
+        }
+
         onLaunchProject(selectedWorkspace, undefined, initialMessage);
     }, [selectedWorkspace, launcherProvider, launcherPermissionMode,
         launcherSelectedModel, launcherWorkspaceMcpEnabled, launcherGlobalMcpEnabled,
-        isExternalRuntime, touchProject, onLaunchProject, updateConfig]);
+        isExternalRuntime, launcherRuntime, apiKeys, config.providerModelAliases,
+        touchProject, onLaunchProject, updateConfig]);
 
     // Path input dialog state (for browser dev mode)
     const [pathDialogOpen, setPathDialogOpen] = useState(false);

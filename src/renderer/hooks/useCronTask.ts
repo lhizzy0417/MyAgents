@@ -45,6 +45,8 @@ export interface CronTaskState {
     executionTarget?: 'current_session' | 'new_task';
     /** Where to deliver execution results (IM channel) */
     delivery?: CronDelivery;
+    /** Per-task MCP enable list — see `CronTaskConfig.mcpEnabledServers`. */
+    mcpEnabledServers?: string[];
   } | null;
   /** Active cron task (after creation) */
   task: CronTask | null;
@@ -132,6 +134,7 @@ export function useCronTask(options: UseCronTaskOptions) {
         schedule: config.schedule,
         executionTarget: config.executionTarget,
         delivery: config.delivery,
+        mcpEnabledServers: config.mcpEnabledServers,
       },
       task: null,
       isStarting: false,
@@ -231,6 +234,14 @@ export function useCronTask(options: UseCronTaskOptions) {
         runtimeConfig: currentConfig.runtimeConfig,
         schedule: currentConfig.schedule,
         delivery: currentConfig.delivery,
+        // Threading the launcher's MCP set into the task makes the
+        // first scheduler-triggered execution take the override branch
+        // in /cron/execute-sync (line ~2402), pinning MCP to the same
+        // set the pre-warm session already has —
+        // applyMcpOverrideAndAwaitReady becomes a fingerprint-match no-op
+        // (line 1282 of agent-session.ts) instead of an abort+restart.
+        // Saves ~5s on every launcher cron handoff.
+        mcpEnabledServers: currentConfig.mcpEnabledServers,
       });
       createdTaskId = task.id;
 
@@ -664,6 +675,20 @@ export function useCronTask(options: UseCronTaskOptions) {
   // Restore state from an existing cron task (for app restart recovery)
   const restoreFromTask = useCallback((task: CronTask) => {
     console.log('[useCronTask] Restoring from task:', task.id, task.status);
+    // Reverse-derive executionTarget from runMode. Rust's CronTask schema
+    // doesn't store executionTarget (it's a UI-only distinction that the
+    // modal collapses into runMode at confirm time), so on restore we
+    // recompute it. Without this the editor would default to
+    // 'current_session' regardless of the actual task — Bug 2A's second
+    // half (the first half is fixed by threading executionTarget through
+    // the launcher → autoSend handoff). The mapping mirrors the modal's
+    // forward direction: `executionTarget==='current_session'` ↔
+    // `runMode==='single_session'`; `'new_task'` ↔ `'new_session'`.
+    // schedule.kind === 'loop' forces single_session in the modal but
+    // doesn't constrain executionTarget; recover from runMode is still
+    // the right inverse.
+    const recoveredExecutionTarget: 'current_session' | 'new_task' =
+      task.runMode === 'new_session' ? 'new_task' : 'current_session';
     setState({
       isEnabled: true,
       config: {
@@ -678,6 +703,8 @@ export function useCronTask(options: UseCronTaskOptions) {
         runtime: task.runtime,
         runtimeConfig: task.runtimeConfig,
         delivery: task.delivery,
+        executionTarget: recoveredExecutionTarget,
+        mcpEnabledServers: task.mcpEnabledServers,
       },
       task,
       isStarting: false,

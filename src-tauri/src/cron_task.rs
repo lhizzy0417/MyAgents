@@ -209,12 +209,25 @@ pub enum TaskStatus {
 }
 
 /// End conditions for a cron task
+///
+/// `skip_serializing_if = "Option::is_none"` on the optional fields is
+/// load-bearing: without it, Rust serializes `None` as JSON `null`, and the
+/// renderer's modal init code (`CronTaskSettingsModal::endCondInit`) checks
+/// `ec.maxExecutions !== undefined` to decide whether the task has end
+/// conditions. `null !== undefined` is `true` in JS, so a "永久运行" task
+/// (deadline=None, max_executions=None, ai_can_exit=false) would round-trip
+/// through Rust as `{deadline: null, maxExecutions: null, aiCanExit: false}`
+/// and the modal would mistakenly display "条件停止 + 执行次数 10". Skipping
+/// the None fields keeps the JSON shape aligned with TS optional convention
+/// (omit the property → `undefined` in the consumer).
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct EndConditions {
     /// Task will stop after this time (ISO timestamp)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deadline: Option<DateTime<Utc>>,
     /// Task will stop after this many executions
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_executions: Option<u32>,
     /// Allow AI to exit the task via ExitCronTask tool
     pub ai_can_exit: bool,

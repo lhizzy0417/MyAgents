@@ -67,6 +67,8 @@ export interface CronTask {
   providerEnv?: { baseUrl?: string; apiKey?: string; authType?: 'auth_token' | 'api_key' | 'both' | 'auth_token_clear_api_key'; apiProtocol?: 'anthropic' | 'openai'; maxOutputTokens?: number; maxOutputTokensParamName?: 'max_tokens' | 'max_completion_tokens' | 'max_output_tokens'; upstreamFormat?: 'chat_completions' | 'responses' };
   runtime?: RuntimeType;
   runtimeConfig?: RuntimeConfig;
+  /** Per-task MCP enable list snapshot — see CronTaskConfig.mcpEnabledServers. */
+  mcpEnabledServers?: string[];
   lastError?: string;
   /** Source IM Bot ID that created this task */
   sourceBotId?: string;
@@ -122,6 +124,24 @@ export interface CronTaskConfig {
   name?: string;
   /** Where to deliver execution results (IM channel) */
   delivery?: CronDelivery;
+  /**
+   * Per-task MCP enable list (PRD 0.2.4 §需求 4). Mirrors
+   * `Task.mcp_enabled_servers` override; `undefined` = follow workspace MCP.
+   *
+   * Why this matters for the launcher cron handoff perf path: the in-tab
+   * pre-warm sets `currentMcpServers` to the Tab's effective MCP set. When
+   * the cron scheduler then fires `/cron/execute-sync`, that handler calls
+   * `applyMcpOverrideAndAwaitReady(target)` where `target` is either the
+   * task's `mcpEnabledServers` (override branch, line ~2402) or
+   * `getEffectiveMcpServers(agentDir)` (reconcile branch, line ~2412).
+   * If the task carries no override, the reconcile branch may compute a
+   * different set than what pre-warm used, fingerprint mismatch, abort+
+   * restart the SDK — wasting ~5s. Threading the launcher's MCP set into
+   * task.mcpEnabledServers makes the override branch fire with the exact
+   * same set the pre-warm already loaded, so `applyMcpOverrideAndAwaitReady`
+   * short-circuits as a no-op (`agent-session.ts:1282`).
+   */
+  mcpEnabledServers?: string[];
 }
 
 /**

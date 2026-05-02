@@ -229,6 +229,7 @@ import {
   switchToSession,
   setMcpServers,
   getMcpServers,
+  getCurrentMcpServers,
   applyMcpOverrideAndAwaitReady,
   withCronDispatchLock,
   setAgents,
@@ -2401,9 +2402,26 @@ async function main() {
             // already matches `currentMcpServers` it's a cheap no-op.
             let target: McpServerDefinition[];
             if (payload.mcpEnabledServers !== undefined) {
-              const allServers = getAllMcpServers();
               const overrideIds = new Set(payload.mcpEnabledServers);
-              target = allServers.filter((s) => overrideIds.has(s.id));
+              // Prefer `currentMcpServers` (set by frontend's /api/mcp/set)
+              // when its IDs cover all override IDs. Sidecar's
+              // `getAllMcpServers()` and the renderer's mcpService produce
+              // McpServerDefinition objects with subtly different env/args
+              // shapes, and feeding sidecar-shaped definitions back through
+              // `applyMcpOverrideAndAwaitReady` triggers a fingerprint
+              // mismatch → abort+restart that wastes ~5s on the launcher
+              // cron handoff. When the frontend already pushed shapes that
+              // cover the override set, reusing those keeps the fingerprint
+              // stable and the call becomes a cheap no-op.
+              const fromCurrent = (getCurrentMcpServers() ?? []).filter(
+                (s) => overrideIds.has(s.id),
+              );
+              if (fromCurrent.length === overrideIds.size) {
+                target = fromCurrent;
+              } else {
+                const allServers = getAllMcpServers();
+                target = allServers.filter((s) => overrideIds.has(s.id));
+              }
               console.log(
                 `[cron] execute-sync taskId=${taskId} applying task MCP override: [${
                   target.map((s) => s.id).join(',') || '(empty)'

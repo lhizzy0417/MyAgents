@@ -1049,6 +1049,25 @@ type McpServerEntry = SdkMcpServerConfig | McpSdkServerConfigWithInstance;
 // null = never set (use config file fallback), [] = explicitly set to none
 let currentMcpServers: McpServerDefinition[] | null = null;
 
+/**
+ * Read-only accessor for `currentMcpServers`. Used by `/cron/execute-sync` to
+ * reuse the frontend-set MCP shapes (from `/api/mcp/set`) instead of
+ * recomputing via the sidecar's `getAllMcpServers()` — the two compute paths
+ * produce slightly different env/args field structures, and feeding the
+ * sidecar-shaped definitions into `applyMcpOverrideAndAwaitReady` triggers a
+ * fingerprint mismatch → abort+restart that wastes ~5s on every launcher
+ * cron handoff. The same fingerprint-mismatch hazard is documented at
+ * `agent-session.ts::initializeAgent` (line ~4972) where the Tab path
+ * deliberately skips self-resolve for the same reason.
+ *
+ * Returns `null` when no `/api/mcp/set` has happened yet (Tab not opened
+ * before cron firing — pure-cron / IM bot paths). Callers fall back to
+ * `getAllMcpServers()` in that case.
+ */
+export function getCurrentMcpServers(): readonly McpServerDefinition[] | null {
+  return currentMcpServers;
+}
+
 // Fingerprint of the MCP key set the SDK was last known to have (sorted server-id list).
 // Captured when query() starts and after each successful querySession.setMcpServers(),
 // so ensureSdkMcpInSync() can detect when the desired MCP set has drifted from the SDK's

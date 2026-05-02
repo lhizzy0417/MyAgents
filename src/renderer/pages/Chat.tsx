@@ -938,6 +938,16 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
             providerEnv: isExternalRuntime ? undefined : providerEnv,
             runtime: currentRuntime,
             runtimeConfig: buildCronRuntimeConfig(),
+            // Without this, the editor reopens defaulting to 'current_session'
+            // because cronState.config.executionTarget is undefined → modal's
+            // computed runMode lies about the user's choice. (Bug 2A.)
+            executionTarget: initialMessage.cron.executionTarget,
+            // Pin the cron task's MCP set to the launcher's chosen list so
+            // /cron/execute-sync's `applyMcpOverrideAndAwaitReady` matches
+            // the pre-warm fingerprint and short-circuits as a no-op
+            // (agent-session.ts:1282) instead of an abort+restart that
+            // wastes ~5s on every launcher cron handoff.
+            mcpEnabledServers: initialMessage.mcpEnabledServers,
           });
           await startCronTask(initialMessage.text);
         } else {
@@ -985,6 +995,8 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
               providerEnv: isExternalRuntime ? undefined : providerEnv,
               runtime: currentRuntime,
               runtimeConfig: buildCronRuntimeConfig(),
+              executionTarget: initialMessage.cron.executionTarget,
+              mcpEnabledServers: initialMessage.mcpEnabledServers,
             });
           }
         } catch (restoreErr) {
