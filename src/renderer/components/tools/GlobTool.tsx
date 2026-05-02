@@ -1,6 +1,6 @@
 import type { GlobInput, ToolUseSimple } from '@/types/chat';
 
-import { CollapsibleTool } from './CollapsibleTool';
+import { getToolSummaryNode } from './toolBadgeConfig';
 import { ExpandableResult, InlineCode, ToolHeader } from './utils';
 
 interface GlobToolProps {
@@ -18,23 +18,25 @@ export default function GlobTool({ tool }: GlobToolProps) {
     );
   }
 
-  const collapsedContent = (
-    <div className="flex flex-wrap items-center gap-1.5">
-      <ToolHeader tool={tool} toolName={tool.name} />
-      <InlineCode>{input.pattern}</InlineCode>
-      {input.path && (
-        <span className="text-[10px] text-[var(--ink-muted)]">in {input.path}</span>
+  const summary = getToolSummaryNode(tool);
+
+  return (
+    <div className="space-y-2">
+      {/* Inner header (B2): pattern + path + summary chip, no tool name */}
+      <div className="flex flex-wrap items-center gap-1.5 text-sm">
+        <InlineCode>{input.pattern}</InlineCode>
+        {input.path && (
+          <span className="text-[10px] text-[var(--ink-muted)]">in {input.path}</span>
+        )}
+        {summary}
+      </div>
+
+      {tool.result && (
+        <ExpandableResult
+          content={tool.result}
+          className="rounded bg-[var(--paper-inset)]/50 px-2 py-1 break-words text-[var(--ink-secondary)]"
+        />
       )}
     </div>
   );
-
-  const expandedContent =
-    tool.result ?
-      <ExpandableResult
-        content={tool.result}
-        className="rounded bg-[var(--paper-inset)]/50 px-2 py-1 break-words text-[var(--ink-secondary)]"
-      />
-    : null;
-
-  return <CollapsibleTool collapsedContent={collapsedContent} expandedContent={expandedContent} />;
 }

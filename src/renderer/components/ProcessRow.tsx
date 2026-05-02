@@ -7,7 +7,8 @@ import {
     formatDuration,
     getToolBadgeConfig,
     getToolLabel,
-    getToolMainLabel
+    getToolMainLabel,
+    getToolSummaryNode
 } from '@/components/tools/toolBadgeConfig';
 import ToolUse from '@/components/ToolUse';
 import type { ContentBlock } from '@/types/chat';
@@ -160,6 +161,12 @@ const ProcessRow = memo(function ProcessRow({
     let icon = null;
     let mainLabel = '';
     let subLabel = '';
+    // Summary node — small surfaced result detail next to subLabel (Edit +N -M, Grep N matches…).
+    // Plain ReactNode (each tool picks its own color). Computed inline: ProcessRow is
+    // already wrapped in React.memo so we only render when `block` changes, and the
+    // React Compiler handles further optimization. Manual useMemo with granular deps
+    // would defeat compiler auto-memoization.
+    const summaryNode = isTool && block.tool ? getToolSummaryNode(block.tool) : null;
 
     if (isThinking) {
         const durationSec = block.thinkingDurationMs ? Math.floor(block.thinkingDurationMs / 1000) : 0;
@@ -246,6 +253,7 @@ const ProcessRow = memo(function ProcessRow({
                             {subLabel}
                         </span>
                     )}
+                    {summaryNode && <span className="shrink-0">{summaryNode}</span>}
                 </div>
 
                 {/* Chevron */}

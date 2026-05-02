@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { Globe, ExternalLink, ChevronDown } from 'lucide-react';
 import type { ToolUseSimple, WebSearchInput } from '@/types/chat';
 import { openExternal } from '@/utils/openExternal';
+import { ExpandableResult } from './utils';
 
 const COLLAPSED_COUNT = 5;
 
@@ -142,13 +143,14 @@ export default function WebSearchTool({ tool }: WebSearchToolProps) {
         </div>
       )}
 
-      {/* Raw Output fallback */}
-      {showRawResult && (
+      {/* Raw Output fallback — height-clamped for consistency with other tools */}
+      {showRawResult && tool.result && (
         <div className="space-y-2">
           <div className="text-xs font-semibold uppercase tracking-wider text-[var(--ink-muted)]">Tool Output</div>
-          <div className="rounded-lg bg-[var(--paper-inset)] p-3 font-mono text-xs text-[var(--ink-secondary)] overflow-x-auto border border-[var(--line-subtle)] select-text">
-            {tool.result}
-          </div>
+          <ExpandableResult
+            content={tool.result}
+            className="rounded-lg border border-[var(--line-subtle)] bg-[var(--paper-inset)] p-3 text-xs text-[var(--ink-secondary)]"
+          />
         </div>
       )}
 

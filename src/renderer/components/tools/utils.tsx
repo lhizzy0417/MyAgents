@@ -165,8 +165,75 @@ export function unwrapSdkResult(result: string): string {
 }
 
 /**
- * Expandable result container with max-h-96 + gradient fade + "展开全部" button.
- * Used by tool components to wrap long <pre> output.
+ * Generic height-clamp container — `max-h-96` by default + gradient fade + "展开全部" button.
+ * Accepts arbitrary children (ReactNode), so tools with non-string bodies (Edit diff,
+ * NotebookEdit cell content, multi-pre layouts) can share the same overflow UX.
+ *
+ * Watches both ResizeObserver and MutationObserver on the clamped wrapper, so
+ * re-measurement fires reliably during streaming (content grows under a fixed
+ * max-h, where scrollHeight changes but clientHeight stays).
+ */
+interface ExpandableContainerProps {
+  children: ReactNode;
+  /** className applied to the outer relative wrapper (e.g. for shared border/bg) */
+  wrapperClassName?: string;
+  /** Gradient fade color — must match the actual content background for a smooth fade. */
+  gradientFrom?: string;
+}
+
+export function ExpandableContainer({
+  children,
+  wrapperClassName = '',
+  gradientFrom = 'from-[var(--paper-inset)]'
+}: ExpandableContainerProps) {
+  const ref = useRef<HTMLDivElement>(null);
+  const [isExpanded, setIsExpanded] = useState(false);
+  const [needsExpand, setNeedsExpand] = useState(false);
+
+  useEffect(() => {
+    const el = ref.current;
+    if (!el || isExpanded) return;
+    const measure = () => {
+      setNeedsExpand(el.scrollHeight > el.clientHeight);
+    };
+    measure();
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    const mo = new MutationObserver(measure);
+    mo.observe(el, { childList: true, subtree: true, characterData: true });
+    return () => {
+      ro.disconnect();
+      mo.disconnect();
+    };
+  }, [isExpanded]);
+
+  return (
+    <div className={`relative ${wrapperClassName}`}>
+      <div
+        ref={ref}
+        className={`${isExpanded ? '' : 'max-h-96'} overflow-hidden`}
+      >
+        {children}
+      </div>
+      {needsExpand && !isExpanded && (
+        <div className={`absolute bottom-0 left-0 right-0 flex justify-center bg-gradient-to-t ${gradientFrom} to-transparent pb-2 pt-8`}>
+          <button
+            type="button"
+            onClick={() => setIsExpanded(true)}
+            className="rounded-full border border-[var(--line)] bg-[var(--paper-elevated)] px-3 py-1 text-xs text-[var(--ink-muted)] shadow-sm hover:text-[var(--ink-secondary)] transition-colors"
+          >
+            展开全部
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Expandable result container for plain string output — wraps {@link ExpandableContainer}
+ * with a `<pre>` and SDK-result unwrapping. Kept as the path of least resistance for
+ * tools whose result is just text (Read, Grep, Glob, Skill, BashOutput, Bash, Task).
  */
 interface ExpandableResultProps {
   content: string;
@@ -181,36 +248,12 @@ interface ExpandableResultProps {
 export function ExpandableResult({ content: rawContent, className = '', wrapperClassName = '', gradientFrom = 'from-[var(--paper-inset)]' }: ExpandableResultProps) {
   // Auto-unwrap SDK JSON wrappers so all tools display clean text
   const content = unwrapSdkResult(rawContent);
-  const [isResultExpanded, setIsResultExpanded] = useState(false);
-  const resultRef = useRef<HTMLPreElement>(null);
-  const [isOverflowing, setIsOverflowing] = useState(false);
-
-  useEffect(() => {
-    if (resultRef.current) {
-      setIsOverflowing(resultRef.current.scrollHeight > resultRef.current.clientHeight);
-    }
-  }, [content]);
-
   return (
-    <div className={`relative ${wrapperClassName}`}>
-      <pre
-        ref={resultRef}
-        className={`overflow-x-auto font-mono text-sm whitespace-pre-wrap select-text ${isResultExpanded ? '' : 'max-h-96'} overflow-hidden ${className}`}
-      >
+    <ExpandableContainer wrapperClassName={wrapperClassName} gradientFrom={gradientFrom}>
+      <pre className={`overflow-x-auto font-mono text-sm whitespace-pre-wrap select-text ${className}`}>
         {content}
       </pre>
-      {isOverflowing && !isResultExpanded && (
-        <div className={`absolute bottom-0 left-0 right-0 flex justify-center bg-gradient-to-t ${gradientFrom} to-transparent pb-2 pt-8`}>
-          <button
-            type="button"
-            onClick={() => setIsResultExpanded(true)}
-            className="rounded-full border border-[var(--line)] bg-[var(--paper-elevated)] px-3 py-1 text-xs text-[var(--ink-muted)] shadow-sm hover:text-[var(--ink-secondary)] transition-colors"
-          >
-            展开全部
-          </button>
-        </div>
-      )}
-    </div>
+    </ExpandableContainer>
   );
 }
 

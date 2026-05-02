@@ -745,6 +745,131 @@ export function getToolExpandedLabel(tool: ToolUseSimple): string {
   }
 }
 
+/**
+ * Count lines for git-style diff stats. Trailing newlines do NOT count as an extra line —
+ * `"a\n"` is 1 line (matches `wc -l` semantics + git diff stats).
+ *   ""        → 0
+ *   "a"       → 1
+ *   "a\n"     → 1
+ *   "a\nb"    → 2
+ *   "a\nb\n"  → 2
+ */
+function countLines(s: string | undefined): number {
+  if (!s) return 0;
+  const parts = s.split('\n');
+  return s.endsWith('\n') ? parts.length - 1 : parts.length;
+}
+
+/**
+ * Parse Grep SDK result. Prefers SDK's authoritative `numMatches` / `numFiles`
+ * fields (see `node_modules/@anthropic-ai/claude-agent-sdk/sdk-tools.d.ts::GrepOutput`),
+ * falls back to deriving from `content` for older payloads or `output_mode: "content"`
+ * results that omit the count fields.
+ */
+function parseGrepStats(result: string | undefined): { matches: number; files: number } | null {
+  if (!result) return null;
+  const trimmed = result.trimStart();
+  if (!trimmed.startsWith('{')) return null;
+  try {
+    const parsed = JSON.parse(trimmed) as {
+      numMatches?: number;
+      numLines?: number;
+      numFiles?: number;
+      content?: string;
+    };
+    if (!parsed || typeof parsed !== 'object') return null;
+    const files = typeof parsed.numFiles === 'number' ? parsed.numFiles : 0;
+    const sdkMatches =
+      typeof parsed.numMatches === 'number' ? parsed.numMatches
+      : typeof parsed.numLines === 'number' ? parsed.numLines
+      : null;
+    if (sdkMatches !== null) return { matches: sdkMatches, files };
+    // Fallback: derive from content (only valid for output_mode: 'content').
+    const content = typeof parsed.content === 'string' ? parsed.content : '';
+    if (!content) return { matches: 0, files };
+    return { matches: content.split('\n').filter(Boolean).length, files };
+  } catch { /* not JSON */ }
+  return null;
+}
+
+/**
+ * Parse Glob SDK result. Prefers SDK's `numFiles` field
+ * (see `GlobOutput` in `sdk-tools.d.ts`), falls back to `filenames.length`.
+ */
+function parseGlobStats(result: string | undefined): { files: number } | null {
+  if (!result) return null;
+  const trimmed = result.trimStart();
+  if (!trimmed.startsWith('{')) return null;
+  try {
+    const parsed = JSON.parse(trimmed) as { numFiles?: number; filenames?: unknown };
+    if (!parsed || typeof parsed !== 'object') return null;
+    if (typeof parsed.numFiles === 'number') return { files: parsed.numFiles };
+    if (Array.isArray(parsed.filenames)) return { files: parsed.filenames.length };
+  } catch { /* not JSON */ }
+  return null;
+}
+
+/**
+ * Outer ProcessRow summary chip — surfaces the most actionable result detail
+ * next to the tool's main label (Edit `+5 -13`, Write `+25`, Grep `N matches in M files`).
+ *
+ * Returns a ReactNode (not a string) so each tool can pick its own color treatment.
+ * The plain-text "A3" style: mono, no pill background, semantic color only.
+ *
+ * Returns `null` if the tool has no useful summary or the input/result hasn't
+ * arrived yet (streaming-safe).
+ */
+export function getToolSummaryNode(tool: ToolUseSimple): ReactNode | null {
+  switch (tool.name) {
+    case 'Edit': {
+      const oldStr = getStringProp(tool.parsedInput, 'old_string');
+      const newStr = getStringProp(tool.parsedInput, 'new_string');
+      // Hold the chip back until BOTH sides have streamed; otherwise users see
+      // misleading `+0 -N` mid-stream when only old_string has arrived.
+      // Empty string is a valid pure insert/delete so we check `=== undefined`, not falsy.
+      if (oldStr === undefined || newStr === undefined) return null;
+      const added = countLines(newStr);
+      const removed = countLines(oldStr);
+      return (
+        <span className="inline-flex items-center gap-1.5 font-mono text-[12px] font-semibold">
+          <span className="text-[var(--success)]">+{added}</span>
+          <span className="text-[var(--error)]">-{removed}</span>
+        </span>
+      );
+    }
+    case 'Write': {
+      const content = getStringProp(tool.parsedInput, 'content');
+      if (content === undefined) return null;
+      return (
+        <span className="font-mono text-[12px] font-semibold text-[var(--success)]">
+          +{countLines(content)}
+        </span>
+      );
+    }
+    case 'Grep': {
+      const stats = parseGrepStats(tool.result);
+      if (!stats) return null;
+      const filesPart = stats.files > 0 ? ` in ${stats.files} ${stats.files === 1 ? 'file' : 'files'}` : '';
+      return (
+        <span className="font-mono text-[12px] text-[var(--ink-muted)]">
+          {stats.matches} {stats.matches === 1 ? 'match' : 'matches'}{filesPart}
+        </span>
+      );
+    }
+    case 'Glob': {
+      const stats = parseGlobStats(tool.result);
+      if (!stats) return null;
+      return (
+        <span className="font-mono text-[12px] text-[var(--ink-muted)]">
+          {stats.files} {stats.files === 1 ? 'file' : 'files'}
+        </span>
+      );
+    }
+    default:
+      return null;
+  }
+}
+
 // Thinking badge configuration - single source of truth
 export function getThinkingBadgeConfig(): ToolBadgeConfig {
   return {
