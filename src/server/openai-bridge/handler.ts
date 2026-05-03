@@ -139,6 +139,18 @@ export function createBridgeHandler(config: BridgeConfig): BridgeHandler {
     try {
       upstream = await config.getUpstreamConfig(request);
     } catch (err) {
+      // PRD #124: distinguish "client routing error" (unknown token) from
+      // "configuration error". The former MUST be 400 so SDK clients see
+      // a clean rejection — wrapping a stale subprocess's late requests
+      // as 500 misleads upstream layers into retrying or surfacing as
+      // generic agent-error. We surface the unknown-token category here
+      // because it's the only error shape `getUpstreamConfig` throws by
+      // contract; anything else is genuinely a 500.
+      const msg = err instanceof Error ? err.message : String(err);
+      if (msg.startsWith('Unknown bridge token') || msg.includes('missing token')) {
+        log(`[bridge] reject: ${msg}`);
+        return jsonError(400, 'invalid_request_error', msg);
+      }
       log(`[bridge] Failed to get upstream config: ${err}`);
       return jsonError(500, 'api_error', 'Bridge configuration error');
     }
@@ -148,9 +160,15 @@ export function createBridgeHandler(config: BridgeConfig): BridgeHandler {
     const isResponses = upstream.upstreamFormat === 'responses';
 
     // 4. Translate request (choose format based on upstream config)
+    // PRD #124: per-request model mapping (carried on UpstreamConfig, set by
+    // the route closure from the bridge token's registry entry) takes
+    // priority over the handler-wide BridgeConfig.modelMapping. This is what
+    // lets concurrent SDK subprocesses with different sub-agent rules
+    // coexist without cross-pollination.
+    const effectiveModelMapping = upstream.modelMapping ?? config.modelMapping;
     const translatedReq = isResponses
-      ? translateRequestToResponses(anthropicReq, { modelOverride: upstream.model, modelMapping: config.modelMapping, imageSaver })
-      : translateRequest(anthropicReq, { modelMapping: config.modelMapping, modelOverride: upstream.model, imageSaver });
+      ? translateRequestToResponses(anthropicReq, { modelOverride: upstream.model, modelMapping: effectiveModelMapping, imageSaver })
+      : translateRequest(anthropicReq, { modelMapping: effectiveModelMapping, modelOverride: upstream.model, imageSaver });
 
     // 4a. Normalize thought_signatures on tool_calls (Gemini thinking models).
     // Gemini requires thought_signature on tool_calls in conversation history.

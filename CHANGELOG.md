@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.2.8] - 2026-05-03
+
+### Added
+
+- **AI 小助理 inbox 加「历史」入口**：设置页右上角新增「历史」按钮，点选直接新开 Tab 进会话 (#120)。
+- **任意会话都能驱动 MyAgents 自身**：`/self-config` 升级为全局 `/myagents-cli`，Chat / IM Bot / Cron 都能用。
+
+### Fixed
+
+- **第三方供应商定时任务跑错模型**：agent 切供应商后老 cron 会拿错配的 model + endpoint 静默失败，现在每条 cron 锁定自己的供应商意图，不再被 agent 切换搞乱 (#119)。
+- **验证供应商时把当前对话搞挂**：OpenAI 协议会话进行中点别的供应商 verify、或后台生成标题，原会污染当前会话路由让 Chat 报 `<synthetic>` 错。多个验证现在可以并发不相互踩 (#124)。
+- **浏览器面板 file:// 链接 / 本地绝对路径打不开**：现在用 OS 默认应用打开（仍走安全校验），Windows 长路径兼容 (#125)。
+- **第三方输入法语音识别刷重复内容发出去**：macOS 上微信输入法偶发把识别文本刷几十次进输入框，发送前现在会弹确认，且必须显式点按钮 (#123)。
+- **最近几天日志被字节配额误清**：总量上限提到 5GB + 最近 7 天硬保护，排查问题用的日志不会因配额溢出被清 (#121)。
+- **任务编辑器误显示用不了的 runtime 选项**：未开启 multi-agent runtime 时不再列出 Claude Code / Codex / Gemini CLI 选项，与 Chat / Launcher 一致。
+
+---
+
 ## [0.2.7] - 2026-05-03
 
 ### Added

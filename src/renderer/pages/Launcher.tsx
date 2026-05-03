@@ -497,6 +497,11 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
                     permissionMode: launcherPermissionMode,
                     model: builtinSelection?.model ?? runtimeModel,
                     providerEnv,
+                    // PRD #119: capture explicit routing intent at scheduling
+                    // time. Standalone launcher crons have no chat session
+                    // they "follow" — the user is explicitly building this
+                    // task, so its provider config is its own intent.
+                    providerIntent: providerEnv ? 'explicit' : 'subscription',
                     runtime: launcherRuntime,
                     runtimeConfig: isExternalRuntime ? runtimeConfigRef.current : undefined,
                     // Snapshot the launcher's MCP selection so the cron task's

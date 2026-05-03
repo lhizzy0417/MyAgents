@@ -229,11 +229,11 @@ npm run typecheck && npm run lint # 代码质量检查
 
 ## 内置 MA 小助理（修改约束）
 
-应用内置 AI 助手运行在 `~/.myagents/`，通过 `/self-config` Skill 调用 `myagents` CLI **直接执行**用户管理操作（不是输出操作步骤）。
+应用内置 AI 助手运行在 `~/.myagents/`，通过 `/myagents-cli` system skill 调用 `myagents` CLI **直接执行**用户管理操作（不是输出操作步骤）。该 skill 是全局的——所有 session（Chat / IM Bot / Cron / Helper）都能用它驱动 MyAgents 的产品能力。
 
 - 修改 `bundled-agents/myagents_helper/` 的 CLAUDE.md 或 Skills → MUST bump `ADMIN_AGENT_VERSION`（`src-tauri/src/commands.rs`）
-- 修改 `src/cli/myagents.ts` 或 `src/cli/myagents.cmd` → MUST bump `CLI_VERSION`
-- 修改 `bundled-skills/` 中 system skill（`task-alignment` / `task-implement`，清单见 `SYSTEM_SKILLS`） → MUST bump `SYSTEM_SKILLS_VERSION`
+- 修改 `src/cli/myagents.ts` 或 `src/cli/myagents.cmd` → MUST bump `CLI_VERSION`，并同步更新 `bundled-skills/myagents-cli/SKILL.md`（CLI surface 变化必须在 skill 文档里反映出来）+ bump `SYSTEM_SKILLS_VERSION`
+- 修改 `bundled-skills/` 中 system skill（清单见 `SYSTEM_SKILLS`） → MUST bump `SYSTEM_SKILLS_VERSION`
 - 新增 system skill：(1) 放入 `bundled-skills/<name>/`；(2) 加入 Rust `SYSTEM_SKILLS` 和 Node `src/server/index.ts::SYSTEM_SKILLS` 两个清单；(3) bump 版本
 - **utility skill vs system skill**：清单内 = system（强制更新）；其它 = utility（首次 seed 后归用户）
 

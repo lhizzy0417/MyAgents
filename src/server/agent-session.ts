@@ -3,6 +3,7 @@ import { existsSync, readdirSync, symlinkSync, lstatSync, readFileSync, readlink
 import { dirname, join, resolve, sep } from 'path';
 import { createRequire } from 'module';
 import { query, getSessionMessages as sdkGetSessionMessages, type Query, type SDKUserMessage, type AgentDefinition, type HookInput, type HookJSONOutput, type PostToolUseHookInput } from '@anthropic-ai/claude-agent-sdk';
+import { registerBridge as registerBridgeInRegistry, unregisterBridge as unregisterBridgeInRegistry, type UpstreamBridgeConfig } from './openai-bridge/bridge-registry';
 import { getScriptDir, getBundledNodeDir, getSystemNodeDirs, getBundledRuntimePath, getSystemNpxPaths, findExistingPath } from './utils/runtime';
 import { getCrossPlatformEnv, isSkillBlockedOnPlatform } from './utils/platform';
 import { ensureDirSync, isDirEntry } from './utils/fs-utils';
@@ -749,25 +750,11 @@ function requiresSignedSessionHistory(providerEnv?: ProviderEnv): boolean {
   return normalizedBaseUrl === 'https://api.anthropic.com';
 }
 
-// OpenAI Bridge: sidecar port for loopback, and active bridge config
+// OpenAI Bridge: sidecar port for loopback. Per-token bridge state lives
+// in `./openai-bridge/bridge-registry`; this module owns its session's
+// token (`activeSessionBridgeToken` below) and the resolver that updates
+// when `currentProviderEnv` / `currentModel` change.
 let sidecarPort: number = 0;
-
-export type OpenAiBridgeConfig = {
-  baseUrl: string;
-  apiKey: string;
-  /** Target model name — bridge overrides ALL request models to this (only when no aliases) */
-  model?: string;
-  /** Max output tokens cap for upstream provider */
-  maxOutputTokens?: number;
-  /** Parameter name for token limit sent to upstream. Default 'max_tokens'. */
-  maxOutputTokensParamName?: 'max_tokens' | 'max_completion_tokens' | 'max_output_tokens';
-  /** Upstream API format: 'chat_completions' (default) or 'responses' */
-  upstreamFormat?: 'chat_completions' | 'responses';
-  /** Model aliases from provider config — used to build modelMapping for sub-agent model resolution */
-  modelAliases?: ModelAliases;
-} | null;
-
-let currentOpenAiBridgeConfig: OpenAiBridgeConfig = null;
 
 /** Set the sidecar port (called once from index.ts on startup).
  *
@@ -793,18 +780,147 @@ export function getSidecarPort(): number {
   return sidecarPort;
 }
 
-/** Get the current OpenAI bridge config (used by bridge handler in index.ts).
- *  Model is always derived from currentModel to avoid staleness after setSessionModel().
- *  When modelAliases exist, model override is suppressed — sub-agents need distinct models. */
-export function getOpenAiBridgeConfig(): OpenAiBridgeConfig {
-  if (!currentOpenAiBridgeConfig) return null;
-  const aliases = currentOpenAiBridgeConfig.modelAliases;
+// ── Active session bridge token (PRD #124) ────────────────────────────────
+//
+// The active session's bridge state used to live in a process-global
+// `currentOpenAiBridgeConfig` mutated as a side effect of
+// `buildClaudeSessionEnv`. That global was shared with every other SDK
+// subprocess (verify, title-gen, sub-agents) — so a one-shot caller
+// could silently hijack the active session's routing. The fix moves
+// every bridge to a per-subprocess token in `bridge-registry`. The
+// active session owns one such token (or none, if its provider is
+// non-OpenAI subscription / Anthropic-protocol third-party).
+//
+// Lifecycle:
+//   - registered in `startStreamingSession` when currentProviderEnv is
+//     OpenAI-protocol
+//   - resolver reads `currentProviderEnv` + `currentModel` live, so
+//     mid-flight `setSessionModel` updates take effect immediately
+//   - unregistered when the SDK subprocess terminates (session reset,
+//     provider switch, abort) — handled in the same paths that clear
+//     `currentProviderEnv`
+
+let activeSessionBridgeToken: string | null = null;
+
+/**
+ * Build the upstream config that the bridge handler will see for the
+ * active session, derived live from `currentProviderEnv` + `currentModel`.
+ * Called per-request by the bridge registry resolver — keep it cheap.
+ */
+function resolveActiveSessionUpstreamConfig(): UpstreamBridgeConfig {
+  // currentProviderEnv may be undefined (subscription / Anthropic-direct)
+  // when the session bridge is registered; that's a registration error
+  // upstream of us. Defensive: empty-string baseUrl + no model → bridge
+  // handler will fail the upstream call with a clear error.
+  const aliases = currentProviderEnv?.modelAliases;
   return {
-    ...currentOpenAiBridgeConfig,
-    // When aliases exist, don't set model as blanket override — let modelMapping handle it.
-    // When no aliases, keep the old behavior (override all to currentModel).
+    baseUrl: currentProviderEnv?.baseUrl ?? '',
+    apiKey: currentProviderEnv?.apiKey ?? '',
+    // When aliases exist, don't set model as blanket override — sub-agents
+    // need distinct models routed via modelMapping. Without aliases, force
+    // ALL request models to currentModel (the historical behavior).
     model: aliases ? undefined : (currentModel || undefined),
     modelAliases: aliases,
+    maxOutputTokens: currentProviderEnv?.maxOutputTokens,
+    maxOutputTokensParamName: currentProviderEnv?.maxOutputTokensParamName,
+    upstreamFormat: currentProviderEnv?.upstreamFormat,
+  };
+}
+
+/**
+ * Ensure the active session has a registered bridge token IFF its provider
+ * is OpenAI-protocol. Caller MUST pass `freshToken: true` when starting a
+ * NEW SDK subprocess (so any in-flight late requests from an old subprocess
+ * find their stale token expired) and `freshToken: false` for in-place
+ * mid-flight re-syncs (provider switches before the abort fires).
+ *
+ * The resolver reads `currentProviderEnv` / `currentModel` live, so an
+ * existing token automatically reflects mid-session config changes. The
+ * fresh-token version is only needed when we're about to spawn a new
+ * subprocess that will see a (possibly different) URL.
+ */
+function ensureActiveSessionBridgeRegistered(opts?: { freshToken?: boolean }): void {
+  if (currentProviderEnv?.apiProtocol !== 'openai') {
+    // Provider is not OpenAI-protocol — no bridge needed. If a stale token
+    // is registered (e.g., from a previous OpenAI provider before a switch),
+    // tear it down here so subsequent SDK launches don't route through it.
+    if (activeSessionBridgeToken) {
+      unregisterBridgeInRegistry(activeSessionBridgeToken);
+      activeSessionBridgeToken = null;
+    }
+    return;
+  }
+  if (opts?.freshToken && activeSessionBridgeToken) {
+    // Caller is about to spawn a new subprocess. Retire the old token so
+    // late requests from the dying subprocess get rejected (400 unknown
+    // token) instead of resolving to the new subprocess's config — that's
+    // the cross-pollination class.
+    unregisterBridgeInRegistry(activeSessionBridgeToken);
+    activeSessionBridgeToken = null;
+  }
+  if (!activeSessionBridgeToken) {
+    activeSessionBridgeToken = randomUUID();
+  }
+  registerBridgeInRegistry(
+    activeSessionBridgeToken,
+    resolveActiveSessionUpstreamConfig,
+    `session:${sessionId}`,
+  );
+}
+
+/**
+ * Tear down the active session's bridge token. Called from the session
+ * `finally` path when the SDK subprocess exits, so the registry doesn't
+ * accumulate stale entries even when subprocesses don't restart cleanly.
+ */
+function unregisterActiveSessionBridge(): void {
+  if (!activeSessionBridgeToken) return;
+  unregisterBridgeInRegistry(activeSessionBridgeToken);
+  activeSessionBridgeToken = null;
+}
+
+/** Returns true if the active session has a registered OpenAI bridge token. */
+export function hasActiveBridge(): boolean {
+  return activeSessionBridgeToken !== null;
+}
+
+/**
+ * One-shot bridge: register a per-call token whose resolver returns a
+ * static snapshot of the provider config. Used by `provider-verify`,
+ * `title-generator`, and `fetchSdkSupportedModels` — code paths that
+ * spawn a single SDK subprocess against a specific provider for a
+ * bounded operation.
+ *
+ * Returns the URL-safe token to feed into `buildClaudeSessionEnv`'s
+ * `bridgeToken` option. The caller MUST call the returned `release()`
+ * function in a `finally` block to unregister; the orphan watchdog
+ * is the last-line safety net, not the contract.
+ */
+export function startOneShotBridge(
+  providerEnv: ProviderEnv,
+  modelOverride: string | undefined,
+  description: string,
+): { token: string; release: () => void } {
+  if (providerEnv.apiProtocol !== 'openai') {
+    throw new Error('startOneShotBridge called with non-OpenAI provider — caller should not need a bridge');
+  }
+  const token = randomUUID();
+  const aliases = providerEnv.modelAliases;
+  const snapshot: UpstreamBridgeConfig = {
+    baseUrl: providerEnv.baseUrl ?? '',
+    apiKey: providerEnv.apiKey ?? '',
+    model: aliases ? undefined : (modelOverride || undefined),
+    modelAliases: aliases,
+    maxOutputTokens: providerEnv.maxOutputTokens,
+    maxOutputTokensParamName: providerEnv.maxOutputTokensParamName,
+    upstreamFormat: providerEnv.upstreamFormat,
+  };
+  // Static resolver — one-shot config doesn't change over the call's
+  // lifetime, so the closure captures the snapshot directly.
+  registerBridgeInRegistry(token, () => snapshot, description);
+  return {
+    token,
+    release: () => unregisterBridgeInRegistry(token),
   };
 }
 // SDK 是否已注册当前 sessionId。true 时后续 query 必须用 resume。
@@ -1580,6 +1696,11 @@ export function setSessionProviderEnv(providerEnv: ProviderEnv | undefined): voi
 
   currentProviderEnv = providerEnv;
   console.log(`[agent] session provider env set: ${oldLabel} → ${newLabel}`);
+  // PRD #124: keep the active session's bridge registration in sync with the
+  // new provider. Function is idempotent and handles all transitions
+  // (Anthropic→OpenAI, OpenAI→Anthropic, OpenAI→OpenAI) — registers, updates,
+  // or unregisters as appropriate.
+  ensureActiveSessionBridgeRegistered();
 
   // If a session is running, its subprocess has the OLD provider env.
   // Restart so the next session picks up the updated environment.
@@ -3201,10 +3322,21 @@ function sealCcAuthEnv(env: NodeJS.ProcessEnv): void {
  *   session, not the one we're building env for) would inject the wrong
  *   cap into the verify/title subprocess. Safe to omit when this is a
  *   regular session spawn where `currentModel` is already correct.
+ * @param opts.bridgeToken  PRD #124: bridge registry token for this
+ *   subprocess. When the resolved provider is OpenAI-protocol, the
+ *   subprocess's `ANTHROPIC_BASE_URL` includes this token in the path
+ *   (`/bridge/<token>`) so the bridge handler routes to ITS upstream and
+ *   not the active session's. Caller MUST register the token in
+ *   `bridge-registry` before invoking this, and unregister on
+ *   subprocess exit. For the active-session path, this is handled in
+ *   `startStreamingSession`; for one-shot calls, use `startOneShotBridge`.
+ *   When omitted and the provider is OpenAI-protocol, this is a logic
+ *   error — the function throws.
  */
 export function buildClaudeSessionEnv(
   providerEnv?: ProviderEnv,
   modelOverride?: string,
+  opts?: { bridgeToken?: string },
 ): NodeJS.ProcessEnv {
   // Ensure essential paths are always present, even when launched from Finder
   // (Finder launches via launchd which doesn't inherit shell environment variables)
@@ -3494,9 +3626,27 @@ export function buildClaudeSessionEnv(
   }
 
   // OpenAI Bridge: if provider uses OpenAI protocol, loopback to sidecar
+  // PRD #124: per-subprocess token in URL path. Each SDK subprocess
+  // (active session, verify, title-gen, sub-agent) registers under a
+  // unique token in `bridge-registry`; the URL path lets the route
+  // handler look up that subprocess's specific upstream without any
+  // shared global state. No more `currentOpenAiBridgeConfig` mutation.
   if (effectiveProviderEnv?.apiProtocol === 'openai' && sidecarPort > 0) {
-    // SDK requests go to sidecar's /v1/messages route, which translates to OpenAI format
-    env.ANTHROPIC_BASE_URL = `http://127.0.0.1:${sidecarPort}`;
+    const bridgeToken = opts?.bridgeToken;
+    if (!bridgeToken) {
+      // This is a programming error: caller built env for an OpenAI-protocol
+      // provider without first registering a bridge token. The SDK subprocess
+      // would send /v1/messages to a path with no /bridge/<token> prefix and
+      // get 404. Fail loud here so the bug is obvious at the right call site.
+      throw new Error(
+        'buildClaudeSessionEnv: OpenAI-protocol provider requires a bridgeToken. ' +
+        'Use startOneShotBridge() (one-shot) or rely on startStreamingSession ' +
+        'to register the active session token before calling this.'
+      );
+    }
+    // SDK requests go to sidecar's /bridge/<token>/v1/messages route, which
+    // translates to OpenAI format and forwards to the per-token upstream.
+    env.ANTHROPIC_BASE_URL = `http://127.0.0.1:${sidecarPort}/bridge/${bridgeToken}`;
     env.ANTHROPIC_API_KEY = effectiveProviderEnv.apiKey ?? '';
     delete env.ANTHROPIC_AUTH_TOKEN;
     // CRITICAL: Strip proxy env vars from subprocess environment.
@@ -3517,18 +3667,7 @@ export function buildClaudeSessionEnv(
     ]) {
       env[proxyVar] = '';
     }
-    // Store upstream config for bridge handler (includes proxy from process.env for upstream fetch)
-    // Note: model is NOT stored here — getOpenAiBridgeConfig() derives it from currentModel
-    // to stay in sync after setSessionModel() / applySessionConfig() model switches
-    currentOpenAiBridgeConfig = {
-      baseUrl: effectiveProviderEnv.baseUrl ?? '',
-      apiKey: effectiveProviderEnv.apiKey ?? '',
-      maxOutputTokens: effectiveProviderEnv.maxOutputTokens,
-      maxOutputTokensParamName: effectiveProviderEnv.maxOutputTokensParamName,
-      upstreamFormat: effectiveProviderEnv.upstreamFormat,
-      modelAliases: effectiveProviderEnv.modelAliases,
-    };
-    console.log(`[env] OpenAI bridge: ANTHROPIC_BASE_URL → loopback :${sidecarPort}, upstream → ${effectiveProviderEnv.baseUrl}, proxy vars stripped`);
+    console.log(`[env] OpenAI bridge: ANTHROPIC_BASE_URL → loopback :${sidecarPort}/bridge/${bridgeToken.slice(0, 8)}…, upstream → ${effectiveProviderEnv.baseUrl}, proxy vars stripped`);
     // Seal any auth var not explicitly set above (e.g. ANTHROPIC_AUTH_TOKEN
     // was deleted, CLAUDE_CODE_OAUTH_TOKEN was never touched) to an empty
     // string. Defense-in-depth against stale `.env` placeholders surfacing
@@ -3537,9 +3676,6 @@ export function buildClaudeSessionEnv(
     sealCcAuthEnv(env);
     return env;
   }
-
-  // Clear bridge config when not using OpenAI protocol
-  currentOpenAiBridgeConfig = null;
 
   // Handle provider-specific environment variables
   // IMPORTANT: Must explicitly delete these when switching back to Anthropic subscription
@@ -4999,6 +5135,8 @@ export async function initializeAgent(
       if (!currentProviderEnv && resolved.providerEnv) {
         currentProviderEnv = resolved.providerEnv;
         console.log(`[agent] self-resolved provider: ${resolved.providerEnv.baseUrl ?? 'anthropic'}`);
+        // PRD #124: keep bridge registration in sync after self-resolve.
+        ensureActiveSessionBridgeRegistered();
       }
       // Only self-resolve model for builtin runtime. External runtimes (CC/Codex) should use
       // their own model (set via /api/model/set from frontend runtimeModel effect).
@@ -5281,6 +5419,8 @@ export async function enqueueUserMessage(
 
     // Update provider env BEFORE terminating so the new session picks it up
     currentProviderEnv = effectiveProviderEnv; // undefined for subscription, object for API
+    // PRD #124: keep bridge registration in sync (handles all provider transitions).
+    ensureActiveSessionBridgeRegistered();
     // Terminate current session - it will restart automatically when processing the message
     abortPersistentSession();
     // Wait for the current session to fully terminate before proceeding
@@ -6233,7 +6373,15 @@ async function startStreamingSession(preWarm = false): Promise<void> {
   // Sync enabled user-level skills as symlinks into project's .claude/skills/
   // Must happen before buildClaudeSessionEnv() so SDK sees them via settingSources: ['project']
   syncProjectUserConfig(agentDir);
-  const env = buildClaudeSessionEnv();
+  // PRD #124: register a FRESH bridge token for this SDK subprocess.
+  // `freshToken: true` retires the previous token (if any) so any late
+  // requests from the dying old subprocess get rejected with a 400
+  // "unknown bridge token" instead of resolving to the new subprocess's
+  // config (the cross-pollination class we're eliminating).
+  ensureActiveSessionBridgeRegistered({ freshToken: true });
+  const env = buildClaudeSessionEnv(undefined, undefined, {
+    bridgeToken: activeSessionBridgeToken ?? undefined,
+  });
   console.log(`[agent] ${preWarm ? 'pre-warm' : 'start'} session cwd=${agentDir}`);
   shouldAbortSession = false;
   resetAbortFlag();
@@ -7864,6 +8012,12 @@ async function startStreamingSession(preWarm = false): Promise<void> {
     const session = querySession;
     querySession = null;
     try { session?.close(); } catch { /* subprocess 可能已退出 */ }
+
+    // PRD #124: unregister the bridge token now that the SDK subprocess
+    // has exited. If the session restarts, `startStreamingSession` mints
+    // a fresh token (freshToken: true) so late requests from this dying
+    // subprocess find their old token gone and get rejected cleanly.
+    unregisterActiveSessionBridge();
 
     // sessionRegistered 已在 system_init handler 中设置，无需重复
 

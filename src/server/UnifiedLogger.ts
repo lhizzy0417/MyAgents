@@ -11,9 +11,10 @@
  *   - The flusher uses a single `openSync` + batched `writeSync` +
  *     `closeSync` per drain — far cheaper than per-entry sync write.
  *   - Per-file 50MB cap → rotate to `unified-<date>.<iso>.log`.
- *   - Per-directory 500MB cap → evict oldest files (still respects
- *     `LOG_RETENTION_DAYS=30` from logUtils.ts — they coexist, with bytes
- *     winning when both apply).
+ *   - Directory budget + age retention live in `./log-retention.ts`
+ *     (#121, 2026-05) so unified + per-session logs share one coherent
+ *     policy. This module owns the active-write path (queue, flush,
+ *     rotation) only.
  *   - Process exit / SIGINT / SIGTERM hook drains the queue using the
  *     same batched openSync/writeSync path, so we don't lose entries at
  *     shutdown without resorting to a per-entry sync write.
@@ -28,17 +29,17 @@ import {
   closeSync,
   existsSync,
   openSync,
-  readdirSync,
   renameSync,
   statSync,
-  unlinkSync,
   writeSync,
 } from 'fs';
 import { join } from 'path';
 
 import type { LogEntry } from '../renderer/types/log';
-import { LOGS_DIR, LOG_RETENTION_DAYS, ensureLogsDir } from './logUtils';
+import { LOGS_DIR, ensureLogsDir } from './logUtils';
 import { localDate } from '../shared/logTime';
+import { runLogRetentionSweep } from './log-retention';
+import { getActiveSessionLogPath } from './AgentLogger';
 
 // ── Tunables (Pattern 6 §6.3.5) ────────────────────────────────────────
 const FLUSH_INTERVAL_MS = 100;
@@ -46,12 +47,13 @@ const FLUSH_INTERVAL_MS = 100;
 const QUEUE_MAX_ENTRIES = 1000;
 /** Per-file size cap before rotation. */
 const PER_FILE_MAX_BYTES = 50 * 1024 * 1024; // 50MB
-/** Per-directory size cap before oldest-eviction. */
-const DIR_MAX_BYTES = 500 * 1024 * 1024; // 500MB
 /** Drop-warning emit interval (only emits if dropped > 0 since last warn). */
 const DROP_WARN_INTERVAL_MS = 60_000;
 /** In-memory ring buffer for crash-log tail capture. */
 const RECENT_LINES_CAPACITY = 200;
+// Directory budget + retention floor live in `./log-retention.ts`. This
+// module focuses on the active-write path (queue, flush, rotation); it
+// hands off cleanup decisions to the unified retention sweep.
 
 // ── State ───────────────────────────────────────────────────────────────
 let currentDate: string | null = null;
@@ -115,9 +117,9 @@ function formatLogEntry(entry: LogEntry): string {
 }
 
 // ── Rotation / eviction ────────────────────────────────────────────────
-function rotateIfNeeded(addBytes: number): void {
-  if (!currentFilePath) return;
-  if (currentFileSize + addBytes <= PER_FILE_MAX_BYTES) return;
+function rotateIfNeeded(addBytes: number): boolean {
+  if (!currentFilePath) return false;
+  if (currentFileSize + addBytes <= PER_FILE_MAX_BYTES) return false;
   // Rotate: rename current to <name>.<timestamp>.log
   try {
     const ts = new Date().toISOString().replace(/[:]/g, '-');
@@ -129,44 +131,33 @@ function rotateIfNeeded(addBytes: number): void {
     renameSync(currentFilePath, rotatedPath);
   } catch {
     // If rotation fails, fall through — we'll keep appending.
+    return false;
   }
   currentFileSize = 0;
+  return true;
 }
 
-function enforceDirectoryBudget(): void {
-  try {
-    const files = readdirSync(LOGS_DIR)
-      .filter((f) => f.startsWith('unified-') && f.endsWith('.log'))
-      .map((f) => {
-        const p = join(LOGS_DIR, f);
-        try {
-          const s = statSync(p);
-          return { path: p, mtimeMs: s.mtimeMs, size: s.size };
-        } catch {
-          return null;
-        }
-      })
-      .filter((x): x is { path: string; mtimeMs: number; size: number } => x !== null);
+/**
+ * Returns the path of the file we're currently writing to (today's
+ * unified-{date}.log). Used by `log-retention` so the budget sweep never
+ * evicts the file we're holding open. Null until the first flush.
+ */
+export function getActiveUnifiedLogPath(): string | null {
+  return currentFilePath;
+}
 
-    let total = files.reduce((acc, f) => acc + f.size, 0);
-    if (total <= DIR_MAX_BYTES) return;
-
-    files.sort((a, b) => a.mtimeMs - b.mtimeMs); // oldest first
-    for (const f of files) {
-      if (total <= DIR_MAX_BYTES) break;
-      // Don't evict the actively-writing file even if it's oldest by mtime
-      // (race: we just rotated and renamed it — defensive).
-      if (f.path === currentFilePath) continue;
-      try {
-        unlinkSync(f.path);
-        total -= f.size;
-      } catch {
-        // Ignore individual eviction errors.
-      }
-    }
-  } catch {
-    // Ignore directory walk errors — best-effort budget enforcement.
-  }
+/**
+ * Returns ALL active log paths the budget sweep MUST not evict — currently
+ * the unified log we're appending to plus the per-session log file (when
+ * AgentLogger has one open). Used by `flushNow`'s on-rotation eager sweep
+ * so we don't accidentally unlink the file we're holding a WriteStream for.
+ */
+function getProtectedActivePaths(): ReadonlySet<string> {
+  const paths = new Set<string>();
+  if (currentFilePath) paths.add(currentFilePath);
+  const sessionPath = getActiveSessionLogPath();
+  if (sessionPath) paths.add(sessionPath);
+  return paths;
 }
 
 // ── Flusher ────────────────────────────────────────────────────────────
@@ -183,10 +174,11 @@ function flushNow(): void {
   let lines: string[] = queue.splice(0, queue.length);
   const payload = lines.join('');
   // payload is already newline-terminated per-line.
+  let didRotate = false;
   try {
     ensureLogsDir();
     const filePath = getLogFilePath();
-    rotateIfNeeded(payload.length);
+    didRotate = rotateIfNeeded(payload.length);
     // Use a single open/write/close per flush — far cheaper than per-entry
     // sync writes because we batch up to 1000 entries.
     const fd = openSync(filePath, 'a');
@@ -202,9 +194,15 @@ function flushNow(): void {
     dropped += lines.length;
     lines = [];
   }
-  // Lazy directory-budget enforcement (only when we just wrote a lot).
-  if (payload.length > 0 && currentFileSize >= PER_FILE_MAX_BYTES) {
-    enforceDirectoryBudget();
+  // Eager directory-budget enforcement when we just rotated. `rotateIfNeeded`
+  // resets `currentFileSize` to 0 on rotation, so we MUST trigger off the
+  // rotation event itself rather than checking the post-write size — checking
+  // size would only fire on a single-flush > 50MB payload, which is essentially
+  // never. Sweeps are stat-only and fast.
+  if (didRotate) {
+    runLogRetentionSweep({
+      activeFilePaths: getProtectedActivePaths(),
+    });
   }
 }
 
@@ -257,42 +255,7 @@ function installExitHooks(): void {
   process.once('SIGTERM', () => { drain(); });
 }
 
-// ── Public API (unchanged signatures) ──────────────────────────────────
-
-/**
- * Clean up old unified log files (older than LOG_RETENTION_DAYS).
- * Coexists with byte-budget eviction in the flusher path.
- */
-export function cleanupOldUnifiedLogs(): void {
-  ensureLogsDir();
-
-  const now = Date.now();
-  const maxAge = LOG_RETENTION_DAYS * 24 * 60 * 60 * 1000;
-  let deletedCount = 0;
-
-  try {
-    const files = readdirSync(LOGS_DIR);
-    for (const file of files) {
-      if (!file.startsWith('unified-') || !file.endsWith('.log')) continue;
-      const filePath = join(LOGS_DIR, file);
-      try {
-        const stat = statSync(filePath);
-        const age = now - stat.mtimeMs;
-        if (age > maxAge) {
-          unlinkSync(filePath);
-          deletedCount++;
-        }
-      } catch { /* ignore */ }
-    }
-    if (deletedCount > 0) {
-      console.log(`[UnifiedLogger] Cleaned up ${deletedCount} old unified log files`);
-    }
-  } catch (err) {
-    console.error('[UnifiedLogger] Failed to cleanup old logs:', err);
-  }
-  // Also enforce byte budget at startup so a stale 600MB dir gets trimmed.
-  enforceDirectoryBudget();
-}
+// ── Public API ────────────────────────────────────────────────────────
 
 /**
  * Append a log entry — non-blocking. Enqueues to an in-memory buffer

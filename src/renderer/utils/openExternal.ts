@@ -1,21 +1,34 @@
-// Open external URLs and files using system default applications
-// Uses Tauri shell plugin in desktop mode, falls back to window.open in browser mode
+// Open external URLs and files using system default applications.
+//
+// Web URLs (http/https/mailto) → Tauri `shell:allow-open` plugin.
+// File paths and `file://` URLs → Rust invoke `cmd_open_path_with_default`.
+//
+// Why split: the default `shell:allow-open` scope regex
+//   `^((mailto:\w+)|(tel:\w+)|(https?://\w+)).+`
+// rejects ANY file target — both `file://...` and bare absolute paths. So
+// for local files this helper hands off to the Rust command, which validates
+// the path against `home/tmp prefix + credential blacklist + canonicalize`
+// (anti-symlink-escape) before spawning the OS default app. See issue #125.
+//
+// Browser fallback mode (Vite dev served in a regular browser) keeps the
+// existing `window.open` behavior for web URLs only — file paths can't be
+// opened from a sandboxed renderer.
+//
+// Windows path note: `new URL("file:///C:/foo").pathname` returns
+// `/C:/foo`, NOT a native `C:\foo`. `fileUrlToPath` strips the leading
+// slash on a drive-letter prefix and normalizes separators, so the path
+// reaches Rust as a real Windows path.
 
 import { isTauriEnvironment } from './browserMock';
 
 /**
- * Open a URL or file path using the system default application
- * - HTTP/HTTPS URLs: Opens in system default browser
- * - mailto: URLs: Opens in system default email client
- * - File paths: Opens with system default application
- *
- * Security: Tauri's shell.open() has built-in security measures:
- * - Only allows opening URLs and file paths
- * - Does not execute arbitrary commands
- * - Respects system security policies
+ * Open a URL or file path using the system default application.
+ * - HTTP/HTTPS / mailto / tel → Tauri shell.open (system default browser /
+ *   email / dialer)
+ * - `file://` URLs and absolute filesystem paths → Rust
+ *   `cmd_open_path_with_default` (system default app for the file type)
  *
  * @param target - URL or file path to open
- * @returns Promise that resolves when the open command is executed
  */
 export async function openExternal(target: string): Promise<void> {
     if (!target || typeof target !== 'string') {
@@ -23,7 +36,6 @@ export async function openExternal(target: string): Promise<void> {
         return;
     }
 
-    // Trim whitespace
     const trimmedTarget = target.trim();
     if (!trimmedTarget) {
         console.warn('[openExternal] Empty target provided');
@@ -31,19 +43,34 @@ export async function openExternal(target: string): Promise<void> {
     }
 
     if (isTauriEnvironment()) {
-        // Use Tauri shell plugin for desktop mode
+        // Local file targets cannot go through Tauri shell.open — route
+        // through Rust invoke instead. Detect either `file://...` or a
+        // platform-native absolute path.
+        const filePath = toLocalFilePath(trimmedTarget);
+        if (filePath) {
+            try {
+                const { invoke } = await import('@tauri-apps/api/core');
+                await invoke('cmd_open_path_with_default', { fullPath: filePath });
+            } catch (error) {
+                console.error('[openExternal] cmd_open_path_with_default failed:', error);
+            }
+            return;
+        }
+
+        // Web URLs (http/https/mailto/tel) — use the shell plugin.
         try {
             const { open } = await import('@tauri-apps/plugin-shell');
             await open(trimmedTarget);
         } catch (error) {
-            console.error('[openExternal] Failed to open:', error);
+            console.error('[openExternal] shell.open failed:', error);
             // Fallback to window.open for URLs only
             if (isExternalUrl(trimmedTarget)) {
                 window.open(trimmedTarget, '_blank', 'noopener,noreferrer');
             }
         }
     } else {
-        // Browser mode: use window.open for URLs only
+        // Browser mode: use window.open for URLs only. File targets are not
+        // openable from a sandboxed renderer.
         if (isExternalUrl(trimmedTarget)) {
             window.open(trimmedTarget, '_blank', 'noopener,noreferrer');
         } else {
@@ -64,32 +91,45 @@ export function isExternalUrl(url: string): boolean {
 }
 
 /**
- * Check if a string is any URL (including file:// protocol)
+ * If `target` is a `file://` URL or an absolute filesystem path, return the
+ * native absolute path; otherwise null. Handles Windows drive letters.
+ *
+ * UNC `file://server/share/...` is not supported — `URL.pathname` drops the
+ * host segment, so we'd silently lose `\\server\share`. Returns the
+ * host-less path; callers should not rely on UNC opens through this helper.
+ *
+ * Exported for unit testing; callers should use `openExternal()` instead.
  */
-export function isUrl(url: string): boolean {
-    if (!url) return false;
-    const lowerUrl = url.toLowerCase();
-    return lowerUrl.startsWith('http://') ||
-           lowerUrl.startsWith('https://') ||
-           lowerUrl.startsWith('mailto:') ||
-           lowerUrl.startsWith('file://');
+export function toLocalFilePath(target: string): string | null {
+    // file:// URL → decode pathname; strip leading `/` on Windows drive paths.
+    if (/^file:\/\//i.test(target)) {
+        try {
+            const url = new URL(target);
+            let pathname = decodeURIComponent(url.pathname);
+            // Windows: `/C:/foo/bar.html` → `C:\foo\bar.html`
+            if (/^\/[A-Za-z]:[/\\]/.test(pathname)) {
+                pathname = pathname.slice(1).replace(/\//g, '\\');
+            }
+            return pathname || null;
+        } catch {
+            return null;
+        }
+    }
+    // Absolute paths (Unix `/...`, Windows `C:\...` or `C:/...`).
+    if (target.startsWith('/')) return target;
+    if (/^[A-Za-z]:[\\/]/.test(target)) return target;
+    return null;
 }
 
 /**
- * Check if a string looks like a file path (internal use)
- * Note: This is kept for potential future use but currently
- * openExternal handles all targets uniformly via Tauri shell.open()
+ * Check if a string looks like a file path (Unix/Windows/home).
+ * Kept exported for legacy callers; new code should use `openExternal`
+ * directly (it handles routing).
  */
-function isFilePath(str: string): boolean {
+export function isFilePath(str: string): boolean {
     if (!str) return false;
-    // Absolute paths on Unix/macOS
     if (str.startsWith('/')) return true;
-    // Absolute paths on Windows
     if (/^[a-zA-Z]:\\/.test(str)) return true;
-    // Home directory paths
     if (str.startsWith('~/')) return true;
     return false;
 }
-
-// Export for potential future use
-export { isFilePath };

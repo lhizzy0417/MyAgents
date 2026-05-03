@@ -90,12 +90,31 @@ export function TaskAdvancedConfigEditor(props: Props) {
     return config?.agents?.find((a) => a.workspacePath === workspacePath) ?? null;
   }, [workspacePath, config]);
 
-  // Effective runtime that this task will run under:
+  // Multi-Agent Runtime feature gate (Settings → 实验室). When OFF, this editor
+  // behaves as if external runtimes don't exist:
+  //   - Runtime selector is hidden entirely
+  //   - effectiveRuntime is forced to 'builtin' for THIS UI's purposes, so
+  //     model/permission/MCP fields render as the builtin variant regardless
+  //     of what's persisted on `runtime` / `workspaceAgent.runtime`
+  //   - Persisted values on disk (`task.runtime`, `agent.runtime`) are NOT
+  //     touched — flipping the gate back on restores the prior selection,
+  //     matching the round-trip semantics in Chat / Launcher / Agent settings.
+  // The single residual gap: a task with `runtime='claude-code'` saved when
+  // the gate was on will still spawn an external runtime sidecar at cron
+  // execution time even with the gate off, because that path is in Rust and
+  // doesn't read the gate. Acceptable until the gate is removed entirely
+  // (planned for a few versions out — at which point external runtimes are
+  // universally available and the behavior becomes correct by definition).
+  const multiAgentRuntimeEnabled = !!config?.multiAgentRuntime;
+
+  // Effective runtime that this task will run under (in this UI's view):
   //   user override `runtime` (if set) > Agent's runtime > 'builtin' default
   // External runtimes self-manage model/permission/MCP, so all three
   // sub-fields are gated on `effectiveRuntime === 'builtin'`.
   const agentRuntime: RuntimeType = workspaceAgent?.runtime ?? 'builtin';
-  const effectiveRuntime: RuntimeType = runtime ?? agentRuntime;
+  const effectiveRuntime: RuntimeType = multiAgentRuntimeEnabled
+    ? (runtime ?? agentRuntime)
+    : 'builtin';
   const isBuiltin = effectiveRuntime === 'builtin';
   const agentRuntimeLabel = RUNTIME_DISPLAY_NAMES[agentRuntime] ?? agentRuntime;
   const effectiveRuntimeLabel = RUNTIME_DISPLAY_NAMES[effectiveRuntime] ?? effectiveRuntime;
@@ -311,26 +330,28 @@ export function TaskAdvancedConfigEditor(props: Props) {
 
       {open && (
         <div className="space-y-5 border-t border-[var(--line-subtle)] px-4 py-4">
-          {/* Runtime — always visible. The "（当前 X）" suffix lives in the
-              "跟随 Agent" option label itself (see runtimeOptions), so the
-              hint here just describes the field semantically. The workspace
-              display name is derived from the resolved project (no extra
-              prop) so callers don't have to thread it through. */}
-          <FieldRow
-            label="Runtime"
-            hint={
-              workspaceDisplayName
-                ? `不选择时跟随 ${workspaceDisplayName}`
-                : '不选择时跟随 Agent 工作区'
-            }
-          >
-            <CustomSelect
-              value={runtime ?? FOLLOW_VALUE}
-              options={runtimeOptions}
-              onChange={(v) => setRuntime(v ? (v as RuntimeType) : undefined)}
-              placeholder="跟随 Agent 工作区"
-            />
-          </FieldRow>
+          {/* Runtime — visible only when the multi-agent-runtime gate is on.
+              When off, the rest of the editor still renders normally; effective
+              runtime is forced to 'builtin' upstream so model/permission/MCP
+              fields show their builtin variant. Mirrors WorkspaceBasicsSection's
+              gate treatment so the two surfaces feel consistent. */}
+          {multiAgentRuntimeEnabled && (
+            <FieldRow
+              label="Runtime"
+              hint={
+                workspaceDisplayName
+                  ? `不选择时跟随 ${workspaceDisplayName}`
+                  : '不选择时跟随 Agent 工作区'
+              }
+            >
+              <CustomSelect
+                value={runtime ?? FOLLOW_VALUE}
+                options={runtimeOptions}
+                onChange={(v) => setRuntime(v ? (v as RuntimeType) : undefined)}
+                placeholder="跟随 Agent 工作区"
+              />
+            </FieldRow>
+          )}
 
           {/* External runtime notice — when the effective runtime is not
               builtin, the Model / Permission / MCP sub-fields are hidden

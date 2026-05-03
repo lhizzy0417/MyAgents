@@ -2042,6 +2042,12 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
               model: cron.config.model,
               permissionMode: cron.config.permissionMode,
               providerEnv: cron.config.providerEnv,
+              // PRD #119: capture explicit routing intent at scheduling time.
+              // The chat's current providerEnv determines whether this cron
+              // intends to run on subscription (no providerEnv) or on a
+              // specific provider (with providerEnv). The cron then preserves
+              // that intent regardless of any later agent changes.
+              providerIntent: cron.config.providerEnv ? 'explicit' : 'subscription',
               runtime: cron.config.runtime,
               runtimeConfig: cron.config.runtimeConfig,
               schedule: cron.config.schedule,

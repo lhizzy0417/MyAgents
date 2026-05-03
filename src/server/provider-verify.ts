@@ -9,7 +9,7 @@ import { join } from 'path';
 import { existsSync, readFileSync } from 'fs';
 import { execSync } from 'child_process';
 import { query } from '@anthropic-ai/claude-agent-sdk';
-import { resolveClaudeCodeCli, buildClaudeSessionEnv } from './agent-session';
+import { resolveClaudeCodeCli, buildClaudeSessionEnv, startOneShotBridge } from './agent-session';
 import { ensureDirSync } from './utils/fs-utils';
 import { getLastBridgeError } from './openai-bridge';
 // Subscription types (keep in sync with src/renderer/types/subscription.ts)
@@ -297,9 +297,13 @@ export async function verifyProviderViaSdk(
   upstreamFormat?: 'chat_completions' | 'responses',
 ): Promise<{ success: boolean; error?: string; detail?: string }> {
   console.log(`[provider/verify] Starting SDK verification for ${baseUrl}, model=${model ?? 'default'}, authType=${authType}, apiProtocol=${apiProtocol ?? 'anthropic'}, maxOutputTokens=${maxOutputTokens ?? 'none'}`);
-  // Pass `model` as the override so CLAUDE_CODE_AUTO_COMPACT_WINDOW is
-  // computed for the model being verified, not the Tab's active session model.
-  const env = buildClaudeSessionEnv({
+  // PRD #124: register a per-call bridge token so the verify subprocess
+  // routes to ITS upstream via /bridge/<token>/v1/messages, completely
+  // isolated from the active Chat session's bridge (if any). The token
+  // resolver returns a static snapshot — verify's config doesn't change
+  // mid-call. Released in finally so the registry stays clean even on
+  // throw / timeout.
+  const providerEnv: import('./agent-session').ProviderEnv = {
     baseUrl,
     apiKey,
     authType: authType as 'auth_token' | 'api_key' | 'both' | 'auth_token_clear_api_key',
@@ -307,23 +311,37 @@ export async function verifyProviderViaSdk(
     maxOutputTokens,
     maxOutputTokensParamName,
     upstreamFormat,
-  }, model);
-  return verifyViaSdk(env, {
-    model,
-    sessionId: randomUUID(),
-    logPrefix: 'provider/verify',
-    parseError: parseProviderError,
-    // Match chat sessions: use 'project' to read .claude/ from cwd.
-    // MUST NOT use 'user' — it reads ~/.claude/settings.json which may contain
-    // enabledPlugins causing 30s+ initialization and triggering our timeout.
-    settingSources: ['project'],
-    // Scope bridge-error diagnostics to this provider's real upstream — but
-    // ONLY when the OpenAI bridge is actually in play. Anthropic-protocol
-    // providers call their baseUrl directly (no bridge), so any bridge error
-    // in the window belongs to some OTHER concurrent session, not us. See
-    // verifyViaSdk.opts.upstreamBaseUrlForDiagnostics docstring.
-    upstreamBaseUrlForDiagnostics: apiProtocol === 'openai' ? baseUrl : undefined,
-  });
+  };
+  // Only OpenAI-protocol providers route through the bridge. Anthropic-protocol
+  // providers (and subscription) hit their baseUrl directly — no token needed.
+  const bridge = apiProtocol === 'openai'
+    ? startOneShotBridge(providerEnv, model, `provider-verify:${baseUrl}`)
+    : null;
+  try {
+    // Pass `model` as the override so CLAUDE_CODE_AUTO_COMPACT_WINDOW is
+    // computed for the model being verified, not the Tab's active session model.
+    const env = buildClaudeSessionEnv(providerEnv, model, {
+      bridgeToken: bridge?.token,
+    });
+    return await verifyViaSdk(env, {
+      model,
+      sessionId: randomUUID(),
+      logPrefix: 'provider/verify',
+      parseError: parseProviderError,
+      // Match chat sessions: use 'project' to read .claude/ from cwd.
+      // MUST NOT use 'user' — it reads ~/.claude/settings.json which may contain
+      // enabledPlugins causing 30s+ initialization and triggering our timeout.
+      settingSources: ['project'],
+      // Scope bridge-error diagnostics to this provider's real upstream — but
+      // ONLY when the OpenAI bridge is actually in play. Anthropic-protocol
+      // providers call their baseUrl directly (no bridge), so any bridge error
+      // in the window belongs to some OTHER concurrent session, not us. See
+      // verifyViaSdk.opts.upstreamBaseUrlForDiagnostics docstring.
+      upstreamBaseUrlForDiagnostics: apiProtocol === 'openai' ? baseUrl : undefined,
+    });
+  } finally {
+    bridge?.release();
+  }
 }
 
 /**
@@ -332,11 +350,14 @@ export async function verifyProviderViaSdk(
  * Uses the same SDK spawning pattern as verify, but only reads initialization data.
  */
 export async function fetchSdkSupportedModels(): Promise<Array<{ value: string; displayName: string; description: string }>> {
+  // PRD #124: this path uses default Anthropic env (subscription / Anthropic-
+  // protocol providers go straight to api.anthropic.com), so no bridge token
+  // is needed. `buildClaudeSessionEnv()` is now a pure function — no global
+  // state pollution to clean up.
   const cliPath = resolveClaudeCodeCli();
   const cwd = join(homedir(), '.myagents', 'projects');
   ensureDirSync(cwd);
 
-  // Use default Anthropic env (includes proxy config, NO_PROXY etc.)
   const env = buildClaudeSessionEnv();
 
   const testQuery = query({
@@ -412,6 +433,9 @@ export function checkAnthropicSubscription(): SubscriptionStatus {
  */
 export async function verifySubscription(): Promise<{ success: boolean; error?: string; detail?: string }> {
   console.log('[subscription/verify] Starting SDK verification...');
+  // PRD #124: subscription path doesn't need a bridge — SDK talks to
+  // api.anthropic.com directly. `buildClaudeSessionEnv()` is now pure
+  // and won't pollute any state.
   const env = buildClaudeSessionEnv(); // No provider override = default Anthropic auth
   return verifyViaSdk(env, {
     sessionId: randomUUID(),

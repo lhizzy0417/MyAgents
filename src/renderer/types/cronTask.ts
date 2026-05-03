@@ -7,6 +7,23 @@ import type { RuntimeConfig, RuntimeType } from '../../shared/types/runtime';
 export type CronRunMode = 'single_session' | 'new_session';
 
 /**
+ * Explicit provider routing intent for a cron task (PRD #119, 2026-05).
+ *
+ * Mirrors `cron_task::ProviderIntent` in Rust. Resolves the ambiguity in
+ * pre-#119 cron tasks where `providerEnv === undefined` could mean either
+ * "follow agent" (legacy) or "explicit subscription" (new). UI cron-create
+ * paths always set this explicitly; legacy persisted tasks deserialize as
+ * `'followAgent'` via serde default.
+ *
+ * Sidecar handler (`/cron/execute(-sync)`) branches on intent:
+ *   - `followAgent` — snapshot resolution at execute time (pre-#119 default)
+ *   - `subscription` — force `providerEnv = undefined`, ignore agent
+ *   - `explicit`     — force `providerEnv = task's payload.providerEnv`,
+ *                      ignore agent
+ */
+export type CronProviderIntent = 'followAgent' | 'subscription' | 'explicit';
+
+/**
  * Task status (simplified: only Running and Stopped)
  * Stopped includes: manual stop, end conditions met, AI exit
  */
@@ -65,6 +82,8 @@ export interface CronTask {
   permissionMode?: string;
   model?: string;
   providerEnv?: { baseUrl?: string; apiKey?: string; authType?: 'auth_token' | 'api_key' | 'both' | 'auth_token_clear_api_key'; apiProtocol?: 'anthropic' | 'openai'; maxOutputTokens?: number; maxOutputTokensParamName?: 'max_tokens' | 'max_completion_tokens' | 'max_output_tokens'; upstreamFormat?: 'chat_completions' | 'responses' };
+  /** PRD #119: explicit routing intent. Defaults to `followAgent` (legacy) when absent. */
+  providerIntent?: CronProviderIntent;
   runtime?: RuntimeType;
   runtimeConfig?: RuntimeConfig;
   /** Per-task MCP enable list snapshot — see CronTaskConfig.mcpEnabledServers. */
@@ -116,6 +135,8 @@ export interface CronTaskConfig {
   permissionMode?: string;
   model?: string;
   providerEnv?: CronTaskProviderEnv;
+  /** PRD #119: explicit routing intent. Frontend cron-create paths SHOULD set this. */
+  providerIntent?: CronProviderIntent;
   runtime?: RuntimeType;
   runtimeConfig?: RuntimeConfig;
   /** Flexible schedule (overrides intervalMinutes) */

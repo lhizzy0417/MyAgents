@@ -900,7 +900,24 @@ pub fn cmd_copy_folder_to_templates(
 
 // ============= Admin Agent Sync =============
 
-const ADMIN_AGENT_VERSION: &str = "14";
+const ADMIN_AGENT_VERSION: &str = "16";
+
+/// Helper-bundled paths (relative to `~/.myagents/`) that previous versions
+/// shipped but that have since been retired.
+///
+/// `merge_dir_recursive` is overwrite-only ("never deletes"), so a file
+/// removed from the bundle would persist on upgraders' disks indefinitely
+/// — letting a retired skill keep loading inside the helper agent and
+/// silently diverge fresh-install from upgrade behavior. Each retire
+/// MUST also append the relative path here so the next sync removes it.
+///
+/// Once `~/.myagents/.admin-agent-version` has rolled past the version
+/// that introduced the retire, the entry is harmless to keep (it just
+/// no-ops on absent paths).
+const RETIRED_ADMIN_PATHS: &[&str] = &[
+    // v16: /self-config promoted to global system skill /myagents-cli
+    ".claude/skills/self-config",
+];
 
 /// Merge bundled admin agent files into ~/.myagents/
 /// Version-gated: only runs when ADMIN_AGENT_VERSION changes.
@@ -926,6 +943,41 @@ pub fn cmd_sync_admin_agent<R: Runtime>(
     let src = res.join("bundled-agents").join("myagents_helper");
     if !src.exists() {
         return Err(format!("Admin agent not found: {:?}", src));
+    }
+
+    // Pre-merge: remove retired paths so they don't linger on upgraders'
+    // disks. Use symlink_metadata (not Path::exists) for symlink-trap
+    // safety, mirroring cmd_sync_system_skills.
+    for rel in RETIRED_ADMIN_PATHS {
+        let target = dest.join(rel);
+        match fs::symlink_metadata(&target) {
+            Ok(meta) => {
+                let removed = if meta.file_type().is_symlink() || meta.is_file() {
+                    fs::remove_file(&target)
+                } else {
+                    fs::remove_dir_all(&target)
+                };
+                if let Err(e) = removed {
+                    ulog_warn!(
+                        "[admin-agent] failed to clear retired path {}: {} — continuing",
+                        rel,
+                        e
+                    );
+                } else {
+                    ulog_info!("[admin-agent] retired {}", rel);
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                // Already absent — fresh install or already cleaned.
+            }
+            Err(e) => {
+                ulog_warn!(
+                    "[admin-agent] symlink_metadata({}) failed: {} — continuing",
+                    rel,
+                    e
+                );
+            }
+        }
     }
 
     // Merge into ~/.myagents/
@@ -1095,7 +1147,7 @@ pub fn cmd_sync_cli<R: Runtime>(
 // matching exclusion list in src/server/index.ts::seedBundledSkills
 // MUST be kept in sync (comment there points back here).
 
-const SYSTEM_SKILLS_VERSION: &str = "8";
+const SYSTEM_SKILLS_VERSION: &str = "10";
 
 /// Skills that ship with the app and MUST stay at the bundled version —
 /// the app's flows depend on them, users are not meant to customise.
@@ -1103,7 +1155,9 @@ const SYSTEM_SKILLS_VERSION: &str = "8";
 const SYSTEM_SKILLS: &[&str] = &[
     "task-alignment",
     "task-implement",
-    "ultra-research",
+    // v10: ultra-research removed — not generic enough to ship as system
+    // skill. Existing installs retain the dir at ~/.myagents/skills/
+    // ultra-research/ until the user deletes it (no orphan cleanup logic).
     "download-anything",
     // v8: agent-browser promoted from utility → system skill. The CLI is
     // no longer bundled with the app; the SKILL.md teaches AI to self-install
@@ -1111,6 +1165,14 @@ const SYSTEM_SKILLS: &[&str] = &[
     // need the updated SKILL.md to land or their AI will hit `command not
     // found` after upgrading. System-skill status forces the overwrite.
     "agent-browser",
+    // v9: myagents-cli promoted from helper-bundled skill (was at
+    // bundled-agents/myagents_helper/.claude/skills/self-config/) to a
+    // global system skill. Every AI session inside MyAgents — Chat / IM Bot
+    // / Cron / Helper — should be able to drive the product's own
+    // capabilities (cron, task center, MCP, Provider, channels, plugins,
+    // skills, widgets) through the CLI. SKILL.md changes track CLI surface
+    // changes, so it must force-overwrite on version bumps.
+    "myagents-cli",
 ];
 
 /// Skills unavailable on certain platforms due to upstream bugs.

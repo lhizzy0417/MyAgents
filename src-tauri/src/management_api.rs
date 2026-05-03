@@ -12,7 +12,7 @@ use std::sync::OnceLock;
 use tokio::net::TcpListener;
 
 use crate::cron_task::{
-    self, CronDelivery, CronSchedule, CronTask, CronTaskConfig, TaskProviderEnv,
+    self, CronDelivery, CronSchedule, CronTask, CronTaskConfig, ProviderIntent, TaskProviderEnv,
 };
 use crate::{ulog_info, ulog_warn, ulog_error};
 use crate::im::{self, ManagedImBots, ManagedAgents};
@@ -151,6 +151,10 @@ struct CreateCronRequest {
     model: Option<String>,
     permission_mode: Option<String>,
     provider_env: Option<TaskProviderEnv>,
+    /// PRD #119: explicit routing intent. Frontend / IM Bot / CLI callers
+    /// that know what they want should set this to `Subscription` or
+    /// `Explicit`. Absent → `FollowAgent` (legacy snapshot semantics).
+    provider_intent: Option<ProviderIntent>,
     runtime: Option<String>,
     runtime_config: Option<serde_json::Value>,
     /// Fallback interval if no schedule provided
@@ -305,6 +309,7 @@ async fn create_cron_handler(
         permission_mode: req.permission_mode.unwrap_or_default(),
         model: req.model,
         provider_env: req.provider_env,
+        provider_intent: req.provider_intent.unwrap_or_default(),
         runtime: req.runtime,
         runtime_config: req.runtime_config,
         // Direct cron creation (legacy IM Bot path) doesn't carry a Task
@@ -1809,6 +1814,10 @@ async fn ensure_cron_for_task(ta: &task::Task) -> Result<String, String> {
         permission_mode: desired_permission_mode,
         model: desired_model,
         provider_env: None,
+        // Task Center dispatch doesn't capture an explicit provider; fall
+        // back to FollowAgent so the cron tracks the workspace agent's
+        // current provider (PRD #119, legacy semantics for this path).
+        provider_intent: ProviderIntent::FollowAgent,
         runtime: ta.runtime.clone(),
         runtime_config: ta.runtime_config.clone(),
         // PRD 0.2.4 §需求 4 — per-task MCP override flows through here so

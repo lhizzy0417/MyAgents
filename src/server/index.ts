@@ -245,7 +245,7 @@ import {
   getPendingInteractiveRequests,
   stripPlaywrightResults,
   setSidecarPort,
-  getOpenAiBridgeConfig,
+  hasActiveBridge,
   getSessionModel,
   syncProjectUserConfig,
   setProxyConfig,
@@ -279,8 +279,9 @@ import {
   markDeferredInitReady,
   setDeferredInitPhase,
 } from './readiness-state';
-import { cleanupOldLogs } from './AgentLogger';
-import { cleanupOldUnifiedLogs, appendUnifiedLogBatch, getRecentLogLines } from './UnifiedLogger';
+import { appendUnifiedLogBatch, getRecentLogLines, getActiveUnifiedLogPath } from './UnifiedLogger';
+import { getActiveSessionLogPath } from './AgentLogger';
+import { runLogRetentionSweep, startPeriodicSweep } from './log-retention';
 import { createSseClient, getClients } from './sse';
 import { imEventBus } from './utils/im-event-bus';
 import { imRequestRegistry } from './utils/im-request-registry';
@@ -408,6 +409,15 @@ type CronExecutePayload = {
     maxOutputTokensParamName?: 'max_tokens' | 'max_completion_tokens' | 'max_output_tokens';
     upstreamFormat?: 'chat_completions' | 'responses';
   };
+  /**
+   * PRD #119: explicit routing intent. Controls how the handler resolves
+   * effective model + providerEnv:
+   *   - `'followAgent'` (default if absent) — snapshot-based, follows agent
+   *   - `'subscription'` — force `effectiveProviderEnv = undefined`
+   *   - `'explicit'`     — force `effectiveProviderEnv = payload.providerEnv`
+   * Mirrors Rust's `cron_task::ProviderIntent`.
+   */
+  providerIntent?: 'followAgent' | 'subscription' | 'explicit';
   /**
    * Per-task MCP enable list override (PRD 0.2.4 §需求 4).
    * `undefined` = follow workspace MCP (`config.agents[].mcpEnabledServers`).
@@ -578,12 +588,17 @@ function resolveBundledSkillsDir(): string | null {
 const SYSTEM_SKILLS: readonly string[] = [
   'task-alignment',
   'task-implement',
-  'ultra-research',
+  // v10: ultra-research removed — not generic enough.
   'download-anything',
   // v8: see commands.rs::SYSTEM_SKILLS — agent-browser promoted to system
   // skill so existing users get the updated self-install SKILL.md after
   // the bundled CLI is removed.
   'agent-browser',
+  // v9: myagents-cli — global skill that exposes the entire `myagents`
+  // CLI surface (cron / task / mcp / model / agent / runtime / skill /
+  // plugin / widget / im / config) to every AI session in the product.
+  // Force-synced because SKILL.md must track CLI changes in lockstep.
+  'myagents-cli',
 ];
 
 /**
@@ -1186,51 +1201,84 @@ async function main() {
   (globalThis as { __myagentsDeferredInit?: Promise<void> }).__myagentsDeferredInit =
     deferredInitPromise;
 
-  // ── OpenAI bridge: lazy ─────────────────────────────────────────────────
-  // Only users on OpenAI-protocol providers hit /v1/messages. Importing
-  // ./openai-bridge (~2600 lines, includes translate/utils/types subtrees)
-  // at startup costs ~120ms for zero benefit on Anthropic-native setups.
+  /**
+   * Extract the bridge token from a `/bridge/<token>/v1/messages` URL.
+   * Returns the token string or `null` for any URL that doesn't match
+   * the expected shape. PRD #124.
+   */
+  function extractBridgeTokenFromUrl(rawUrl: string): string | null {
+    try {
+      const u = new URL(rawUrl);
+      const m = u.pathname.match(/^\/bridge\/([^/]+)\/v1\/messages(?:\/count_tokens)?$/);
+      return m ? m[1] : null;
+    } catch {
+      return null;
+    }
+  }
+
+  // ── OpenAI bridge: lazy + per-token (PRD #124) ─────────────────────────
+  // Only users on OpenAI-protocol providers hit `/bridge/<token>/v1/messages`.
+  // Importing `./openai-bridge` (~2600 lines, includes translate/utils/types
+  // subtrees) at startup costs ~120ms for zero benefit on Anthropic-native
+  // setups, so the factory stays lazy.
   //
-  // Strategy: keep the factory behind ensureBridgeHandler(). First /v1/messages
-  // that sees an active bridgeConfig loads the module, builds the handler,
-  // and wires registerBridgeSeedFn (bridge-cache buffers signatures until
-  // registration, so seed ordering is preserved — see bridge-cache.ts).
+  // The handler is stateless across tokens: every request carries its
+  // bridge token in the URL path; getUpstreamConfig parses the token and
+  // looks it up in `bridge-registry`. Each SDK subprocess (active session,
+  // verify, title-gen, sub-agent) registers under its own token, so they
+  // route to their own upstream without cross-pollination. See
+  // `bridge-registry.ts` for the lifecycle contract.
   let bridgeHandlerPromise: Promise<BridgeHandler> | null = null;
   const ensureBridgeHandler = (): Promise<BridgeHandler> => {
-    if (!bridgeHandlerPromise) {
-      bridgeHandlerPromise = import('./openai-bridge').then(({ createBridgeHandler }) => {
-        const handler = createBridgeHandler({
+    if (bridgeHandlerPromise) return bridgeHandlerPromise;
+    bridgeHandlerPromise = (async () => {
+      const [{ createBridgeHandler }, { lookupBridge }] = await Promise.all([
+        import('./openai-bridge'),
+        import('./openai-bridge/bridge-registry'),
+      ]);
+      const handler = createBridgeHandler({
           workspacePath: agentDir || undefined,
-          getUpstreamConfig: () => {
-            const config = getOpenAiBridgeConfig();
-            if (!config) throw new Error('Bridge not active');
+          getUpstreamConfig: (request) => {
+            const token = extractBridgeTokenFromUrl(request.url);
+            if (!token) {
+              throw new Error('Bridge request missing token in URL path');
+            }
+            const cfg = lookupBridge(token);
+            if (!cfg) {
+              throw new Error(`Unknown bridge token: ${token}`);
+            }
+            // Per-request modelMapping bound to THIS token's aliases —
+            // ensures concurrent bridges with different sub-agent rules
+            // don't cross-pollinate (the original #124 bug class).
+            const aliases = cfg.modelAliases;
+            const modelMapping = aliases
+              ? (requestModel: string): string | undefined => {
+                  if (requestModel.startsWith('claude') && requestModel.includes('sonnet') && aliases.sonnet) return aliases.sonnet;
+                  if (requestModel.startsWith('claude') && requestModel.includes('opus') && aliases.opus) return aliases.opus;
+                  if (requestModel.startsWith('claude') && requestModel.includes('haiku') && aliases.haiku) return aliases.haiku;
+                  // Last-resort: claude-* with no specific alias → use the
+                  // bridge's own active model (per-token, no global leakage).
+                  if (requestModel.startsWith('claude-')) return cfg.model || undefined;
+                  return undefined;
+                }
+              : undefined;
             return {
-              baseUrl: config.baseUrl,
-              apiKey: config.apiKey,
-              model: config.model,
-              maxOutputTokens: config.maxOutputTokens,
-              maxOutputTokensParamName: config.maxOutputTokensParamName,
-              upstreamFormat: config.upstreamFormat,
+              baseUrl: cfg.baseUrl,
+              apiKey: cfg.apiKey,
+              model: cfg.model,
+              maxOutputTokens: cfg.maxOutputTokens,
+              maxOutputTokensParamName: cfg.maxOutputTokensParamName,
+              upstreamFormat: cfg.upstreamFormat,
+              modelMapping,
             };
-          },
-          modelMapping: (requestModel: string) => {
-            const config = getOpenAiBridgeConfig();
-            if (!config?.modelAliases) return undefined;
-            const aliases = config.modelAliases;
-            if (requestModel.startsWith('claude') && requestModel.includes('sonnet') && aliases.sonnet) return aliases.sonnet;
-            if (requestModel.startsWith('claude') && requestModel.includes('opus') && aliases.opus) return aliases.opus;
-            if (requestModel.startsWith('claude') && requestModel.includes('haiku') && aliases.haiku) return aliases.haiku;
-            if (requestModel.startsWith('claude-')) return getSessionModel() || undefined;
-            return undefined;
           },
           logger: (msg) => console.log(msg),
         });
-        // Register seed callback now that the handler exists. bridge-cache
-        // flushes any entries buffered during pre-registration.
-        registerBridgeSeedFn((entries) => handler.seedThoughtSignatures(entries));
-        return handler;
-      });
-    }
+      // Register seed callback now that the handler exists. bridge-cache
+      // flushes any entries buffered during pre-registration.
+      registerBridgeSeedFn((entries) => handler.seedThoughtSignatures(entries));
+      return handler;
+    })();
     return bridgeHandlerPromise;
   };
 
@@ -2058,33 +2106,63 @@ async function main() {
           // Wrap cron prompt so AI recognizes it as system-triggered (not a real-time human message)
           const wrappedPrompt = `<system-reminder>\n<CRON_TASK>\n${prompt}\n</CRON_TASK>\n</system-reminder>`;
 
-          // v0.1.69 T15: Resolve per-tick from the session snapshot (owned kind).
-          // This endpoint runs against whatever session is already loaded in this
-          // Sidecar, so there's no switch step — but the snapshot is still
-          // authoritative over task-frozen payload fields.
+          // PRD #119: intent-driven resolution — see /cron/execute-sync for
+          // the full design comment. This endpoint runs against whatever
+          // session is already loaded (no session switch), so the snapshot
+          // path operates on the current session's metadata. For Subscription
+          // / Explicit intents we bypass the snapshot entirely and use the
+          // payload's values directly.
+          const intent = payload.providerIntent ?? 'followAgent';
           let effectiveModel = model;
           let effectiveProviderEnv: typeof providerEnv = providerEnv;
           let effectiveRuntimeConfig = payload.runtimeConfig;
-          if (currentSessionId) {
-            const sessionMeta = getSessionMetadata(currentSessionId);
-            const agent = findAgentByWorkspacePath(agentDir) as AgentConfig | undefined;
-            if (sessionMeta && agent) {
-              const resolved = resolveSessionConfig(sessionMeta, agent, undefined, 'owned');
-              if (resolved.model !== undefined) effectiveModel = resolved.model;
-              if (resolved.providerEnvJson) {
-                try {
-                  effectiveProviderEnv = JSON.parse(resolved.providerEnvJson);
-                } catch (e) {
-                  console.warn(`[cron] execute T15: failed to parse providerEnvJson for session ${currentSessionId}, falling back to task-frozen value`, e);
+
+          if (intent === 'followAgent') {
+            if (currentSessionId) {
+              const sessionMeta = getSessionMetadata(currentSessionId);
+              const agent = findAgentByWorkspacePath(agentDir) as AgentConfig | undefined;
+              if (sessionMeta && agent) {
+                const resolved = resolveSessionConfig(sessionMeta, agent, undefined, 'owned');
+                if (resolved.model !== undefined) effectiveModel = resolved.model;
+                if (resolved.providerEnvJson) {
+                  try {
+                    effectiveProviderEnv = JSON.parse(resolved.providerEnvJson);
+                  } catch (e) {
+                    console.warn(`[cron] execute followAgent: failed to parse providerEnvJson for session ${currentSessionId}, falling back to task-frozen value`, e);
+                  }
+                }
+                if (resolved.runtime !== 'builtin') {
+                  effectiveRuntimeConfig = {
+                    ...(payload.runtimeConfig ?? {}),
+                    model: resolved.model ?? payload.runtimeConfig?.model,
+                    permissionMode: resolved.permissionMode ?? payload.runtimeConfig?.permissionMode,
+                  };
                 }
               }
-              if (resolved.runtime !== 'builtin') {
-                effectiveRuntimeConfig = {
-                  ...(payload.runtimeConfig ?? {}),
-                  model: resolved.model ?? payload.runtimeConfig?.model,
-                  permissionMode: resolved.permissionMode ?? payload.runtimeConfig?.permissionMode,
-                };
-              }
+            }
+            // Backward-compat with the pre-#119 pragmatic fix — see /cron/execute-sync above.
+            if (payload.model) effectiveModel = payload.model;
+            if (payload.providerEnv) effectiveProviderEnv = payload.providerEnv;
+          } else if (intent === 'subscription') {
+            effectiveProviderEnv = undefined;
+            if (payload.model) effectiveModel = payload.model;
+            if (effectiveRuntimeConfig) {
+              effectiveRuntimeConfig = { ...effectiveRuntimeConfig, model: payload.model ?? effectiveRuntimeConfig.model };
+            }
+          } else if (intent === 'explicit') {
+            if (!payload.providerEnv) {
+              console.error(`[cron] execute intent=explicit but payload.providerEnv is missing — refusing to run`);
+              clearCronTaskContext(currentSessionId);
+              resetInteractionScenario();
+              return jsonResponse({
+                success: false,
+                error: 'Cron task has explicit provider intent but no providerEnv — task data is malformed.',
+              }, 400);
+            }
+            effectiveProviderEnv = payload.providerEnv;
+            if (payload.model) effectiveModel = payload.model;
+            if (effectiveRuntimeConfig) {
+              effectiveRuntimeConfig = { ...effectiveRuntimeConfig, model: payload.model ?? effectiveRuntimeConfig.model };
             }
           }
 
@@ -2178,6 +2256,24 @@ async function main() {
           // owner kind in resolveSessionConfig (PRD D4 footnote).
           const cronAgent = findAgentByWorkspacePath(agentDir) as AgentConfig | undefined;
           const cronSnapshot: Partial<SessionMetadata> = cronAgent ? snapshotForOwnedSession(cronAgent) : {};
+          // PRD #119: stamp the cron's explicit routing intent into the
+          // freshly-built snapshot. For Subscription / Explicit intents,
+          // the snapshot reflects the cron's own provider — NOT the agent's
+          // — so other readers (session details panel, history view) see
+          // an accurate record of what config the run actually used. This
+          // also lets the unified `resolveSessionConfig` path read back the
+          // right values without intent-aware branching at read time.
+          const cronIntent = payload.providerIntent ?? 'followAgent';
+          if (cronIntent === 'subscription') {
+            cronSnapshot.providerId = undefined;
+            cronSnapshot.providerEnvJson = undefined;
+            if (payload.model) cronSnapshot.model = payload.model;
+          } else if (cronIntent === 'explicit' && payload.providerEnv) {
+            cronSnapshot.providerId = undefined;
+            cronSnapshot.providerEnvJson = JSON.stringify(payload.providerEnv);
+            if (payload.model) cronSnapshot.model = payload.model;
+          }
+          // FollowAgent (legacy): cronSnapshot keeps the agent's values verbatim.
           const overrideRuntime = payload.runtime ?? getActiveRuntimeType();
           if (overrideRuntime) cronSnapshot.runtime = overrideRuntime;
           // PRD 0.2.4 §需求 4 — stamp per-task MCP override into the new
@@ -2233,70 +2329,111 @@ async function main() {
           console.log(`[cron] execute-sync taskId=${taskId} no sessionId provided, using current session`);
         }
 
-        // v0.1.69 T15: Cron per-tick resolve — unified for both run modes.
+        // ── Intent-driven resolution (PRD #119, 2026-05) ──────────────────
         //
-        // Both single_session and new_session derive their effective config from the
-        // session snapshot that was captured at creation time (single_session: at
-        // CronTask creation; new_session: at each tick by `snapshotForOwnedSession`
-        // above). CronTask.model / provider_env / runtime_config are task-frozen
-        // fallbacks used only if no snapshot exists.
+        // Cron tasks declare their routing intent explicitly. Three branches:
         //
-        // Resolving for both paths keeps "payload.model" from winning over the fresh
-        // per-tick snapshot in new_session mode — if the user edits the Agent between
-        // ticks, new_session picks up the change next tick via the fresh snapshot.
+        //   - `subscription` — cron uses Anthropic subscription regardless of
+        //     what the agent currently looks like. effectiveProviderEnv is
+        //     forced to undefined; agent's third-party `providerEnvJson` is
+        //     IGNORED. effectiveModel comes from payload.
+        //
+        //   - `explicit`     — cron uses its own captured providerEnv. Snapshot
+        //     is bypassed entirely. effectiveModel + effectiveProviderEnv come
+        //     from payload, atomic. (Pre-#119 the handler re-resolved from the
+        //     agent snapshot, which silently overwrote providerEnv with the
+        //     agent's even though model came from the cron — model+endpoint
+        //     mismatch → 400 + silent empty output.)
+        //
+        //   - `followAgent`  — pre-#119 default. Read the session snapshot,
+        //     fall back to agent for unset fields. Behavior preserved for
+        //     legacy crons (those persisted before #119 deserialize as
+        //     `followAgent` via serde default).
+        //
+        // The snapshot itself was already updated above for new_session mode
+        // to match intent, so a future read still returns coherent values —
+        // but we don't rely on that here; we drive directly from intent +
+        // payload so single_session and new_session behave identically.
+        //
+        // permissionMode override is intent-independent: it overrides the
+        // resolved value if payload.permissionMode is set, else falls back
+        // to the resolver / runtime default.
+        const intent = payload.providerIntent ?? 'followAgent';
+
         let effectiveModel = model;
         let effectiveProviderEnv: typeof providerEnv = providerEnv;
         let effectiveRuntimeConfig = payload.runtimeConfig;
-        const snapshotSessionId = effectiveSessionId ?? getSessionId();
-        if (snapshotSessionId) {
-          const sessionMeta = getSessionMetadata(snapshotSessionId);
-          const agent = findAgentByWorkspacePath(agentDir) as AgentConfig | undefined;
-          if (sessionMeta && agent) {
-            const resolved = resolveSessionConfig(sessionMeta, agent, undefined, 'owned');
-            if (resolved.model !== undefined) effectiveModel = resolved.model;
-            if (resolved.providerEnvJson) {
-              try {
-                effectiveProviderEnv = JSON.parse(resolved.providerEnvJson);
-              } catch (e) {
-                console.warn(`[cron] execute-sync T15: failed to parse providerEnvJson for session ${snapshotSessionId}, falling back to task-frozen value`, e);
+
+        if (intent === 'followAgent') {
+          // Legacy snapshot-based resolution.
+          const snapshotSessionId = effectiveSessionId ?? getSessionId();
+          if (snapshotSessionId) {
+            const sessionMeta = getSessionMetadata(snapshotSessionId);
+            const agent = findAgentByWorkspacePath(agentDir) as AgentConfig | undefined;
+            if (sessionMeta && agent) {
+              const resolved = resolveSessionConfig(sessionMeta, agent, undefined, 'owned');
+              if (resolved.model !== undefined) effectiveModel = resolved.model;
+              if (resolved.providerEnvJson) {
+                try {
+                  effectiveProviderEnv = JSON.parse(resolved.providerEnvJson);
+                } catch (e) {
+                  console.warn(`[cron] execute-sync followAgent: failed to parse providerEnvJson for session ${snapshotSessionId}, falling back to task-frozen value`, e);
+                }
               }
+              if (resolved.runtime !== 'builtin') {
+                effectiveRuntimeConfig = {
+                  ...(payload.runtimeConfig ?? {}),
+                  model: resolved.model ?? payload.runtimeConfig?.model,
+                  permissionMode: resolved.permissionMode ?? payload.runtimeConfig?.permissionMode,
+                };
+              }
+              console.log(`[cron] execute-sync intent=followAgent session=${snapshotSessionId} runMode=${effectiveRunMode} snapshotLocked=${Boolean(sessionMeta.configSnapshotAt)} model=${effectiveModel ?? 'default'} runtime=${resolved.runtime}`);
             }
-            if (resolved.runtime !== 'builtin') {
-              effectiveRuntimeConfig = {
-                ...(payload.runtimeConfig ?? {}),
-                model: resolved.model ?? payload.runtimeConfig?.model,
-                permissionMode: resolved.permissionMode ?? payload.runtimeConfig?.permissionMode,
-              };
-            }
-            console.log(`[cron] execute-sync T15: resolved from snapshot session=${snapshotSessionId} runMode=${effectiveRunMode} snapshotLocked=${Boolean(sessionMeta.configSnapshotAt)} model=${effectiveModel ?? 'default'} runtime=${resolved.runtime}`);
           }
+          // #119 followAgent backward-compat: pre-#119 the pragmatic fix
+          // (commit 502f89c3) re-applied payload.model + payload.providerEnv
+          // AFTER snapshot resolve so legacy crons that captured those at
+          // schedule time still won the model+provider-bundle race against
+          // a later-changed agent. We preserve that behavior here for any
+          // cron that deserialized as `followAgent` (legacy default) but
+          // still has explicit payload.* values — without it, those tasks
+          // regress to following the agent snapshot they explicitly tried
+          // to override.
+          if (payload.model) effectiveModel = payload.model;
+          if (payload.providerEnv) effectiveProviderEnv = payload.providerEnv;
+        } else if (intent === 'subscription') {
+          // Cron explicitly wants subscription — never inherit from agent.
+          effectiveProviderEnv = undefined;
+          if (payload.model) effectiveModel = payload.model;
+          if (effectiveRuntimeConfig) {
+            effectiveRuntimeConfig = { ...effectiveRuntimeConfig, model: payload.model ?? effectiveRuntimeConfig.model };
+          }
+          console.log(`[cron] execute-sync intent=subscription runMode=${effectiveRunMode} model=${effectiveModel ?? 'default'} (snapshot bypassed)`);
+        } else if (intent === 'explicit') {
+          // Cron explicitly wants its captured provider — never inherit from agent.
+          // payload.providerEnv MUST be present. A missing providerEnv with
+          // explicit intent is a malformed task — fail closed rather than
+          // silently routing the cron's model to a different upstream
+          // (subscription / agent snapshot). This is the #119 root cause:
+          // model and provider are an atomic routing bundle.
+          if (!payload.providerEnv) {
+            console.error(`[cron] execute-sync intent=explicit but payload.providerEnv is missing — refusing to run (would mismatch model+endpoint)`);
+            clearCronTaskContext(effectiveSessionId);
+            resetInteractionScenario();
+            return jsonResponse({
+              success: false,
+              error: 'Cron task has explicit provider intent but no providerEnv — task data is malformed. Re-create the task.',
+            }, 400);
+          }
+          effectiveProviderEnv = payload.providerEnv;
+          if (payload.model) effectiveModel = payload.model;
+          if (effectiveRuntimeConfig) {
+            effectiveRuntimeConfig = { ...effectiveRuntimeConfig, model: payload.model ?? effectiveRuntimeConfig.model };
+          }
+          console.log(`[cron] execute-sync intent=explicit runMode=${effectiveRunMode} model=${effectiveModel ?? 'default'} provider=${effectiveProviderEnv?.baseUrl}`);
         }
 
-        // Per-task override precedence (v0.1.69 cross-review fix):
-        //
-        // Task-level `model` / `permissionMode` set at task creation time (via
-        // CLI `--model` / `--permissionMode` flags on `task create-direct` /
-        // `task create-from-alignment`) are explicit per-task intent — the user
-        // said "this task should run with this model regardless of what the
-        // session/agent defaults are". They must therefore win over both
-        // (a) the agent default copied into a fresh new_session snapshot, and
-        // (b) the historical session snapshot reused by single_session mode.
-        //
-        // We apply on top of `effectiveModel` / `effectiveRuntimeConfig` rather
-        // than injecting into the snapshot, so the behavior is identical for
-        // both run modes and the snapshot itself stays a pure derivation of
-        // session history.
-        //
-        // Without this block, the CLI surface accepts and validates overrides,
-        // `enrichTaskCreateResponse` echoes them back as "overridden" — but
-        // dispatch silently falls back to the snapshot value. That's the
-        // silent-data-loss bug cross-review flagged on 2026-04-22.
-        if (payload.model) {
-          effectiveModel = payload.model;
-          if (effectiveRuntimeConfig) {
-            effectiveRuntimeConfig = { ...effectiveRuntimeConfig, model: payload.model };
-          }
-        }
+        // Permission mode override is intent-independent.
         if (payload.permissionMode) {
           effectiveRuntimeConfig = {
             ...(effectiveRuntimeConfig ?? {}),
@@ -7863,47 +8000,63 @@ description: >
 
       // ============= END IM BOT API =============
 
-      // ============= OPENAI BRIDGE (Loopback) =============
-      // SDK subprocess sends Anthropic requests here when provider uses OpenAI protocol
-      if (pathname === '/v1/messages' && request.method === 'POST') {
-        const bridgeConfig = getOpenAiBridgeConfig();
-        if (bridgeConfig) {
-          // Diagnostic: log incoming model name to verify sub-agent requests reach the bridge
-          try {
-            const clonedReq = request.clone();
-            const body = await clonedReq.json() as { model?: string };
-            console.log(`[bridge] Incoming request: model=${body.model ?? '(none)'}, bridge_model_override=${bridgeConfig.model ?? '(none)'}`);
-          } catch { /* ignore parse errors for diagnostic */ }
-          try {
-            const handler = await ensureBridgeHandler();
-            return await handler(request);
-          } catch (error) {
-            console.error('[bridge] Handler error:', error);
+      // ============= OPENAI BRIDGE (Loopback, per-token) =============
+      // PRD #124: each SDK subprocess registers under a unique token.
+      // ANTHROPIC_BASE_URL = http://127.0.0.1:<port>/bridge/<token>, so the
+      // CLI sends POSTs to /bridge/<token>/v1/messages. The handler resolves
+      // the token via `bridge-registry` and routes to that subprocess's own
+      // upstream — no shared global state, no cross-pollination between
+      // concurrent SDK invocations.
+      const bridgeMessagesMatch = pathname.match(/^\/bridge\/([^/]+)\/v1\/messages$/);
+      if (bridgeMessagesMatch && request.method === 'POST') {
+        const token = bridgeMessagesMatch[1];
+        try {
+          const handler = await ensureBridgeHandler();
+          return await handler(request);
+        } catch (error) {
+          // The handler's getUpstreamConfig throws when the token is unknown
+          // (subprocess unregistered, or routing was wrong) — surface as 400
+          // so the SDK sees a clean error instead of a 500.
+          const msg = error instanceof Error ? error.message : 'Bridge error';
+          const isUnknownToken = msg.startsWith('Unknown bridge token');
+          if (isUnknownToken) {
+            console.warn(`[bridge] rejecting request with unknown token=${token}: ${msg}`);
             return jsonResponse(
-              { type: 'error', error: { type: 'api_error', message: error instanceof Error ? error.message : 'Bridge error' } },
-              500,
+              { type: 'error', error: { type: 'invalid_request_error', message: msg } },
+              400,
             );
           }
+          console.error('[bridge] Handler error:', error);
+          return jsonResponse(
+            { type: 'error', error: { type: 'api_error', message: msg } },
+            500,
+          );
         }
-        // Bridge not active — fall through to 404
       }
 
-      // POST /v1/messages/count_tokens — CLI sends this for context window management.
-      // OpenAI-compatible APIs have no equivalent, so return an estimated token count.
-      if (pathname === '/v1/messages/count_tokens' && request.method === 'POST') {
-        const bridgeConfig = getOpenAiBridgeConfig();
-        if (bridgeConfig) {
-          try {
-            const body = await request.json() as { messages?: unknown[]; system?: unknown; tools?: unknown[] };
-            // Rough estimate: serialize content → chars / 4 ≈ tokens
-            const contentLength = JSON.stringify(body.messages ?? []).length
-              + JSON.stringify(body.system ?? '').length
-              + JSON.stringify(body.tools ?? []).length;
-            const estimatedTokens = Math.max(1, Math.ceil(contentLength / 4));
-            return jsonResponse({ input_tokens: estimatedTokens });
-          } catch {
-            return jsonResponse({ input_tokens: 1024 }); // Safe fallback
-          }
+      // POST /bridge/<token>/v1/messages/count_tokens — CLI sends this for
+      // context window management. OpenAI-compatible APIs have no equivalent,
+      // so we return an estimated token count without involving the upstream.
+      // We still require a valid token so untokened callers can't probe.
+      const bridgeCountMatch = pathname.match(/^\/bridge\/([^/]+)\/v1\/messages\/count_tokens$/);
+      if (bridgeCountMatch && request.method === 'POST') {
+        const { lookupBridge } = await import('./openai-bridge/bridge-registry');
+        const token = bridgeCountMatch[1];
+        if (!lookupBridge(token)) {
+          return jsonResponse(
+            { type: 'error', error: { type: 'invalid_request_error', message: `Unknown bridge token: ${token}` } },
+            400,
+          );
+        }
+        try {
+          const body = await request.json() as { messages?: unknown[]; system?: unknown; tools?: unknown[] };
+          const contentLength = JSON.stringify(body.messages ?? []).length
+            + JSON.stringify(body.system ?? '').length
+            + JSON.stringify(body.tools ?? []).length;
+          const estimatedTokens = Math.max(1, Math.ceil(contentLength / 4));
+          return jsonResponse({ input_tokens: estimatedTokens });
+        } catch {
+          return jsonResponse({ input_tokens: 1024 }); // Safe fallback
         }
       }
 
@@ -7953,8 +8106,29 @@ description: >
     try {
       currentInitPhase = 'cleanup';
       setDeferredInitPhase(currentInitPhase);
-      cleanupOldLogs();
-      cleanupOldUnifiedLogs();
+      // Unified retention sweep (#121) — replaces v0.2.7's split between
+      // cleanupOldLogs (per-session) + cleanupOldUnifiedLogs (unified). One
+      // policy module covers age cutoff, byte budget, and the recent-data
+      // floor across all sources. Per-session logs gained a byte budget
+      // here for the first time.
+      //
+      // The active-file set protects BOTH the unified log we're appending
+      // to AND the per-session log file (if AgentLogger has one open) from
+      // budget eviction — without this, a long-lived session log past the
+      // 7-day floor could be unlinked while the WriteStream is still open.
+      const collectActivePaths = (): ReadonlySet<string> => {
+        const paths = new Set<string>();
+        const u = getActiveUnifiedLogPath();
+        if (u) paths.add(u);
+        const s = getActiveSessionLogPath();
+        if (s) paths.add(s);
+        return paths;
+      };
+      runLogRetentionSweep({ activeFilePaths: collectActivePaths() });
+      // Hourly background sweep — bounds gradual growth without waiting
+      // for the next 50MB rotation event. Active-file getter is invoked
+      // at each sweep so day-rollovers are reflected.
+      startPeriodicSweep(collectActivePaths);
       cleanupStalePlaywrightProfile();
 
       currentInitPhase = 'skill-seed';
@@ -7982,7 +8156,7 @@ description: >
         const model = getSessionModel() || '?';
         const mcpList = getMcpServers();
         const mcpNames = mcpList ? Object.keys(mcpList).join(',') || 'none' : 'none';
-        const bridge = getOpenAiBridgeConfig() ? 'yes' : 'no';
+        const bridge = hasActiveBridge() ? 'yes' : 'no';
         // Health signal: confirm builtin-mcp-meta.ts's side-effect registration
         // actually fired. An empty list here is a red flag — the META file was
         // not imported by agent-session.ts, which means lazy MCP lookup will

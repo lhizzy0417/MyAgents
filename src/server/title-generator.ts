@@ -16,7 +16,7 @@ import { randomUUID } from 'crypto';
 import { homedir } from 'os';
 import { join } from 'path';
 import { query } from '@anthropic-ai/claude-agent-sdk';
-import { resolveClaudeCodeCli, buildClaudeSessionEnv, type ProviderEnv } from './agent-session';
+import { resolveClaudeCodeCli, buildClaudeSessionEnv, startOneShotBridge, type ProviderEnv } from './agent-session';
 import { ClaudeCodeRuntime } from './runtimes/claude-code';
 import { CodexRuntime } from './runtimes/codex';
 import { GeminiRuntime } from './runtimes/gemini';
@@ -93,6 +93,26 @@ export async function generateTitle(
   model: string,
   providerEnv?: ProviderEnv,
 ): Promise<string | null> {
+  // PRD #124: register a per-call bridge token if the title-gen provider is
+  // OpenAI-protocol — the SDK subprocess routes to ITS upstream via a
+  // dedicated /bridge/<token> path, fully isolated from the active session.
+  // For Anthropic-direct / subscription title-gen, no token is needed.
+  const bridge = providerEnv?.apiProtocol === 'openai'
+    ? startOneShotBridge(providerEnv, model, `title-gen:${providerEnv.baseUrl ?? 'anthropic'}`)
+    : null;
+  try {
+    return await generateTitleInner(rounds, model, providerEnv, bridge?.token);
+  } finally {
+    bridge?.release();
+  }
+}
+
+async function generateTitleInner(
+  rounds: TitleRound[],
+  model: string,
+  providerEnv?: ProviderEnv,
+  bridgeToken?: string,
+): Promise<string | null> {
   const startTime = Date.now();
   const sessionId = randomUUID();
 
@@ -103,7 +123,7 @@ export async function generateTitle(
 
     // Pass `model` as the override so CLAUDE_CODE_AUTO_COMPACT_WINDOW is
     // computed for the title-gen model, not the active Tab session's model.
-    const env = buildClaudeSessionEnv(providerEnv, model);
+    const env = buildClaudeSessionEnv(providerEnv, model, { bridgeToken });
     const prompt = buildUserPrompt(rounds);
 
     async function* titlePrompt() {

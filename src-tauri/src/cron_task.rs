@@ -251,6 +251,55 @@ pub struct TaskProviderEnv {
     pub upstream_format: Option<String>,
 }
 
+/// Explicit provider routing intent for a cron task (PRD #119, 2026-05).
+///
+/// Pre-#119, cron tasks could not unambiguously express their routing
+/// intent: `provider_env: None` could mean "follow the workspace agent"
+/// (legacy default) OR "explicitly use Anthropic subscription". The
+/// sidecar handler had to guess — and silently picked "follow agent",
+/// which caused subscription-intent crons to inherit a third-party
+/// `providerEnvJson` from the agent snapshot when the user later changed
+/// the agent's provider. The mirror failure (third-party intent silently
+/// overridden by agent snapshot) was the original report.
+///
+/// This enum makes intent first-class:
+///
+///   - `FollowAgent` — pre-#119 default. Snapshot resolution at execute
+///     time; agent changes between ticks affect this cron. Legacy tasks
+///     deserialize into this variant via serde default.
+///
+///   - `Subscription` — cron explicitly runs on Anthropic subscription
+///     auth, regardless of what the agent looks like at execute time.
+///     `provider_env` is ignored.
+///
+///   - `Explicit` — cron runs on the captured `provider_env` regardless
+///     of agent changes. `provider_env` MUST be `Some(...)` when this
+///     variant is used.
+///
+/// Behavior at execute time (sidecar `/cron/execute(-sync)`): the handler
+/// branches on intent and either follows the snapshot path (`FollowAgent`)
+/// or short-circuits to the task's own values (`Subscription` /
+/// `Explicit`). See `src/server/index.ts` for the resolution code.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum ProviderIntent {
+    /// Snapshot-based: follow the workspace agent at execute time. Legacy
+    /// default for crons created before #119 — present in this variant
+    /// because serde fills missing fields with `Default::default()`.
+    #[default]
+    FollowAgent,
+    /// Explicitly use Anthropic subscription. Ignores `provider_env`.
+    Subscription,
+    /// Explicitly use the captured `provider_env`. Snapshot is bypassed.
+    /// Caller MUST ensure `provider_env` is `Some(...)` when this variant
+    /// is selected; an `Explicit` intent with `provider_env: None` is a
+    /// malformed task — the sidecar handler fails the request with
+    /// HTTP 400 rather than silently degrading to subscription, which
+    /// could still produce the model+endpoint mismatch this enum was
+    /// introduced to prevent.
+    Explicit,
+}
+
 /// Delivery target for IM Bot cron task results
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -311,6 +360,11 @@ pub struct CronTask {
     /// Provider environment (API key, base URL)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_env: Option<TaskProviderEnv>,
+    /// Routing intent for this cron — see `ProviderIntent` for full design.
+    /// Defaults to `FollowAgent` (legacy snapshot behavior) so pre-#119 tasks
+    /// keep their existing semantics across upgrade.
+    #[serde(default)]
+    pub provider_intent: ProviderIntent,
     /// Agent runtime snapshot for external Runtime tasks.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime: Option<String>,
@@ -389,6 +443,13 @@ pub struct CronTaskConfig {
     pub model: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub provider_env: Option<TaskProviderEnv>,
+    /// Provider routing intent (PRD #119). Callers without explicit intent —
+    /// legacy IM Bot path, Task Center dispatch — leave this as
+    /// `FollowAgent` (the serde default) and keep snapshot semantics.
+    /// Frontend cron creation paths set this to `Subscription` or `Explicit`
+    /// based on what the user picked when scheduling.
+    #[serde(default)]
+    pub provider_intent: ProviderIntent,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1863,6 +1924,7 @@ impl CronTaskManager {
             permission_mode: config.permission_mode,
             model: config.model,
             provider_env: config.provider_env,
+            provider_intent: config.provider_intent,
             runtime: config.runtime,
             runtime_config: config.runtime_config,
             mcp_enabled_servers: config.mcp_enabled_servers,
@@ -2781,6 +2843,10 @@ async fn execute_task_directly(
             max_output_tokens_param_name: env.max_output_tokens_param_name.clone(),
             upstream_format: env.upstream_format.clone(),
         }),
+        // PRD #119: forward routing intent so the sidecar handler can
+        // either honor the snapshot path (FollowAgent / legacy) or
+        // short-circuit to task-owned values (Subscription / Explicit).
+        provider_intent: Some(task.provider_intent),
         runtime: task.runtime.clone(),
         runtime_config: task.runtime_config.clone(),
         mcp_enabled_servers: task.mcp_enabled_servers.clone(),

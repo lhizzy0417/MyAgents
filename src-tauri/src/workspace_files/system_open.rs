@@ -1,6 +1,6 @@
 //! "Open in Finder/Explorer" + "Open with default app".
 //!
-//! Three commands:
+//! Four commands:
 //! - `cmd_workspace_open_in_finder` — workspace-relative path, reveals in OS
 //!   file manager (`open -R` / `explorer /select,` / `xdg-open <parent>`).
 //! - `cmd_workspace_open_with_default` — workspace-relative path, hands off
@@ -10,6 +10,17 @@
 //!   that live OUTSIDE any chat workspace. Validated against `home_dir` /
 //!   `tmp_dir` prefix (mirrors sidecar `/agent/open-path`) so a malicious
 //!   absolute path can't escape into `/etc` or similar.
+//! - `cmd_open_path_with_default` (issue #125) — absolute path, opens with
+//!   the OS default app. Used by BrowserPanel's "open in external browser"
+//!   button when previewing a local HTML file. Same safety surface as
+//!   `cmd_open_path_external` (canonicalize + home/tmp prefix + credential
+//!   blacklist) — only the spawn target differs (`open <path>` vs `open -R`).
+//!   The renderer's `openExternal()` helper detects `file://` URLs and
+//!   absolute paths and routes through this command, because Tauri's
+//!   `shell:allow-open` scope regex `^((mailto:\w+)|(tel:\w+)|(https?://\w+)).+`
+//!   rejects both. v0.2.7 had a partial fix that extracted the bare path
+//!   from `file://` and called `shell.open(<path>)` — that also failed the
+//!   regex (and produced `/C:/...` paths on Windows).
 //!
 //! All variants fire-and-forget — the spawned command's stdout/stderr is
 //! dropped deliberately so we don't block the IPC reply. Rust
@@ -77,6 +88,29 @@ pub async fn cmd_open_path_external(full_path: String) -> Result<SystemOpenResul
     Ok(SystemOpenResult { success: true })
 }
 
+/// Open an **absolute** path with the OS default application (i.e. hand off
+/// like `open <path>` / Windows `Start-Process` / `xdg-open <path>`). Used
+/// by `BrowserPanel`'s "open in external browser" button when the embedded
+/// preview is a local HTML file (issue #125). Also covers any future
+/// `openExternal(file:// | absolute path)` call — the renderer helper
+/// auto-routes file targets through this command because Tauri's
+/// `shell:allow-open` scope regex rejects file targets entirely.
+///
+/// Same safety surface as `cmd_open_path_external` — see
+/// `validate_external_open_path` for the canonicalize + home/tmp prefix +
+/// credential blacklist guard. The only difference is the spawn target
+/// (`spawn_default_open` vs `spawn_reveal`).
+#[tauri::command]
+pub async fn cmd_open_path_with_default(full_path: String) -> Result<SystemOpenResult, String> {
+    let trimmed = full_path.trim();
+    if trimmed.is_empty() {
+        return Err("fullPath is required".to_string());
+    }
+    let target = validate_external_open_path(trimmed)?;
+    spawn_default_open(&target)?;
+    Ok(SystemOpenResult { success: true })
+}
+
 /// Validate that `full_path` (absolute) canonicalizes to somewhere safe to
 /// reveal in the OS file manager: under home_dir or tmp_dir, NOT under any
 /// credential / system blacklist (`~/.ssh`, `~/.aws`, `Library/Keychains`,
@@ -114,7 +148,15 @@ fn validate_external_open_path(full_path: &str) -> Result<PathBuf, String> {
     // Apply the project-wide credential / system blacklist on the
     // canonicalized path — blocks `~/.ssh`, `~/.gnupg`, `~/.aws`, Library/
     // Keychains, Library/Cookies, etc. even though the home prefix passed.
-    if let Some(s) = canonical.to_str() {
+    //
+    // On Windows, `canonicalize` returns paths with the `\\?\` verbatim
+    // prefix, while `validate_file_path` builds blacklist roots via
+    // `home.join(".ssh")` etc. without that prefix. Strip the prefix via
+    // `normalize_external_path` first, otherwise `starts_with` comparisons
+    // inside `validate_file_path` would silently miss and let
+    // `~/.ssh/id_rsa` slip through (issue #125 cross-review).
+    let normalized = crate::sidecar::normalize_external_path(canonical.clone());
+    if let Some(s) = normalized.to_str() {
         crate::commands::validate_file_path(s)?;
     }
     Ok(canonical)
@@ -237,6 +279,15 @@ mod tests {
         let res = cmd_open_path_external("relative/path".to_string()).await;
         assert!(res.is_err());
         assert!(res.unwrap_err().contains("absolute"));
+    }
+
+    #[tokio::test]
+    async fn open_path_with_default_rejects_relative_and_empty() {
+        let res = cmd_open_path_with_default("relative/path".to_string()).await;
+        assert!(res.is_err());
+        assert!(res.unwrap_err().contains("absolute"));
+        let res = cmd_open_path_with_default("".to_string()).await;
+        assert!(res.is_err());
     }
 
     #[tokio::test]

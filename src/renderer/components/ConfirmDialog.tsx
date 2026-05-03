@@ -14,6 +14,14 @@ interface ConfirmDialogProps {
     confirmVariant?: 'danger' | 'primary';
     danger?: boolean; // Deprecated, use confirmVariant
     loading?: boolean;
+    /**
+     * When true, suppress the global Enter-to-confirm shortcut. Use for
+     * confirmations triggered automatically as a safety net (e.g. Bug #123's
+     * IME-duplication guard) where the user just pressed Enter to send and
+     * a reflexive second Enter must NOT silently confirm a danger action.
+     * Escape-to-cancel stays on, button clicks still work.
+     */
+    disableEnterShortcut?: boolean;
     onConfirm: () => void;
     onCancel: () => void;
 }
@@ -28,6 +36,7 @@ export default function ConfirmDialog({
     confirmVariant,
     danger = false,
     loading = false,
+    disableEnterShortcut = false,
     onConfirm,
     onCancel
 }: ConfirmDialogProps) {
@@ -39,17 +48,17 @@ export default function ConfirmDialog({
     const finalCancelText = cancelText || cancelLabel || '取消';
     const isDanger = confirmVariant === 'danger' || danger;
 
-    // Keyboard: Enter to confirm, Escape to cancel
+    // Keyboard: Enter to confirm (unless disabled), Escape to cancel
     const handleKeyDown = useCallback((e: KeyboardEvent) => {
         if (loading) return;
-        if (e.key === 'Enter') {
+        if (e.key === 'Enter' && !disableEnterShortcut) {
             e.preventDefault();
             onConfirm();
         } else if (e.key === 'Escape') {
             e.preventDefault();
             onCancel();
         }
-    }, [loading, onConfirm, onCancel]);
+    }, [loading, disableEnterShortcut, onConfirm, onCancel]);
 
     useEffect(() => {
         document.addEventListener('keydown', handleKeyDown);

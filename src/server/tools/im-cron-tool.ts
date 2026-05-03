@@ -247,6 +247,10 @@ async function imCronToolHandler(args: {
           // override is needed, add it to the `job` schema.
           permissionMode: '',
           providerEnv: addCtx.providerEnv,
+          // PRD #119: explicit routing intent captures the IM session's
+          // current provider state. The cron then preserves that intent
+          // regardless of later agent edits.
+          providerIntent: addCtx.providerEnv ? 'explicit' : 'subscription',
           runtime: addCtx.runtime,
           runtimeConfig: addCtx.runtimeConfig,
           intervalMinutes: args.job.schedule.kind === 'every' ? args.job.schedule.minutes : 30,

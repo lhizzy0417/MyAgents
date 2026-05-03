@@ -378,6 +378,7 @@ pub fn run() {
             workspace_files::system_open::cmd_workspace_open_in_finder,
             workspace_files::system_open::cmd_workspace_open_with_default,
             workspace_files::system_open::cmd_open_path_external,
+            workspace_files::system_open::cmd_open_path_with_default,
             workspace_files::git_branch::cmd_workspace_git_branch,
             workspace_files::watcher::cmd_workspace_watch_start,
             workspace_files::watcher::cmd_workspace_watch_stop,

@@ -3815,6 +3815,10 @@ pub struct CronExecutePayload {
     pub model: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub provider_env: Option<ProviderEnv>,
+    /// PRD #119: routing intent. `None` deserializes to FollowAgent on the
+    /// receiver side (sidecar handler treats absent as legacy default).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider_intent: Option<crate::cron_task::ProviderIntent>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub runtime: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -4059,6 +4063,7 @@ pub async fn cmd_execute_cron_task(
     permissionMode: Option<String>,
     model: Option<String>,
     providerEnv: Option<ProviderEnv>,
+    providerIntent: Option<crate::cron_task::ProviderIntent>,
     runtime: Option<String>,
     runtimeConfig: Option<serde_json::Value>,
     runMode: Option<String>,
@@ -4074,6 +4079,7 @@ pub async fn cmd_execute_cron_task(
         permission_mode: permissionMode,
         model,
         provider_env: providerEnv,
+        provider_intent: providerIntent,
         runtime,
         runtime_config: runtimeConfig,
         // Renderer-driven cron execution path doesn't carry a parent Task,

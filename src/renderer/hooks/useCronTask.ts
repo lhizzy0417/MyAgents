@@ -35,6 +35,8 @@ export interface CronTaskState {
     permissionMode?: string;
     /** Provider environment (captured at task creation time) */
     providerEnv?: { baseUrl?: string; apiKey?: string; authType?: 'auth_token' | 'api_key' | 'both' | 'auth_token_clear_api_key'; apiProtocol?: 'anthropic' | 'openai'; maxOutputTokens?: number; maxOutputTokensParamName?: 'max_tokens' | 'max_completion_tokens' | 'max_output_tokens'; upstreamFormat?: 'chat_completions' | 'responses' };
+    /** PRD #119: explicit routing intent — see `CronProviderIntent`. */
+    providerIntent?: 'followAgent' | 'subscription' | 'explicit';
     /** Agent runtime snapshot for external Runtime tasks */
     runtime?: RuntimeType;
     /** Runtime-scoped config snapshot for external Runtime tasks */
@@ -129,6 +131,11 @@ export function useCronTask(options: UseCronTaskOptions) {
         model: config.model,
         permissionMode: config.permissionMode,
         providerEnv: config.providerEnv,
+        // PRD #119: capture intent at enable time. Defaults derived from
+        // current providerEnv (subscription if absent, explicit if present)
+        // so existing call sites that don't set this still get correct
+        // intent. Caller can override explicitly for unusual cases.
+        providerIntent: config.providerIntent ?? (config.providerEnv ? 'explicit' : 'subscription'),
         runtime: config.runtime,
         runtimeConfig: config.runtimeConfig,
         schedule: config.schedule,
@@ -230,6 +237,11 @@ export function useCronTask(options: UseCronTaskOptions) {
         model: currentConfig.model,
         permissionMode: currentConfig.permissionMode,
         providerEnv: currentConfig.providerEnv,
+        // PRD #119: capture explicit routing intent. presence/absence of
+        // providerEnv at scheduling time determines whether this cron will
+        // run on subscription or on a specific third-party provider — and
+        // that intent persists regardless of later agent edits.
+        providerIntent: currentConfig.providerIntent ?? (currentConfig.providerEnv ? 'explicit' : 'subscription'),
         runtime: currentConfig.runtime,
         runtimeConfig: currentConfig.runtimeConfig,
         schedule: currentConfig.schedule,
