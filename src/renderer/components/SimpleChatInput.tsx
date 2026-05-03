@@ -3,6 +3,7 @@ import { memo, useCallback, useEffect, useImperativeHandle, useMemo, useRef, use
 
 import Tip from '@/components/Tip';
 import { useToast } from '@/components/Toast';
+import ConfirmDialog from '@/components/ConfirmDialog';
 import { ModalityBadges } from '@/components/ModalityBadges';
 import { useImagePreview } from '@/context/ImagePreviewContext';
 import { type SessionState } from '@/context/TabContext';
@@ -56,6 +57,73 @@ function getCurrentModelLabel(
   return provider ? getModelDisplayName(provider, modelId) : modelId;
 }
 
+
+/**
+ * Bug #123 guardrail — detect pathological content duplication that almost
+ * certainly came from a third-party IME / voice-input glitch on macOS WebView
+ * (WeChat 输入法 has been observed writing recognized speech into the
+ * controlled textarea dozens of times, producing 77K-char messages on a
+ * single Enter). We can't fix the IME / WebKit composition behavior itself,
+ * so the input layer adds a confirm step before such content goes out.
+ *
+ * Two complementary checks (returns the repeat count when either flags):
+ *
+ *   A. Delimiter-split segment frequency. Split on whitespace + Chinese/English
+ *      punctuation, take segments of length >= 10, flag when the top segment
+ *      repeats >= 5 times AND covers >= 50% of total length. Catches the
+ *      common voice-recognition case where punctuation is interleaved between
+ *      duplicates.
+ *
+ *   B. Prefix-repetition fallback for delimiter-free runs. Voice recognition
+ *      sometimes produces continuous CJK text without inserted punctuation;
+ *      then check A finds segments.length <= 1 and misses. Sample candidate
+ *      block lengths (50/100/200 chars), count occurrences of the leading
+ *      block, and flag with the same coverage threshold.
+ *
+ * Tuned so normal repetition ("yes yes yes" — segments too short, prefix
+ * doesn't repeat) and ordinary long pastes (no single dominant segment or
+ * prefix block) do NOT trigger.
+ */
+function detectExcessiveRepetition(text: string): number {
+  if (text.length < 1000) return 0;
+
+  // Check A — delimiter-split segment frequency.
+  const segments = text
+    .split(/[\s。！？；;.!?，,]+/)
+    .map((s) => s.trim())
+    .filter((s) => s.length >= 10);
+  if (segments.length >= 5) {
+    const counts = new Map<string, number>();
+    for (const s of segments) counts.set(s, (counts.get(s) ?? 0) + 1);
+    let topCount = 0;
+    let topLength = 0;
+    for (const [seg, c] of counts) {
+      if (c > topCount) {
+        topCount = c;
+        topLength = seg.length;
+      }
+    }
+    const coverage = (topLength * topCount) / text.length;
+    if (topCount >= 5 && coverage >= 0.5) return topCount;
+  }
+
+  // Check B — prefix-repetition fallback (delimiter-free duplication).
+  for (const blockLen of [50, 100, 200]) {
+    if (text.length < blockLen * 5) continue;
+    const block = text.slice(0, blockLen);
+    let count = 0;
+    let pos = 0;
+    while (true) {
+      const next = text.indexOf(block, pos);
+      if (next === -1) break;
+      count++;
+      pos = next + blockLen;
+    }
+    if (count >= 5 && count * blockLen >= text.length * 0.5) return count;
+  }
+
+  return 0;
+}
 
 // Image attachment type
 export interface ImageAttachment {
@@ -460,6 +528,25 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
   // Guard against double-fire of handleSend (e.g. rapid Enter + click)
   const sendingRef = useRef(false);
 
+  // Bug #123: track IME composition so the auto-resize effect can skip
+  // textarea.style.height writes during composition. Style recalculation
+  // during composition is the historical WebKit trigger (Bug 46868 class)
+  // for "IME candidate text leaks into committed value" — observed on
+  // macOS Tauri WebView with WeChat IME voice input duplicating recognized
+  // text dozens of times. Resize once after compositionend via resizeBump.
+  const isComposingRef = useRef(false);
+  const [resizeBump, setResizeBump] = useState(0);
+
+  // Bug #123: pending excessive-repetition confirmation. When non-null, a
+  // ConfirmDialog is shown with the repeat count; the user can cancel
+  // (input is preserved for editing) or confirm (send proceeds, bypassing
+  // the repetition guard once).
+  const [repetitionWarning, setRepetitionWarning] = useState<{
+    text: string;
+    images: ImageAttachment[];
+    count: number;
+  } | null>(null);
+
   // Close all dropdown menus (plus, mode, model, provider)
   const closeAllMenus = useCallback(() => {
     setShowPlusMenu(false);
@@ -488,6 +575,13 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
   useEffect(() => {
     const textarea = textareaRef.current;
     if (!textarea) return;
+
+    // Bug #123: don't touch textarea.style during IME composition. Style
+    // recalculation while the IME holds marked text is the historical
+    // WebKit trigger for candidate-text duplication (macOS WebView +
+    // WeChat IME voice input). The post-compositionend handler will run
+    // resize once after commit.
+    if (isComposingRef.current) return;
 
     const wasExpanded = prevExpandedRef.current;
     prevExpandedRef.current = isExpanded;
@@ -528,7 +622,19 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
     const scrollHeight = textarea.scrollHeight;
     textarea.style.height = `${Math.max(minHeight, Math.min(scrollHeight, maxHeight))}px`;
     // eslint-disable-next-line react-hooks/exhaustive-deps -- textareaRef is stable
-  }, [inputValue, isExpanded]);
+  }, [inputValue, isExpanded, resizeBump]);
+
+  // IME composition handlers (Bug #123). Set the ref BEFORE the auto-resize
+  // effect can run for the in-progress composition, and bump `resizeBump`
+  // after commit so the textarea catches up to its final size even if the
+  // IME doesn't emit a follow-up input event.
+  const handleCompositionStart = useCallback(() => {
+    isComposingRef.current = true;
+  }, []);
+  const handleCompositionEnd = useCallback(() => {
+    isComposingRef.current = false;
+    setResizeBump((b) => b + 1);
+  }, []);
 
   // Fetch slash commands function (extracted for reuse).
   // PRD 0.2.7: routed through fileService.listSlashCommands (Rust scan +
@@ -1269,12 +1375,31 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
 
   // Send message - defined before handleKeyDown to avoid circular dependency
   // Note: isLoading guard removed to allow queuing messages while AI is responding
+  const bypassRepetitionRef = useRef(false);
   const handleSend = useCallback(async () => {
     const text = inputValue.trim();
     if (!text && images.length === 0) return;
 
-    // Prevent double-fire (rapid Enter + click, or concurrent async sends)
+    // Prevent double-fire (rapid Enter + click, or concurrent async sends).
+    // Must run BEFORE consuming `bypassRepetitionRef` so a confirm-during-
+    // in-flight-send doesn't silently swallow the bypass and force the user
+    // to re-confirm on retry.
     if (sendingRef.current) return;
+
+    // Bug #123: gate dramatic IME-style content duplication behind a
+    // ConfirmDialog. The textarea-side mitigation (skip resize during
+    // composition) reduces the trigger but can't deterministically prevent
+    // the WebKit/IME bug, so the input layer also catches the symptom
+    // before a 77K-char message goes out.
+    if (!bypassRepetitionRef.current) {
+      const repeatCount = detectExcessiveRepetition(text);
+      if (repeatCount > 0) {
+        setRepetitionWarning({ text, images: [...images], count: repeatCount });
+        return;
+      }
+    }
+    bypassRepetitionRef.current = false;
+
     sendingRef.current = true;
 
     // Send-time modality reminder: paste-time toast may have scrolled past or
@@ -1514,6 +1639,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
   const toggleExpand = () => setIsExpanded((prev) => !prev);
 
   return (
+    <>
     <div className={isLauncherMode
       ? 'relative flex w-full justify-center'
       : 'pointer-events-none absolute inset-x-0 bottom-0 z-20 flex justify-center px-4 pb-4'
@@ -1619,6 +1745,8 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
               onChange={handleInputChange}
               onKeyDown={handleKeyDown}
               onPaste={handlePaste}
+              onCompositionStart={handleCompositionStart}
+              onCompositionEnd={handleCompositionEnd}
               placeholder={
                 isLauncherMode
                   ? '今天，想干点啥？'
@@ -2318,6 +2446,26 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
         </div>
       </div>
     </div>
+    {repetitionWarning && (
+      <ConfirmDialog
+        title="检测到内容存在大量重复"
+        message={`同一段文字重复了约 ${repetitionWarning.count} 次（共 ${repetitionWarning.text.length.toLocaleString()} 字符）。常见于第三方输入法的语音识别异常。仍要发送吗？`}
+        confirmText="仍要发送"
+        cancelText="取消"
+        confirmVariant="danger"
+        // Bug #123: don't bind Enter to confirm — the user just pressed Enter
+        // to trigger send, and a reflexive second Enter must not silently
+        // confirm sending the duplicated payload. Click is required.
+        disableEnterShortcut
+        onConfirm={() => {
+          setRepetitionWarning(null);
+          bypassRepetitionRef.current = true;
+          handleSend();
+        }}
+        onCancel={() => setRepetitionWarning(null)}
+      />
+    )}
+    </>
   );
 }));
 
