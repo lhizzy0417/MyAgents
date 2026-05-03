@@ -1742,6 +1742,12 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
             <textarea
               ref={textareaRef}
               value={inputValue}
+              // Bug #123: lock the textarea while the repetition-warning
+              // dialog is open. Without this, an IME composition during the
+              // dialog window could mutate inputValue between detection and
+              // the user's confirm click — the dialog would describe content
+              // that no longer matches what handleSend reads.
+              readOnly={!!repetitionWarning}
               onChange={handleInputChange}
               onKeyDown={handleKeyDown}
               onPaste={handlePaste}

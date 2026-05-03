@@ -293,8 +293,10 @@ pub enum ProviderIntent {
     /// Explicitly use the captured `provider_env`. Snapshot is bypassed.
     /// Caller MUST ensure `provider_env` is `Some(...)` when this variant
     /// is selected; an `Explicit` intent with `provider_env: None` is a
-    /// malformed task and the sidecar handler treats it as `Subscription`
-    /// (defensive fallback) rather than misrouting requests.
+    /// malformed task — the sidecar handler fails the request with
+    /// HTTP 400 rather than silently degrading to subscription, which
+    /// could still produce the model+endpoint mismatch this enum was
+    /// introduced to prevent.
     Explicit,
 }
 

@@ -902,6 +902,23 @@ pub fn cmd_copy_folder_to_templates(
 
 const ADMIN_AGENT_VERSION: &str = "16";
 
+/// Helper-bundled paths (relative to `~/.myagents/`) that previous versions
+/// shipped but that have since been retired.
+///
+/// `merge_dir_recursive` is overwrite-only ("never deletes"), so a file
+/// removed from the bundle would persist on upgraders' disks indefinitely
+/// — letting a retired skill keep loading inside the helper agent and
+/// silently diverge fresh-install from upgrade behavior. Each retire
+/// MUST also append the relative path here so the next sync removes it.
+///
+/// Once `~/.myagents/.admin-agent-version` has rolled past the version
+/// that introduced the retire, the entry is harmless to keep (it just
+/// no-ops on absent paths).
+const RETIRED_ADMIN_PATHS: &[&str] = &[
+    // v16: /self-config promoted to global system skill /myagents-cli
+    ".claude/skills/self-config",
+];
+
 /// Merge bundled admin agent files into ~/.myagents/
 /// Version-gated: only runs when ADMIN_AGENT_VERSION changes.
 #[tauri::command]
@@ -926,6 +943,41 @@ pub fn cmd_sync_admin_agent<R: Runtime>(
     let src = res.join("bundled-agents").join("myagents_helper");
     if !src.exists() {
         return Err(format!("Admin agent not found: {:?}", src));
+    }
+
+    // Pre-merge: remove retired paths so they don't linger on upgraders'
+    // disks. Use symlink_metadata (not Path::exists) for symlink-trap
+    // safety, mirroring cmd_sync_system_skills.
+    for rel in RETIRED_ADMIN_PATHS {
+        let target = dest.join(rel);
+        match fs::symlink_metadata(&target) {
+            Ok(meta) => {
+                let removed = if meta.file_type().is_symlink() || meta.is_file() {
+                    fs::remove_file(&target)
+                } else {
+                    fs::remove_dir_all(&target)
+                };
+                if let Err(e) = removed {
+                    ulog_warn!(
+                        "[admin-agent] failed to clear retired path {}: {} — continuing",
+                        rel,
+                        e
+                    );
+                } else {
+                    ulog_info!("[admin-agent] retired {}", rel);
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                // Already absent — fresh install or already cleaned.
+            }
+            Err(e) => {
+                ulog_warn!(
+                    "[admin-agent] symlink_metadata({}) failed: {} — continuing",
+                    rel,
+                    e
+                );
+            }
+        }
     }
 
     // Merge into ~/.myagents/
