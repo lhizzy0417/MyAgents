@@ -115,6 +115,18 @@ const TOOLS_BRIDGE_RESTRICTED_SYNTAX = [
     selector: "CallExpression[callee.type='Identifier'][callee.name='fetch']",
     message:
       'Bare fetch() in tools/bridge has no AbortSignal — upstream hang freezes the SDK turn / IM message until OS TCP timeout (minutes). Use cancellableFetch from @/server/utils/cancellation, which wires a default 30s timeout and propagates parent abort signals. CLAUDE.md red-line.'
+  },
+  {
+    // Same hazard via the namespaced form: `globalThis.fetch(...)` /
+    // `window.fetch(...)` / `self.fetch(...)`. AST-equivalent to bare
+    // `fetch(...)` — same lifetime, same lack of default AbortSignal — so
+    // it must be banned alongside. Indirect-via-rebinding (`const f =
+    // globalThis.fetch; f(...)`) is harder to express in ESLint and is
+    // left to review.
+    selector:
+      "CallExpression[callee.type='MemberExpression'][callee.property.name='fetch'][callee.object.name=/^(globalThis|window|self)$/]",
+    message:
+      'Namespaced fetch (globalThis.fetch / window.fetch / self.fetch) has the same hang risk as bare fetch() — Use cancellableFetch from @/server/utils/cancellation. CLAUDE.md red-line.'
   }
 ];
 

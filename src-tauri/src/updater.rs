@@ -792,8 +792,10 @@ pub async fn test_update_connectivity(app: AppHandle) -> Result<String, String> 
     let url = format!("https://download.myagents.io/update/{}.json", target);
     logger::info(&app, format!("[Updater] Testing HTTP connectivity to: {}", url));
 
-    // Build a reqwest client with user's proxy configuration
+    // Build a reqwest client with user's proxy configuration. Updater talks
+    // to R2 — external host, system proxy wanted.
     let current_version = app.package_info().version.to_string();
+    #[allow(clippy::disallowed_methods)]
     let builder = reqwest::Client::builder()
         .user_agent(format!("MyAgents-Updater/{}", current_version))
         .timeout(std::time::Duration::from_secs(30));

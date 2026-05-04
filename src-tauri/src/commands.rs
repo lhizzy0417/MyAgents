@@ -1502,6 +1502,8 @@ pub async fn cmd_wecom_qr_generate() -> Result<WecomQrGenerateResult, String> {
         plat
     );
 
+    // External host (work.weixin.qq.com) — system proxy is wanted here.
+    #[allow(clippy::disallowed_methods)]
     let builder = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(15));
     let client = crate::proxy_config::build_client_with_proxy(builder)?;
@@ -1556,6 +1558,8 @@ pub async fn cmd_wecom_qr_poll(scode: String, poll_index: Option<u32>) -> Result
         safe_scode
     );
 
+    // External host — system proxy wanted.
+    #[allow(clippy::disallowed_methods)]
     let builder = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(10));
     let client = crate::proxy_config::build_client_with_proxy(builder)?;
@@ -1632,6 +1636,8 @@ pub async fn cmd_fetch_provider_models(
     let client = if is_localhost {
         crate::local_http::json_client(std::time::Duration::from_secs(15))
     } else {
+        // External host branch — system proxy wanted.
+        #[allow(clippy::disallowed_methods)]
         let builder = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(15));
         crate::proxy_config::build_client_with_proxy(builder)?

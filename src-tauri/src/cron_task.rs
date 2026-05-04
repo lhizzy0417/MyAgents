@@ -2156,8 +2156,14 @@ impl CronTaskManager {
         }
 
         let mut tasks = self.tasks.write().await;
-        let task = tasks.get_mut(task_id)
-            .ok_or_else(|| format!("Task not found: {}", task_id))?;
+        // Apply patches to a CLONE so a late-stage validation failure
+        // (PRD 0.2.9 invariants below) doesn't leave the in-memory store
+        // half-patched — found during cross-review of dev/0.2.9.
+        let mut task: CronTask = tasks
+            .get(task_id)
+            .ok_or_else(|| format!("Task not found: {}", task_id))?
+            .clone();
+        let task = &mut task;
 
         // Apply allowed patches
         if let Some(name) = patch.get("name").and_then(|v| v.as_str()) {
@@ -2272,6 +2278,7 @@ impl CronTaskManager {
                 };
             }
         }
+
         if let Some(pm) = patch.get("permissionMode").and_then(|v| v.as_str()) {
             task.permission_mode = pm.to_string();
         }
@@ -2296,6 +2303,36 @@ impl CronTaskManager {
             task.delivery = None;
         }
 
+        // PRD 0.2.9 — Re-run the create-time invariants on the merged state.
+        // The sibling `create_task` choke point gates the create path, but
+        // this `update_task_fields` path (used by `/api/cron/update` and the
+        // CLI / IM patch flows) was missing the same gate, so a patch like
+        // `{"providerId": "openai-x"}` against an existing CronTask with
+        // `runtime: Some("codex")` would silently land — exactly the half-
+        // state the validator is designed to refuse. Found by CC review on
+        // dev/0.2.9. Same pin-runtime semantics: provider_id with no runtime
+        // → pin builtin so a later Agent runtime flip doesn't cross-talk.
+        // Patches were applied to a CLONE above, so a validation failure
+        // here aborts cleanly without touching the in-memory store.
+        if task.provider_id.is_some() && task.runtime.is_none() {
+            task.runtime = Some("builtin".to_string());
+        }
+        if task.provider_id.is_some() && task.model.is_none() {
+            return Err(
+                "providerId 必须与 model 配对设置（CronTask 更新路径校验）".to_string(),
+            );
+        }
+        if let Some(rt) = task.runtime.as_deref() {
+            if matches!(rt, "claude-code" | "codex" | "gemini")
+                && task.provider_id.is_some()
+            {
+                return Err(format!(
+                    "外部 runtime '{}' 不允许同时指定 providerId（CronTask 更新路径校验）",
+                    rt
+                ));
+            }
+        }
+
         task.updated_at = Utc::now();
         // Detect schedule-shape change so we know whether to restart the
         // scheduler (even shape-unchanged edits still go through this path
@@ -2304,6 +2341,8 @@ impl CronTaskManager {
             || task.interval_minutes != prev_interval
             || task.end_conditions != prev_end_conditions;
         let updated = task.clone();
+        // Commit the validated clone back to the map.
+        tasks.insert(task_id.to_string(), updated.clone());
         drop(tasks);
         self.save_to_disk().await?;
         ulog_info!("[CronTask] Updated task fields: {}", task_id);

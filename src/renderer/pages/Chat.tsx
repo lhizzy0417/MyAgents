@@ -2046,9 +2046,12 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
               permissionMode: cron.config.permissionMode,
               // PRD 0.2.9 — Forward the live-resolve providerId; sidecar
               // re-reads provider config on every tick so credential
-              // rotation propagates without re-saving the cron.
+              // rotation propagates without re-saving the cron. R2
+              // invariant: when providerId is set, drop providerEnv so
+              // no apiKey snapshot lands in cron_tasks.json. Legacy
+              // callers (no providerId) keep the explicit-snapshot path.
               providerId: cron.config.providerId,
-              providerEnv: cron.config.providerEnv,
+              providerEnv: cron.config.providerId ? undefined : cron.config.providerEnv,
               providerIntent:
                 cron.config.providerIntent
                 ?? (cron.config.providerId

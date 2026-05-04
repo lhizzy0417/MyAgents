@@ -32,6 +32,8 @@ use std::time::Duration;
 /// Using raw `reqwest::Client::builder()` or `reqwest::Client::new()` for localhost
 /// is forbidden — it will silently break when the user has a system proxy configured.
 pub fn builder() -> reqwest::ClientBuilder {
+    // This module is the single legitimate caller of `Client::builder()`.
+    #[allow(clippy::disallowed_methods)]
     reqwest::Client::builder().no_proxy()
 }
 
@@ -74,5 +76,7 @@ pub fn sse_client() -> reqwest::Client {
 /// Same guarantee as [`builder()`] but for synchronous contexts
 /// (e.g., `spawn_blocking` or Tauri command handlers).
 pub fn blocking_builder() -> reqwest::blocking::ClientBuilder {
+    // This module is the single legitimate caller of `Client::builder()`.
+    #[allow(clippy::disallowed_methods)]
     reqwest::blocking::Client::builder().no_proxy()
 }

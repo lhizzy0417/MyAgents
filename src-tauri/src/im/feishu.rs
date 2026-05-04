@@ -605,11 +605,14 @@ impl FeishuAdapter {
         dedup_path: Option<PathBuf>,
         group_event_tx: mpsc::Sender<GroupEvent>,
     ) -> Self {
+        // External host (open.feishu.cn / open.larksuite.com) — system proxy wanted.
+        #[allow(clippy::disallowed_methods)]
         let client_builder = Client::builder()
             .timeout(Duration::from_secs(30));
         let client = proxy_config::build_client_with_proxy(client_builder)
             .unwrap_or_else(|e| {
                 ulog_warn!("[feishu] Failed to build client with proxy: {}, falling back to direct", e);
+                #[allow(clippy::disallowed_methods)]
                 Client::builder()
                     .timeout(Duration::from_secs(30))
                     .build()

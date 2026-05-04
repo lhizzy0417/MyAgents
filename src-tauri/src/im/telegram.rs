@@ -234,11 +234,15 @@ impl TelegramAdapter {
         approval_tx: mpsc::Sender<ApprovalCallback>,
         group_event_tx: mpsc::Sender<GroupEvent>,
     ) -> Self {
+        // External host (api.telegram.org) — system proxy wanted, not the
+        // localhost guard.
+        #[allow(clippy::disallowed_methods)]
         let client_builder = Client::builder()
             .timeout(Duration::from_secs(LONG_POLL_TIMEOUT + 10));
         let client = proxy_config::build_client_with_proxy(client_builder)
             .unwrap_or_else(|e| {
                 ulog_warn!("[telegram] Failed to build client with proxy: {}, falling back to direct", e);
+                #[allow(clippy::disallowed_methods)]
                 Client::builder()
                     .timeout(Duration::from_secs(LONG_POLL_TIMEOUT + 10))
                     .build()

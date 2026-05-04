@@ -134,10 +134,14 @@ export function useCronTask(options: UseCronTaskOptions) {
         notifyEnabled: config.notifyEnabled,
         model: config.model,
         permissionMode: config.permissionMode,
-        // PRD 0.2.9 — Prefer `providerId` (live-resolve at sidecar) over
-        // `providerEnv` (deprecated frozen snapshot). Both are accepted so
-        // legacy callers still work; sidecar prefers providerId when set.
-        providerEnv: config.providerEnv,
+        // PRD 0.2.9 R2 invariant — zero credential copies on disk: when
+        // `providerId` is set (the live-resolve path), force-clear
+        // `providerEnv` so the persisted CronTask carries no apiKey
+        // snapshot, even if the caller accidentally forwarded one. The
+        // sidecar prefers providerId at runtime regardless, but on-disk
+        // shape is what matters for R2. Legacy callers that pass only
+        // `providerEnv` (no providerId) keep the explicit-snapshot path.
+        providerEnv: config.providerId ? undefined : config.providerEnv,
         providerId: config.providerId,
         // PRD #119 / 0.2.9 — When providerId is set, intent is ignored by
         // sidecar (live-resolve takes precedence). Otherwise we fall back
@@ -239,8 +243,10 @@ export function useCronTask(options: UseCronTaskOptions) {
     let createdTaskId: string | null = null;
     try {
       // PRD 0.2.9 — Forward providerId (live-resolve) when set; fall back
-      // to legacy providerEnv path otherwise. Both can coexist on the
-      // payload; sidecar prefers providerId when present.
+      // to legacy providerEnv path otherwise. R2 invariant: when
+      // providerId is set, drop providerEnv from the create payload so
+      // no apiKey snapshot lands in cron_tasks.json (sidecar prefers
+      // providerId at runtime, but on-disk shape is what R2 enforces).
       const task = await createCronTask({
         workspacePath,
         sessionId,
@@ -252,7 +258,7 @@ export function useCronTask(options: UseCronTaskOptions) {
         notifyEnabled: currentConfig.notifyEnabled,
         model: currentConfig.model,
         permissionMode: currentConfig.permissionMode,
-        providerEnv: currentConfig.providerEnv,
+        providerEnv: currentConfig.providerId ? undefined : currentConfig.providerEnv,
         providerId: currentConfig.providerId,
         // PRD #119 / 0.2.9 — see enableCronMode for the same fallback rules.
         providerIntent:
