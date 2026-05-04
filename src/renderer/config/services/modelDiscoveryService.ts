@@ -229,5 +229,8 @@ export function supportsModelDiscovery(provider: Provider): boolean {
   if (provider.type === 'subscription') return false;
   // MiniMax has no model list endpoint
   if (provider.id === 'minimax') return false;
+  // Coding Plan: coding.dashscope.aliyuncs.com has no /models endpoint, and the
+  // sk-sp-* key is rejected by the regular dashscope.aliyuncs.com endpoint
+  if (provider.id === 'aliyun-bailian-coding') return false;
   return true;
 }

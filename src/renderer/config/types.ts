@@ -741,7 +741,6 @@ export const PRESET_PROVIDERS: Provider[] = [
     isBuiltin: true,
     authType: 'auth_token',
     websiteUrl: 'https://bailian.console.aliyun.com/',
-    modelListUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1/models',
     config: {
       baseUrl: 'https://coding.dashscope.aliyuncs.com/apps/anthropic',
     },
