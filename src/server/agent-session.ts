@@ -2502,6 +2502,11 @@ async function handleAskUserQuestion(
       if (pendingAskUserQuestions.has(requestId)) {
         cleanup();
         console.warn('[AskUserQuestion] Timed out after 10 minutes');
+        // PRD #131 — broadcast lifecycle expiry so the frontend modal
+        // gets cleared. Without this, the user could still click Submit
+        // / Cancel after timeout, hitting the "Unknown request" path on
+        // the backend (issue #131 Bug 3 desync).
+        broadcast('ask-user-question:expired', { requestId, reason: 'timeout' });
         resolve(null);
       }
     }, 10 * 60 * 1000);
@@ -2514,7 +2519,18 @@ async function handleAskUserQuestion(
 
     const onAbort = () => {
       console.debug('[AskUserQuestion] Aborted by SDK signal');
+      // PRD #131 — guard the broadcast: the abort listener is left
+      // registered after handleAskUserQuestionResponse returns (no
+      // removeEventListener on the response path), and SDK's deny+interrupt
+      // fires the same canUseTool signal AFTER the user already
+      // responded. Without the guard the resulting `:expired` broadcast
+      // would clear a card the frontend was still rendering with the
+      // "submitted" state. Only broadcast when the entry is still pending.
+      const wasPending = pendingAskUserQuestions.has(requestId);
       cleanup();
+      if (wasPending) {
+        broadcast('ask-user-question:expired', { requestId, reason: 'aborted' });
+      }
       // Reject with AbortError so SDK's own abort handling creates the single tool_result.
       // Previously resolve(null) caused canUseTool to return deny → duplicate tool_result
       // (one from our deny, one from SDK's internal abort) → "tool_use ids must be unique" on resume.
@@ -2587,6 +2603,8 @@ async function handleExitPlanMode(
       if (pendingExitPlanMode.has(requestId)) {
         cleanup();
         console.warn('[ExitPlanMode] Timed out after 10 minutes');
+        // PRD #131 — see handleAskUserQuestion for rationale.
+        broadcast('exit-plan-mode:expired', { requestId, reason: 'timeout' });
         resolve(false);
       }
     }, 10 * 60 * 1000);
@@ -2599,7 +2617,12 @@ async function handleExitPlanMode(
 
     const onAbort = () => {
       console.debug('[ExitPlanMode] Aborted by SDK signal');
+      // Guard same as handleAskUserQuestion — see that comment.
+      const wasPending = pendingExitPlanMode.has(requestId);
       cleanup();
+      if (wasPending) {
+        broadcast('exit-plan-mode:expired', { requestId, reason: 'aborted' });
+      }
       reject(new DOMException('Aborted', 'AbortError'));
     };
 
@@ -2655,6 +2678,8 @@ async function handleEnterPlanMode(
       if (pendingEnterPlanMode.has(requestId)) {
         cleanup();
         console.warn('[EnterPlanMode] Timed out after 10 minutes');
+        // PRD #131 — see handleAskUserQuestion for rationale.
+        broadcast('enter-plan-mode:expired', { requestId, reason: 'timeout' });
         resolve(false);
       }
     }, 10 * 60 * 1000);
@@ -2667,7 +2692,12 @@ async function handleEnterPlanMode(
 
     const onAbort = () => {
       console.debug('[EnterPlanMode] Aborted by SDK signal');
+      // Guard same as handleAskUserQuestion — see that comment.
+      const wasPending = pendingEnterPlanMode.has(requestId);
       cleanup();
+      if (wasPending) {
+        broadcast('enter-plan-mode:expired', { requestId, reason: 'aborted' });
+      }
       reject(new DOMException('Aborted', 'AbortError'));
     };
 
@@ -6465,20 +6495,75 @@ async function startStreamingSession(preWarm = false): Promise<void> {
 
     // Fork detection: if this session was created via fork, override resume/sessionId
     // to use SDK's forkSession option (load source history + branch to new session).
-    // Consumed once — forkFrom is cleared from metadata after use.
+    //
+    // PRD #134/#135 — `forkFrom` is retained across restarts until the SDK
+    // has demonstrably persisted the forked conversation to its on-disk
+    // store (`~/.claude/projects/.../<sessionId>.jsonl`). The persistence
+    // probe (`sdkGetSessionMessages(sdkSid)` after first non-error result —
+    // see the result-message handler below) is what clears `forkFrom`,
+    // *not* this start path.
+    //
+    // The original code deleted `forkFrom` HERE on the very first start,
+    // before any SDK interaction. Two failure windows opened up:
+    //  (a) User idle after fork → model switch → restart with no message
+    //      ever sent → SDK never persisted → resume fails.
+    //  (b) User sends message + switches model → first turn runs but
+    //      SDK's JSONL flush is async; `setSessionModel`'s deferred
+    //      restart fires on the same `result` message and races with
+    //      the flush. Subprocess B's resume fails with "No conversation
+    //      found" → `recoverFromStaleSession()` silently spawns a fresh
+    //      SDK conversation → all forked context lost (#135 reports 40+
+    //      failed turns in a single day before this fix).
+    //
+    // Keeping `forkFrom` lets every pre-flush restart re-run fork mode.
+    // Re-forking is idempotent: SDK reloads the source history and writes
+    // to the same new sessionId. Cost = a few hundred ms of source-history
+    // reload per pre-flush restart. Acceptable vs. silent context loss.
     let forkMode = false;
     let forkResumeAt: string | undefined;
     const forkMeta = getSessionMetadata(sessionId);
     if (forkMeta?.forkFrom) {
-      const { sourceSessionId, messageUuid } = forkMeta.forkFrom;
-      console.log(`[agent] fork mode: resuming from ${sourceSessionId}, fork at ${messageUuid}, new session ${sessionId}`);
-      resumeFrom = sourceSessionId;
-      effectiveSdkSessionId = sessionId;
-      forkMode = true;
-      forkResumeAt = messageUuid;
-      // Clear forkFrom so subsequent restarts resume normally
-      delete forkMeta.forkFrom;
-      await saveSessionMetadata(forkMeta);
+      // PRD #134/#135 sync guard — before re-engaging fork mode, probe the
+      // SDK's own store for `sessionId`. If the JSONL already exists with
+      // ≥1 message, SDK has fully persisted: re-running fork mode here
+      // would make the SDK reject with `Session ID <X> is already in use`
+      // (empirically verified — the SDK CLI exits 1 with that exact stderr,
+      // see `test_fork_idempotency.mjs`). The existing
+      // `detectedAlreadyInUse` recovery only fires when `!sessionRegistered`,
+      // so this case would propagate as an unhandled error to the user.
+      // Skip fork mode + clear `forkFrom` so the caller uses normal resume.
+      //
+      // Why this is sync (await) rather than the post-result async probe:
+      // we MUST decide between fork-mode and normal-resume BEFORE issuing
+      // the SDK query, and we have to know definitively. The probe is a
+      // single file read (~ms) and only runs when forkFrom is set, so the
+      // cost is negligible.
+      const sdkSidProbe = forkMeta.sdkSessionId ?? sessionId;
+      let alreadyPersisted = false;
+      try {
+        const probe = await sdkGetSessionMessages(sdkSidProbe, {
+          dir: agentDir,
+          limit: 1,
+        });
+        if (probe.length > 0) alreadyPersisted = true;
+      } catch {
+        /* ENOENT / read error — treat as "not persisted" */
+      }
+
+      if (alreadyPersisted) {
+        console.log(`[agent] fork session ${sessionId} already persisted in SDK store — skipping fork mode, clearing forkFrom`);
+        delete forkMeta.forkFrom;
+        await saveSessionMetadata(forkMeta);
+        // Fall through: normal resume path picks up sdkSessionId via the
+        // sessionRegistered branch above.
+      } else {
+        const { sourceSessionId, messageUuid } = forkMeta.forkFrom;
+        console.log(`[agent] fork mode: resuming from ${sourceSessionId}, fork at ${messageUuid}, new session ${sessionId}`);
+        resumeFrom = sourceSessionId;
+        effectiveSdkSessionId = sessionId;
+        forkMode = true;
+        forkResumeAt = messageUuid;
+      }
     }
 
     const mcpStatus = currentMcpServers === null ? 'auto' : currentMcpServers.length === 0 ? 'disabled' : `enabled(${currentMcpServers.length})`;
@@ -6666,14 +6751,22 @@ async function startStreamingSession(preWarm = false): Promise<void> {
           };
         }
 
-        // Special handling for AskUserQuestion - always requires user interaction
+        // Special handling for AskUserQuestion - always requires user interaction.
+        // PRD #131 — `interrupt: true` on the deny terminates the assistant
+        // turn after the tool_result lands. Without it, the SDK feeds back
+        // "用户取消了问答" and the AI keeps issuing tool calls (Read/Edit/…)
+        // even though the user never gave permission. The `interrupt` knob is
+        // the documented SDK escape hatch (sdk.d.ts:1786-1791
+        // PermissionResult.deny.interrupt) and is exactly the right semantic
+        // for control-transfer tools like AskUserQuestion / ExitPlanMode.
         if (toolName === 'AskUserQuestion') {
           console.log('[canUseTool] AskUserQuestion detected, prompting user');
           const answers = await handleAskUserQuestion(input, options.signal);
           if (answers === null) {
             return {
               behavior: 'deny' as const,
-              message: '用户取消了问答'
+              message: '用户取消了问答',
+              interrupt: true,
             };
           }
           // Return with answers filled in
@@ -6684,12 +6777,20 @@ async function startStreamingSession(preWarm = false): Promise<void> {
           };
         }
 
-        // Special handling for ExitPlanMode - user reviews the plan
+        // Special handling for ExitPlanMode - user reviews the plan.
+        // PRD #131 — `interrupt: true` so the AI stops the turn after the
+        // user rejects. Previously the AI interpreted the deny as "try
+        // again" and kept calling tools (TodoWrite, Read, Edit, even another
+        // ExitPlanMode), defeating the user's intent.
         if (toolName === 'ExitPlanMode') {
           console.log('[canUseTool] ExitPlanMode detected, requesting user approval');
           const approved = await handleExitPlanMode(input, options.signal);
           if (!approved) {
-            return { behavior: 'deny' as const, message: '用户拒绝了方案' };
+            return {
+              behavior: 'deny' as const,
+              message: '用户拒绝了方案',
+              interrupt: true,
+            };
           }
           return {
             behavior: 'allow' as const,
@@ -6697,12 +6798,17 @@ async function startStreamingSession(preWarm = false): Promise<void> {
           };
         }
 
-        // Special handling for EnterPlanMode - user approves entering plan mode
+        // Special handling for EnterPlanMode - user approves entering plan mode.
+        // PRD #131 — same control-transfer semantic; interrupt on rejection.
         if (toolName === 'EnterPlanMode') {
           console.log('[canUseTool] EnterPlanMode detected, requesting user approval');
           const approved = await handleEnterPlanMode(input, options.signal);
           if (!approved) {
-            return { behavior: 'deny' as const, message: '用户拒绝进入计划模式' };
+            return {
+              behavior: 'deny' as const,
+              message: '用户拒绝进入计划模式',
+              interrupt: true,
+            };
           }
           return {
             behavior: 'allow' as const,
@@ -7831,6 +7937,53 @@ async function startStreamingSession(preWarm = false): Promise<void> {
         });
 
         handleMessageComplete();
+
+        // PRD #134 — clear `forkFrom` only once we've VERIFIED the SDK has
+        // persisted the forked conversation to its on-disk store. "First
+        // non-error result" is necessary but not sufficient: the SDK's
+        // JSONL flush is async, and the deferred-restart abort triggered
+        // by `setSessionModel` (model-window restart) can fire on the
+        // same `result` message and race with the flush. If we cleared
+        // `forkFrom` here speculatively, the next subprocess would
+        // resume by sdkSessionId, fail with "No conversation found",
+        // and `recoverFromStaleSession()` would silently spawn a fresh
+        // SDK conversation — exactly the user-visible bug from #134/#135
+        // (40+ failed turns reported in a single day).
+        //
+        // Probe via `sdkGetSessionMessages(sdkSid)` — reads the SDK's
+        // own project JSONL. If it returns at least one message, the
+        // conversation is durably persisted and any future restart can
+        // resume normally. If it throws / returns empty, keep
+        // `forkFrom` so the next `startStreamingSession` re-runs fork
+        // mode (idempotent — SDK reloads source history and writes to
+        // the same new sessionId). Async — the result handler doesn't
+        // block on this.
+        if (!resultMessage.is_error) {
+          const meta = getSessionMetadata(sessionId);
+          const sdkSid = meta?.sdkSessionId;
+          const probeDir = agentDir;
+          if (meta?.forkFrom && sdkSid) {
+            sdkGetSessionMessages(sdkSid, { dir: probeDir, limit: 1 })
+              .then(found => {
+                if (found.length === 0) return; // not persisted yet — keep forkFrom
+                // Re-fetch metadata in case anything changed since the
+                // result handler captured it (e.g., restart already
+                // re-issued fork mode in the gap).
+                const fresh = getSessionMetadata(sessionId);
+                if (!fresh?.forkFrom) return;
+                console.log(`[agent] fork session ${sessionId} persisted in SDK store — clearing forkFrom`);
+                delete fresh.forkFrom;
+                saveSessionMetadata(fresh).catch(e =>
+                  console.warn('[agent] forkFrom clear failed (non-fatal, will retry on next turn):', e),
+                );
+              })
+              .catch(e => {
+                // ENOENT / "No conversation found" / etc. — SDK hasn't
+                // persisted yet. forkFrom stays; next start re-forks.
+                console.log(`[agent] forkFrom persistence probe inconclusive, keeping flag: ${(e as Error)?.message ?? e}`);
+              });
+          }
+        }
 
         // Post-turn error recovery. Three policies based on scenario × reason:
         //

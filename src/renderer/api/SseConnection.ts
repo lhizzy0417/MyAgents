@@ -46,8 +46,11 @@ const JSON_EVENTS = new Set([
     'chat:agent-error',
     'permission:request', // Permission prompt for tool usage
     'ask-user-question:request', // AskUserQuestion tool prompt
+    'ask-user-question:expired', // PRD #131 — backend timeout / SDK abort: clear stale UI card
     'exit-plan-mode:request',  // ExitPlanMode tool - AI submits plan for review
+    'exit-plan-mode:expired',  // PRD #131 — backend timeout: clear stale UI card
     'enter-plan-mode:request', // EnterPlanMode tool - AI requests plan mode
+    'enter-plan-mode:expired', // PRD #131 — backend timeout: clear stale UI card
     'cron:task-exit-requested', // AI requested cron task exit via exit_cron_task tool
     'chat:task-started',    // Background task (SDK Task tool) started
     'chat:task-notification', // Background task completed/failed/stopped

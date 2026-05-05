@@ -57,6 +57,40 @@ const originalConsole = {
     debug: console.debug.bind(console),
 };
 
+// PRD #132 — once stdio is broken, every `originalConsole.*` call below
+// is another potential EPIPE → uncaughtException. The wrapper used to feed
+// itself: a failed stderr write turned into uncaughtException, whose
+// handler called console.error, which routed back into this wrapper, which
+// called originalConsole.error again, which raised another EPIPE — fast
+// loop that wrote 50–200 KB to ~/.myagents/logs/crash/<ts>.log per
+// iteration until the disk filled. After the stdio listener in index.ts
+// flips the broken bit, we silently skip the originalConsole.* call and
+// only keep the in-memory ring + SSE broadcast paths alive.
+//
+// We expose BOTH a probe (read) and a marker (write): the probe lets the
+// wrapper skip writes after the async stdio listener trips the bit; the
+// marker lets the sync-throw branch below set the bit immediately so we
+// don't even attempt the next call (would otherwise wait for the next
+// event-loop turn for the async listener to do it).
+let stdioBrokenRef: () => boolean = () => false;
+let markStdioBrokenRef: () => void = () => {};
+export function setStdioBrokenProbe(probe: () => boolean, marker: () => void): void {
+    stdioBrokenRef = probe;
+    markStdioBrokenRef = marker;
+}
+function safeOriginal(method: 'log' | 'error' | 'warn' | 'debug', args: unknown[]): void {
+    if (stdioBrokenRef()) return;
+    try {
+        originalConsole[method](...args);
+    } catch {
+        // The write itself threw (sync EPIPE on tty fd). Mark broken so we
+        // stop trying. The `error` listener in index.ts also catches the
+        // matching async error and sets the same flag, but we set it now
+        // so the very next call short-circuits without another attempt.
+        try { markStdioBrokenRef(); } catch { /* unreachable */ }
+    }
+}
+
 // ==================== Broadcast Function ====================
 let broadcastLog: ((entry: LogEntry) => void) | null = null;
 
@@ -129,8 +163,11 @@ function createAndBroadcast(level: LogLevel, args: unknown[]): void {
         try {
             broadcastLog(entry);
         } catch (e) {
-            // Log error using original console to prevent infinite loops
-            originalConsole.error('[Logger] Broadcast failed:', e);
+            // Log error using original console to prevent infinite loops.
+            // PRD #132 — `originalConsole.error` itself can EPIPE when stdio
+            // is closed; route through the safe wrapper so we don't seed a
+            // new recursion.
+            safeOriginal('error', ['[Logger] Broadcast failed:', e]);
         }
     }
 }
@@ -146,36 +183,37 @@ export function initLogger(getSseClients: () => ReturnType<typeof createSseClien
             try {
                 client.send('chat:log', entry);
             } catch (e) {
-                originalConsole.error('[Logger] client.send failed:', e);
+                safeOriginal('error', ['[Logger] client.send failed:', e]);
             }
         }
     };
 
-    // Override console methods
+    // Override console methods. PRD #132 — `safeOriginal` skips the write
+    // when stdio is closed so we don't reseed the recursive EPIPE loop.
     console.log = (...args: unknown[]) => {
-        originalConsole.log(...args);
+        safeOriginal('log', args);
         createAndBroadcast('info', args);
     };
 
     console.error = (...args: unknown[]) => {
-        originalConsole.error(...args);
+        safeOriginal('error', args);
         createAndBroadcast('error', args);
     };
 
     console.warn = (...args: unknown[]) => {
-        originalConsole.warn(...args);
+        safeOriginal('warn', args);
         createAndBroadcast('warn', args);
     };
 
     console.debug = (...args: unknown[]) => {
-        originalConsole.debug(...args);
+        safeOriginal('debug', args);
         createAndBroadcast('debug', args);
     };
 
     // Mark console.log as patched (for diagnostics endpoint)
     (console.log as unknown as Record<string, boolean>).__patched_by_logger__ = true;
 
-    originalConsole.log('[Logger] Unified logging initialized');
+    safeOriginal('log', ['[Logger] Unified logging initialized']);
 }
 
 /**
@@ -214,7 +252,11 @@ export function sendLog(level: LogLevel, message: string, meta?: Record<string, 
         if (ctx.runtime) entry.runtime = ctx.runtime;
     }
 
-    originalConsole[level === 'info' ? 'log' : level](message);
+    // PRD #132 — route through safeOriginal so this back-channel respects
+    // the same stdio-broken short-circuit as the patched `console.*`. A
+    // future caller of sendLog() during a closed-pipe state would otherwise
+    // re-seed the EPIPE recursion that #132 was designed to prevent.
+    safeOriginal(level === 'info' ? 'log' : level, [message]);
 
     // Store in history
     logHistory.push(entry);

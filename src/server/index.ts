@@ -111,6 +111,13 @@ import { getBuiltinMcpInstance } from './tools/builtin-mcp-registry';
 // file; we keep the most recent CRASH_LOG_MAX_FILES and evict oldest.
 const CRASH_LOG_DIR = join(homedir(), '.myagents', 'logs', 'crash');
 const CRASH_LOG_MAX_FILES = 20;
+// PRD #132 — hard cap on a single crash log file. The bug was: a recursive
+// EPIPE loop appended ~50–200 KB per iteration and grew a single file to
+// 95–105 GB. The recursion is fixed below by ignoring stdio EPIPE + a re-
+// entry guard, but a hard ceiling stays as belt-and-suspenders so any
+// future regression can't fill the user's disk again. 50 MB matches the
+// per-file cap used by UnifiedLogger.
+const CRASH_LOG_FILE_MAX_BYTES = 50 * 1024 * 1024;
 // Per-process crash log path: a single file per sidecar lifetime, holding all
 // the lifecycle/error events for THIS process. The filename uses the start
 // time so we can sort/evict by name. We append throughout the process.
@@ -126,6 +133,14 @@ const CRASH_LOG_FILE = (() => {
   const ts = new Date().toISOString().replace(/[:]/g, '-');
   return join(CRASH_LOG_DIR, `${ts}.log`);
 })();
+
+// PRD #132 — ceiling tracker. We checkpoint file size every Nth append (not
+// every append) so the ceiling check itself is cheap: an `appendFileSync`
+// that already grew the file by 200 KB is fine, the *next* one will be
+// blocked. ceilingHit is sticky for this process lifetime — once tripped we
+// stop appending entirely so the file stays at its current size.
+let crashLogCeilingHit = false;
+let crashLogAppendCount = 0;
 
 function evictOldCrashLogs(): void {
   try {
@@ -149,6 +164,7 @@ function evictOldCrashLogs(): void {
 }
 
 function crashLog(prefix: string, ...args: unknown[]) {
+  if (crashLogCeilingHit) return;
   try {
     const msg = args.map(a => {
       if (a instanceof Error) return `${a.message}\n${a.stack}`;
@@ -156,6 +172,19 @@ function crashLog(prefix: string, ...args: unknown[]) {
       return String(a);
     }).join(' ');
     appendFileSync(CRASH_LOG_FILE, `[${new Date().toISOString()}] ${prefix} ${msg}\n`);
+    // Cheap ceiling check: stat once every 32 appends.
+    if ((++crashLogAppendCount & 0x1f) === 0) {
+      try {
+        const sz = statSync(CRASH_LOG_FILE).size;
+        if (sz > CRASH_LOG_FILE_MAX_BYTES) {
+          crashLogCeilingHit = true;
+          appendFileSync(
+            CRASH_LOG_FILE,
+            `[${new Date().toISOString()}] CEILING_HIT crash log capped at ${CRASH_LOG_FILE_MAX_BYTES} bytes; further events suppressed for this sidecar lifetime\n`,
+          );
+        }
+      } catch { /* stat failed, keep appending */ }
+    }
   } catch { /* ignore */ }
 }
 
@@ -165,6 +194,7 @@ function crashLog(prefix: string, ...args: unknown[]) {
  * has cross-process context, not just the bare error.
  */
 function dumpCrashContext(reason: string): void {
+  if (crashLogCeilingHit) return;
   try {
     const lines = getRecentLogLines(200);
     if (lines.length === 0) return;
@@ -177,6 +207,48 @@ function dumpCrashContext(reason: string): void {
 // Top-level beacon: fires BEFORE main(), proves JS module loading succeeded
 try { process.stderr.write(`[startup] module loaded, pid=${process.pid}\n`); } catch { /* ignore */ }
 
+// PRD #132 — silence stdio EPIPE before it can become an uncaughtException.
+//
+// When Tauri kills the sidecar's stdout/stderr pipe but the sidecar keeps
+// running (orphaned via SIGKILL of parent, helper sidecar outliving owner,
+// dev-server reload not killing children cleanly), the next write fails
+// with EPIPE. Without an 'error' listener Node turns the unhandled stream
+// error into uncaughtException, which our handler responded to by calling
+// console.error → another EPIPE → another uncaughtException → a recursive
+// loop that wrote 50–200 KB to the crash log per iteration at SSD-bound
+// rate, growing a single file to 95–105 GB in minutes (issue #132).
+//
+// Installing 'error' listeners that swallow EPIPE/EBADF/ENOTCONN cuts the
+// loop at the source: the failed write resolves to a no-op instead of
+// fanning out into the fault handler. Other stdio errors keep their
+// existing behavior so we still notice non-pipe-closure faults. Once the
+// stdio sink is broken we mark `stdioBroken` and the wrapper console below
+// stops attempting to write to it — defense in depth against any code path
+// that bypasses our listener.
+let stdioBroken = false;
+const STDIO_BENIGN_CLOSE_CODES = new Set(['EPIPE', 'EBADF', 'ENOTCONN', 'ECONNRESET']);
+function onStdioError(stream: 'stdout' | 'stderr') {
+  return (err: NodeJS.ErrnoException) => {
+    if (STDIO_BENIGN_CLOSE_CODES.has(err.code ?? '')) {
+      if (!stdioBroken) {
+        stdioBroken = true;
+        // Best-effort note in crash log; this MUST NOT call console.* (which
+        // would re-enter the same broken pipe and re-trigger the loop).
+        try {
+          crashLog('STDIO_CLOSED', `${stream} ${err.code ?? 'unknown'} — disabling future stdio writes for this sidecar`);
+        } catch { /* ignore */ }
+      }
+      return; // swallow
+    }
+    // Non-pipe-closure error — record once, do not propagate.
+    try { crashLog('STDIO_ERROR', `${stream} ${err.code ?? ''} ${err.message ?? ''}`); } catch { /* ignore */ }
+  };
+}
+try { process.stdout.on('error', onStdioError('stdout')); } catch { /* ignore */ }
+try { process.stderr.on('error', onStdioError('stderr')); } catch { /* ignore */ }
+export function isStdioBroken(): boolean { return stdioBroken; }
+export function markStdioBroken(): void { stdioBroken = true; }
+
 process.on('exit', (code) => {
   crashLog('EXIT', `code=${code}`);
 });
@@ -185,27 +257,84 @@ process.on('beforeExit', (code) => {
   crashLog('BEFORE_EXIT', `code=${code}`);
 });
 
+// PRD #132 — uncaughtException re-entry guard + EPIPE-aware short circuit.
+//
+// Even with the stdio listeners above, an in-flight async write may still
+// emit an EPIPE that becomes uncaughtException (timing window between the
+// write call and the listener being invoked). Two defenses:
+//   1. Re-entry guard: if the handler is already running (sync or
+//      promise-resumed), drop subsequent fires until it returns. Prevents
+//      a deep stack of nested handlers from forming.
+//   2. EPIPE fast path: skip dumpCrashContext (the 200-line dump is what
+//      grew the file by 50–200 KB per iteration) and skip the console.error
+//      "feedback" line (the original recursion seed). Just record one
+//      bare line so post-mortem still sees we hit it.
+let inUncaughtHandler = false;
+function isStdioPipeError(e: unknown): boolean {
+  if (!e || typeof e !== 'object') return false;
+  const code = (e as NodeJS.ErrnoException).code;
+  if (code && STDIO_BENIGN_CLOSE_CODES.has(code)) return true;
+  const msg = (e as Error).message ?? '';
+  return /\bwrite\s+(EPIPE|EBADF|ENOTCONN)\b/i.test(msg);
+}
+
 process.on('uncaughtException', (err) => {
-  crashLog('UNCAUGHT_EXCEPTION', err);
-  dumpCrashContext('uncaughtException');
-  console.error('[process] uncaughtException:', err);
+  if (inUncaughtHandler) {
+    // Re-entry — drop. Recording even one line here would risk re-triggering.
+    return;
+  }
+  inUncaughtHandler = true;
+  try {
+    if (isStdioPipeError(err)) {
+      // Lightweight path: one line, no context dump, no console.error.
+      // The stdio listeners above mark stdioBroken which makes the rest
+      // of the process drop console writes anyway.
+      crashLog('UNCAUGHT_EPIPE', err);
+      stdioBroken = true;
+      return;
+    }
+    crashLog('UNCAUGHT_EXCEPTION', err);
+    dumpCrashContext('uncaughtException');
+    if (!stdioBroken) {
+      try { console.error('[process] uncaughtException:', err); } catch { /* ignore */ }
+    }
+  } finally {
+    inUncaughtHandler = false;
+  }
 });
 
 process.on('unhandledRejection', (reason) => {
-  crashLog('UNHANDLED_REJECTION', reason);
-  dumpCrashContext('unhandledRejection');
-  console.error('[process] unhandledRejection:', reason);
+  if (inUncaughtHandler) return;
+  inUncaughtHandler = true;
+  try {
+    if (isStdioPipeError(reason)) {
+      crashLog('UNHANDLED_REJECTION_EPIPE', reason);
+      stdioBroken = true;
+      return;
+    }
+    crashLog('UNHANDLED_REJECTION', reason);
+    dumpCrashContext('unhandledRejection');
+    if (!stdioBroken) {
+      try { console.error('[process] unhandledRejection:', reason); } catch { /* ignore */ }
+    }
+  } finally {
+    inUncaughtHandler = false;
+  }
 });
 
 process.on('SIGTERM', () => {
   crashLog('SIGNAL', 'SIGTERM');
-  console.log('[process] SIGTERM received, shutting down...');
+  if (!stdioBroken) {
+    try { console.log('[process] SIGTERM received, shutting down...'); } catch { /* ignore */ }
+  }
   process.exit(0);  // Trigger SDK's process.on('exit') handler → SIGTERM CLI subprocess
 });
 
 process.on('SIGINT', () => {
   crashLog('SIGNAL', 'SIGINT');
-  console.log('[process] SIGINT received, shutting down...');
+  if (!stdioBroken) {
+    try { console.log('[process] SIGINT received, shutting down...'); } catch { /* ignore */ }
+  }
   process.exit(0);
 });
 
@@ -271,7 +400,10 @@ import { snapshotForOwnedSession } from './utils/session-snapshot';
 import { resolveSessionConfig } from './utils/resolve-session-config';
 import type { AgentConfig } from '../shared/types/agent';
 import type { SessionMetadata } from './types/session';
-import { initLogger, getLoggerDiagnostics, withLogContext } from './logger';
+import { initLogger, getLoggerDiagnostics, withLogContext, setStdioBrokenProbe } from './logger';
+// `isStdioBroken` / `markStdioBroken` are defined above (in the crash-
+// diagnostics block) and consumed by `setStdioBrokenProbe` below to wire
+// the logger's safe-write wrapper to the stdio-state bit.
 import {
   buildGateResponseBody,
   buildReadyResponseBody,
@@ -1218,6 +1350,10 @@ async function main() {
   startupBeacon('ensureAgentDir done');
 
   // Initialize unified logging system (intercepts console.log and sends to SSE)
+  // PRD #132 — wire the stdio-broken probe + marker so the logger wrapper
+  // stops calling originalConsole.* once a stdio EPIPE has marked the sink
+  // dead, and so a sync write-throw can flip the bit immediately.
+  setStdioBrokenProbe(isStdioBroken, markStdioBroken);
   initLogger(getClients);
   startupBeacon('initLogger done — switching to console.log');
 

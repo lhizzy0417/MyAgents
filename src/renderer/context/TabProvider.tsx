@@ -1874,6 +1874,40 @@ export default function TabProvider({
                 break;
             }
 
+            // PRD #131 — backend expired the request (timeout / SDK abort).
+            // Clear the matching pending state so the modal disappears and the
+            // user can't click into a stale card whose backend entry is gone
+            // (which would hit "Unknown request" on respond and leave the UI
+            // wedged). We match by requestId so a stale event for a
+            // long-replaced request never wipes a fresh modal.
+            case 'ask-user-question:expired': {
+                const payload = data as { requestId: string; reason?: string } | null;
+                if (payload?.requestId) {
+                    setPendingAskUserQuestion(prev =>
+                        prev?.requestId === payload.requestId ? null : prev,
+                    );
+                }
+                break;
+            }
+            case 'exit-plan-mode:expired': {
+                const payload = data as { requestId: string; reason?: string } | null;
+                if (payload?.requestId) {
+                    setPendingExitPlanMode(prev =>
+                        prev?.requestId === payload.requestId ? null : prev,
+                    );
+                }
+                break;
+            }
+            case 'enter-plan-mode:expired': {
+                const payload = data as { requestId: string; reason?: string } | null;
+                if (payload?.requestId) {
+                    setPendingEnterPlanMode(prev =>
+                        prev?.requestId === payload.requestId ? null : prev,
+                    );
+                }
+                break;
+            }
+
             // Background task lifecycle (SDK Task tool)
             case 'chat:task-started': {
                 console.log(`[TabProvider ${tabId}] ${eventName}:`, data);

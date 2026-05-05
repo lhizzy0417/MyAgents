@@ -28,6 +28,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **阿里百炼 Coding Plan 添加后模型管理报错** (#127)：跳过该 provider 的模型探活。
 - **Windows 上点外链每次闪一个 CMD 黑窗**。
 - **飞书慢响应时 IM Bot 消息挂死直到分钟级 OS 超时**：上游 fetch 现在带 30s 超时 + 父级取消传递。
+- **Plan Mode 下用户拒绝方案后 AI 仍继续执行其他工具** (#131)：现在拒绝即终止整轮回答，UI 弹窗在后端超时 / 中断后也会自动消失，不再出现"前端已取消但后端不认识"的错位状态。
+- **极端情况下崩溃日志暴涨到几百 GB 撑爆磁盘** (#132)：sidecar 在父进程关闭其 stdout / stderr 管道后，原本会陷入 EPIPE → uncaughtException → 写日志 → 再 EPIPE 的递归循环，单文件可在几分钟内写到 100 GB。修复：捕获并静默 stdio 关闭、避免崩溃处理器递归触发，并对单个崩溃日志文件加 50 MB 上限。
+- **Fork 分支后切换模型，首条消息丢上下文 / 静默失败** (#134, #135)：原来 fork 关系在第一次 SDK 启动后立即丢弃，模型切换触发 SDK 重启时找不到 session，AI 失忆。现在 fork 元数据保留到 SDK 真正持久化后才清除，期间任何重启会自动重走 fork。
 
 ### Migration
 
