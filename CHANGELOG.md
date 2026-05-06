@@ -20,6 +20,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **聊天滚动定位**：发消息 / Tab 切换后能正确停在最底，多 tool 调用的长助手消息不会停在中段；切走再切回时不会错误退出「自动跟随最新」模式。
 - **Widget 标签出现在消息正文不破坏渲染**：当 AI 在解释或讨论 `<generative-ui-widget>` 协议本身时（inline code、文字中提及、一条消息含两个 widget），消息能完整显示，不再被错当成「未闭合 widget」吞掉后续内容。
 - **Windows 非系统盘工作区 / 项目级 skill 的「打开」按钮**：工作区在 `D:\` / 外接卷上、或项目里的 skill / command 路径，「在 Finder/资源管理器中显示」和「用默认应用打开」现在能正常工作（之前一律报 "Path not allowed"）。
+- **渠道列表显示真实 bot 名，不再是 npm 包名**：同一个插件下挂多个 bot 时（比如两个飞书 bot），列表里之前都显示成 npm 包名（`larksuite/openclaw-lark` × 2）看不清谁是谁。现在直接拉飞书 / QQ 各自 API 的真实 bot displayName 显示。0.2.10 之前已经被写到磁盘的旧「包名」状态会在下次 channel 启动时自动清掉。
+
+### Improved
+
+- **飞书 Channel 配置向导更顺**：凭证步骤删掉多余的几张引导图、凭证填好后顶部出现「凭证已验证 / 接下来要做的 3 步」的状态条，整个绑定流程不再让人原地懵。
 
 ### Security
 
