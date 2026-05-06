@@ -235,8 +235,13 @@ export interface WorkspaceFileService {
   /** [workspace-free] Reveal an absolute path (NOT workspace-relative) in the
    *  OS file manager. Used by Skill/Command detail panels for
    *  `~/.myagents/skills/...`. The Rust side validates the path canonicalizes
-   *  to under home_dir or tmp AND passes the credential blacklist. */
-  openPathExternal(args: { fullPath: string }): Promise<void>;
+   *  to under home_dir or tmp AND passes the credential blacklist.
+   *
+   *  Optional `workspace` widens the trusted-prefix list for project-scope
+   *  callers whose path may live under `<project>/.claude/skills/...` on a
+   *  non-system drive (issue #125 follow-up — Windows workspaces on `D:\`).
+   *  Credential blacklist still applies. */
+  openPathExternal(args: { fullPath: string; workspace?: string | null }): Promise<void>;
   /** [requires workspace] Batch existence check — input order is preserved in the returned map. */
   checkPaths(args: { paths: string[] }): Promise<CheckPathsResult>;
   /** [requires workspace] Read a workspace file as a Blob URL (for `<img src=...>`
@@ -485,9 +490,14 @@ export function useWorkspaceFileService(workspacePath: string | null): Workspace
   );
 
   const openPathExternal: WorkspaceFileService['openPathExternal'] = useCallback(
-    async ({ fullPath }) => {
+    async ({ fullPath, workspace }) => {
       // No workspace required — this command takes an absolute path.
-      await invokeIfTauri<void>('cmd_open_path_external', { fullPath });
+      // `workspace` is optional: when present (project-scope skill/command
+      // on a non-system drive), Rust adds it to the trusted-prefix list.
+      await invokeIfTauri<void>('cmd_open_path_external', {
+        fullPath,
+        workspace: workspace?.trim() || null,
+      });
     },
     [invokeIfTauri],
   );

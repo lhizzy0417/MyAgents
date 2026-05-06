@@ -341,15 +341,22 @@ const SkillDetailPanel = forwardRef<SkillDetailPanelRef, SkillDetailPanelProps>(
         // for global, `<project>/.claude/skills/<name>/` for project), not a
         // workspace-relative path — so we use `cmd_open_path_external` which
         // takes absolute paths and validates them against home/tmp prefix.
+        // Issue #125 follow-up: forward `agentDir` for project-scope skills
+        // so Rust can accept paths under non-system-drive workspaces (e.g.
+        // `D:\project\.claude\skills\foo\`); without this, project skills on
+        // Windows non-system drives fail with "Path not allowed".
         const fileService = useWorkspaceFileService(null);
         const handleOpenInFinder = useCallback(async () => {
             if (!skill) return;
             try {
-                await fileService.openPathExternal({ fullPath: skill.path });
+                await fileService.openPathExternal({
+                    fullPath: skill.path,
+                    workspace: scope === 'project' ? agentDir ?? null : null,
+                });
             } catch {
                 toastRef.current.error('无法打开目录');
             }
-        }, [skill, fileService]);
+        }, [skill, fileService, scope, agentDir]);
 
         if (loading) {
             return (

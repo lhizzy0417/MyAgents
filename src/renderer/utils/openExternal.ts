@@ -10,6 +10,17 @@
 // the path against `home/tmp prefix + credential blacklist + canonicalize`
 // (anti-symlink-escape) before spawning the OS default app. See issue #125.
 //
+// Workspace context (issue #125 follow-up): Windows users with workspaces
+// on non-system drives (`D:\`, mapped drives) hit `Path not allowed`
+// because the workspace path doesn't start with `USERPROFILE` or `%TEMP%`.
+// Callers that know the path lives inside a chat workspace pass
+// `{ workspace: agentDir }` so Rust can add that root to the trusted-prefix
+// list. The home-anchored credential blacklist (`<home>/.ssh`,
+// `Library/Keychains`, etc.) still applies, but it does NOT cover
+// workspace-relative credential dirs — that's consistent with the rest
+// of the app and matches the behavior of the Rust validator (see
+// `validate_external_open_path` in `system_open.rs`).
+//
 // Browser fallback mode (Vite dev served in a regular browser) keeps the
 // existing `window.open` behavior for web URLs only — file paths can't be
 // opened from a sandboxed renderer.
@@ -21,6 +32,18 @@
 
 import { isTauriEnvironment } from './browserMock';
 
+export interface OpenExternalOptions {
+    /**
+     * Workspace root the file target belongs to, for callers operating
+     * inside a chat workspace (BrowserPanel previewing a workspace HTML
+     * file, project-scope SkillDetailPanel / CommandDetailPanel). When
+     * provided, Rust adds the canonical workspace root to the trusted
+     * prefix list, fixing the "workspace on D:\ → Path not allowed" bug
+     * (issue #125 follow-up). No-op for web URLs.
+     */
+    workspace?: string | null;
+}
+
 /**
  * Open a URL or file path using the system default application.
  * - HTTP/HTTPS / mailto / tel → Tauri shell.open (system default browser /
@@ -29,8 +52,12 @@ import { isTauriEnvironment } from './browserMock';
  *   `cmd_open_path_with_default` (system default app for the file type)
  *
  * @param target - URL or file path to open
+ * @param options - optional workspace context for file targets
  */
-export async function openExternal(target: string): Promise<void> {
+export async function openExternal(
+    target: string,
+    options?: OpenExternalOptions,
+): Promise<void> {
     if (!target || typeof target !== 'string') {
         console.warn('[openExternal] Invalid target provided');
         return;
@@ -50,7 +77,14 @@ export async function openExternal(target: string): Promise<void> {
         if (filePath) {
             try {
                 const { invoke } = await import('@tauri-apps/api/core');
-                await invoke('cmd_open_path_with_default', { fullPath: filePath });
+                // Workspace is forwarded as null when not provided so the
+                // Rust `Option<String>` deserializer sees an explicit None
+                // rather than a missing field.
+                const workspace = options?.workspace?.trim() || null;
+                await invoke('cmd_open_path_with_default', {
+                    fullPath: filePath,
+                    workspace,
+                });
             } catch (error) {
                 console.error('[openExternal] cmd_open_path_with_default failed:', error);
             }

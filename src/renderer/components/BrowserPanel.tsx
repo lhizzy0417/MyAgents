@@ -29,6 +29,14 @@ interface BrowserPanelProps {
   browserAlive: boolean;
   /** When previewing a local file, stores its metadata for editor toggle */
   sourceFile?: { name: string; content: string; size: number; path: string } | null;
+  /**
+   * Active chat workspace path. Forwarded to `openExternal()` when the user
+   * clicks "open in external browser" so Rust can accept workspace files
+   * outside home/tmp (e.g. Windows `D:\workspace\foo.html`). Issue #125
+   * follow-up — without this the path validator rejects every non-system-
+   * drive workspace.
+   */
+  workspace?: string | null;
   onBrowserCreated: () => void;
   onCreateFailed: () => void;
   onClose: () => void;
@@ -51,6 +59,7 @@ export default function BrowserPanel({
   isDraggingSplit,
   browserAlive,
   sourceFile,
+  workspace,
   onBrowserCreated,
   onCreateFailed,
   onClose,
@@ -259,9 +268,11 @@ export default function BrowserPanel({
 
   const handleOpenExternal = useCallback(() => {
     // openExternal auto-routes file:// URLs through Rust (see openExternal.ts);
-    // web URLs go through Tauri shell.open. No branching needed here.
-    if (currentUrl) openExternal(currentUrl);
-  }, [currentUrl]);
+    // web URLs go through Tauri shell.open. Forwarding `workspace` lets Rust
+    // accept paths under non-system-drive workspaces (issue #125 follow-up);
+    // it's a no-op for web URLs.
+    if (currentUrl) openExternal(currentUrl, { workspace });
+  }, [currentUrl, workspace]);
 
   // ── URL bar editing ──
   const handleUrlClick = useCallback(() => {

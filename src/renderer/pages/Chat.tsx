@@ -3282,6 +3282,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
                     isDraggingSplit={isDraggingSplit}
                     browserAlive={browserAlive}
                     sourceFile={browserSourceFile}
+                    workspace={agentDir}
                     onBrowserCreated={handleBrowserCreated}
                     onCreateFailed={handleBrowserCreateFailed}
                     onClose={handleBrowserClose}

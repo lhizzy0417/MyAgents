@@ -250,15 +250,21 @@ const CommandDetailPanel = forwardRef<CommandDetailPanelRef, CommandDetailPanelP
         // Phase D.5: command.path is an absolute path; route through the
         // dedicated `cmd_open_path_external` invoke (validates home/tmp prefix)
         // instead of sidecar `/agent/open-path`.
+        // Issue #125 follow-up: forward `agentDir` for project-scope commands
+        // so Rust accepts paths under non-system-drive workspaces (e.g.
+        // `D:\project\.claude\commands\foo.md`).
         const fileService = useWorkspaceFileService(null);
         const handleOpenInFinder = useCallback(async () => {
             if (!command) return;
             try {
-                await fileService.openPathExternal({ fullPath: command.path });
+                await fileService.openPathExternal({
+                    fullPath: command.path,
+                    workspace: scope === 'project' ? agentDir ?? null : null,
+                });
             } catch {
                 toastRef.current.error('无法打开目录');
             }
-        }, [command, fileService]);
+        }, [command, fileService, scope, agentDir]);
 
         if (loading) {
             return (
