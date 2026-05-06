@@ -9,24 +9,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.2.10] - 2026-05-07
 
+> 重点修复：1M 上下文模型真正按 1M 用、上游 API 抖动期间能手动停止、切模型 / 切供应商后立即发消息不再丢或跑错配置；安全侧补一个工作区内 symlink 逃逸的口子。
+
 ### Fixed
 
-- **1M 模型真正用上 1M 上下文窗口**：之前只要走非 Anthropic 协议的 ≥1M 模型（DeepSeek V4 Pro / Gemini 2.5 / GPT-5.4 / Claude 1M ……），SDK 内部都按 200K 默认窗口算 —— `/context` 显 200K，auto-compact 在 ~187K 就触发，附件按 200K 截。现在在送给 SDK 的 model 字段上拼 `[1m]` 后缀触发 SDK 1M 路径；上游 API 看不到该后缀（SDK 自己 strip）。覆盖主 query / sub-agent / runtime setModel / one-shot spawns / sonnet/opus/haiku alias env 全部 6 个 SDK 注入点。
-- **API 重试期间停止按钮可用**：上游 Anthropic API 抖动时 SDK 会做指数退避重试（最多 ~5 分钟），过去用户只能干等 —— 停止按钮被强制 disable。现在重试期间显示红色 Stop 按钮（"停止重试"），中止走标准 abort 路径，干净退出，不留脏 SDK 状态。
-- **切供应商后立即发消息不会被静默 abort**：deferred-restart 的 reason 在 fresh subprocess spawn 时没清空，导致 ~500ms 后 pre-warm timer 误把刚起好的 subprocess abort 掉，前端静默回 idle。fresh-spawn 入口现在主动 drain pending reasons + cancel orphaned timer。
-- **Tab 切换 / 发送消息后真正滚到最底**：`scrollToBottom()` 漏传 Virtuoso 的 `align: 'end'`，之前会停在最后一条消息的顶部（流式回复多 tool 调用时尤其明显）。同时修复 tab inactive↔active 切换时 follow 模式被 Virtuoso ResizeObserver 在 hidden 期发的 stale 回调污染：现在 inactive 时快照 follow 状态，re-active 时强制恢复，不依赖 live ref。
-- **Widget 标签提及不破坏 Markdown 渲染**：消息谈论 `<generative-ui-widget>` 协议时（inline code、prose 中段提及、一条消息含两个 widget）原解析器会把后续内容当成"未闭合 widget"全部吞掉。重写 pre-Markdown 提取器：line-anchored open 检测、bounded close 搜索、走动 mask window。
-- **Windows 非系统盘 / 项目级 skill 路径打开**：v0.2.8 给 #125 加的 `cmd_open_path_*` 信任前缀只看 home / tmp，工作区在 `D:\` 或外接卷上的所有"打开"操作都报 "Path not allowed"。现在两个 cmd 接受 workspace 参数作为第三个信任前缀；同时拒绝 filesystem-root（`/`、`C:\`、`\\?\C:\`、UNC root）防 prefix-tautology 旁路、对 workspace-only 命中追加 canonicalized blacklist 复查防 macOS `/etc → /private/etc` symlink 旁路。25 个 Rust 测试。
+- **1M 模型真的按 1M 上下文用**：选了 1M 窗口的模型（DeepSeek V4 Pro / Gemini 2.5 / GPT-5.4 / Claude 1M ……），`/context` 现在显示 1M、长对话不会过早被自动压缩、附件也不会被提前截。之前所有非 Anthropic 协议的 1M 模型都被当 200K 处理，长上下文优势用不上。
+- **切模型后立即发消息保证用新模型**：模型选择器换模型后立刻按发送，首条消息现在保证在新模型上跑——之前有内部异步窗口，首轮偶尔会跑在旧模型上。
+- **API 抖动期间停止按钮可用**：上游 API 临时故障时内部会指数退避重试（最长 ~5 分钟），过去用户只能干等——停止按钮被禁用。现在期间显示红色「停止重试」按钮，可以随时退出。
+- **切供应商后立即发消息不会被静默吞掉**：之前内部延迟重启的逻辑会误把刚起好的子进程关掉，前端默默回到空闲、用户消息丢失。
+- **聊天滚动定位**：发消息 / Tab 切换后能正确停在最底，多 tool 调用的长助手消息不会停在中段；切走再切回时不会错误退出「自动跟随最新」模式。
+- **Widget 标签出现在消息正文不破坏渲染**：当 AI 在解释或讨论 `<generative-ui-widget>` 协议本身时（inline code、文字中提及、一条消息含两个 widget），消息能完整显示，不再被错当成「未闭合 widget」吞掉后续内容。
+- **Windows 非系统盘工作区 / 项目级 skill 的「打开」按钮**：工作区在 `D:\` / 外接卷上、或项目里的 skill / command 路径，「在 Finder/资源管理器中显示」和「用默认应用打开」现在能正常工作（之前一律报 "Path not allowed"）。
 
 ### Security
 
-- **Workspace 内 symlink 不再能指向外部敏感文件被打开**：`cmd_workspace_open_in_finder` / `cmd_workspace_open_with_default` 之前用 lexical 解析，`leak → ~/.ssh/id_rsa` 这类工作区里的 symlink 能通过校验、然后被系统 `open` 跟随打开。改用 canonicalize 两端的 `resolve_existing_inside_workspace`，逃逸 symlink 在 prefix check 阶段就被拒（"escapes workspace root via symlink"）。两个 Rust 测试覆盖：恶意 symlink 必须被拒、合法工作区内 symlink 仍能 resolve。
-- **Widget Bash auto-allow regex 拒绝换行**：`myagents widget …` 命令的自动放行 regex 用了 `\s`，JS 里 `\s` 包括 `\n`，导致 `myagents widget readme\nrm` 之类的"两行命令"能命中正则被自动放行（shell 当两行执行）。改成 `[ \t]`，禁掉所有线终结符；20-case 对抗表全部通过。
-- **切完模型立即发消息不会用旧模型跑**：`setSessionModel` 是 fire-and-forget（同步更新 `currentModel`、异步 IPC 给 SDK subprocess），`applySessionConfig` 在 `newModel === currentModel` 时短路、跳过自己的 setModel，结果用户的第一个 turn 在 SDK 还没 ack 新 model 时就被 yield 出去——首 turn 跑在旧 model 上。新增 `pendingSetModelPromise` 跟踪 in-flight setModel；`applySessionConfig` 入口 await，保证 yield message 时 SDK 已经在新 model 上。
+- **工作区里的 symlink 不再能指向工作区外被系统打开**：repo 中存在 `leak → ~/.ssh/id_rsa` 这类 symlink 时（无论是误提交还是恶意构造），过去会被系统级「打开」跟随到外部敏感文件。现在 reveal / 默认应用打开两条路径都会做 canonical 校验，逃逸 symlink 直接被拒。
 
 ### Changed
 
-- **Generative-UI 走 CLI 统一双 runtime**：删 `widget_read_me` builtin MCP，builtin SDK + 三个外部 runtime（Claude Code / Codex / Gemini）都通过 `myagents widget readme <module>` CLI 加载设计契约。新增 `buildWidgetSection()` 在 desktop 场景下注入 widget 引导（content-based trigger："你的解释画图比文字更清楚就画图"），共享 `WIDGET_TRIGGER_GUIDANCE` 常量保证系统 prompt 与 README 不漂移。Builtin MCP 数量从 6 降为 5。
+- **AI 决定何时画图改为基于内容**：之前要用户说「可视化 / 画一张图 / 做表」AI 才会动用 generative-ui widget；现在 AI 自己根据内容判断——比较、流程、结构、时间轴这类用图比用字更清楚的场景。多个运行时（builtin SDK / Claude Code / Codex / Gemini CLI）行为统一。
 
 ---
 
