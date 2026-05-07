@@ -118,6 +118,34 @@ function camelCase(s: string): string {
   return s.replace(/-([a-z])/g, (_, c) => c.toUpperCase());
 }
 
+/**
+ * Demand a positional argument BEFORE issuing an API call. Issue #149: on
+ * Windows some commands' positional args were getting silently dropped
+ * before reaching the server, surfacing as a server-side "Missing required
+ * argument" or "missing field" — which makes the AI think the CLI itself
+ * is at fault. This shortcut exits at the CLI boundary with a concrete
+ * usage hint so the AI's recovery path is clearer than parsing a server
+ * 422.
+ *
+ * If `value` is non-empty, returns it (narrowed to `string`). If empty,
+ * exits 1 with a `myagents <command>` usage line for the AI to follow.
+ *
+ * `flagAlternative` documents the `--<flag>` form a caller can use as a
+ * workaround when shell quoting drops a positional.
+ */
+function requirePositional(
+  value: string | undefined,
+  argName: string,
+  command: string,
+  flagAlternative?: string,
+): string {
+  const v = (value ?? '').trim();
+  if (v) return v;
+  console.error(`Error: ${command} requires <${argName}>.`);
+  console.error(`  Usage: myagents ${command} <${argName}>${flagAlternative ? ` (or --${flagAlternative} <${argName}>)` : ''}`);
+  process.exit(1);
+}
+
 // ---------------------------------------------------------------------------
 // Help text
 // ---------------------------------------------------------------------------
@@ -385,6 +413,44 @@ function printResult(group: string, action: string, result: Record<string, unkno
   }
   if (group === 'agent' && action === 'runtime-status') {
     printAgentRuntimeStatus(result.data as Record<string, unknown>);
+    return;
+  }
+  if (group === 'agent' && action === 'channel') {
+    // `agent channel list/add/remove` — list returns an array of channel
+    // descriptors; add/remove return small ack objects. Issue #149.
+    const subAction = (typeof flags.action === 'string' ? flags.action : undefined)
+      ?? (Array.isArray(result.data) ? 'list' : undefined);
+    if (Array.isArray(result.data) || subAction === 'list') {
+      printChannelList(result.data as Array<Record<string, unknown>>);
+      return;
+    }
+    // add/remove fallthrough to generic ✓ formatter below
+  }
+  if (group === 'config' && action === 'get') {
+    // Issue #149: was falling through to `✓ get` (id-only generic
+    // formatter). Now show the actual key + (possibly redacted) value.
+    const data = (result.data as Record<string, unknown>) ?? {};
+    const key = data.key ?? '';
+    const value = data.value;
+    if (typeof value === 'object' && value !== null) {
+      console.log(`${key}:`);
+      console.log(formatObject(value as Record<string, unknown>));
+    } else {
+      console.log(`${key}: ${value === undefined ? '(unset)' : String(value)}`);
+    }
+    return;
+  }
+  if (group === 'mcp' && action === 'env') {
+    // `mcp env get/set/delete` — generic ✓ formatter swallowed values for
+    // get. Render env map for any sub-action (issue #149).
+    const data = (result.data as Record<string, unknown>) ?? {};
+    const env = (data.env as Record<string, unknown>) ?? data;
+    if (env && typeof env === 'object' && Object.keys(env).length > 0) {
+      console.log(formatObject(env as Record<string, unknown>));
+    } else {
+      console.log('(no env vars set)');
+    }
+    if (result.hint) console.log(`\n${result.hint}`);
     return;
   }
   if (group === 'agent' && action === 'show') {
@@ -894,21 +960,45 @@ function printCronStatus(data: Record<string, unknown>): void {
   if (data.nextExecutionAt) console.log(`Next execution: ${data.nextExecutionAt}`);
 }
 
+function printChannelList(channels: Array<Record<string, unknown>>): void {
+  if (!channels || channels.length === 0) {
+    console.log('No channels configured for this agent.');
+    return;
+  }
+  const pad = (s: string, n: number) => s.padEnd(n);
+  console.log(pad('ID', 38) + pad('Type', 26) + pad('Enabled', 10) + 'Name');
+  for (const ch of channels) {
+    const id = String(ch.id ?? '?').slice(0, 36);
+    const type = String(ch.type ?? '?').slice(0, 24);
+    const enabled = ch.enabled === false ? 'off' : 'on';
+    const name = String(ch.name ?? '');
+    console.log(pad(id, 38) + pad(type, 26) + pad(enabled, 10) + name);
+  }
+  console.log(`\n${channels.length} channel(s)`);
+}
+
 function printPluginList(plugins: Array<Record<string, unknown>>): void {
   if (!plugins || plugins.length === 0) {
     console.log('No plugins installed.');
     return;
   }
+  // Issue #149: Rust returns plugin objects with `pluginId / npmSpec /
+  // packageVersion / manifest` fields, NOT `id / name / version /
+  // description`. The previous formatter read the wrong fields and printed
+  // `?` for every cell. The display name comes from the manifest's `name`
+  // (a friendly label like "Feishu" or "WeChat"); the `pluginId` is a
+  // slug-style internal id. Description lives at `manifest.description`.
   const pad = (s: string, n: number) => s.padEnd(n);
-  console.log(pad('ID', 30) + pad('Version', 12) + 'Name');
+  console.log(pad('ID', 28) + pad('Version', 14) + pad('Name', 22) + 'Description');
   for (const p of plugins) {
-    console.log(
-      pad(String(p.name ?? p.id ?? '?'), 30) +
-      pad(String(p.version ?? '?'), 12) +
-      String(p.description ?? '')
-    );
+    const manifest = (p.manifest as Record<string, unknown> | undefined) ?? {};
+    const id = String(p.pluginId ?? p.npmSpec ?? '?').slice(0, 26);
+    const version = String(p.packageVersion ?? '?');
+    const name = String(manifest.name ?? p.npmSpec ?? '').slice(0, 20);
+    const desc = String(manifest.description ?? '');
+    console.log(pad(id, 28) + pad(version, 14) + pad(name, 22) + desc);
   }
-  console.log(`\n${plugins.length} plugins installed`);
+  console.log(`\n${plugins.length} plugin(s) installed`);
 }
 
 function printSkillList(skills: Array<Record<string, unknown>>): void {
@@ -1302,8 +1392,11 @@ function buildRoute(group: string, action: string, rest: string[]): string {
     const oauthAction = rest[0] || 'status';
     return `mcp/oauth/${oauthAction}`;
   }
-  // Tool readmes: `myagents cron readme`, `myagents im readme`, `myagents widget ...`
-  if (action === 'readme' && (group === 'cron' || group === 'im' || group === 'widget')) {
+  // Tool readmes: `myagents cron readme`, `myagents im readme`, `myagents widget ...`,
+  // `myagents thought readme`. `thought` is included so the AI's natural
+  // generalization from cron/im/widget readme doesn't 404 — the server returns
+  // a brief "no separate readme" message redirecting back to the prompt brief.
+  if (action === 'readme' && (group === 'cron' || group === 'im' || group === 'widget' || group === 'thought')) {
     return `readme/${group}`;
   }
   // `widget` only exists for readme lookup — any form of invocation
@@ -1343,7 +1436,7 @@ function buildRequestBody(
       return { id: rest[0] || flags.id, scope: flags.scope };
     }
     if (action === 'show') {
-      return { id: rest[0] || flags.id };
+      return { id: requirePositional(rest[0] ?? (flags.id as string | undefined), 'mcp-id', 'mcp show', 'id') };
     }
     if (action === 'oauth') {
       const oauthAction = rest[0] || 'status'; // discover | start | status | revoke
@@ -1419,7 +1512,7 @@ function buildRequestBody(
   // Agent commands
   if (group === 'agent') {
     if (action === 'enable' || action === 'disable') return { id: rest[0] || flags.id };
-    if (action === 'show') return { id: rest[0] || flags.id };
+    if (action === 'show') return { id: requirePositional(rest[0] ?? (flags.id as string | undefined), 'agent-id', 'agent show', 'id') };
     if (action === 'set') return { id: rest[0], key: rest[1], value: tryParseJson(rest[2]) };
     if (action === 'channel') {
       const channelAction = rest[0] || 'list'; // list | add | remove
@@ -1436,7 +1529,7 @@ function buildRequestBody(
   // choosing values for `task create-direct --runtime/--model/...`.
   if (group === 'runtime') {
     if (action === 'list') return {};
-    if (action === 'describe') return { runtime: rest[0] || flags.runtime };
+    if (action === 'describe') return { runtime: requirePositional(rest[0] ?? (flags.runtime as string | undefined), 'runtime', 'runtime describe', 'runtime') };
     return {};
   }
 
@@ -1485,6 +1578,9 @@ function buildRequestBody(
         workspacePath: flags.workspace,
         schedule: normalizeScheduleFlag(flags.schedule),
         intervalMinutes: flags.every ? Number(flags.every) : undefined,
+        // Forward --dry-run so the admin handler can return a preview
+        // instead of writing to the cron store. Issue #149.
+        dryRun: flags.dryRun,
       };
     }
     if (action === 'exit') {
@@ -1604,7 +1700,7 @@ function buildRequestBody(
         includeDeleted: flags.includeDeleted,
       };
     }
-    if (action === 'get') return { id: rest[0] || flags.id };
+    if (action === 'get') return { id: requirePositional(rest[0] ?? (flags.id as string | undefined), 'task-id', 'task get', 'id') };
     if (action === 'update-status') {
       return {
         id: rest[0],
@@ -1689,10 +1785,50 @@ function buildRequestBody(
       };
     }
     if (action === 'create') {
-      return {
-        content: rest.join(' ') || flags.content,
-      };
+      // Issue #149: on Windows the AI-emitted `myagents thought create '<text>'`
+      // sometimes loses the positional argument (root cause not reproducible
+      // from macOS — likely a shell-quoting interaction in
+      // git-bash → cmd.exe → node argv). The result was a silent
+      // `{ content: undefined }` → JSON.stringify drops the field → Rust 422
+      // "missing field `content`". Two layers of defense added here:
+      //   1. `--content-file <path>` reads the body from a file on disk —
+      //      bypasses every shell quoting issue, mirrors `cron add`'s
+      //      `--prompt-file` (which exists for the exact same reason).
+      //   2. Reject empty content at the CLI boundary with an actionable
+      //      error pointing at --content-file, so the AI can self-recover
+      //      on retry instead of routing through an opaque server 422.
+      let contentText: string | undefined =
+        (typeof flags.content === 'string' ? flags.content : undefined) ?? rest.join(' ');
+      if (flags.contentFile && typeof flags.contentFile === 'string') {
+        try {
+          // Lazy-require keeps cold path short for non-thought commands.
+          const fs = require('fs') as typeof import('fs');
+          const MAX_BYTES = 1024 * 1024; // 1 MB — pathological for a thought
+          const stat = fs.statSync(flags.contentFile);
+          if (stat.size > MAX_BYTES) {
+            console.error(`Error: --content-file "${flags.contentFile}" is ${stat.size} bytes, exceeds ${MAX_BYTES} (1 MB) limit`);
+            process.exit(1);
+          }
+          const raw = fs.readFileSync(flags.contentFile, 'utf-8');
+          if (raw.includes('\0')) {
+            console.error(`Error: --content-file "${flags.contentFile}" contains NUL bytes (is this a binary file?)`);
+            process.exit(1);
+          }
+          contentText = raw;
+        } catch (err) {
+          console.error(`Error: failed to read --content-file "${flags.contentFile}": ${err instanceof Error ? err.message : String(err)}`);
+          process.exit(1);
+        }
+      }
+      const trimmed = contentText?.trim() ?? '';
+      if (!trimmed) {
+        console.error('Error: thought create requires a non-empty content. Pass it as a positional arg, --content "<text>", or --content-file <path>.');
+        console.error('  → Tip: shells with quirky quoting (Windows / pwsh) drop quoted args sometimes — write the text to a file and pass --content-file.');
+        process.exit(1);
+      }
+      return { content: trimmed };
     }
+    if (action === 'readme') return {}; // graceful no-op surfaced via admin-api
     return {};
   }
 

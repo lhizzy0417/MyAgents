@@ -1225,7 +1225,7 @@ async function routeAdminApi(pathname: string, payload: Record<string, unknown>)
   if (route === 'im/channels') return await api.handleImChannels();
 
   // Tool readme — progressive-disclosure helpers for external runtimes
-  if (route === 'readme/cron' || route === 'readme/im' || route === 'readme/widget') {
+  if (route === 'readme/cron' || route === 'readme/im' || route === 'readme/widget' || route === 'readme/thought') {
     const topic = route.split('/')[1];
     return api.handleReadme({
       topic,

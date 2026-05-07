@@ -102,13 +102,20 @@ discussion, not the inbox. The trigger is the user's explicit ask to
 record, not the presence of recordable content.
 
   myagents thought list [--tag X] [--limit N] [--json]   # browse
-  myagents thought create '<content>'                    # capture
+  myagents thought create '<content>'                    # capture (preferred)
+  myagents thought create --content-file <abs-path>      # if content has CJK
+                                                           # / multi-line / shell
+                                                           # metachars / on Windows
 
 For \`create\`, ALWAYS wrap the content in single quotes ('...'), not
 double quotes. The user's content is shell data and may contain
 \`$(...)\`, backticks, or \`\\\`; double quotes let bash interpolate
-those, single quotes don't. Tag inline with \`#xxx\` inside the content
-itself — there's no separate --tag flag on create.
+those, single quotes don't. If single-quoting still misbehaves (some
+Windows / PowerShell shells drop quoted args silently), write the
+content to a tempfile with your file-writing tool and use
+\`--content-file <abs-path>\` — that path is shell-quote-free and
+works identically across platforms. Tag inline with \`#xxx\` inside
+the content itself — there's no separate --tag flag on create.
 </myagents-cli-thought>`;
 
 /**

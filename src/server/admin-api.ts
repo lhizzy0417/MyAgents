@@ -1498,12 +1498,26 @@ Use "myagents <group> --help" for details on a specific group.`,
 // Version
 // ---------------------------------------------------------------------------
 
+// Compile-time injected by esbuild (scripts/esbuild-bundle.mjs `define`).
+// In dev (`npm run server` via tsx, no esbuild), the identifier is undefined
+// at runtime — the `?? process.env.…` chain below reaches the env fallback.
+declare const __MYAGENTS_VERSION__: string | undefined;
+
 export function handleVersion(): AdminResponse {
-  // npm_package_version is set by npm/bun when launched via npm scripts;
-  // MYAGENTS_VERSION can be injected by the build system as a fallback.
-  const version = process.env.npm_package_version
+  // Resolution order:
+  //   1. esbuild-injected `__MYAGENTS_VERSION__` (production sidecar bundle).
+  //   2. `npm_package_version` (set by npm in dev when launched via scripts).
+  //   3. `MYAGENTS_VERSION` env override (build system / tests).
+  //   4. 'dev' sentinel — visibly NOT a release version, so anyone reading
+  //      `myagents version` knows they're on an un-stamped build instead of
+  //      seeing a stale hardcoded number that lies about which build is
+  //      installed (issue #149: users had no way to tell whether the dmg they
+  //      reinstalled actually contained the patched CLI/sidecar — the old
+  //      hardcoded '0.1.70' fallback shipped in every release).
+  const version = (typeof __MYAGENTS_VERSION__ !== 'undefined' ? __MYAGENTS_VERSION__ : undefined)
+    ?? process.env.npm_package_version
     ?? process.env.MYAGENTS_VERSION
-    ?? '0.1.70';
+    ?? 'dev';
   return { success: true, data: { version } };
 }
 
@@ -1602,6 +1616,20 @@ export async function handleCronCreate(payload: Record<string, unknown>): Promis
   const finalPayload = (payload.workspacePath || payload.workspace_path)
     ? payload
     : { ...payload, workspacePath: defaultCronWorkspace() };
+
+  // Issue #149: --dry-run was silently ignored — the previous implementation
+  // forwarded payload to Rust regardless, so `cron add --dry-run` would
+  // actually write a task to disk. Honor the flag locally before any
+  // mutation happens. The preview shape mirrors `mcp add`'s dry-run path
+  // (printResult prints `[DRY RUN] Would apply:` when `dryRun: true`
+  // appears alongside `preview`).
+  if (finalPayload.dryRun) {
+    // Strip the flag itself from the preview body so the user sees only
+    // the task fields they're actually requesting.
+    const { dryRun: _dryRun, ...preview } = finalPayload as Record<string, unknown>;
+    return { success: true, dryRun: true, preview };
+  }
+
   const resp = await managementApi('/api/cron/create', 'POST', finalPayload);
   return wrapMgmtResponse(resp);
 }
@@ -2308,6 +2336,33 @@ EXAMPLES
 
 The output begins with the required <generative-ui-widget> output format contract; do not skip reading it.`;
 
+const README_THOUGHT = `myagents thought — Inbox capture for the user's second brain
+
+WHAT
+  Lightweight, unstructured idea / TODO entries the user surfaces
+  mid-conversation. The full guidance lives in your system prompt's
+  <myagents-cli-thought> section — that brief is sufficient. There is no
+  expanded readme here (this command is intentionally minimal).
+
+COMMANDS
+  list [--tag X] [--limit N] [--json]
+      Browse / search the inbox. Use BEFORE create to spot duplicates.
+
+  create '<content>'              # primary form, single-quoted on Linux/macOS
+  create --content "<content>"    # explicit flag, works in any shell
+  create --content-file <path>    # read content from file (recommended for
+                                    multi-line, CJK, or content with shell-
+                                    special chars; bypasses any shell quoting
+                                    quirk on Windows / pwsh)
+
+  Tag inline with #xxx inside the content body — there is no separate
+  --tag flag on create. Run \`myagents thought list\` to browse.
+
+WHEN TO CALL
+  Only when the user explicitly asks to record / save / note specific
+  content for later ("记一下", "帮我记", "记下来", "remember this", etc.).
+  Do not file FYI remarks, brainstorming, or unsolicited ideas.`;
+
 export function handleReadme(payload: { topic?: string; modules?: string[] }): AdminResponse {
   const topic = (payload.topic ?? '').toLowerCase();
   if (topic === 'cron') {
@@ -2315,6 +2370,9 @@ export function handleReadme(payload: { topic?: string; modules?: string[] }): A
   }
   if (topic === 'im' || topic === 'im-media' || topic === 'media') {
     return { success: true, data: { text: README_IM } };
+  }
+  if (topic === 'thought') {
+    return { success: true, data: { text: README_THOUGHT } };
   }
   if (topic === 'widget' || topic === 'generative-ui' || topic === 'ui') {
     const modules = (payload.modules ?? []).filter(m => typeof m === 'string' && m.length > 0);

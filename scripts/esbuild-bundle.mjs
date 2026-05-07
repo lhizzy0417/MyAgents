@@ -21,6 +21,17 @@ import { build } from 'esbuild';
 import { copyFile, readFile, mkdir } from 'node:fs/promises';
 import { dirname } from 'node:path';
 
+// Read package.json version once and inject as a compile-time constant.
+// This is the ONLY way `myagents version` can show the real shipped
+// version in production: the runtime `process.env.npm_package_version`
+// is set by `npm run …` (dev), not by Tauri's sidecar spawn (prod), so
+// without compile-time injection the admin-api falls back to a stale
+// hardcoded string. Issue #149 follow-up — users couldn't tell whether
+// they were running the patched build.
+const PKG_VERSION = JSON.parse(
+  await readFile(new URL('../package.json', import.meta.url), 'utf8'),
+).version;
+
 // Banner content kept as plain string literals here — no shell parsing
 // involved, so single/double quotes mean what they say.
 //
@@ -128,6 +139,12 @@ await build({
   bundle: true,
   platform: 'node',
   target: 'node22',
+  define: {
+    // Compile-time version constant. Replaces `process.env.npm_package_version`
+    // fallbacks across the codebase so `myagents version` reports the real
+    // shipped build instead of a stale hardcoded string in production.
+    __MYAGENTS_VERSION__: JSON.stringify(PKG_VERSION),
+  },
   // `postBuild` is our own hook — strip it before handing config to esbuild.
   ...(({ postBuild: _strip, ...rest }) => rest)(cfg),
 });

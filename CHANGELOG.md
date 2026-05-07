@@ -27,6 +27,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **订阅版 Sonnet 4.6 不再撞 1M 限额**：`Anthropic（订阅）`预设里 sonnet-4-6 之前被标为 1M 上下文，但订阅默认只给 200K，结果发消息直接报 `Extra usage is required for 1M context`。校正回 200K，订阅用户开箱即用；想用 1M 的可以自定义 provider 显式启用。
 - **删除会话时确认按钮无响应**：会话历史里点删除，确认按钮不触发任何事件——改用统一确认弹窗组件。
 - **行动模式下 AI 调用 `myagents thought create` 不再弹权限框**：AI 用单引号包裹内容（防 shell 注入）调 thought create，过去仍要用户点一次"允许"才能落库。现在符合"单引号、无尾随 shell 元字符"形式直接放行；双引号 / 不带引号等任何不安全形式仍会拦截。
+- **Windows CLI 一组体感问题（issue #149）**：
+  - `cron add --dry-run` 之前会真的写入任务（CLI 没把 flag 传给 server），现在按 `mcp add --dry-run` 同款形态返回 `[DRY RUN] Would apply:` 预览。
+  - `myagents thought create` 在 Windows 上偶尔丢内容报 422，新增 `--content-file <abs-path>` 跨平台保底通道（写文件 → 传路径，不受任何 shell 引号问题影响），CLI 端把空内容拦在 API round-trip 之前给可恢复错误提示。
+  - `myagents thought readme` 之前返回 `Unknown admin route`，现在返回简短指引（含 `--content-file` 用法）。
+  - `plugin list` 之前每行字段都是 `?`（CLI formatter 字段名跟 Rust 返回结构对不上），修正字段映射。
+  - `config get / mcp env get / agent channel list` 之前只显示 `✓ <action>` 没数据，补 3 个 formatter 渲染实际 key/value / env map / channel 列表。
+  - `mcp show / agent show / runtime describe / task get` 在 Windows 报 "Missing required argument"（根因待 Windows 端调试，无法在 macOS 复现）：CLI 端早期校验把不清晰的 server 422 替换为带 `--<flag>` workaround 提示的清晰错误。
 
 ---
 

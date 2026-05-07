@@ -7217,6 +7217,22 @@ async function startStreamingSession(preWarm = false): Promise<void> {
               updatedInput: input as Record<string, unknown>
             };
           }
+
+          // 6. Thought capture via file: `myagents thought create --content-file <path>`
+          //    Path is shell-quote-free (a single token without metachars), so
+          //    the regex constraint here is the path-token character class
+          //    `[^ \t;|&<>$\`'"]` — explicitly forbid every shell metachar
+          //    that could turn the rest of the line into a write side effect.
+          //    The path doesn't have to exist or be safe content-wise; the
+          //    CLI validates size, NUL bytes, and read errors before sending
+          //    anything to the management API. Issue #149 follow-up.
+          if (/^myagents[ \t]+thought[ \t]+create[ \t]+--content-file[ \t]+[^ \t\n\r;|&<>$`'"]+[ \t]*$/.test(cmd)) {
+            console.log(`[permission] myagents thought create --content-file auto-allowed: ${cmd}`);
+            return {
+              behavior: 'allow' as const,
+              updatedInput: input as Record<string, unknown>
+            };
+          }
         }
 
         // Headless IM fast-path: IM bridges (Telegram/Dingtalk builtin + all OpenClaw plugins
