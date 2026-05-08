@@ -115,8 +115,12 @@ const CMD_SHIM_REGEX = /node_modules[\\/]\.bin[\\/][^\\/]+\.cmd$/i;
  */
 function escapeWindowsCmdArg(arg: string, doubleEscapeMetaChars: boolean): string {
   let s = String(arg);
-  s = s.replace(/(?=(\\+?)?)\1"/g, '$1$1\\"');
-  s = s.replace(/(?=(\\+?)?)\1$/, '$1$1');
+  // Greedy `(\\*)` so 2+ consecutive backslashes preceding `"` (or end-of-arg)
+  // are all doubled. Earlier draft used lazy `(\\+?)?` which captured at most
+  // one backslash and silently emitted `…\\\\"` (4 BS + bare quote) for input
+  // `…\\"`, which cmd.exe then reads as a string terminator → arg truncation.
+  s = s.replace(/(\\*)"/g, '$1$1\\"');
+  s = s.replace(/(\\*)$/, '$1$1');
   s = `"${s}"`;
   s = s.replace(CMD_META_CHARS, '^$1');
   if (doubleEscapeMetaChars) s = s.replace(CMD_META_CHARS, '^$1');
@@ -161,6 +165,11 @@ export function spawn(argv: string[], options: SpawnOptions = {}): SubprocessHan
     const escapedArgs = args.map((a) => escapeWindowsCmdArg(a, doubleEscape));
     const cmdLine = [escapedCmd, ...escapedArgs].join(' ');
     nodeOpts.windowsVerbatimArguments = true;
+    // Default windowsHide:true on the cmd.exe wrap path — wrapping IS the
+    // exact situation where a brief console window would otherwise pop. Lets
+    // call sites omit `windowsHide` without leaking a flash, the same
+    // pit-of-success shape as `local_http` / `process_cmd` / `apply_to_subprocess`.
+    if (options.windowsHide === undefined) nodeOpts.windowsHide = true;
     const comspec = process.env.comspec || 'cmd.exe';
     const child = nodeSpawn(comspec, ['/d', '/s', '/c', `"${cmdLine}"`], nodeOpts);
     return wrapChildProcess(child);
