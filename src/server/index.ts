@@ -4764,81 +4764,121 @@ async function main() {
                 });
               }
 
-              return new Promise<Response>((resolve) => {
-                const proc = spawn(warmupCmd, warmupArgs, {
-                  env: baseEnv,
-                  timeout: 120000, // 2 min timeout
-                  stdio: ['ignore', 'pipe', 'pipe'],
-                });
-
-                let stderr = '';
-                proc.stderr?.on('data', (data) => { stderr += data; });
-
-                proc.on('error', (err) => {
-                  console.error('[api/mcp/enable] Warmup error:', err);
-                  resolve(jsonResponse({
-                    success: false,
-                    error: {
-                      type: 'warmup_failed',
-                      message: `预热失败: ${err.message}`,
-                    }
-                  }));
-                });
-
-                proc.on('close', (code) => {
-                  console.log(`[api/mcp/enable] Warmup exited with code ${code}`);
-                  // Code 0 or 1 is acceptable (--help may return 1 for some packages)
-                  // Check stderr for real errors (package not found, network issues, etc.)
-                  const stderrLower = stderr.toLowerCase();
-                  const networkKeywords = [
-                    'enotfound',     // DNS resolution failed
-                    'etimedout',     // Connection timeout
-                    'econnrefused',  // Connection refused
-                    'econnreset',    // Connection reset
-                    'proxy error',   // Proxy failures
-                    'proxy authentication', // Proxy auth required
-                    'bad gateway',   // Proxy 502
-                    'socket hang up',// Connection dropped
-                  ];
-                  const packageKeywords = [
-                    '404',                // HTTP 404 not found
-                    'package not found',  // npm/npx package resolution
-                    'module not found',   // Module resolution failure
-                    'err!',               // npm error indicator
-                  ];
-                  const isNetworkError = networkKeywords.some(kw => stderrLower.includes(kw));
-                  const isPackageError = packageKeywords.some(kw => stderrLower.includes(kw));
-
-                  if (isNetworkError) {
-                    resolve(jsonResponse({
-                      success: false,
-                      error: {
-                        type: 'warmup_failed',
-                        message: '网络连接失败，请检查网络或代理设置',
-                      }
-                    }));
-                  } else if (isPackageError) {
-                    resolve(jsonResponse({
-                      success: false,
-                      error: {
-                        type: 'package_not_found',
-                        message: '包不存在或无法下载，请检查包名',
-                      }
-                    }));
-                  } else if (code !== 0 && code !== 1) {
-                    // Non-zero exit (other than 1 which --help may return) is a failure
-                    resolve(jsonResponse({
-                      success: false,
-                      error: {
-                        type: 'warmup_failed',
-                        message: `预热异常退出 (code ${code})`,
-                      }
-                    }));
-                  } else {
-                    resolve(jsonResponse({ success: true }));
-                  }
-                });
+              const handle = wrappedSpawn([warmupCmd, ...warmupArgs], {
+                env: baseEnv,
+                stdin: 'ignore',
+                stdout: 'pipe',
+                stderr: 'pipe',
               });
+
+              // Drain stderr — wrappedSpawn exposes it as a Web ReadableStream
+              // (Bun.spawn-shape parity), not a Node Readable, so we read with
+              // the Web reader API.
+              let stderr = '';
+              const stderrDone = (async () => {
+                if (!handle.stderr) return;
+                const reader = handle.stderr.getReader();
+                const decoder = new TextDecoder();
+                try {
+                  while (true) {
+                    const { done, value } = await reader.read();
+                    if (done) break;
+                    stderr += decoder.decode(value, { stream: true });
+                  }
+                } catch { /* ignore — process exit will settle handle.exited */ }
+                finally {
+                  reader.releaseLock();
+                }
+              })();
+
+              // 2 min timeout (was the old `timeout` spawn option). If npx
+              // hangs (e.g. tarball download stalled), kill the wrapper +
+              // surface a warmup failure instead of leaving the request open.
+              let timedOut = false;
+              const timer = setTimeout(() => {
+                timedOut = true;
+                try { handle.kill('SIGTERM'); } catch { /* ignore */ }
+              }, 120000);
+
+              const code = await handle.exited;
+              clearTimeout(timer);
+              await stderrDone; // make sure all stderr bytes are captured before classifying
+
+              // Spawn-failure path (ENOENT / bad arch / EINVAL): handle.error
+              // is populated and code === -1.
+              if (handle.error) {
+                console.error('[api/mcp/enable] Warmup error:', handle.error);
+                return jsonResponse({
+                  success: false,
+                  error: {
+                    type: 'warmup_failed',
+                    message: `预热失败: ${handle.error.message}`,
+                  },
+                });
+              }
+
+              if (timedOut) {
+                console.warn('[api/mcp/enable] Warmup timed out after 120s');
+                return jsonResponse({
+                  success: false,
+                  error: {
+                    type: 'warmup_failed',
+                    message: '预热超时（120s），请检查网络或代理设置',
+                  },
+                });
+              }
+
+              console.log(`[api/mcp/enable] Warmup exited with code ${code}`);
+              // Code 0 or 1 is acceptable (--help may return 1 for some packages)
+              // Check stderr for real errors (package not found, network issues, etc.)
+              const stderrLower = stderr.toLowerCase();
+              const networkKeywords = [
+                'enotfound',     // DNS resolution failed
+                'etimedout',     // Connection timeout
+                'econnrefused',  // Connection refused
+                'econnreset',    // Connection reset
+                'proxy error',   // Proxy failures
+                'proxy authentication', // Proxy auth required
+                'bad gateway',   // Proxy 502
+                'socket hang up',// Connection dropped
+              ];
+              const packageKeywords = [
+                '404',                // HTTP 404 not found
+                'package not found',  // npm/npx package resolution
+                'module not found',   // Module resolution failure
+                'err!',               // npm error indicator
+              ];
+              const isNetworkError = networkKeywords.some(kw => stderrLower.includes(kw));
+              const isPackageError = packageKeywords.some(kw => stderrLower.includes(kw));
+
+              if (isNetworkError) {
+                return jsonResponse({
+                  success: false,
+                  error: {
+                    type: 'warmup_failed',
+                    message: '网络连接失败，请检查网络或代理设置',
+                  },
+                });
+              }
+              if (isPackageError) {
+                return jsonResponse({
+                  success: false,
+                  error: {
+                    type: 'package_not_found',
+                    message: '包不存在或无法下载，请检查包名',
+                  },
+                });
+              }
+              if (code !== 0 && code !== 1) {
+                return jsonResponse({
+                  success: false,
+                  error: {
+                    type: 'warmup_failed',
+                    message: `预热异常退出 (code ${code})`,
+                  },
+                });
+              }
+              return jsonResponse({ success: true });
             }
 
             // Custom MCP or non-npx command → check if command exists in user's shell PATH
