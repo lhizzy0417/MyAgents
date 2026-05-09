@@ -5809,15 +5809,21 @@ export async function enqueueUserMessage(
   // any of the three queues. This prevents config changes and turn-usage
   // resets during the brief gap between turns.
   //
-  // (v0.2.11 cross-bugfix #142 review-fix #2) MUST include pendingMidTurnQueue.
-  // Window: turn ends → handleMessageComplete promotes first pending to
-  // generator → generator runs `messages.push() → await persistMessagesToStorage()`
-  // BEFORE flipping isStreamingMessage=true. During the await, isTurnInFlight
-  // is false, messageQueue is empty, but pendingMidTurnQueue may still hold
-  // items. A new enqueue arriving in this window would take the direct-send
-  // path (wasQueued=false), then later be picked up by the generator and
-  // re-trigger mid-turn defer — semantically the user's expected ordering
-  // (queued items run first) would break.
+  // MUST include pendingMidTurnQueue (v0.2.11 cross-bugfix #142 review-fix #2):
+  // when a turn ends and handleMessageComplete is preparing to promote the next
+  // pending item, there's a window where isTurnInFlight() is false and
+  // messageQueue is empty, but pendingMidTurnQueue still holds items. Without
+  // this guard a new enqueue would slip into the direct-send path and break
+  // the user's expected ordering (queued items run first).
+  //
+  // KNOWN GAP (tracked separately, not a regression of #173): this snapshot is
+  // synchronous, but enqueueUserMessage proceeds through several awaits before
+  // it actually pushes to messageQueue / wakeGenerator. Two rapid sends can
+  // both pass this gate before either reaches the push, both broadcast
+  // chat:message-replay, and both yield to the SDK without intervening AI
+  // responses. The same race exists in v0.2.11 / v0.2.12 (verified by reading
+  // both versions); fixing it requires a synchronous "admission ticket" that's
+  // out of scope for the #173 dedup hotfix.
   const isSessionBusy = isTurnInFlight()
     || shouldAbortSession
     || isInterruptingResponse
