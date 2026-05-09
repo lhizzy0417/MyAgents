@@ -1078,11 +1078,6 @@ export default function App() {
         await deactivateSession(oldSessionForLaunch);
       }
 
-      // Cancel background completion on target session if reconnecting
-      if (sessionId) {
-        await cancelBackgroundCompletion(sessionId);
-      }
-
       // For new sessions (no sessionId), generate a temporary session ID
       // The actual session ID will be created by the backend when the session starts
       const effectiveSessionId = sessionId ?? createPendingSessionId(targetTabId);
@@ -1098,6 +1093,16 @@ export default function App() {
       // pending → ready window) callers can use `useSessionReady`.
       const result = await ensureSessionSidecar(effectiveSessionId, project.path, 'tab', targetTabId);
       console.log(`[App] Session Sidecar ensured: port=${result.port}, isNew=${result.isNew}`);
+
+      // Cancel background completion AFTER Tab is registered as an owner.
+      // (Order matters — calling cancel first when BG is the last owner causes
+      // the sidecar to stop on the BG release, which kills any in-flight
+      // streaming turn before its content can be persisted. With Tab already
+      // an owner via ensureSessionSidecar above, the BG release is safe and
+      // the in-flight turn keeps streaming into the new Tab's SSE.)
+      if (sessionId) {
+        await cancelBackgroundCompletion(sessionId);
+      }
 
       // Activate session with Tab (for Session singleton tracking and fallback port lookup)
       // Always use effectiveSessionId to ensure session_activations has entry for this Tab
@@ -1459,8 +1464,14 @@ export default function App() {
     const tabAgentDir: string = currentTabForScenario4.agentDir;
 
     try {
-      // First, cancel any background completion on the TARGET session (user reconnecting)
-      await cancelBackgroundCompletion(sessionId);
+      // NOTE: cancelBackgroundCompletion is deliberately deferred to AFTER all
+      // ensure-and-activate paths below. If we cancel BG here while it's the
+      // last owner of the target session's sidecar, the sidecar stops, the SDK
+      // subprocess dies, and any in-flight streaming turn (with thinking,
+      // tool_use blocks, and pending text) never gets persisted to disk —
+      // resume from history then loads only the messages saved before the
+      // turn started. The fix is to register Tab as an owner first via
+      // ensureSessionSidecar, then release BG safely.
 
       // Track whether Tab is joining a pre-existing sidecar (e.g. IM Bot session)
       // to skip automatic config sync in Chat.tsx mount
@@ -1529,6 +1540,12 @@ export default function App() {
         await activateSession(sessionId, tabId, null, result.port, currentTabForScenario4.agentDir, false);
         joinedExisting = !result.isNew;
       }
+
+      // Tab is now an owner of the target session's sidecar (via every
+      // ensureSessionSidecar branch above). Safe to cancel any BG completion
+      // now — releasing the BG owner with Tab still attached keeps the sidecar
+      // alive and the streaming turn intact.
+      await cancelBackgroundCompletion(sessionId);
 
       // Update UI state - TabProvider will detect sessionId change and call loadSession()
       //
