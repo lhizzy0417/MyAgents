@@ -32,6 +32,15 @@ use crate::sidecar::{
 };
 use crate::{ulog_info, ulog_warn};
 
+/// UTF-8-safe shortener for log lines and notification text. The bare
+/// `&s[..8.min(s.len())]` form is byte-indexed and panics if byte 8 lands
+/// inside a multi-byte char. Session ids are UUIDs so the panic never
+/// triggers in practice, but the chars-based form is correct by construction
+/// and removes the trap for any future caller passing non-ASCII strings.
+fn short_id(s: &str) -> String {
+    s.chars().take(8).collect()
+}
+
 // ============================================================================
 // 1. New conversation with surface migration
 // ============================================================================
@@ -62,7 +71,7 @@ pub async fn cmd_session_new_with_surface_migration<R: Runtime>(
 ) -> Result<NewSessionResult, String> {
     ulog_info!(
         "[handover] surface migration: session={} key={}",
-        &oldSessionId[..8.min(oldSessionId.len())],
+        short_id(&oldSessionId),
         sessionKey,
     );
 
@@ -122,8 +131,8 @@ pub async fn cmd_session_new_with_surface_migration<R: Runtime>(
 
     ulog_info!(
         "[handover] surface migration done: {} → {}",
-        &oldSessionId[..8.min(oldSessionId.len())],
-        &new_session_id[..8.min(new_session_id.len())],
+        short_id(&oldSessionId),
+        short_id(&new_session_id),
     );
 
     Ok(NewSessionResult { new_session_id })
@@ -148,7 +157,35 @@ pub struct HandoverResult {
 /// desktop session as the new conversation backend. The old binding's session
 /// loses its `Agent` owner; the desktop session gains it.
 ///
-/// The channel sends a notification message to the chat (Q9 lockdown text).
+/// ## Step ordering (v0.2.14 cross-bugfix)
+///
+/// Earlier ordering wrote the `peer_session` mutation BEFORE attaching the
+/// `Agent` owner to the target sidecar. If `ensure_session_sidecar` failed
+/// (or panicked silently), the channel would already be bound to the new
+/// session_id but the desktop tab would be the only owner — close the tab
+/// and the sidecar dies, IM messages then orphan into nothing.
+///
+/// New order:
+///
+///   1. Resolve channel + workspace (read-only)
+///   2. Snapshot the chat to take over (`most_recent_peer_session_key`)
+///   3. Look up sidecar port (read-only)
+///   4. **`ensure_session_sidecar`** — attach Agent owner FIRST. Fail-fast
+///      here makes the operation atomic from the user's POV: nothing was
+///      mutated, the old binding is intact, the renderer toast says
+///      "交接失败" with no surprise side-effects.
+///   5. **Mutate `peer_sessions`** — atomic snapshot+upsert under one lock.
+///   6. Release prior owner (best-effort).
+///   7. Send notification to the IM chat (last step; failure → notified=false
+///      surfaces back to the renderer toast as "已交接（通知未发送）").
+///
+/// ## Observability
+///
+/// Every step logs an `[handover]` ulog line on entry / decision / completion.
+/// The PRD 0.2.14 dogfood found a case where the function silently exited
+/// after acquiring the manager lock with NO subsequent log line, which made
+/// root-causing the missing notification impossible. Each step is now a
+/// log breadcrumb so partial-failure diagnosis is grep-able.
 #[tauri::command]
 #[allow(non_snake_case)]
 pub async fn cmd_handover_session_to_channel<R: Runtime>(
@@ -159,38 +196,58 @@ pub async fn cmd_handover_session_to_channel<R: Runtime>(
     workspacePath: String,
 ) -> Result<HandoverResult, String> {
     ulog_info!(
-        "[handover] session={} → agent={} channel={}",
-        &sessionId[..8.min(sessionId.len())],
+        "[handover] start session={} → agent={} channel={}",
+        short_id(&sessionId),
         agentId,
         channelId,
     );
 
     let agent_state: tauri::State<'_, ManagedAgents> = app
         .try_state()
-        .ok_or_else(|| "Agent state unavailable".to_string())?;
+        .ok_or_else(|| {
+            ulog_warn!("[handover] step1 ManagedAgents state unavailable");
+            "Agent state unavailable".to_string()
+        })?;
     let manager: tauri::State<'_, ManagedSidecarManager> = app
         .try_state()
-        .ok_or_else(|| "Sidecar manager unavailable".to_string())?;
+        .ok_or_else(|| {
+            ulog_warn!("[handover] step1 ManagedSidecarManager state unavailable");
+            "Sidecar manager unavailable".to_string()
+        })?;
 
     // ----- 1. Resolve target channel + workspace constraint
     let (router_arc, adapter, agent_workspace) = {
         let agents = agent_state.lock().await;
-        let agent = agents
-            .get(&agentId)
-            .ok_or_else(|| format!("Agent {} not found", agentId))?;
-        let channel = agent
-            .channels
-            .get(&channelId)
-            .ok_or_else(|| format!("Channel {} not found in agent {}", channelId, agentId))?;
+        let agent = agents.get(&agentId).ok_or_else(|| {
+            ulog_warn!(
+                "[handover] step1 agent {} not found in ManagedAgents",
+                agentId
+            );
+            format!("Agent {} not found", agentId)
+        })?;
+        let channel = agent.channels.get(&channelId).ok_or_else(|| {
+            ulog_warn!(
+                "[handover] step1 channel {} not found in agent {}",
+                channelId,
+                agentId
+            );
+            format!("Channel {} not found in agent {}", channelId, agentId)
+        })?;
         (
             channel.bot_instance.router.clone(),
             channel.bot_instance.adapter.clone(),
             agent.config.workspace_path.clone(),
         )
     };
+    ulog_info!("[handover] step1 channel resolved");
 
     let req_workspace = PathBuf::from(&workspacePath);
     if normalize_str(&agent_workspace) != normalize_path(&req_workspace) {
+        ulog_warn!(
+            "[handover] workspace mismatch: agent={} request={}",
+            agent_workspace,
+            req_workspace.display()
+        );
         return Err(format!(
             "Workspace mismatch: agent workspace = {}, session workspace = {}",
             agent_workspace,
@@ -204,33 +261,107 @@ pub async fn cmd_handover_session_to_channel<R: Runtime>(
     let target_session_key = {
         let router = router_arc.lock().await;
         router.most_recent_peer_session_key().ok_or_else(|| {
+            ulog_warn!("[handover] no prior peer_session for channel {}", channelId);
             "Channel 没有最近活跃的对话；请先在 IM 端发一条消息建立会话".to_string()
         })?
     };
+    ulog_info!("[handover] step2 target_session_key={}", target_session_key);
 
-    // ----- 3. Get target sidecar port
-    let sidecar_port = {
-        let mgr = manager.lock().map_err(|e| e.to_string())?;
-        mgr.get_session_port(&sessionId).ok_or_else(|| {
-            format!(
+    // ----- 3. Sanity-check that the target session HAS a Sidecar in the
+    // manager. We don't reuse this port directly — `ensure_session_sidecar`
+    // below returns the authoritative port (it may replace a dead sidecar
+    // and mint a new one). Reading the pre-ensure port and writing it into
+    // peer_sessions would bind IM to a stale port if a replacement happened
+    // (review-by-codex F1 finding).
+    {
+        let mgr = manager.lock().map_err(|e| {
+            ulog_warn!("[handover] step3 manager lock poisoned: {}", e);
+            e.to_string()
+        })?;
+        if mgr.get_session_port(&sessionId).is_none() {
+            ulog_warn!(
+                "[handover] step3 session {} has no Sidecar in manager",
+                short_id(&sessionId)
+            );
+            return Err(format!(
                 "Session {} has no running Sidecar — open the tab first",
-                &sessionId[..8.min(sessionId.len())]
-            )
-        })?
-    };
+                short_id(&sessionId)
+            ));
+        }
+    }
+    ulog_info!(
+        "[handover] step3 session {} sidecar present",
+        short_id(&sessionId),
+    );
 
-    // ----- 4. Mutate router: release old binding's Agent owner, install new
+    // ----- 4. Attach Agent owner to target Sidecar FIRST (fail-fast).
+    //
+    // Done before any router mutation so that an `ensure_session_sidecar`
+    // failure leaves zero observable side-effect — the old binding is intact,
+    // no orphaned chat-id-without-owner state. Was step 5 in the pre-0.2.14
+    // ordering; reordered after a dogfood report where the function exited
+    // silently mid-step without notification or `[handover] done` log.
+    //
+    // CRITICAL: `ensure_session_sidecar` is documented as a BLOCKING function
+    // (uses `reqwest::blocking::Client` + `std::sync::Mutex`). Calling it
+    // directly from this async Tauri command would deadlock the runtime —
+    // which is exactly what the dogfood log showed (function entered, lock
+    // acquired, then no further log). Wrap in `tokio::task::spawn_blocking`
+    // per the contract documented at `sidecar.rs::ensure_session_sidecar`.
+    // (review-by-codex F2 finding — root cause of v0.2.14 dogfood Bug 1).
+    let owner = SidecarOwner::Agent(target_session_key.clone());
+    let app_clone = app.clone();
+    let mgr_clone = manager.inner().clone();
+    let sid_clone = sessionId.clone();
+    let workspace_clone = req_workspace.clone();
+    let owner_clone = owner.clone();
+    let ensure_result = tokio::task::spawn_blocking(move || {
+        ensure_session_sidecar(
+            &app_clone,
+            &mgr_clone,
+            &sid_clone,
+            &workspace_clone,
+            owner_clone,
+        )
+    })
+    .await
+    .map_err(|e| {
+        ulog_warn!("[handover] step4 spawn_blocking join error: {}", e);
+        format!("ensure_session_sidecar join failed: {}", e)
+    })?
+    .map_err(|e| {
+        ulog_warn!(
+            "[handover] step4 ensure_session_sidecar failed for session {}: {}",
+            short_id(&sessionId),
+            e
+        );
+        format!("Failed to attach Agent owner: {}", e)
+    })?;
+    let target_port = ensure_result.port;
+    ulog_info!(
+        "[handover] step4 Agent owner attached to session {} (port={}, is_new={})",
+        short_id(&sessionId),
+        target_port,
+        ensure_result.is_new,
+    );
+
+    // ----- 5. Mutate router atomically (snapshot prior + upsert under one lock).
+    //
+    // Use `target_port` from step 4 (the authoritative port returned by
+    // ensure_session_sidecar) rather than what step 3 read pre-ensure —
+    // `is_new=true` means the old sidecar was dead and a fresh one was minted
+    // on a different port; binding the IM channel to the stale port would
+    // route subsequent messages into a closed socket.
     let (chat_id, prior_session_id) = {
         let mut router = router_arc.lock().await;
         let prior = router.peer_session_snapshot(&target_session_key);
         let prior_session_id = prior.as_ref().map(|p| p.session_id.clone());
         let (source_type, source_id) = parse_session_key(&target_session_key);
 
-        // Replace the binding with desktop session
         router.upsert_peer_session(PeerSession {
             session_key: target_session_key.clone(),
             session_id: sessionId.clone(),
-            sidecar_port,
+            sidecar_port: target_port,
             workspace_path: req_workspace.clone(),
             source_type,
             source_id: source_id.clone(),
@@ -240,42 +371,55 @@ pub async fn cmd_handover_session_to_channel<R: Runtime>(
 
         (source_id, prior_session_id)
     };
+    ulog_info!(
+        "[handover] step5 peer_session upserted: chat_id={} prior_session={}",
+        chat_id,
+        prior_session_id.as_deref().map(short_id).unwrap_or_else(|| "none".into()),
+    );
 
-    // ----- 5. Sidecar owner accounting
-    let owner = SidecarOwner::Agent(target_session_key.clone());
-    if let Some(prior_sid) = prior_session_id {
+    // ----- 6. Release the prior session's Agent owner (best-effort).
+    // Same-session re-bind (prior == new) is a no-op — don't accidentally
+    // strip the owner we just attached.
+    if let Some(prior_sid) = prior_session_id.as_deref() {
         if prior_sid != sessionId {
-            // Old session no longer owned by this channel's binding
-            let _ = release_session_sidecar(manager.inner(), &prior_sid, &owner);
+            match release_session_sidecar(manager.inner(), prior_sid, &owner) {
+                Ok(stopped) => ulog_info!(
+                    "[handover] step6 released prior Agent owner from {} (sidecar_stopped={})",
+                    short_id(prior_sid),
+                    stopped
+                ),
+                Err(e) => ulog_warn!(
+                    "[handover] step6 release_session_sidecar({}) failed: {}",
+                    short_id(prior_sid),
+                    e
+                ),
+            }
         }
     }
-    // Add Agent owner to target session's Sidecar (already running, this just
-    // records the new ownership).
-    if let Err(e) = ensure_session_sidecar(
-        &app,
-        manager.inner(),
-        &sessionId,
-        &req_workspace,
-        owner.clone(),
-    ) {
-        ulog_warn!("[handover] ensure_session_sidecar failed: {}", e);
-        return Err(format!("Failed to attach Agent owner: {}", e));
-    }
 
-    // ----- 6. Notify the channel (Q9 lockdown text)
-    const NOTIFICATION: &str =
-        "🔄 桌面端已将对话交接到此 channel\n完整上下文已带过来，可以直接继续。";
-    let notified = match adapter.send_message(&chat_id, NOTIFICATION).await {
-        Ok(_) => true,
+    // ----- 7. Notify the channel. Same 8-char session-id prefix surface that
+    // `/new` shows in IM (`✅ 已创建新对话 (xxxxxxxx)`) so the user can
+    // correlate the two affordances. Failure here is non-fatal — `notified`
+    // surfaces back to the renderer toast.
+    let notification = format!("当前会话切换至「{}」", short_id(&sessionId));
+    ulog_info!(
+        "[handover] step7 sending notification to chat={} via adapter",
+        chat_id
+    );
+    let notified = match adapter.send_message(&chat_id, &notification).await {
+        Ok(_) => {
+            ulog_info!("[handover] step7 notification sent");
+            true
+        }
         Err(e) => {
-            ulog_warn!("[handover] notification send failed: {}", e);
+            ulog_warn!("[handover] step7 notification send failed: {}", e);
             false
         }
     };
 
     ulog_info!(
         "[handover] done: session={} now bound to {} (notified={})",
-        &sessionId[..8.min(sessionId.len())],
+        short_id(&sessionId),
         target_session_key,
         notified,
     );

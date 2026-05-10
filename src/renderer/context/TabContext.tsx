@@ -138,6 +138,23 @@ export interface TabContextValue extends TabState {
     /** Prepend the next page of older messages. Safe to call repeatedly — guarded internally. */
     loadOlderMessages: () => Promise<void>;
     resetSession: () => Promise<boolean>;
+    /**
+     * Soft session swap for the IM-handover "新对话保留绑定" flow.
+     *
+     * Used when the Rust handover (`cmd_session_new_with_surface_migration`)
+     * has ALREADY minted a fresh session_id on the running sidecar via
+     * `/api/im/session/new` and rotated the channel binding to it. The renderer
+     * MUST NOT call `resetSession()` afterwards — that would POST `/chat/reset`
+     * and mint yet another session id, leaving the channel binding pointing
+     * at the migrate-minted id while the tab adopts the second mint
+     * (PRD 0.2.14 cross-bugfix; manifests as "tag disappears after 新对话").
+     *
+     * This helper does the local UI clear that resetSession does, swaps
+     * `currentSessionId` to `newSessionId`, and notifies the parent via
+     * `onSessionIdChange` so the SSE auto-reconnect effect picks up the new
+     * session. No backend call is made.
+     */
+    adoptMigratedSession: (newSessionId: string) => void;
 
     // Tab-scoped API functions (use this Tab's Sidecar)
     // `opts.signal` cancels the call from the renderer side (e.g., useEffect
@@ -213,6 +230,7 @@ const defaultContextValue: TabContextValue = {
     loadSession: async () => false,
     loadOlderMessages: async () => { },
     resetSession: async () => false,
+    adoptMigratedSession: () => { },
     apiGet: async () => { throw new Error('Not in TabProvider'); },
     apiPost: async () => { throw new Error('Not in TabProvider'); },
     apiPut: async () => { throw new Error('Not in TabProvider'); },

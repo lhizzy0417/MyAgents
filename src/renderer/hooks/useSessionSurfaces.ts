@@ -74,7 +74,7 @@ export function useSessionSurfaces(
                             agentName: agent.agentName,
                             channelId: ch.channelId,
                             channelType: ch.channelType,
-                            channelName: ch.name || ch.botUsername || ch.channelType,
+                            channelName: ch.botUsername || ch.name || ch.channelType,
                             sessionKey: sess.sessionKey,
                             platformLabel: extractPlatformDisplay(sess.sessionKey),
                             status: ch.status,

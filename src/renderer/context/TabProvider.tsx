@@ -545,6 +545,67 @@ export default function TabProvider({
         }
     }, [tabId, postJson, setStreamingMessage, clearInteractiveState, clearSessionActive, resetPaginationState]);
 
+    /**
+     * Local-only session swap for the IM-handover "新对话保留绑定" flow.
+     *
+     * The Rust handover (`cmd_session_new_with_surface_migration`) has already
+     * minted `newSessionId` on the running sidecar via `/api/im/session/new`
+     * AND rotated `peer_sessions[*].session_id` to it. Calling resetSession()
+     * here would post `/chat/reset` and mint a SECOND id — leaving the binding
+     * pointing at the migrate-minted id while the tab adopts the second mint
+     * (the v0.2.14 "tag disappears after 新对话" bug).
+     *
+     * This helper does the local UI clear (mirrors resetSession step 1) and
+     * notifies the parent to update Tab.sessionId. The session-aware SSE
+     * useEffect picks up the new id and reconnects; no backend call is made.
+     */
+    const adoptMigratedSession = useCallback((newSessionId: string) => {
+        console.log(`[TabProvider ${tabId}] adoptMigratedSession: ${currentSessionIdRef.current?.slice(0, 8) ?? 'none'} → ${newSessionId.slice(0, 8)}`);
+
+        // Suppress the chat:init that the migrate already broadcast on the
+        // sidecar — we're treating the new session as "freshly created here"
+        // even though it came from Rust, to keep the same race-free guard
+        // resetSession uses.
+        isNewSessionRef.current = true;
+
+        // Mirror resetSession's local clear (kept in lockstep to avoid drift).
+        setHistoryMessages([]);
+        resetPaginationState();
+        setStreamingMessage(null);
+        seenIdsRef.current.clear();
+        clearSessionActive();
+        toolNameMapRef.current.clear();
+        pendingToolResultDeltasRef.current.clear();
+        pendingToolInputDeltasRef.current.clear();
+        pendingSubagentToolResultDeltasRef.current.clear();
+        pendingSubagentToolInputDeltasRef.current.clear();
+        setIsLoading(false);
+        setSessionState('idle');
+        setSystemStatus(null);
+        setAgentError(null);
+        setLastTerminalReason(null);
+        setUnifiedLogs([]);
+        setLogs([]);
+        setSessionMeta(null);
+        clearInteractiveState();
+        autoTitleAttemptedRef.current = false;
+        titleRoundsRef.current = [];
+        pendingUserMessagesRef.current = [];
+        lastCompletedTextRef.current = '';
+        lastProviderEnvRef.current = undefined;
+        lastModelRef.current = undefined;
+
+        // Reset tab title so SortableTabItem falls back to folder name.
+        onTitleChangeRef.current?.('New Chat');
+
+        // Adopt the migrate-minted id locally + push it up so App.tsx's
+        // Tab.sessionId reflects the swap. The session-aware SSE useEffect
+        // will detect the prop change on next render and reconnect.
+        currentSessionIdRef.current = newSessionId;
+        setCurrentSessionId(newSessionId);
+        onSessionIdChangeRef.current?.(newSessionId);
+    }, [tabId, setStreamingMessage, clearInteractiveState, clearSessionActive, resetPaginationState]);
+
     // Append log
     const appendLog = useCallback((line: string) => {
         setLogs(prev => {
@@ -3396,6 +3457,7 @@ export default function TabProvider({
         loadSession,
         loadOlderMessages,
         resetSession,
+        adoptMigratedSession,
         // Tab-scoped API functions
         apiGet: apiGetJson,
         apiPost: postJson,
@@ -3411,7 +3473,7 @@ export default function TabProvider({
     }), [
         tabId, agentDir, currentSessionId, messages, historyMessages, streamingMessage, firstItemIndex, hasMoreBefore, isLoading, isSessionLoading, sessionState, sessionRuntime, sessionMeta,
         logs, unifiedLogs, systemInitInfo, agentError, systemStatus, lastTerminalReason, pendingPermission, pendingAskUserQuestion, pendingExitPlanMode, pendingEnterPlanMode, toolCompleteCount, queuedMessages, isConnected,
-        setMessages, appendLog, appendUnifiedLog, clearUnifiedLogs, sendMessage, stopResponse, loadSession, loadOlderMessages, resetSession,
+        setMessages, appendLog, appendUnifiedLog, clearUnifiedLogs, sendMessage, stopResponse, loadSession, loadOlderMessages, resetSession, adoptMigratedSession,
         apiGetJson, postJson, apiPutJson, apiDeleteJson, respondPermission, respondAskUserQuestion, respondExitPlanMode, cancelQueuedMessage, forceExecuteQueuedMessage
     ]);
 

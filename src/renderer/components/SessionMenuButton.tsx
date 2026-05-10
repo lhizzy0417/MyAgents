@@ -213,7 +213,17 @@ export default function SessionMenuButton({
                 workspacePath,
             });
             if (res.ok) {
-                toast.success(`已交接到 ${candidate.platformLabel} · ${candidate.channelName}`);
+                if (res.notified) {
+                    toast.success(`已交接到 ${candidate.platformLabel} · ${candidate.channelName}`);
+                } else {
+                    // Step 7 (adapter.send_message) failed but the binding
+                    // is in place. Surface the partial failure instead of
+                    // silently treating it as full success — the user needs
+                    // to know the IM end didn't get notified so they can
+                    // ping the channel manually if needed. v0.2.14 dogfood
+                    // showed silent-fail leading to "did this work?" UX.
+                    toast.error(`已交接到 ${candidate.platformLabel} · ${candidate.channelName}，但通知未送达 IM`);
+                }
                 closeAll();
             } else {
                 toast.error('交接失败');

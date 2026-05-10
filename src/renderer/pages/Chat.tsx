@@ -209,6 +209,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     stopResponse,
     loadSession,
     resetSession,
+    adoptMigratedSession,
     clearUnifiedLogs,
     respondPermission,
     respondAskUserQuestion,
@@ -2743,7 +2744,17 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
       });
       if (newSessionId) {
         console.log(`[Chat] Channel-bound new conversation: ${sessionId.slice(0, 8)} → ${newSessionId.slice(0, 8)}`);
-        await resetSession();
+        // CRITICAL: do NOT call resetSession() here.
+        //
+        // The Rust migrate already minted `newSessionId` on the running
+        // sidecar via /api/im/session/new AND rotated peer_sessions[*].session_id
+        // to it. If we additionally POST /chat/reset, the sidecar mints a
+        // SECOND id and the tab adopts the second mint — leaving the channel
+        // binding pointing at `newSessionId` while the tab is on a third id.
+        // Net effect: BOTH the old and new session lose the channel tag in
+        // the UI (peer_session never matches what the tab is showing). The
+        // dedicated soft-swap helper avoids the second mint.
+        adoptMigratedSession(newSessionId);
         return;
       }
       // Migration returned null (handled error inside the client) — surface
@@ -2757,7 +2768,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
       toastRef.current.error('Channel 重绑失败，已就地重置');
       await resetSession();
     }
-  }, [surfaces.channel, sessionId, resetSession]);
+  }, [surfaces.channel, sessionId, resetSession, adoptMigratedSession]);
 
   // Internal handler for starting a new session
   // If AI is running, App.tsx handles it via background completion (returns true).
