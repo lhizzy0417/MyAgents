@@ -1,26 +1,114 @@
-// AUTO-GENERATED STUB — do not edit manually.
-// Regenerate: npm run generate:sdk-shims
-// Source: openclaw/src/plugin-sdk/channel-config-helpers.ts
+// Hand-written shim for openclaw/plugin-sdk/channel-config-helpers.
+//
+// The auto-generated stub returned `undefined` for `createScopedDmSecurityResolver`,
+// which crashed plugins that build their channel object's `security.resolveDmPolicy`
+// at module-load time (yuanbao 2.13.x — issue #180).
+//
+// Source-of-truth: openclaw/src/plugin-sdk/channel-config-helpers.ts (factory)
+// + openclaw/src/channels/plugins/helpers.ts::buildAccountScopedDmSecurityPolicy
+// (implementation). Bridge mode forces `dmPolicy: 'open'` at the runtime layer
+// (see compat-runtime.ts:213) and lets the Rust IM layer do access control,
+// so the policy object this returns is mostly informational — but its shape
+// must match upstream so plugins that introspect it don't break.
+//
+// Other helpers in this module (resolveChannelConfigWrites, the createScoped*
+// adapters, etc.) are not consumed by any shipped plugin today; they remain
+// `undefined` until a plugin needs them. Add the impl from upstream when that
+// happens.
 
-const _warned = new Set();
-function _w(fn) {
-  if (!_warned.has(fn)) { _warned.add(fn); console.warn('[sdk-shim] openclaw/plugin-sdk/channel-config-helpers.' + fn + '() not implemented in Bridge mode'); }
+import { DEFAULT_ACCOUNT_ID } from './account-id.js';
+
+function _resolveFieldName(suffix, fallbackField) {
+  if (suffix == null || suffix === '') return fallbackField;
+  return /^[A-Za-z0-9_-]+$/.test(suffix) ? suffix : null;
 }
 
-export function resolveChannelConfigWrites() { _w('resolveChannelConfigWrites'); return undefined; }
-export function authorizeConfigWrite() { _w('authorizeConfigWrite'); return undefined; }
-export function canBypassConfigWritePolicy() { _w('canBypassConfigWritePolicy'); return false; }
-export function formatConfigWriteDeniedMessage() { _w('formatConfigWriteDeniedMessage'); return ""; }
-export function mapAllowFromEntries() { _w('mapAllowFromEntries'); return undefined; }
-export function formatTrimmedAllowFromEntries() { _w('formatTrimmedAllowFromEntries'); return ""; }
-export function resolveOptionalConfigString() { _w('resolveOptionalConfigString'); return undefined; }
-export function adaptScopedAccountAccessor() { _w('adaptScopedAccountAccessor'); return undefined; }
-export function createScopedAccountConfigAccessors() { _w('createScopedAccountConfigAccessors'); return undefined; }
-export function createScopedChannelConfigBase() { _w('createScopedChannelConfigBase'); return undefined; }
-export function createScopedChannelConfigAdapter() { _w('createScopedChannelConfigAdapter'); return undefined; }
-export function createTopLevelChannelConfigBase() { _w('createTopLevelChannelConfigBase'); return undefined; }
-export function createTopLevelChannelConfigAdapter() { _w('createTopLevelChannelConfigAdapter'); return undefined; }
-export function createHybridChannelConfigBase() { _w('createHybridChannelConfigBase'); return undefined; }
-export function createHybridChannelConfigAdapter() { _w('createHybridChannelConfigAdapter'); return undefined; }
-export function createScopedDmSecurityResolver() { _w('createScopedDmSecurityResolver'); return undefined; }
-export function buildAccountScopedDmSecurityPolicy() { _w('buildAccountScopedDmSecurityPolicy'); return undefined; }
+function _matchesAnyField(config, fields) {
+  return fields.some((field) => field != null && config?.[field] !== undefined);
+}
+
+export function buildAccountScopedDmSecurityPolicy(params) {
+  const resolvedAccountId = params.accountId ?? params.fallbackAccountId ?? DEFAULT_ACCOUNT_ID;
+  const channelConfig = params.cfg?.channels?.[params.channelKey];
+  const rootBasePath = `channels.${params.channelKey}.`;
+  const accountBasePath = `channels.${params.channelKey}.accounts.${resolvedAccountId}.`;
+  const defaultBasePath = `channels.${params.channelKey}.accounts.${DEFAULT_ACCOUNT_ID}.`;
+  const accountConfig = channelConfig?.accounts?.[resolvedAccountId];
+  const defaultAccountConfig =
+    params.inheritSharedDefaultsFromDefaultAccount && resolvedAccountId !== DEFAULT_ACCOUNT_ID
+      ? channelConfig?.accounts?.[DEFAULT_ACCOUNT_ID]
+      : undefined;
+
+  const simplePolicyField = _resolveFieldName(params.policyPathSuffix, 'dmPolicy');
+  const simpleAllowFromField = _resolveFieldName(params.allowFromPathSuffix, 'allowFrom');
+  const fields = [simplePolicyField, simpleAllowFromField];
+  const basePath =
+    simplePolicyField || simpleAllowFromField
+      ? _matchesAnyField(accountConfig, fields)
+        ? accountBasePath
+        : _matchesAnyField(defaultAccountConfig, fields)
+          ? defaultBasePath
+          : _matchesAnyField(channelConfig, fields)
+            ? rootBasePath
+            : accountConfig
+              ? accountBasePath
+              : rootBasePath
+      : accountConfig
+        ? accountBasePath
+        : rootBasePath;
+
+  const allowFromPath = `${basePath}${params.allowFromPathSuffix ?? ''}`;
+  const policyPath =
+    params.policyPathSuffix != null ? `${basePath}${params.policyPathSuffix}` : undefined;
+
+  return {
+    policy: params.policy ?? params.defaultPolicy ?? 'pairing',
+    allowFrom: params.allowFrom ?? [],
+    policyPath,
+    allowFromPath,
+    approveHint:
+      params.approveHint ??
+      `Approve via: openclaw pairing approve ${params.approveChannelId ?? params.channelKey} <code>`,
+    normalizeEntry: params.normalizeEntry,
+  };
+}
+
+export function createScopedDmSecurityResolver(params) {
+  return ({ cfg, accountId, account }) =>
+    buildAccountScopedDmSecurityPolicy({
+      cfg,
+      channelKey: params.channelKey,
+      accountId,
+      fallbackAccountId:
+        params.resolveFallbackAccountId?.(account) ?? account?.accountId,
+      policy: params.resolvePolicy?.(account),
+      allowFrom: params.resolveAllowFrom?.(account) ?? [],
+      defaultPolicy: params.defaultPolicy,
+      allowFromPathSuffix: params.allowFromPathSuffix,
+      policyPathSuffix: params.policyPathSuffix,
+      approveChannelId: params.approveChannelId,
+      approveHint: params.approveHint,
+      normalizeEntry: params.normalizeEntry,
+      inheritSharedDefaultsFromDefaultAccount: params.inheritSharedDefaultsFromDefaultAccount,
+    });
+}
+
+// Re-exported for plugins that already import them from this module path
+// (matches upstream barrel surface).
+export { mapAllowFromEntries } from './compat.js';
+
+// Surfaces upstream exports — kept as undefined until a plugin consumes them.
+export const resolveChannelConfigWrites = undefined;
+export const authorizeConfigWrite = undefined;
+export const canBypassConfigWritePolicy = undefined;
+export const formatConfigWriteDeniedMessage = undefined;
+export const formatTrimmedAllowFromEntries = undefined;
+export const resolveOptionalConfigString = undefined;
+export const adaptScopedAccountAccessor = undefined;
+export const createScopedAccountConfigAccessors = undefined;
+export const createScopedChannelConfigBase = undefined;
+export const createScopedChannelConfigAdapter = undefined;
+export const createTopLevelChannelConfigBase = undefined;
+export const createTopLevelChannelConfigAdapter = undefined;
+export const createHybridChannelConfigBase = undefined;
+export const createHybridChannelConfigAdapter = undefined;

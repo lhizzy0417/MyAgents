@@ -566,6 +566,53 @@ impl SessionRouter {
         }
     }
 
+    // ===== Surface handover helpers (PRD 0.2.14) =====
+
+    /// True if a peer_session entry exists for the given session_key.
+    /// Used by `cmd_session_new_with_surface_migration` to find which channel
+    /// owns a session_key without exposing the full HashMap.
+    pub fn has_peer_session(&self, session_key: &str) -> bool {
+        self.peer_sessions.contains_key(session_key)
+    }
+
+    /// Snapshot a peer_session for read-only inspection (e.g. capture
+    /// `prior_session_id` before we overwrite the entry during handover).
+    pub fn peer_session_snapshot(&self, session_key: &str) -> Option<PeerSession> {
+        self.peer_sessions.get(session_key).cloned()
+    }
+
+    /// Insert-or-replace a peer_session — used by handover to redirect a
+    /// channel binding to a new session_id. Caller is responsible for
+    /// SidecarOwner accounting (release old, ensure new) — this method only
+    /// touches the router's HashMap.
+    pub fn upsert_peer_session(&mut self, ps: PeerSession) {
+        self.peer_sessions.insert(ps.session_key.clone(), ps);
+    }
+
+    /// Pick the most-recently-active peer_session_key in this channel.
+    /// Used as the handover target — preserves "talk to the same chat,
+    /// different session backend" semantics.
+    pub fn most_recent_peer_session_key(&self) -> Option<String> {
+        self.peer_sessions
+            .values()
+            .max_by_key(|ps| ps.last_active)
+            .map(|ps| ps.session_key.clone())
+    }
+
+    /// Iterate over the channel's peer_sessions (read-only). Used by the
+    /// mirror endpoint (`/api/im/mirror`) to find which channel binds a given
+    /// session_id without exposing the full HashMap.
+    pub fn peer_sessions_iter(&self) -> impl Iterator<Item = &PeerSession> {
+        self.peer_sessions.values()
+    }
+
+    /// Snapshot the set of peer_session_keys currently bound. Used by the
+    /// runtime-change orchestrator (`runtime_change.rs`) to iterate without
+    /// holding a borrow into the HashMap during async freeze HTTP calls.
+    pub fn peer_session_keys(&self) -> Vec<String> {
+        self.peer_sessions.keys().cloned().collect()
+    }
+
     /// Get active peer session info (for health state)
     pub fn active_sessions(&self) -> Vec<super::types::ImActiveSession> {
         self.peer_sessions
@@ -775,14 +822,57 @@ impl SessionRouter {
         }
     }
 
-    /// Release all sessions (shutdown)
+    /// Release all sessions and DROP the peer→session binding map.
+    ///
+    /// **Destructive.** Use only when the bot itself is being torn down
+    /// (`shutdown_bot_instance`) — after this call, `peer_sessions` is empty,
+    /// so any handover / message-routing / `most_recent_peer_session_key`
+    /// lookup will treat the channel as if it had never seen a chat. For
+    /// hot-reload paths that just need sidecars to restart (e.g. runtime
+    /// switch), use [`Self::release_all_sidecars_preserve_bindings`] instead.
     pub fn release_all(&mut self, manager: &ManagedSidecarManager) {
+        let count = self.peer_sessions.len();
         let keys: Vec<String> = self.peer_sessions.keys().cloned().collect();
         for key in keys {
             if let Some(ps) = self.peer_sessions.remove(&key) {
                 let owner = SidecarOwner::Agent(key);
                 let _ = release_session_sidecar(manager, &ps.session_id, &owner);
             }
+        }
+        if count > 0 {
+            ulog_info!(
+                "[im-router] release_all: dropped {} peer_session(s) and released their sidecars",
+                count,
+            );
+        }
+    }
+
+    /// Release running Sidecars but PRESERVE the peer→session bindings.
+    ///
+    /// Used by hot-reload paths where the next IM message must spawn a fresh
+    /// Sidecar (e.g. runtime change from `builtin` → `claude-code`), but the
+    /// channel→chat binding must survive so handover / message routing /
+    /// `/new` resume keep working. Each entry's `sidecar_port` is zeroed —
+    /// `prepare_ensure_sidecar` will see the existing peer_session and re-mint
+    /// the Sidecar on the next dispatch, reusing the same `session_id` so the
+    /// SDK conversation resumes seamlessly.
+    pub fn release_all_sidecars_preserve_bindings(&mut self, manager: &ManagedSidecarManager) {
+        let mut released = 0_usize;
+        let keys: Vec<String> = self.peer_sessions.keys().cloned().collect();
+        for key in keys {
+            if let Some(ps) = self.peer_sessions.get_mut(&key) {
+                let owner = SidecarOwner::Agent(key.clone());
+                let _ = release_session_sidecar(manager, &ps.session_id, &owner);
+                ps.sidecar_port = 0;
+                released += 1;
+            }
+        }
+        if released > 0 {
+            ulog_info!(
+                "[im-router] Released {} sidecar(s); {} peer_session binding(s) preserved for resume",
+                released,
+                self.peer_sessions.len(),
+            );
         }
     }
 }

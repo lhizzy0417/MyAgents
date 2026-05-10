@@ -138,11 +138,28 @@ export function Popover({
       if (!t) return;
       if (floatingRef.current?.contains(t)) return;
       if (anchorRef.current?.contains(t)) return;
+      // Don't dismiss when the click landed in something layered above us
+      // (e.g. a ConfirmDialog at z-[300] portaled to body by a child of the
+      // Popover's owner). Without this, the document-level mousedown fires
+      // before the dialog's own click handler, and a parent that resets
+      // dialog state on close would unmount the dialog mid-click — issue
+      // #178: confirm button visibly closes the dialog but the action never
+      // ran. Walk ancestors and bail if any positioned ancestor's z-index
+      // exceeds ours.
+      let el: Element | null = t.nodeType === 1 ? (t as Element) : t.parentElement;
+      while (el && el !== document.body) {
+        const style = window.getComputedStyle(el);
+        if (style.position !== 'static') {
+          const z = parseInt(style.zIndex, 10);
+          if (!Number.isNaN(z) && z > zIndex) return;
+        }
+        el = el.parentElement;
+      }
       onClose();
     };
     document.addEventListener('mousedown', handler);
     return () => document.removeEventListener('mousedown', handler);
-  }, [open, closeOnOutsideClick, onClose, anchorRef]);
+  }, [open, closeOnOutsideClick, onClose, anchorRef, zIndex]);
 
   if (!open) return null;
 

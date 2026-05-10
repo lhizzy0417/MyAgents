@@ -57,6 +57,37 @@
 
 **其它优化：** `getSessionMetadata` 从 3 次合并成 1 次 memo。
 
+## "AI 启动中" UI 状态判据：`sdkControlReady` ≠ `system_init`
+
+SDK 0.2.119 有**两个**完全不同含义的"准备好"信号，老代码混用了它们导致 UI 误标。
+
+| 信号 | 来源 | 真实语义 | 时机 |
+|------|------|---------|------|
+| `Query.initializationResult()` | SDK 内部 `subtype:"initialize"` control_request 的 response | **subprocess 控制面 ready**：tools 加载完、MCP handshake 完成、commands/agents 列表就绪 | spawn 后 ~300ms-3s |
+| streamed `system_init` (`type:"system",subtype:"init"`) | `QueryEngine.submitMessage()` 在 `fetchSystemPromptParts → processUserInput → recordTranscript → loadAllPlugins` 之后 yield（claude-code:`src/QueryEngine.ts:540`）| **per-turn metadata**：当前 turn 用到的 model / tools / mcp_servers / session_id / permissionMode | 第一条 user message 触发 turn 的中后段 |
+
+**UI 状态机对应**：
+- `sessionState === 'starting'` → "AI 启动中（首次启动可能较慢）" hint —— **subprocess 还没 ready 才该显示这个**
+- `sessionState === 'running'` → 普通"思考中…" loading —— subprocess ready 后 turn 执行期间显示
+
+老代码用 `setSessionState(systemInitInfo ? 'running' : 'starting')` —— 用 per-turn metadata 当作 subprocess-ready 信号。后果：pre-warm 完成后用户发的第一条慢消息（典型例子：`/context` 命令做 14 个本地 turn 统计 token，可达 44 秒）整段 turn 都被标成 "AI 启动中"，让用户以为 sidecar 卡死。
+
+**正确判据**（`agent-session.ts:6118`）：
+
+```typescript
+setSessionState((systemInitInfo || sdkControlReady) ? 'running' : 'starting');
+```
+
+`sdkControlReady` 是模块级布尔，由 `startStreamingSession()` spawn 完 `query()` 后**fire-and-forget** `querySession.initializationResult()` 触发：promise resolve 时设为 true。所有 session 重置点（`resetSession` / `switchToSession` / 第三方 → Anthropic 切换 / `initializeAgent`）必须**同时**清 `systemInitInfo` 和 `sdkControlReady`。
+
+**为什么 fire-and-forget 而不是 `await initializationResult()`**：技术上 await 不会死锁（SDK 内部的 `readMessages()` 在 F9 构造时就开始独立 pump 消息进 `pendingControlResponses`，不依赖外层 for-await），但 await 会让 `startStreamingSession` 的整个执行序列化在 control 面初始化之后 —— 没必要。`sdkControlReady` 是纯 UI 副信号，不需要阻塞主流程。
+
+**Promise 身份校验**：`querySession.initializationResult()` resolve 前如果发生 abort + 新 pre-warm（querySession 被替换），旧 promise 可能仍 resolve（buffer 里已经有 response 了）。所以 `.then` handler 必须 capture `localQuery` 并检查 `querySession === localQuery`，否则会污染下一个 session 的 `sdkControlReady`。
+
+**非 pre-warm 冷启动的额外 fast-path**：用户在没有 pre-warm 的情况下直接发第一条消息，`enqueueUserMessage` 会设 state=`'starting'`。`initializationResult` 的 resolve handler 看到 `sessionState === 'starting'` 时主动转 `'running'`（约 3-5s 后），不必等到第一个 turn 末尾的 streamed `system_init` 才转。否则 /context 这类慢首 turn 会让"AI 启动中"挂 44 秒。
+
+**为什么不切到 SDK 的 `startup()` / `WarmQuery` API**：MyAgents 的「pre-warm 即最终 session」架构（CLAUDE.md「Pre-warm 机制」段）让 `querySession` 是单一对象贯穿生命周期，`setMcpServers` / `setAgents` / `setSessionModel` / `abortPersistentSession` 全部 close-over 它。WarmQuery 模式要求 pre-warm 期间 `querySession` 是 WarmQuery、第一条消息时换成 Query，会波及几十处调用点。`startup()` 内部其实就是 spawn + `await initializationResult()`，我们直接展开调更轻。
+
 ## Tier 2 懒加载
 
 ### 大模块改为 `await import()`
@@ -93,6 +124,7 @@
 3. **是否新加了路由不走 deferred-init gate？** —— 除 `/health/*` 和 `/refs/:id` 外都应走 gate。
 4. **是否 Tab session 误开启了 MCP self-resolve？** —— 检查 `initializeAgent` 的 `includeMcp` 参数。
 5. **是否新加了 `console.log` 在 hot path 而 logger 未 buffered？** —— `UnifiedLogger` 是 in-memory bounded queue，但极高频日志仍可能拖慢。
+6. **是否第一条用户消息整段都被标成「AI 启动中」？** —— 先确认 `sdkControlReady` 是否在 pre-warm spawn 后被 `initializationResult()` 设为 true（grep `[agent] SDK control plane ready in`）。再核对所有 session 重置点同时清 `systemInitInfo` 和 `sdkControlReady`。详见上方「`sdkControlReady` ≠ `system_init`」节。
 
 ## 与其他文档的关系
 

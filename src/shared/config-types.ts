@@ -322,7 +322,14 @@ export interface AppConfig {
   experimentalSplitView?: boolean; // 实验性：文件预览在右侧分屏而非弹窗
   // General settings
   autoStart: boolean; // 开机启动
-  cronNotifications: boolean; // 定时任务通知
+  // OS-level desktop notifications. When false, ALL notification trigger
+  // points are suppressed at the Rust entry point (cron complete, task
+  // complete, AI turn complete, permission request, ask-user-question,
+  // plan-mode review). Renamed from `cronNotifications` in 0.2.14 — the
+  // legacy name was misleading because only one of the six triggers is
+  // cron-related; the toggle was decorative until 0.2.14 wired it up.
+  osNotifications: boolean;
+  notificationSound: boolean; // 通知提醒声音（OS 通知是否播放声音）
   // API Keys for providers (stored separately for security)
   providerApiKeys?: Record<string, string>;
   // Provider verification status (persisted after API key validation)
@@ -1000,5 +1007,6 @@ export const DEFAULT_CONFIG: AppConfig = {
   minimizeToTray: true,   // 默认开启最小化到托盘
   showDevTools: false,
   autoStart: false,       // 默认不开启开机启动
-  cronNotifications: true,
+  osNotifications: true,  // 默认开启系统通知
+  notificationSound: true, // 默认开启通知声音
 };

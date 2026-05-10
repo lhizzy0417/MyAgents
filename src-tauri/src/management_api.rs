@@ -14,9 +14,9 @@ use tokio::net::TcpListener;
 use crate::cron_task::{
     self, CronDelivery, CronSchedule, CronTask, CronTaskConfig, ProviderIntent, TaskProviderEnv,
 };
-use crate::{ulog_info, ulog_warn, ulog_error};
+use crate::{ulog_debug, ulog_info, ulog_warn, ulog_error};
 use crate::im::{self, ManagedImBots, ManagedAgents};
-use crate::im::adapter::ImStreamAdapter;
+use crate::im::adapter::{ImAdapter, ImStreamAdapter};
 use crate::im::bridge;
 use crate::im::types::MediaType;
 use crate::task;
@@ -95,6 +95,7 @@ pub async fn start_management_api() -> Result<u16, String> {
         .route("/api/im/channels", get(list_im_channels_handler))
         .route("/api/im/wake", post(wake_bot_handler))
         .route("/api/im/send-media", post(send_media_handler))
+        .route("/api/im/mirror", post(mirror_to_channel_handler))
         .route("/api/im-bridge/message", post(handle_bridge_message))
         .route("/api/cron/stop", post(stop_cron_handler))
         .route("/api/plugin/list", get(list_plugins_handler))
@@ -1969,4 +1970,236 @@ fn schedules_equivalent(
         (Loop, Loop) => true,
         _ => false,
     }
+}
+
+// ============================================================================
+// IM Mirror — fan out desktop-driven session activity to a bound IM channel
+// (PRD 0.2.14 Phase C).
+//
+// Sidecar calls this AFTER persisting a desktop user message and AFTER each
+// AI text block completes. Rust looks up which IM channel currently binds
+// `sessionId` (via `peer_sessions[*].session_id == sessionId`) and forwards
+// the text (with `👤 桌面端用户消息` prefix for `role: user`, plain for
+// `role: assistant`) plus any inline images.
+//
+// Tool calls / canUseTool / partial chunks are NOT mirrored (the Sidecar
+// caller filters those out — see `agent-session.ts::mirrorIfChannelBound`).
+// ============================================================================
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct MirrorRequest {
+    session_id: String,
+    /// "user" | "assistant"
+    role: String,
+    text: Option<String>,
+    /// Optional inline images (base64 PNG/JPG). Sent after the text body.
+    /// Each entry: { mimeType: "image/png" | "image/jpeg", dataBase64 }.
+    images: Option<Vec<MirrorImage>>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct MirrorImage {
+    mime_type: String,
+    data_base64: String,
+}
+
+const DESKTOP_USER_PREFIX: &str = "[From: 桌面端用户消息]";
+const MIRROR_IMAGE_MAX_BYTES: usize = 5 * 1024 * 1024;
+
+/// Find the channel currently bound to `session_id`. Scans agent channels'
+/// `peer_sessions`. Returns `(adapter, chat_id, channel_id)` of the first
+/// match — by invariant only one channel binds a given session_id at a time.
+async fn find_channel_for_session(
+    session_id: &str,
+) -> Option<(std::sync::Arc<im::AnyAdapter>, String, String)> {
+    let agents = get_agents()?;
+    let agents_guard = agents.lock().await;
+    for agent in agents_guard.values() {
+        for (channel_id, ch) in &agent.channels {
+            let router = ch.bot_instance.router.lock().await;
+            for ps in router.peer_sessions_iter() {
+                if ps.session_id == session_id {
+                    return Some((
+                        std::sync::Arc::clone(&ch.bot_instance.adapter),
+                        ps.source_id.clone(),
+                        channel_id.clone(),
+                    ));
+                }
+            }
+        }
+    }
+    None
+}
+
+async fn mirror_to_channel_handler(
+    Json(req): Json<MirrorRequest>,
+) -> Json<serde_json::Value> {
+    let resolved = match find_channel_for_session(&req.session_id).await {
+        Some(t) => t,
+        None => {
+            // Session has no channel binding — silent no-op (this is the
+            // common case for pure-desktop sessions; we don't want noisy logs).
+            return Json(serde_json::json!({ "mirrored": false }));
+        }
+    };
+    let (adapter, chat_id, channel_id) = resolved;
+
+    // ----- Body text (with prefix for user role) -----
+    //
+    // PRD 0.2.14 — visual parity with native IM AI replies:
+    //   * assistant role → `push_text_preferring_stream`. Adapters whose
+    //     channels have a streaming protocol (Bridge plugins with
+    //     `streaming: true` like OpenClaw Lark CardKit, Dingtalk AI Card)
+    //     deliver the mirror via `start_stream → finalize_stream`, landing
+    //     on the SAME visual surface as a live AI reply (CardKit /
+    //     interactive card on Feishu via Bridge, AI Card on Dingtalk).
+    //     Adapters that don't support streaming fall through to
+    //     `send_message` (post-type bubble on native Feishu, plain text on
+    //     Telegram). This is the helper documented at adapter.rs:244-289
+    //     specifically for "out-of-band pushes that should match live
+    //     reply style."
+    //   * user role → plain `send_message`. The user-mirror has a `[From: …]`
+    //     prefix and is conceptually a "system note about an external user
+    //     event" — landing as a plain bubble is the desired visual
+    //     (confirmed by dogfood: the user said the user-mirror bubble was
+    //     correct, only the assistant-mirror needed CardKit treatment).
+    let body = req.text.unwrap_or_default();
+    let mut text_failed = false;
+    let mut sent_text = false;
+    if !body.is_empty() {
+        let result = match req.role.as_str() {
+            "user" => {
+                let payload = format!("{}\n{}", DESKTOP_USER_PREFIX, body);
+                adapter.send_message(&chat_id, &payload).await
+            }
+            _ => {
+                im::adapter::push_text_preferring_stream(adapter.as_ref(), &chat_id, &body).await
+            }
+        };
+        match result {
+            Ok(_) => sent_text = true,
+            Err(e) => {
+                ulog_warn!(
+                    "[mirror] send_message failed channel={} session={}: {}",
+                    channel_id,
+                    &req.session_id[..8.min(req.session_id.len())],
+                    e
+                );
+                text_failed = true;
+            }
+        }
+    }
+
+    // ----- Optional images (PNG/JPG only, 5MB cap each) -----
+    //
+    // Pre-decode size guard (review-by-codex M2): a 50MB base64 string
+    // decodes to ~37.5MB binary which is rejected by `MIRROR_IMAGE_MAX_BYTES`
+    // — but only AFTER we've already done the expensive `base64::decode`
+    // allocation. Cap on the *encoded* length first so an attacker can't
+    // amplify ~7x memory before being rejected.
+    //
+    // Formula: padded base64 inflates to `4 * ceil(bytes / 3)` chars.
+    // MUST stay byte-for-byte equivalent to the Node-side
+    // `MIRROR_IMAGE_MAX_BASE64_CHARS` in agent-session.ts:toMirrorImages
+    // — otherwise the boundary 5 MiB image is accepted on one side and
+    // rejected on the other (review-by-codex F4).
+    const MIRROR_IMAGE_MAX_BASE64_LEN: usize =
+        ((MIRROR_IMAGE_MAX_BYTES + 2) / 3) * 4 + 64;
+
+    let mut sent_images = 0usize;
+    let mut skipped_images = 0usize;
+    if let Some(images) = req.images {
+        // Capture total before consuming — needed so the break-on-error
+        // path below can attribute the remaining unprocessed images to
+        // `skipped_images` (review-by-codex F5). Without this, an early
+        // break leaves the response's `imagesSkipped` undercounting and
+        // hides "we silently dropped half the upload" from observability.
+        let total_images = images.len();
+        for (idx, img) in images.into_iter().enumerate() {
+            // Whitelist MIME — the spec said PNG/JPG only.
+            let (ext, ok_mime) = match img.mime_type.as_str() {
+                "image/png" => ("png", true),
+                "image/jpeg" | "image/jpg" => ("jpg", true),
+                _ => ("bin", false),
+            };
+            if !ok_mime {
+                skipped_images += 1;
+                continue;
+            }
+            // Cheap encoded-size check BEFORE the decode allocation.
+            if img.data_base64.len() > MIRROR_IMAGE_MAX_BASE64_LEN {
+                ulog_debug!(
+                    "[mirror] skip oversize image[{}] base64Len={}",
+                    idx,
+                    img.data_base64.len()
+                );
+                skipped_images += 1;
+                continue;
+            }
+            let bytes = match base64_decode(&img.data_base64) {
+                Some(b) => b,
+                None => {
+                    skipped_images += 1;
+                    continue;
+                }
+            };
+            if bytes.len() > MIRROR_IMAGE_MAX_BYTES {
+                skipped_images += 1;
+                continue;
+            }
+            let filename = format!("desktop-mirror-{}.{}", idx, ext);
+            // Caption only on first image when paired with user text — keeps
+            // the prefix visible alongside the visual.
+            let caption = if req.role == "user" && !sent_text && idx == 0 {
+                Some(DESKTOP_USER_PREFIX.to_string())
+            } else {
+                None
+            };
+            match adapter
+                .send_photo(&chat_id, bytes, &filename, caption.as_deref())
+                .await
+            {
+                Ok(_) => sent_images += 1,
+                Err(e) => {
+                    let remaining = total_images.saturating_sub(idx + 1);
+                    ulog_warn!(
+                        "[mirror] send_photo[{}] failed channel={}: {} — aborting, attributing {} remaining as skipped",
+                        idx,
+                        channel_id,
+                        e,
+                        remaining,
+                    );
+                    skipped_images += 1 + remaining;
+                    // Break-on-transport-error (review-by-codex M4):
+                    // adapter.send_photo failures are dominated by transport-
+                    // class problems (network drop, expired auth, rate limit).
+                    // Continuing the loop hammers the same dead leg N more
+                    // times; better to surface what we sent and let the caller
+                    // (or user) retry. Format-class errors are already
+                    // filtered upstream by MIME whitelist + size cap, so
+                    // here the failure is almost always transport. Remaining
+                    // images counted into `skipped_images` so the response's
+                    // `imagesSkipped` field stays observability-accurate.
+                    break;
+                }
+            }
+        }
+    }
+
+    Json(serde_json::json!({
+        "mirrored": sent_text || sent_images > 0,
+        "textSent": sent_text,
+        "textFailed": text_failed,
+        "imagesSent": sent_images,
+        "imagesSkipped": skipped_images,
+    }))
+}
+
+/// Standalone base64 decoder — keeps mirror handler dependency-free of any
+/// crate not already pulled in by management_api.
+fn base64_decode(s: &str) -> Option<Vec<u8>> {
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
+    STANDARD.decode(s.trim()).ok()
 }

@@ -3348,12 +3348,12 @@ fn send_task_notification(
         format!("任务 #{} 已完成", task.execution_count + 1)
     };
 
-    // Use tauri notification plugin — include tab_id for frontend navigation
-    let _ = handle.emit("notification:show", serde_json::json!({
-        "title": title,
-        "body": body,
-        "tabId": task.tab_id
-    }));
+    // Send the OS notification through the unified notification module so the
+    // click handler is wired structurally (Windows toast Activated, macOS /
+    // Linux fallback). Bypassing this and emitting a raw event would resurrect
+    // the fragile "front-end forwards to plugin-notification" path that lost
+    // tab_id on click.
+    crate::notification::show_with_navigation(handle, &title, &body, task.tab_id.clone());
 }
 
 /// Global singleton instance

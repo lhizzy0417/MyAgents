@@ -99,8 +99,16 @@ pub fn setup_tray<R: Runtime>(app: &tauri::App<R>) -> Result<(), Box<dyn std::er
     Ok(())
 }
 
-/// Show the main window (and focus it)
-fn show_main_window<R: Runtime>(app: &tauri::AppHandle<R>) {
+/// Show the main window (and focus it).
+///
+/// Single canonical "bring to foreground" routine. Reused by:
+/// - tray icon left-click / "Open" menu
+/// - `single_instance` plugin's second-instance callback (lib.rs)
+/// - `notification` module's click handler (Windows toast Activated event)
+///
+/// Pit-of-success: one helper, three callers; new entry points MUST call this
+/// rather than re-deriving show + unminimize + set_focus.
+pub fn show_main_window<R: Runtime>(app: &tauri::AppHandle<R>) {
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.show();
         let _ = window.unminimize();
@@ -127,12 +135,15 @@ struct PartialAppConfig {
 }
 
 /// Check if minimize to tray is enabled
-/// Reads from ~/.myagents/config.json, defaults to false if not configured
+/// Reads from ~/.myagents/config.json, defaults to false if not configured.
+///
+/// Uses the project-canonical `app_dirs::myagents_data_dir()` helper rather
+/// than raw `dirs::home_dir()` — that way any future dev/prod data-dir
+/// isolation flows through automatically.
 #[allow(dead_code)]
 pub fn should_minimize_to_tray() -> bool {
-    // Try to read from user config
-    if let Some(home) = dirs::home_dir() {
-        let config_path = home.join(".myagents").join("config.json");
+    if let Some(dir) = crate::app_dirs::myagents_data_dir() {
+        let config_path = dir.join("config.json");
 
         if let Ok(content) = fs::read_to_string(&config_path) {
             if let Ok(config) = serde_json::from_str::<PartialAppConfig>(strip_bom(&content)) {

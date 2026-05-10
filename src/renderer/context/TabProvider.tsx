@@ -545,6 +545,67 @@ export default function TabProvider({
         }
     }, [tabId, postJson, setStreamingMessage, clearInteractiveState, clearSessionActive, resetPaginationState]);
 
+    /**
+     * Local-only session swap for the IM-handover "新对话保留绑定" flow.
+     *
+     * The Rust handover (`cmd_session_new_with_surface_migration`) has already
+     * minted `newSessionId` on the running sidecar via `/api/im/session/new`
+     * AND rotated `peer_sessions[*].session_id` to it. Calling resetSession()
+     * here would post `/chat/reset` and mint a SECOND id — leaving the binding
+     * pointing at the migrate-minted id while the tab adopts the second mint
+     * (the v0.2.14 "tag disappears after 新对话" bug).
+     *
+     * This helper does the local UI clear (mirrors resetSession step 1) and
+     * notifies the parent to update Tab.sessionId. The session-aware SSE
+     * useEffect picks up the new id and reconnects; no backend call is made.
+     */
+    const adoptMigratedSession = useCallback((newSessionId: string) => {
+        console.log(`[TabProvider ${tabId}] adoptMigratedSession: ${currentSessionIdRef.current?.slice(0, 8) ?? 'none'} → ${newSessionId.slice(0, 8)}`);
+
+        // Suppress the chat:init that the migrate already broadcast on the
+        // sidecar — we're treating the new session as "freshly created here"
+        // even though it came from Rust, to keep the same race-free guard
+        // resetSession uses.
+        isNewSessionRef.current = true;
+
+        // Mirror resetSession's local clear (kept in lockstep to avoid drift).
+        setHistoryMessages([]);
+        resetPaginationState();
+        setStreamingMessage(null);
+        seenIdsRef.current.clear();
+        clearSessionActive();
+        toolNameMapRef.current.clear();
+        pendingToolResultDeltasRef.current.clear();
+        pendingToolInputDeltasRef.current.clear();
+        pendingSubagentToolResultDeltasRef.current.clear();
+        pendingSubagentToolInputDeltasRef.current.clear();
+        setIsLoading(false);
+        setSessionState('idle');
+        setSystemStatus(null);
+        setAgentError(null);
+        setLastTerminalReason(null);
+        setUnifiedLogs([]);
+        setLogs([]);
+        setSessionMeta(null);
+        clearInteractiveState();
+        autoTitleAttemptedRef.current = false;
+        titleRoundsRef.current = [];
+        pendingUserMessagesRef.current = [];
+        lastCompletedTextRef.current = '';
+        lastProviderEnvRef.current = undefined;
+        lastModelRef.current = undefined;
+
+        // Reset tab title so SortableTabItem falls back to folder name.
+        onTitleChangeRef.current?.('New Chat');
+
+        // Adopt the migrate-minted id locally + push it up so App.tsx's
+        // Tab.sessionId reflects the swap. The session-aware SSE useEffect
+        // will detect the prop change on next render and reconnect.
+        currentSessionIdRef.current = newSessionId;
+        setCurrentSessionId(newSessionId);
+        onSessionIdChangeRef.current?.(newSessionId);
+    }, [tabId, setStreamingMessage, clearInteractiveState, clearSessionActive, resetPaginationState]);
+
     // Append log
     const appendLog = useCallback((line: string) => {
         setLogs(prev => {
@@ -669,7 +730,17 @@ export default function TabProvider({
         pendingChunksRef.current = [];
 
         setStreamingMessage(prev => {
-            if (!prev || prev.role !== 'assistant' || !isStreamingRef.current) return prev;
+            // `!prev` is the authoritative "message already finalised" check —
+            // moveStreamingToHistory() returns null from its updater, so any
+            // stale RAF firing afterwards sees prev=null and bails. Do NOT
+            // also gate on `isStreamingRef.current`: that flag is cleared by
+            // ANY chat:status idle event (clearSessionActive), and a runtime
+            // that races idle ahead of chat:message-complete (e.g. a sidecar
+            // bug or out-of-order SSE) would here clear pendingChunksRef
+            // synchronously above and then throw the merged text away in
+            // this updater — silently dropping every chunk that hadn't yet
+            // RAF-flushed. v0.2.14 cross-bugfix.
+            if (!prev || prev.role !== 'assistant') return prev;
             if (typeof prev.content === 'string') {
                 return { ...prev, content: prev.content + merged };
             }
@@ -1068,11 +1139,21 @@ export default function TabProvider({
                         clearSessionActive();
                         setIsLoading(false);
                         setSystemStatus(null);
-                    } else if (payload.sessionState === 'running' && !isStreamingRef.current) {
-                        // Session is running but we haven't received any streaming events yet.
-                        // This happens when a Tab connects mid-flight (e.g., IM session in progress)
-                        // and receives a replayed chat:status → "running" from the SSE last-value cache.
-                        // Set isLoading so the UI shows the loading state instead of action buttons.
+                    } else if (
+                        (payload.sessionState === 'running' || payload.sessionState === 'starting')
+                        && !isStreamingRef.current
+                    ) {
+                        // Session is busy (subprocess starting up or actively
+                        // processing) but we haven't received any streaming
+                        // events yet. This happens when a Tab connects
+                        // mid-flight (e.g., IM session in progress) and
+                        // receives a replayed chat:status from the SSE
+                        // last-value cache, or during the (issue #174)
+                        // startup-timeout window where the SDK subprocess is
+                        // alive but system_init hasn't arrived. Set isLoading
+                        // so the UI shows the loading state instead of action
+                        // buttons; the 'starting' branch lets MessageList
+                        // render a distinct "AI 启动中" hint.
                         setIsLoading(true);
                     }
                 }
@@ -3304,15 +3385,32 @@ export default function TabProvider({
         }
     }, [pendingAskUserQuestion, postJson]);
 
-    // Respond to ExitPlanMode request (keep card visible with resolved status)
-    const respondExitPlanMode = useCallback(async (approved: boolean) => {
-        if (!pendingExitPlanMode) return;
+    // Respond to ExitPlanMode request (keep card visible with resolved status).
+    // `feedback` (issue #182): user's 「修改意见」 — only meaningful on reject.
+    //
+    // Returns `true` on success and `false` on failure (network error or
+    // `{success:false}` body). We do an optimistic state flip before the POST
+    // for UI responsiveness, then roll back on failure so the user can retry
+    // their feedback — review-by-codex caught that without the rollback the
+    // card would lock into "已拒绝" while the SDK's pendingExitPlanMode entry
+    // hung waiting for a response that never arrives.
+    const respondExitPlanMode = useCallback(async (approved: boolean, feedback?: string): Promise<boolean> => {
+        if (!pendingExitPlanMode) return false;
+        const snapshot = pendingExitPlanMode;
         const requestId = pendingExitPlanMode.requestId;
         setPendingExitPlanMode(prev => prev ? { ...prev, resolved: approved ? 'approved' : 'rejected' } : null);
         try {
-            await postJson('/api/exit-plan-mode/respond', { requestId, approved });
+            const res = await postJson<{ success?: boolean }>('/api/exit-plan-mode/respond', { requestId, approved, feedback });
+            if (res && res.success === false) {
+                console.error('[TabProvider] ExitPlanMode response rejected by backend');
+                setPendingExitPlanMode(prev => prev && prev.requestId === requestId ? { ...snapshot } : prev);
+                return false;
+            }
+            return true;
         } catch (error) {
             console.error('[TabProvider] Failed to send ExitPlanMode response:', error);
+            setPendingExitPlanMode(prev => prev && prev.requestId === requestId ? { ...snapshot } : prev);
+            return false;
         }
     }, [pendingExitPlanMode, postJson]);
 
@@ -3359,6 +3457,7 @@ export default function TabProvider({
         loadSession,
         loadOlderMessages,
         resetSession,
+        adoptMigratedSession,
         // Tab-scoped API functions
         apiGet: apiGetJson,
         apiPost: postJson,
@@ -3374,7 +3473,7 @@ export default function TabProvider({
     }), [
         tabId, agentDir, currentSessionId, messages, historyMessages, streamingMessage, firstItemIndex, hasMoreBefore, isLoading, isSessionLoading, sessionState, sessionRuntime, sessionMeta,
         logs, unifiedLogs, systemInitInfo, agentError, systemStatus, lastTerminalReason, pendingPermission, pendingAskUserQuestion, pendingExitPlanMode, pendingEnterPlanMode, toolCompleteCount, queuedMessages, isConnected,
-        setMessages, appendLog, appendUnifiedLog, clearUnifiedLogs, sendMessage, stopResponse, loadSession, loadOlderMessages, resetSession,
+        setMessages, appendLog, appendUnifiedLog, clearUnifiedLogs, sendMessage, stopResponse, loadSession, loadOlderMessages, resetSession, adoptMigratedSession,
         apiGetJson, postJson, apiPutJson, apiDeleteJson, respondPermission, respondAskUserQuestion, respondExitPlanMode, cancelQueuedMessage, forceExecuteQueuedMessage
     ]);
 

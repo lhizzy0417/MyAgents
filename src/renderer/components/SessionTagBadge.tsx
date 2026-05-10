@@ -37,8 +37,12 @@ export default function SessionTagBadge({ tag }: { tag: SessionTag }) {
     const style = TAG_STYLES[tag.type] ?? TAG_STYLES.im;
     const label = tag.type === 'im' ? tag.platform : (TAG_LABELS[tag.type] ?? tag.type);
 
+    // `leading-none` collapses the badge's line-box to its glyph height so
+    // `items-center` in the parent (Chat header / history row) centers the
+    // pill against the 14px title's optical baseline rather than against a
+    // taller default line-box that would visually float the pill upward.
     return (
-        <span className={`inline-flex shrink-0 items-center gap-1 rounded-full px-1.5 py-0.5 text-[10px] font-medium ${style.text} ${style.bg}`}>
+        <span className={`inline-flex shrink-0 items-center gap-1 rounded-full px-1.5 py-[3px] text-[10px] font-medium leading-none ${style.text} ${style.bg}`}>
             <span className={`inline-block h-1.5 w-1.5 rounded-full ${style.dot}`} />
             {label}
         </span>

@@ -255,7 +255,10 @@ export async function generateTitleExternal(
   workspacePath: string,
 ): Promise<string | null> {
   const startTime = Date.now();
-  const titleSessionId = `title-${randomUUID()}`;
+  // Plain UUID — Claude Code CLI rejects `--session-id <non-uuid>` with
+  // "Invalid session ID. Must be a valid UUID." A `title-` prefix would tank
+  // every CC title-gen call. Logs are already tagged with `[title-generator]`.
+  const titleSessionId = randomUUID();
   const userPrompt = buildUserPrompt(rounds);
 
   let runtime: AgentRuntime;

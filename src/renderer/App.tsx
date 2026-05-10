@@ -12,7 +12,6 @@ import { useToast } from '@/components/Toast';
 import { useUpdater } from '@/hooks/useUpdater';
 import { useTrayEvents } from '@/hooks/useTrayEvents';
 import { useHelperAgentModelDefaults } from '@/hooks/useHelperAgentModelDefaults';
-import { notifyCronTaskComplete } from '@/services/notificationService';
 import { useConfig } from '@/hooks/useConfig';
 import { useThemeEffect } from '@/hooks/useTheme';
 import { useTabSwipeGesture } from '@/hooks/useTabSwipeGesture';
@@ -2342,13 +2341,6 @@ export default function App() {
       // Cmd+W bottom: overlay → split → tab → launcher → STOP.
       closeCurrentTab(); // Last tab auto-creates launcher; launcher is a no-op.
     },
-    onNavigateToTab: (tabId: string) => {
-      // Verify the tab still exists before switching
-      const exists = tabsRef.current.some(t => t.id === tabId);
-      if (exists) {
-        handleSelectTab(tabId);
-      }
-    },
     onExitRequested: async () => {
       // Check for running cron tasks
       try {
@@ -2373,22 +2365,31 @@ export default function App() {
     },
   });
 
-  // Listen for cron task notifications from Rust (notification:show)
-  // Store tabId as pending navigation so focus-regain auto-switches to the tab
+  // Listen for notification clicks. Rust emits this from two paths:
+  // - Windows: directly from the WinRT toast `Activated` callback
+  // - macOS / Linux: when the front-end calls `cmd_consume_notification_click`
+  //   on focus-regain (handled inside `useTrayEvents`)
+  // Both converge here so tab routing has one entry point.
   useEffect(() => {
     if (!isTauriEnvironment()) return;
     const ac = new AbortController();
-    void listenWithCleanup<{ title: string; body: string; tabId?: string | null }>(
-      'notification:show',
+    void listenWithCleanup<{ tabId: string }>(
+      'notification:click',
       (event) => {
-        const { title, body, tabId } = event.payload;
-        // Send actual OS notification (Rust only emits the event, doesn't send OS notification)
-        notifyCronTaskComplete(title, body, tabId ?? undefined);
+        const { tabId } = event.payload;
+        if (!tabId) return;
+        const exists = tabsRef.current.some((t) => t.id === tabId);
+        if (exists) {
+          console.log('[App] notification:click → handleSelectTab', tabId);
+          handleSelectTab(tabId);
+        } else {
+          console.warn('[App] notification:click for missing tab:', tabId);
+        }
       },
       ac.signal,
     );
     return () => ac.abort();
-  }, []);
+  }, [handleSelectTab]);
 
   return (
     <div className="flex h-screen flex-col bg-[var(--paper)]">

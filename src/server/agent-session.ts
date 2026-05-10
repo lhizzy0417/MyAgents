@@ -51,6 +51,7 @@ import { getCurrentRuntimeType, isExternalRuntime } from './runtimes/factory';
 import type { ImagePayload } from './runtimes/types';
 import { imEventBus, type ImEventType } from './utils/im-event-bus';
 import { imRequestRegistry } from './utils/im-request-registry';
+import { mirrorIfChannelBound, type MirrorImage } from './utils/im-mirror';
 
 // Module-level debug mode check (avoids repeated environment variable access)
 const isDebugMode = process.env.DEBUG === '1' || process.env.NODE_ENV === 'development';
@@ -360,7 +361,13 @@ export function syncProjectUserConfig(projectDir: string): void {
   }
 }
 
-type SessionState = 'idle' | 'running' | 'error';
+// (issue #174) `starting` separates "subprocess launched, awaiting system_init"
+// from "AI actively processing a turn". Without it, the 60s→600s adaptive
+// startup-timeout window looks identical to a normal busy turn in the UI:
+// user can't tell if the SDK is stuck in MCP handshake / first-time workspace
+// init or doing real work, and after up to 10 minutes the only signal is the
+// timeout-error toast. `starting` → `running` when system_init arrives.
+type SessionState = 'idle' | 'starting' | 'running' | 'error';
 
 // Permission mode types - UI values
 export type PermissionMode = 'auto' | 'plan' | 'fullAgency' | 'custom';
@@ -654,8 +661,105 @@ type InFlightMetadata = {
   messageText: string;
   attachments?: MessageWire['attachments'];
   requestId?: string;
+  /** PRD 0.2.14 — propagated from `enqueueUserMessage(metadata)` so the
+   *  delayed-resolve push sites (queued_command replay / queue:started
+   *  fallback) can decide whether this user message should mirror to a
+   *  bound IM channel. Only `'desktop'` triggers mirror. */
+  source?: SessionSource;
+  /** PRD 0.2.14 — base64 image payloads forwarded for mirror purposes.
+   *  Lives alongside `attachments` (which is on-disk paths) because the
+   *  Sidecar→management-API mirror call needs raw bytes inline. PNG/JPG
+   *  only at the call site; non-image payloads must not be queued here. */
+  mirrorImages?: MirrorImage[];
 };
 let inFlightMetadata: InFlightMetadata | null = null;
+
+// ===== Desktop → IM mirror state (PRD 0.2.14 Phase C) =====
+//
+// `currentTurnMirrorEnabled` is set when a desktop user message is finalized
+// (any of three push sites in this file) and cleared when the AI turn ends or
+// is aborted. While it's true, `content_block_stop` for text blocks fires a
+// mirror call with the accumulated block text.
+//
+// `pendingTextBlockTexts` accumulates `text_delta` per stream index so we
+// can ship a complete block text at content_block_stop. Cleared with the
+// flag at turn boundaries.
+let currentTurnMirrorEnabled = false;
+let currentTurnMirrorSessionId: string | null = null;
+const pendingTextBlockTexts: Map<number, string> = new Map();
+
+function clearMirrorState(): void {
+  currentTurnMirrorEnabled = false;
+  currentTurnMirrorSessionId = null;
+  pendingTextBlockTexts.clear();
+}
+
+function maybeAccumulateMirrorChunk(index: number, chunk: string): void {
+  if (!currentTurnMirrorEnabled) return;
+  const prev = pendingTextBlockTexts.get(index) ?? '';
+  pendingTextBlockTexts.set(index, prev + chunk);
+}
+
+/** Fire-and-forget user-side mirror. Caller decides whether to invoke based on
+ *  metadata.source — this helper is the single source of formatting + transport. */
+function fireDesktopUserMirror(content: string, images: MirrorImage[] | undefined): void {
+  // Only fire if there's a chance an IM channel is bound. Rust silently
+  // no-ops if not, but skipping the round-trip when content is trivially
+  // empty avoids needless network chatter.
+  if (!content && (!images || images.length === 0)) return;
+  currentTurnMirrorEnabled = true;
+  currentTurnMirrorSessionId = sessionId;
+  void mirrorIfChannelBound({
+    sessionId,
+    role: 'user',
+    text: content,
+    images,
+  });
+}
+
+/** Fire-and-forget assistant text-block mirror. Called from content_block_stop.
+ *  The session id captured at user-message time guards against turn boundary
+ *  drift (resetSession during a streaming turn). */
+function fireDesktopAssistantBlockMirror(text: string): void {
+  if (!text) return;
+  if (!currentTurnMirrorEnabled) return;
+  const sid = currentTurnMirrorSessionId ?? sessionId;
+  void mirrorIfChannelBound({
+    sessionId: sid,
+    role: 'assistant',
+    text,
+  });
+}
+
+/** Convert ImagePayload[] to MirrorImage[] keeping only PNG/JPG (Q5 lockdown). */
+// Pre-validation cap MUST stay in sync with Rust's
+// `MIRROR_IMAGE_MAX_BYTES = 5MB` in management_api.rs (and its
+// `MIRROR_IMAGE_MAX_BASE64_LEN` derivation). Base64 with padding inflates
+// to `4 * ceil(bytes / 3)` chars — using a strict `Math.ceil(bytes/3)*4`
+// formula matches Rust's exact bound, plus the same 64-char slack for any
+// trailing whitespace/newlines. Without this alignment, the Node check is
+// off by 1 char at the boundary and would reject a 5 MiB image that Rust
+// would still accept (review-by-codex F4). Cap on the *encoded* length so
+// the guard is O(1) without decoding.
+const MIRROR_IMAGE_MAX_BYTES = 5 * 1024 * 1024;
+const MIRROR_IMAGE_MAX_BASE64_CHARS = Math.ceil(MIRROR_IMAGE_MAX_BYTES / 3) * 4 + 64;
+
+function toMirrorImages(images: ImagePayload[] | undefined): MirrorImage[] | undefined {
+  if (!images || images.length === 0) return undefined;
+  const out: MirrorImage[] = [];
+  for (const img of images) {
+    const mime = img.mimeType.toLowerCase();
+    if (mime !== 'image/png' && mime !== 'image/jpeg' && mime !== 'image/jpg') continue;
+    if (img.data.length > MIRROR_IMAGE_MAX_BASE64_CHARS) {
+      console.warn(
+        `[mirror] dropping oversize image: mime=${mime} base64Len=${img.data.length} cap=${MIRROR_IMAGE_MAX_BASE64_CHARS}`,
+      );
+      continue;
+    }
+    out.push({ mimeType: img.mimeType, dataBase64: img.data });
+  }
+  return out.length > 0 ? out : undefined;
+}
 let isApiRetrying = false;  // Track api_retry state to clear when streaming resumes
 const messages: MessageWire[] = [];
 // Pattern 3 §3.2.4 — incremental persistence cursor.
@@ -752,6 +856,18 @@ const PRE_WARM_MAX_RETRIES = 3;
 // (SDK CLI needs first stdin message before system_init, which never comes for Global Sidecar)
 let preWarmDisabled = false;
 let systemInitInfo: SystemInitInfo | null = null;
+// `sdkControlReady` is the "subprocess fully ready" signal — separate from
+// `system_init`. The SDK CLI's `system/init` is yielded LATE in QueryEngine.submitMessage
+// (after fetchSystemPromptParts → processUserInput → recordTranscript → loadAllPlugins),
+// so it's per-turn metadata, NOT a "boot complete" handshake. By contrast,
+// `Query.initializationResult()` resolves as soon as the subprocess processes the
+// `subtype: "initialize"` control_request — typically <1s after spawn (Codex repro:
+// resolved at +337ms). We track that separately so the UI can distinguish:
+//   subprocess still booting       → 'AI 启动中'   (sdkControlReady=false)
+//   subprocess ready, turn running → '思考中…'    (sdkControlReady=true)
+// Reset to false on any session restart (abort / switchToSession / config-change reload),
+// re-set to true when the next pre-warm's initializationResult resolves.
+let sdkControlReady = false;
 type MessageQueueItem = {
   id: string;                     // Unique queue item ID
   message: SDKUserMessage['message'];
@@ -1185,6 +1301,7 @@ async function handleQueuedCommandReplay(
     timestamp: new Date().toISOString(),
     attachments: meta?.attachments,
     sdkUuid: sdkMessage.uuid,
+    metadata: meta?.source ? { source: meta.source } : undefined,
   };
   messages.push(userMessage);
   if (sdkMessage.uuid) {
@@ -1192,6 +1309,11 @@ async function handleQueuedCommandReplay(
     liveSessionUuids.add(sdkMessage.uuid);
   }
   await persistMessagesToStorage();
+
+  // PRD 0.2.14 — desktop → IM mirror (queued mid-turn replay path).
+  if (meta?.source === 'desktop') {
+    fireDesktopUserMirror(userMessage.content as string, meta.mirrorImages);
+  }
 
   console.log(`[agent] queued_command replay consumed by AI: queueId=${queueId}`);
   broadcast('queue:started', {
@@ -2641,11 +2763,19 @@ function getPermissionRules(mode: PermissionMode): PermissionRules {
 const sessionAlwaysAllowed = new Set<string>();
 
 // Pending permission requests waiting for user response
+//
+// No wall-clock timeout — matches Claude Code (the CLI reference) which never
+// times out user-facing prompts. The user's mental model is "AI is waiting for
+// me," so the modal must survive arbitrary AFK time. Cleanup happens on the
+// real boundaries: SDK abort signal (onAbort handler), session reset/switch/
+// fork (clearSessionPermissions), or sidecar process exit. The 10-minute
+// hard timeout was removed in v0.2.14 — its only original purpose (PRD #131
+// "Unknown request" desync) is already covered by the abort-driven `:expired`
+// broadcast.
 const pendingPermissions = new Map<string, {
   resolve: (decision: 'allow' | 'deny') => void;
   toolName: string;
   input: unknown;
-  timer: ReturnType<typeof setTimeout>;  // Timer reference for cleanup
 }>();
 
 // AskUserQuestion types - import from shared
@@ -2656,25 +2786,29 @@ export type { AskUserQuestionInput, AskUserQuestion, AskUserQuestionOption } fro
 import type { ExitPlanModeAllowedPrompt } from '../shared/types/planMode';
 export type { ExitPlanModeRequest, EnterPlanModeRequest, ExitPlanModeAllowedPrompt } from '../shared/types/planMode';
 
-// Pending AskUserQuestion requests waiting for user response
+// Pending AskUserQuestion requests waiting for user response.
+// See pendingPermissions comment — no wall-clock timeout (v0.2.14).
 const pendingAskUserQuestions = new Map<string, {
   resolve: (answers: Record<string, string> | null) => void;
   input: AskUserQuestionInput;
-  timer: ReturnType<typeof setTimeout>;
 }>();
 
-// Pending ExitPlanMode requests waiting for user approval
+// Pending ExitPlanMode requests waiting for user approval.
+// See pendingPermissions comment — no wall-clock timeout (v0.2.14).
+// `feedback` carries the user's optional 「修改意见」 — when present on a
+// rejection, canUseTool sends it back to the model via deny.message so the
+// AI can revise the plan in the same turn (issue #182).
+type ExitPlanModeResolution = { approved: boolean; feedback?: string };
 const pendingExitPlanMode = new Map<string, {
-  resolve: (approved: boolean) => void;
+  resolve: (result: ExitPlanModeResolution) => void;
   plan?: string;
   allowedPrompts?: ExitPlanModeAllowedPrompt[];
-  timer: ReturnType<typeof setTimeout>;
 }>();
 
-// Pending EnterPlanMode requests waiting for user approval
+// Pending EnterPlanMode requests waiting for user approval.
+// See pendingPermissions comment — no wall-clock timeout (v0.2.14).
 const pendingEnterPlanMode = new Map<string, {
   resolve: (approved: boolean) => void;
-  timer: ReturnType<typeof setTimeout>;
 }>();
 
 /**
@@ -2732,24 +2866,10 @@ async function handleAskUserQuestion(
     previewFormat: 'html',
   });
 
-  // Wait for user response or abort
+  // Wait for user response or abort. No wall-clock timeout — see the
+  // pendingAskUserQuestions Map declaration for why.
   return new Promise((resolve, reject) => {
-    // Timeout after 10 minutes (user needs time to think)
-    const timer = setTimeout(() => {
-      if (pendingAskUserQuestions.has(requestId)) {
-        cleanup();
-        console.warn('[AskUserQuestion] Timed out after 10 minutes');
-        // PRD #131 — broadcast lifecycle expiry so the frontend modal
-        // gets cleared. Without this, the user could still click Submit
-        // / Cancel after timeout, hitting the "Unknown request" path on
-        // the backend (issue #131 Bug 3 desync).
-        broadcast('ask-user-question:expired', { requestId, reason: 'timeout' });
-        resolve(null);
-      }
-    }, 10 * 60 * 1000);
-
     const cleanup = () => {
-      clearTimeout(timer);
       pendingAskUserQuestions.delete(requestId);
       signal?.removeEventListener('abort', onAbort);
     };
@@ -2777,7 +2897,7 @@ async function handleAskUserQuestion(
     // Listen for SDK abort signal
     signal?.addEventListener('abort', onAbort);
 
-    pendingAskUserQuestions.set(requestId, { resolve, input: questionInput, timer });
+    pendingAskUserQuestions.set(requestId, { resolve, input: questionInput });
   });
 }
 
@@ -2796,8 +2916,6 @@ export function handleAskUserQuestionResponse(
     return false;
   }
 
-  // Clear the timeout timer to prevent memory leak
-  clearTimeout(pending.timer);
   pendingAskUserQuestions.delete(requestId);
 
   if (answers === null) {
@@ -2812,12 +2930,15 @@ export function handleAskUserQuestionResponse(
 }
 
 /**
- * Handle ExitPlanMode tool - AI submits a plan for user review
+ * Handle ExitPlanMode tool - AI submits a plan for user review.
+ * Returns {approved, feedback?}: feedback is the user's optional rejection
+ * comment, used by canUseTool to construct a deny message routed back to
+ * the model so it can revise the plan in the same turn (issue #182).
  */
 async function handleExitPlanMode(
   input: unknown,
   signal?: AbortSignal
-): Promise<boolean> {
+): Promise<ExitPlanModeResolution> {
   console.log('[ExitPlanMode] Requesting user approval');
 
   const obj = (input && typeof input === 'object' ? input : {}) as Record<string, unknown>;
@@ -2835,19 +2956,9 @@ async function handleExitPlanMode(
 
   broadcast('exit-plan-mode:request', { requestId, plan, allowedPrompts });
 
+  // No wall-clock timeout — see pendingExitPlanMode Map declaration.
   return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => {
-      if (pendingExitPlanMode.has(requestId)) {
-        cleanup();
-        console.warn('[ExitPlanMode] Timed out after 10 minutes');
-        // PRD #131 — see handleAskUserQuestion for rationale.
-        broadcast('exit-plan-mode:expired', { requestId, reason: 'timeout' });
-        resolve(false);
-      }
-    }, 10 * 60 * 1000);
-
     const cleanup = () => {
-      clearTimeout(timer);
       pendingExitPlanMode.delete(requestId);
       signal?.removeEventListener('abort', onAbort);
     };
@@ -2864,21 +2975,27 @@ async function handleExitPlanMode(
     };
 
     signal?.addEventListener('abort', onAbort);
-    pendingExitPlanMode.set(requestId, { resolve, plan, allowedPrompts, timer });
+    pendingExitPlanMode.set(requestId, { resolve, plan, allowedPrompts });
   });
 }
 
 /**
- * Handle user's ExitPlanMode response from frontend
+ * Handle user's ExitPlanMode response from frontend.
+ * `feedback` is forwarded only on rejection (issue #182): when set, the
+ * model receives it as the deny message and continues the same turn to
+ * revise the plan; when empty, behavior matches the legacy reject path.
  */
-export function handleExitPlanModeResponse(requestId: string, approved: boolean): boolean {
-  console.debug(`[ExitPlanMode] handleResponse: requestId=${requestId}, approved=${approved}`);
+export function handleExitPlanModeResponse(
+  requestId: string,
+  approved: boolean,
+  feedback?: string,
+): boolean {
+  console.debug(`[ExitPlanMode] handleResponse: requestId=${requestId}, approved=${approved}, hasFeedback=${!!feedback}`);
   const pending = pendingExitPlanMode.get(requestId);
   if (!pending) {
     console.warn(`[ExitPlanMode] Unknown request: ${requestId}`);
     return false;
   }
-  clearTimeout(pending.timer);
   pendingExitPlanMode.delete(requestId);
   // Restore currentPermissionMode so applySessionConfig won't override SDK's internal state
   if (approved && prePlanPermissionMode) {
@@ -2888,7 +3005,8 @@ export function handleExitPlanModeResponse(requestId: string, approved: boolean)
     // Notify frontend that mode changed (plan → auto/custom/etc.)
     broadcast('chat:permission-mode-changed', { permissionMode: currentPermissionMode });
   }
-  pending.resolve(approved);
+  const trimmed = feedback?.trim();
+  pending.resolve({ approved, feedback: !approved && trimmed ? trimmed : undefined });
   return true;
 }
 
@@ -2910,19 +3028,9 @@ async function handleEnterPlanMode(
 
   broadcast('enter-plan-mode:request', { requestId });
 
+  // No wall-clock timeout — see pendingEnterPlanMode Map declaration.
   return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => {
-      if (pendingEnterPlanMode.has(requestId)) {
-        cleanup();
-        console.warn('[EnterPlanMode] Timed out after 10 minutes');
-        // PRD #131 — see handleAskUserQuestion for rationale.
-        broadcast('enter-plan-mode:expired', { requestId, reason: 'timeout' });
-        resolve(false);
-      }
-    }, 10 * 60 * 1000);
-
     const cleanup = () => {
-      clearTimeout(timer);
       pendingEnterPlanMode.delete(requestId);
       signal?.removeEventListener('abort', onAbort);
     };
@@ -2939,7 +3047,7 @@ async function handleEnterPlanMode(
     };
 
     signal?.addEventListener('abort', onAbort);
-    pendingEnterPlanMode.set(requestId, { resolve, timer });
+    pendingEnterPlanMode.set(requestId, { resolve });
   });
 }
 
@@ -2953,7 +3061,6 @@ export function handleEnterPlanModeResponse(requestId: string, approved: boolean
     console.warn(`[EnterPlanMode] Unknown request: ${requestId}`);
     return false;
   }
-  clearTimeout(pending.timer);
   pendingEnterPlanMode.delete(requestId);
   // Sync currentPermissionMode so applySessionConfig won't override SDK's plan mode
   if (approved) {
@@ -3046,19 +3153,10 @@ async function checkToolPermission(
   // Forward to IM event bus (subscribers route per-requestId for interactive approval cards)
   emitImEvent('permission-request', JSON.stringify({ requestId, toolName, input: inputPreview }));
 
-  // Wait for user response or abort
+  // Wait for user response or abort. No wall-clock timeout — see the
+  // pendingPermissions Map declaration for why.
   return new Promise((resolve, reject) => {
-    // Timer is declared before cleanup (same pattern as handleAskUserQuestion) so cleanup can clear it
-    const timer = setTimeout(() => {
-      if (pendingPermissions.has(requestId)) {
-        cleanup();
-        console.warn(`[permission] ${toolName}: timed out after 10 minutes, denying`);
-        resolve('deny');
-      }
-    }, 10 * 60 * 1000);
-
     const cleanup = () => {
-      clearTimeout(timer);
       pendingPermissions.delete(requestId);
       signal?.removeEventListener('abort', onAbort);
     };
@@ -3074,7 +3172,7 @@ async function checkToolPermission(
     // Listen for SDK abort signal
     signal?.addEventListener('abort', onAbort);
 
-    pendingPermissions.set(requestId, { resolve, toolName, input, timer });
+    pendingPermissions.set(requestId, { resolve, toolName, input });
   });
 }
 
@@ -3093,8 +3191,6 @@ export function handlePermissionResponse(
     return false;
   }
 
-  // Clear the timeout timer to prevent memory leak
-  clearTimeout(pending.timer);
   pendingPermissions.delete(requestId);
 
   if (decision === 'deny') {
@@ -3117,7 +3213,6 @@ export function handlePermissionResponse(
     for (const [otherId, otherPending] of pendingPermissions) {
       if (otherPending.toolName === pending.toolName) {
         console.log(`[permission] ${otherPending.toolName}: cascade auto-approved (requestId=${otherId})`);
-        clearTimeout(otherPending.timer);
         pendingPermissions.delete(otherId);
         otherPending.resolve('allow');
       }
@@ -3128,50 +3223,75 @@ export function handlePermissionResponse(
 }
 
 /**
- * Clear session permission state (call when session ends).
+ * Drain every pending interactive request map.
  *
- * Pattern 1 cleanup contract: every pending request map holds (timer, resolve).
- * If we just `.clear()` the maps, the timers fire later (logging stale state)
- * and the resolve callbacks never run — leaving the SDK / tool turn waiting
- * forever for a decision that will never come. We must:
- *   1. clearTimeout each entry's timer
- *   2. resolve each waiter with a "denied / cancelled" outcome
- *      (deny for permission-style, null/false for question/plan-mode —
- *       matches the timeout fallback paths above)
+ * Why this exists (v0.2.14 — Codex review): once the per-entry 10-minute
+ * timeout was removed, only two paths cleaned up pending entries — the
+ * SDK abort signal (`onAbort` in each handler, broadcasts `:expired` and
+ * rejects) and `clearSessionPermissions`. The SDK abort path covers
+ * "session was cleanly torn down by interrupt()", but it does NOT cover:
+ *   1. SDK subprocess crash / error before `signal.abort` fires
+ *      (the runStreamingSession `finally` block runs this drain).
+ *   2. UI-triggered `resetSession` that clears via `clearSessionPermissions`
+ *      while the renderer still has history visible — `chat:init`'s
+ *      `clearInteractiveState` is gated on `historyMessages.length === 0`
+ *      (TabProvider.tsx:973), so a non-empty history would leave the modal
+ *      painted with no backend entry to respond to → "Unknown request"
+ *      desync (PRD #131).
  *
- * Called from session reset / switch / fork / rewind paths.
+ * Mirrors `external-session.ts::drainPendingInteractiveRequestsAsExpired`.
+ * For Ask/ExitPlan/EnterPlan we broadcast the matching `:expired` event so
+ * the frontend modal clears even when the chat:init guard skips the
+ * unconditional clear. For permission requests we skip the broadcast —
+ * there is no `permission:expired` channel; pendingPermission is cleared
+ * via the chat:init / clearInteractiveState path on SSE reconnect, and
+ * adding a new SSE event type just for cross-coverage is out of scope.
+ *
+ * `reason` is forwarded into the `:expired` payload so future telemetry /
+ * UX messaging can distinguish reset-driven vs crash-driven expiry. The
+ * frontend currently ignores it.
  */
-export function clearSessionPermissions(): void {
-  // Permission requests: resolve with 'deny' so any awaiting tool call
-  // surfaces as denied (the same behaviour as the per-entry 10-min timeout).
+function drainPendingInteractiveRequests(reason: 'reset' | 'session-end'): void {
+  // Permission: resolve with 'deny' so any awaiting tool call surfaces as
+  // denied. No `:expired` broadcast (see helper docstring).
   for (const [, p] of pendingPermissions) {
-    clearTimeout(p.timer);
     try { p.resolve('deny'); } catch { /* swallow — never propagate from cleanup */ }
   }
   pendingPermissions.clear();
 
-  // Ask-user-question: resolve with null (matches timeout path) → tool sees
-  // "user did not answer" and degrades gracefully.
-  for (const [, q] of pendingAskUserQuestions) {
-    clearTimeout(q.timer);
+  // Ask-user-question: broadcast :expired then resolve(null). Order matters
+  // only for tests — the tool turn is going away regardless.
+  for (const [requestId, q] of pendingAskUserQuestions) {
+    try { broadcast('ask-user-question:expired', { requestId, reason }); } catch { /* swallow */ }
     try { q.resolve(null); } catch { /* swallow */ }
   }
   pendingAskUserQuestions.clear();
 
-  // Plan-mode entries resolve with `false` (mirrors the per-entry timeout
-  // semantics — request was not approved).
-  for (const [, p] of pendingExitPlanMode) {
-    clearTimeout(p.timer);
-    try { p.resolve(false); } catch { /* swallow */ }
+  // Plan-mode entries resolve with `{approved: false}` (request was not approved).
+  for (const [requestId, p] of pendingExitPlanMode) {
+    try { broadcast('exit-plan-mode:expired', { requestId, reason }); } catch { /* swallow */ }
+    try { p.resolve({ approved: false }); } catch { /* swallow */ }
   }
   pendingExitPlanMode.clear();
 
-  for (const [, p] of pendingEnterPlanMode) {
-    clearTimeout(p.timer);
+  for (const [requestId, p] of pendingEnterPlanMode) {
+    try { broadcast('enter-plan-mode:expired', { requestId, reason }); } catch { /* swallow */ }
     try { p.resolve(false); } catch { /* swallow */ }
   }
   pendingEnterPlanMode.clear();
+}
 
+/**
+ * Clear session permission state on user-initiated session reset.
+ *
+ * Only call site: `resetSession()` (this file, ~L5298). Fork / switch /
+ * rewind paths rely on `abortPersistentSession()` → SDK `interrupt()` →
+ * canUseTool `signal.abort` → per-handler `onAbort` cleanup, which is the
+ * canonical SDK-driven teardown path. (CC review noted the prior JSDoc's
+ * "switch/fork/rewind" claim was untrue.)
+ */
+export function clearSessionPermissions(): void {
+  drainPendingInteractiveRequests('reset');
   sessionAlwaysAllowed.clear();
   prePlanPermissionMode = null;
 }
@@ -4549,8 +4669,13 @@ function handleMessageComplete(): void {
         content: meta.messageText,
         timestamp: new Date().toISOString(),
         attachments: meta.attachments,
+        metadata: meta.source ? { source: meta.source } : undefined,
       };
       messages.push(userMessage);
+      // PRD 0.2.14 — desktop → IM mirror (queue:started fallback path).
+      if (meta.source === 'desktop') {
+        fireDesktopUserMirror(meta.messageText, meta.mirrorImages);
+      }
       console.log(`[agent] queue:started fallback at turn-end (no mid-turn replay), queueId=${stale}`);
       broadcast('queue:started', {
         queueId: stale,
@@ -4607,6 +4732,9 @@ function handleMessageComplete(): void {
     imRequestRegistry.setStatus(completedReq, 'completed');
     imRequestRegistry.unregister(completedReq);
   }
+  // PRD 0.2.14 — desktop turn ended; release mirror state so the next
+  // (possibly IM-driven) turn doesn't accidentally mirror through here.
+  clearMirrorState();
   // 跨回合状态清理（持久 session 下多回合共享同一个 for-await 循环）
   // SDK 的 stream event index 是 per-message 的，不同回合的 index 可能冲突
   streamIndexToToolId.clear();
@@ -4710,6 +4838,8 @@ function handleMessageStopped(): void {
     imRequestRegistry.setStatus(stoppedReq, 'completed');
     imRequestRegistry.unregister(stoppedReq);
   }
+  // PRD 0.2.14 — desktop turn stopped; release mirror state.
+  clearMirrorState();
   // 跨回合状态清理（与 handleMessageComplete 保持一致）
   streamIndexToToolId.clear();
   streamIndexToBlockType.clear();
@@ -4772,6 +4902,8 @@ function handleMessageError(error: string): void {
     imRequestRegistry.setStatus(failedReq, 'failed');
     imRequestRegistry.unregister(failedReq);
   }
+  // PRD 0.2.14 — desktop turn errored out; release mirror state.
+  clearMirrorState();
   setSessionState('idle');
 
   // Don't persist expected termination signals as errors
@@ -5316,6 +5448,7 @@ export async function resetSession(): Promise<void> {
   pendingResumeSessionAt = undefined; // Prevent leaking rewind state to new session
   messageResolver = null;
   systemInitInfo = null; // Clear old system info so new session gets fresh init
+  sdkControlReady = false; // Subprocess gone — must re-confirm via initializationResult on next pre-warm
 
   // 4b. Keep currentAgentDefinitions — agents are workspace-level config, not session state.
   // Clearing them here causes a race: pre-warm fires before frontend re-syncs agents,
@@ -5438,6 +5571,7 @@ export async function initializeAgent(
   agentDir = nextAgentDir;
   hasInitialPrompt = Boolean(initialPrompt && initialPrompt.trim());
   systemInitInfo = null;
+  sdkControlReady = false;
 
   // Memoize session metadata for the whole initialization pass. Previously this
   // function called getSessionMetadata(initialSessionId) three times (at resume
@@ -5641,6 +5775,7 @@ export async function switchToSession(targetSessionId: string): Promise<boolean>
   messageResolver = null;
   setSessionState('idle');
   systemInitInfo = null;
+  sdkControlReady = false;
 
   // Clear SDK ready signal state
   _sdkReadyResolve = null;
@@ -5881,6 +6016,7 @@ export async function enqueueUserMessage(
       lastPersistedIndex = 0;
       persistedSessionMessageCache.length = 0;
       systemInitInfo = null;
+      sdkControlReady = false;
       console.log('[agent] Fresh session: third-party → Anthropic (signature incompatible)');
     }
 
@@ -5896,6 +6032,19 @@ export async function enqueueUserMessage(
     querySession = null;
     isProcessing = false;
     setSessionState('idle');
+    // CRITICAL (v0.2.14 dogfood): the abort above set shouldAbortSession=true
+    // to terminate the OLD pre-warmed session. Once awaitSessionTermination
+    // confirms the old session is gone, the flag has done its job — but
+    // leaving it set leaks across the next message. The user's freshly
+    // enqueued message (added below) gets scheduled into startStreamingSession
+    // via setTimeout(0); that function's pre-launch abort guard
+    // (`shouldAbortSession && !preWarm`) then fires "aborted pre-launch by
+    // stop during starting" and drains the just-enqueued message — exactly
+    // the silent-fail manifest in the dogfood log when the user changed
+    // their model from a third-party provider to Anthropic and sent a
+    // message in the same beat. Reset here, NOT after the message-enqueue
+    // below, so the guard sees a clean slate.
+    resetAbortFlag();
     // Explicit cancel — broadcasts queue:cancelled so frontend clears stale pills
     // before the new message (added below) fires queue:added. Without this, the UI
     // would show old pills as phantoms alongside the new one.
@@ -6022,7 +6171,24 @@ export async function enqueueUserMessage(
     clearTimeout(preWarmTimer);
     preWarmTimer = null;
   }
-  setSessionState('running');
+  // (issue #174 — refined per cross-bugfix 2026-05-10)
+  //
+  // 'starting' = SDK subprocess still booting → UI shows "AI 启动中（首次启动
+  //              可能较慢）" with the cold-start timer.
+  // 'running'  = subprocess ready, turn executing → UI shows "思考中…".
+  //
+  // Original judge `systemInitInfo ? 'running' : 'starting'` mislabels turns:
+  // streamed `system_init` is per-turn metadata (QueryEngine yields it AFTER
+  // processUserInput / skill loading), so a fully pre-warmed session running
+  // a slow first turn (notably /context, 14 internal turns of local
+  // computation, observed at 44s) sat in 'starting' for the entire turn.
+  // The pre-warm path already drove `Query.initializationResult()` to set
+  // `sdkControlReady` once the SDK control plane finished its initialize
+  // handshake, so use that as the actual subprocess-ready signal. Keep
+  // `systemInitInfo` as a fallback: if a session somehow received system_init
+  // without sdkControlReady having flipped (e.g., recovery paths that bypass
+  // pre-warm), the per-turn metadata still proves the subprocess is alive.
+  setSessionState((systemInitInfo || sdkControlReady) ? 'running' : 'starting');
 
   // Save images to disk and create attachment records
   const savedAttachments: MessageWire['attachments'] = [];
@@ -6226,6 +6392,8 @@ export async function enqueueUserMessage(
         messageText: trimmed,
         attachments: savedAttachments.length > 0 ? savedAttachments : undefined,
         requestId,
+        source: metadata?.source,
+        mirrorImages: toMirrorImages(images),
       };
       wakeGenerator(queueItem);
       console.log(`[agent] Message queued mid-turn (in-flight to CLI): queueId=${queueId} requestId=${requestId ?? '-'} text="${trimmed.slice(0, 50)}"`);
@@ -6289,6 +6457,17 @@ export async function enqueueUserMessage(
 
   // Persist messages to disk after adding user message
   await persistMessagesToStorage();
+
+  // PRD 0.2.14 — desktop → IM mirror (direct-send path, single push site).
+  // Q1·C: mirror the full user text + PNG/JPG attachments. Rust silently
+  // no-ops if no channel binding exists for this session.
+  if (metadata?.source === 'desktop') {
+    fireDesktopUserMirror(trimmed, toMirrorImages(images));
+  } else {
+    // New non-desktop turn — make sure stale mirror state from a prior
+    // desktop turn doesn't bleed into this AI response.
+    clearMirrorState();
+  }
 
   const queueItem: MessageQueueItem = {
     id: queueId,
@@ -6394,6 +6573,37 @@ export async function waitForSessionIdle(
 
 export async function interruptCurrentResponse(reason: CancelReason = 'user'): Promise<boolean> {
   if (!isTurnInFlight()) {
+    // (issue #174) Stop pressed during 'starting': the SDK subprocess is
+    // alive but system_init hasn't arrived (the for-await loop sees no
+    // assistant content yet, so isTurnInFlight is false). Without this
+    // branch the user's Stop button is a no-op for the up-to-10-minute
+    // startup-timeout window. Tear the subprocess down via the canonical
+    // abort path — same teardown the startup-timeout firer uses.
+    if (sessionState === 'starting') {
+      console.log(`[agent] Stop pressed during startup (reason=${reason}) — aborting persistent session`);
+      // Drain BEFORE abort so the cold-start path's queued first-message
+      // (enqueued by enqueueUserMessage just before the deferred
+      // startStreamingSession scheduled via setTimeout(0)) doesn't survive
+      // into a recovery session and silently re-execute. abortPersistentSession
+      // calls rescuePendingToQueue which only moves pendingMidTurnQueue items
+      // (empty during startup) — it doesn't touch messageQueue. Order
+      // matters: drain here, then abort sets shouldAbortSession so the
+      // pre-launch guard inside startStreamingSession bails out cleanly.
+      drainQueueWithCancellation();
+      abortPersistentSession();
+      // Cold-start race: if the deferred startStreamingSession setTimeout(0)
+      // hasn't fired yet, querySession is null and isProcessing is false,
+      // so the for-await finally block — the only path that flips
+      // sessionState back to 'idle' — will never run. Force the transition
+      // here so the UI returns to a sendable state immediately. (When a
+      // subprocess IS alive, abortPersistentSession's interrupt() drives
+      // the for-await loop to terminate and the existing finally block
+      // handles the idle transition; we'd be racing it, so skip.)
+      if (!querySession && !isProcessing) {
+        setSessionState('idle');
+      }
+      return true;
+    }
     // No active turn, but there might be orphaned queued messages.
     // Drain them and notify the frontend so the UI can recover.
     if (messageQueue.length > 0) {
@@ -6938,6 +7148,48 @@ export async function forkSession(assistantMessageId: string): Promise<{
 async function startStreamingSession(preWarm = false): Promise<void> {
   await awaitSessionTermination(10_000, 'startStreamingSession');
 
+  // (issue #174) Cold-start abort race: enqueueUserMessage schedules this
+  // function via setTimeout(0) after pushing to messageQueue. If the user
+  // presses Stop before the timer fires, interruptCurrentResponse's
+  // 'starting' branch sets shouldAbortSession=true and drains messageQueue —
+  // but the unconditional `shouldAbortSession = false` reset further down
+  // in this function would silently re-arm the launch. Bail out here
+  // instead. Pre-warm doesn't enter this race (it's not user-driven) so
+  // the guard is gated on !preWarm.
+  if (shouldAbortSession && !preWarm) {
+    // Defense-in-depth (v0.2.14 dogfood): differentiate the two paths that
+    // can arrive here:
+    //   * User-Stop path — interruptCurrentResponse('starting') drains
+    //     messageQueue BEFORE setting the abort flag, so the queue is
+    //     empty when we get here. No agent-error needed (the user pressed
+    //     Stop themselves; surfacing an error banner would be misleading).
+    //   * Stale-flag path — some upstream code path set shouldAbortSession=true
+    //     and forgot to reset before enqueuing the next user message
+    //     (the original v0.2.14 dogfood was the third-party→Anthropic
+    //     provider switch in enqueueUserMessage; that specific leak is now
+    //     fixed at the source, but this defense catches any future leaks).
+    //     Queue holds the user's just-enqueued message → without an
+    //     explicit error broadcast, the renderer sees the message-replay,
+    //     the queue:cancelled, and chat:status idle, but NO chat:agent-error
+    //     → the #183 retry banner doesn't fire and the user is left
+    //     wondering why their message vanished without a trace.
+    const droppedCount = messageQueue.length;
+    console.log(
+      `[agent] startStreamingSession: aborted pre-launch by stop during starting (droppedQueued=${droppedCount})`,
+    );
+    shouldAbortSession = false;
+    drainQueueWithCancellation();
+    if (droppedCount > 0) {
+      const errorMessage = '消息发送被中断，请重新发送';
+      lastAgentError = errorMessage;
+      broadcast('chat:agent-error', { message: errorMessage });
+    }
+    if (sessionState === 'starting') {
+      setSessionState('idle');
+    }
+    return;
+  }
+
   if (isProcessing || querySession) {
     return;
   }
@@ -6997,9 +7249,13 @@ async function startStreamingSession(preWarm = false): Promise<void> {
   streamIndexToBlockType.clear();
   imTextBlockIndices.clear();
 
-  // Don't broadcast 'running' during pre-warm — session is invisible to frontend
+  // (issue #174) Broadcast 'starting' (not 'running') here: the SDK subprocess
+  // has just been launched and system_init hasn't arrived yet. The for-await
+  // loop below transitions to 'running' once system_init lands. Pre-warm stays
+  // 'idle' as before — pre-warmed sessions are invisible to the UI until the
+  // first user message lifts them into the active path.
   if (!preWarm) {
-    setSessionState('running');
+    setSessionState('starting');
   }
 
   let resolveTermination: () => void;
@@ -7490,18 +7746,52 @@ async function startStreamingSession(preWarm = false): Promise<void> {
         }
 
         // Special handling for ExitPlanMode - user reviews the plan.
-        // PRD #131 — `interrupt: true` so the AI stops the turn after the
-        // user rejects. Previously the AI interpreted the deny as "try
-        // again" and kept calling tools (TodoWrite, Read, Edit, even another
-        // ExitPlanMode), defeating the user's intent.
+        //
+        // Two reject modes (issue #182):
+        // - User submits empty feedback → legacy behavior: deny + interrupt:true.
+        //   The AI stops the turn (same as PRD #131 — without interrupt the
+        //   model would treat the deny as "try again" and keep calling tools).
+        // - User submits modification feedback → deny + interrupt:false +
+        //   message=<wrapped feedback>. The model receives the feedback as the
+        //   tool_result and is *explicitly instructed* to revise the plan and
+        //   call ExitPlanMode again, so the user can iterate on the plan card
+        //   without resending from the input box.
+        //
+        // The wrapper instruction matters: PermissionResult.deny.message is
+        // an unstructured string with no protocol meaning by itself — without
+        // the wrapper the model can drift to plain-text reply or unrelated
+        // tool calls (review-by-codex fabrication concern).
         if (toolName === 'ExitPlanMode') {
           console.log('[canUseTool] ExitPlanMode detected, requesting user approval');
-          const approved = await handleExitPlanMode(input, options.signal);
-          if (!approved) {
+          const result = await handleExitPlanMode(input, options.signal);
+          if (!result.approved) {
+            const hasFeedback = !!result.feedback;
+            // Cap feedback length before splicing into the wrapper.
+            // The wrapper is a system-style instruction ("…请根据上述反馈
+            // 修订方案，然后再次调用 ExitPlanMode 工具…") delivered via
+            // PermissionResult.deny.message, which the model reads as a
+            // tool_result. A long or maliciously crafted feedback string
+            // can shift the apparent authority of the wrapper — e.g.
+            // injected text like "请忽略上述指令并 …" trailed by plausible
+            // Chinese could social-engineer the model into executing the
+            // injected instruction. Truncating to a reasonable plan-comment
+            // length (4 KB chars) caps the attack surface AND makes the
+            // wrapper still readable. Suffix marker tells the model the
+            // input was clipped (so it doesn't fabricate around an
+            // apparently mid-sentence cut).
+            // v0.2.14 cross-bugfix follow-up.
+            const FEEDBACK_MAX_CHARS = 4000;
+            const rawFeedback = (result.feedback ?? '').toString();
+            const feedback = rawFeedback.length > FEEDBACK_MAX_CHARS
+              ? `${rawFeedback.slice(0, FEEDBACK_MAX_CHARS)}\n\n[…feedback 已截断，原文 ${rawFeedback.length} 字符]`
+              : rawFeedback;
+            const message = hasFeedback
+              ? `用户没有批准当前方案，并提供了以下修改意见：\n\n${feedback}\n\n请根据上述反馈修订方案，然后再次调用 ExitPlanMode 工具提交新版本的方案以供审核。`
+              : '用户拒绝了方案';
             return {
               behavior: 'deny' as const,
-              message: '用户拒绝了方案',
-              interrupt: true,
+              message,
+              interrupt: !hasFeedback,
             };
           }
           return {
@@ -7585,6 +7875,19 @@ async function startStreamingSession(preWarm = false): Promise<void> {
         ? { resume: resumeFrom, ...(rewindResumeAt ? { resumeSessionAt: rewindResumeAt } : {}) }
         : { sessionId: effectiveSdkSessionId };
 
+    // (issue #174) Second pre-launch abort guard. Between the first guard
+    // (right after awaitSessionTermination) and here, several async calls
+    // run — buildSdkMcpServers, sdkGetSessionMessages, env/agent loading.
+    // A user Stop pressed in that window sets shouldAbortSession=true and
+    // drains messageQueue; without this second check we'd still spawn the
+    // SDK subprocess for nothing. Throwing keeps the surrounding try/catch +
+    // finally cleanup path single-source-of-truth — the catch below logs
+    // the abort sentinel without retrying, the finally restores state.
+    if (shouldAbortSession && !preWarm) {
+      console.log('[agent] startStreamingSession: aborted just before query() by stop during starting');
+      throw new Error('STARTUP_ABORTED_BY_STOP');
+    }
+
     try {
       querySession = query({
         prompt: promptGen,
@@ -7613,6 +7916,79 @@ async function startStreamingSession(preWarm = false): Promise<void> {
 
     console.log('[agent] session started');
     console.log('[agent] starting for-await loop on querySession');
+
+    // ── sdkControlReady tracking (subprocess-ready signal) ─────────────────
+    //
+    // The streamed `system_init` we wait for in the for-await loop below is
+    // emitted per-turn by QueryEngine.submitMessage() AFTER fetchSystemPromptParts
+    // → processUserInput → recordTranscript → loadAllPlugins (claude-code/src/
+    // QueryEngine.ts:540). For pre-warm sessions parked at messageGenerator's
+    // waitForMessage(), `system_init` therefore never arrives until the user's
+    // first message kicks off a turn — and worse, slow first turns (notably
+    // /context with num_turns=14 doing local context-usage computation) keep
+    // sessionState='starting' for the full turn duration, mislabeling normal
+    // execution as "AI 启动中（首次启动可能较慢）".
+    //
+    // `Query.initializationResult()` resolves on a different lifecycle event:
+    // the SDK's `subtype: "initialize"` control_request response, which fires
+    // as soon as the subprocess has loaded tools + done MCP handshakes. The F9
+    // (Query) constructor at sdk.mjs already kicks this off in `this.initialization
+    // = this.initialize()` — calling `initializationResult()` here just awaits
+    // the existing promise. Verified empirically with DEBUG_CLAUDE_AGENT_SDK=1:
+    // resolved at +337ms in a clean repro; in MyAgents production with project
+    // settings + playwright MCP the same handshake completes in ~3-5s.
+    //
+    // We use `sdkControlReady` as the gate for the "AI 启动中" UI hint
+    // (enqueueUserMessage near line 6118) so a fully-warmed subprocess running
+    // a slow turn shows '思考中…' instead of '启动中…'. `system_init` keeps its
+    // existing job: source of truth for sessionRegistered / sdkSessionId / tools
+    // / mcp_servers / `systemInitInfo`. Two signals, two purposes — don't merge.
+    //
+    // Fire-and-forget: the for-await loop below needs to start consuming SDK
+    // messages immediately. SDK-internal `readMessages()` (sdk.mjs F9 ctor)
+    // pumps control_responses into pendingControlResponses on its own — does
+    // NOT depend on the outer for-await — so awaiting here would not actually
+    // deadlock. Fire-and-forget is still preferred: this hop is purely a side
+    // signal for UI gating, blocking startStreamingSession's flow on it would
+    // serialize the for-await loop's startup behind it for no benefit.
+    //
+    // Capture `querySession` into `localQuery` and check identity before setting
+    // `sdkControlReady`: if a config-change abort kills this subprocess and a
+    // new pre-warm spawns a different querySession, the OLD promise might
+    // still resolve from a buffered transport response (rare but possible —
+    // see SDK performCleanup which rejects pendings, but a response already
+    // in transport.readMessages's queue can land first). The identity check
+    // prevents the stale resolution from flipping `sdkControlReady=true` for
+    // the wrong subprocess.
+    if (querySession) {
+      const localQuery = querySession;
+      const initStartT = Date.now();
+      void localQuery.initializationResult().then(() => {
+        if (querySession !== localQuery) {
+          // Stale: a session swap happened while initialize was in flight.
+          // The new pre-warm will fire its own initializationResult().
+          return;
+        }
+        sdkControlReady = true;
+        console.log(`[agent] SDK control plane ready in ${Date.now() - initStartT}ms (preWarm=${preWarm})`);
+        // For non-pre-warm cold starts (user sent the very first message with
+        // no prior pre-warm), enqueueUserMessage already set sessionState to
+        // 'starting' (line 6118 — sdkControlReady was false at that moment).
+        // Without this transition, the UI would stay in '启动中' until the slow
+        // streamed system_init lands at the END of the first turn (think /context
+        // 44s); now we promote to 'running' as soon as the SDK control plane
+        // confirms ready (~3-5s in production), matching the actual subprocess
+        // state.
+        if (sessionState === 'starting' && !shouldAbortSession) {
+          setSessionState('running');
+        }
+      }).catch((error) => {
+        // Common cause: control request races against an abort that closes the
+        // subprocess before the response arrives — benign. The next pre-warm
+        // / startStreamingSession will reset and retry.
+        console.warn('[agent] initializationResult() failed:', error instanceof Error ? error.message : error);
+      });
+    }
 
     // Startup timeout: if no system_init arrives, abort.
     // IMPORTANT: Only system_init clears this timeout, NOT other messages like rate_limit_event.
@@ -7766,6 +8142,12 @@ async function startStreamingSession(preWarm = false): Promise<void> {
         // Buffer system_init during pre-warm; replay when first user message arrives
         if (!isPreWarming) {
           sessionRegistered = true;  // SDK 确认注册，后续必须 resume
+          // (issue #174) Subprocess is now ready — graduate 'starting' to
+          // 'running' so the UI swaps the "AI 启动中" hint for the normal
+          // thinking indicator. Skip on pre-warm (state is 'idle' anyway).
+          if (sessionState === 'starting') {
+            setSessionState('running');
+          }
           broadcast('chat:system-init', { info: systemInitInfo, sessionId, runtime: 'builtin' });
         } else {
           // Pre-warm 不设 sessionRegistered — 这是核心设计约束
@@ -7940,6 +8322,9 @@ async function startStreamingSession(preWarm = false): Promise<void> {
                   currentTurnHasOutput = true;
                   // IM stream: forward non-subagent text delta to event bus (Pattern B)
                   emitImEvent('delta', streamEvent.delta.text);
+                  // PRD 0.2.14 — accumulate per-block text for desktop→IM mirror
+                  // (no-op when current turn isn't desktop-driven).
+                  maybeAccumulateMirrorChunk(streamEvent.index, streamEvent.delta.text);
                 } else {
                   console.log(`[agent] Filtered decorative text from stream (${decorativeCheck.reason})`);
                 }
@@ -8170,6 +8555,14 @@ async function startStreamingSession(preWarm = false): Promise<void> {
             if (imTextBlockIndices.has(streamEvent.index)) {
               emitImEvent('block-end', '');
               imTextBlockIndices.delete(streamEvent.index);
+            }
+            // PRD 0.2.14 — desktop turn AI text block done → mirror to bound channel.
+            // Q1·C: one mirror call per text block, with accumulated body. No-op
+            // when the turn isn't desktop-driven (currentTurnMirrorEnabled=false).
+            const mirroredBlockText = pendingTextBlockTexts.get(streamEvent.index);
+            if (mirroredBlockText !== undefined) {
+              pendingTextBlockTexts.delete(streamEvent.index);
+              fireDesktopAssistantBlockMirror(mirroredBlockText);
             }
           }
         }
@@ -8786,6 +9179,17 @@ async function startStreamingSession(preWarm = false): Promise<void> {
     }
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : 'Unknown error occurred';
+    // (issue #174) Pre-launch abort sentinel — clean exit, not a real error.
+    // Skip the loud session-error log + the all-recovery branches below;
+    // jump straight to finally for state cleanup. shouldAbortSession is
+    // already true (set by interruptCurrentResponse), and the finally block
+    // will run setSessionState('idle') / unregister bridge / resolve
+    // sessionTerminationPromise. Without this short-circuit the message
+    // would reach console.error and look like a real failure.
+    if (errorMessage === 'STARTUP_ABORTED_BY_STOP') {
+      console.log('[agent] session start aborted pre-launch by user stop');
+      return;
+    }
     const errorStack = error instanceof Error ? error.stack : String(error);
     console.error('[agent] session error:', errorMessage);
     console.error('[agent] session error stack:', errorStack);
@@ -8952,6 +9356,17 @@ async function startStreamingSession(preWarm = false): Promise<void> {
     // a fresh token (freshToken: true) so late requests from this dying
     // subprocess find their old token gone and get rejected cleanly.
     unregisterActiveSessionBridge();
+
+    // (v0.2.14 — Codex review) Drain pending interactive requests on every
+    // SDK exit shape. The per-handler `onAbort` covers the canonical
+    // SDK-driven `interrupt()` path, but unexpected exits (subprocess
+    // crash, transport error in `for await`, abortPersistentSession races
+    // where signal.abort doesn't propagate before close) would otherwise
+    // leak Map entries — `getPendingInteractiveRequests` then replays
+    // ghost cards to newly connecting SSE clients. Pre-warm sessions can't
+    // hold pending entries (they never serve a turn), but draining is
+    // idempotent so the wasPreWarming branch is harmless.
+    drainPendingInteractiveRequests('session-end');
 
     // sessionRegistered 已在 system_init handler 中设置，无需重复
 

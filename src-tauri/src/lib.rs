@@ -8,6 +8,7 @@ pub mod config_io;
 mod commands;
 pub mod cron_task;
 pub mod im;
+pub mod notification;
 pub mod local_http;
 pub mod logger;
 pub mod legacy_upgrade;
@@ -180,12 +181,17 @@ pub fn run() {
         })
         .register_asynchronous_uri_scheme_protocol("myagents", attachment_protocol::handle)
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
-            // Another instance was launched — bring the existing window to the foreground
-            if let Some(window) = app.get_webview_window("main") {
-                let _ = window.show();
-                let _ = window.unminimize();
-                let _ = window.set_focus();
-            }
+            // Another instance was launched — bring the existing window to the
+            // foreground. Reuses the same routine as tray click and toast click
+            // so all three "raise window" entry points stay in lockstep.
+            tray::show_main_window(app);
+            // Notify the front-end that the user just re-activated the app via
+            // an external trigger (taskbar icon, dock click on Linux, etc.).
+            // The notification module piggy-backs on this to consume any
+            // pending deep-link target from a recently-clicked toast on
+            // platforms where in-process Activated callbacks aren't available
+            // (macOS / Linux fallback path).
+            notification::on_window_activated_externally(app);
         }))
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_dialog::init())
@@ -297,6 +303,9 @@ pub fn run() {
             cmd_get_background_sessions,
             // Proxy hot-reload
             cmd_propagate_proxy,
+            // OS notification + click-to-foreground deep-link (v0.2.14)
+            notification::cmd_show_notification,
+            notification::cmd_consume_notification_click,
             // IM Bot commands (non-deprecated survivors)
             im::cmd_im_conversations,
             // Group permission commands (v0.1.28)
@@ -320,6 +329,9 @@ pub fn run() {
             im::cmd_update_agent_config,
             im::cmd_create_agent,
             im::cmd_delete_agent,
+            // Session ↔ channel surface handover (PRD 0.2.14)
+            im::handover::cmd_session_new_with_surface_migration,
+            im::handover::cmd_handover_session_to_channel,
             // WeCom QR code commands (public API, not plugin gateway)
             commands::cmd_wecom_qr_generate,
             commands::cmd_wecom_qr_poll,

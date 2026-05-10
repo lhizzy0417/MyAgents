@@ -472,8 +472,10 @@ SDK `result` 消息带有 `terminal_reason` 字段，标识本轮对话的终止
     "deepseek": { "sonnet": "deepseek-chat", "opus": "deepseek-reasoner", "haiku": "deepseek-chat" }
   },
 
-  // 定时任务通知
-  "cronNotifications": true
+  // 桌面通知（OS 系统通知）总开关
+  "osNotifications": true,
+  // OS 通知声音（osNotifications 开启时是否播放声音）
+  "notificationSound": true
 }
 ```
 

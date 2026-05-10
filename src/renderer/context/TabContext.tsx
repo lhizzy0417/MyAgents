@@ -25,7 +25,11 @@ import type { ExitPlanModeRequest, EnterPlanModeRequest } from '../../shared/typ
 import type { TerminalReason } from '../../shared/terminalReason';
 import type { SessionMetadata } from '@/api/sessionClient';
 
-export type SessionState = 'idle' | 'running' | 'stopping' | 'error';
+// (issue #174) 'starting' = SDK subprocess launched, awaiting system_init.
+// Distinct from 'running' (= AI actively processing a turn) so the UI can
+// surface a "AI 启动中" hint instead of the generic thinking spinner during
+// the up-to-10-minute startup-timeout window.
+export type SessionState = 'idle' | 'starting' | 'running' | 'stopping' | 'error';
 
 /**
  * Tab state - all the state that belongs to a single Tab
@@ -134,6 +138,23 @@ export interface TabContextValue extends TabState {
     /** Prepend the next page of older messages. Safe to call repeatedly — guarded internally. */
     loadOlderMessages: () => Promise<void>;
     resetSession: () => Promise<boolean>;
+    /**
+     * Soft session swap for the IM-handover "新对话保留绑定" flow.
+     *
+     * Used when the Rust handover (`cmd_session_new_with_surface_migration`)
+     * has ALREADY minted a fresh session_id on the running sidecar via
+     * `/api/im/session/new` and rotated the channel binding to it. The renderer
+     * MUST NOT call `resetSession()` afterwards — that would POST `/chat/reset`
+     * and mint yet another session id, leaving the channel binding pointing
+     * at the migrate-minted id while the tab adopts the second mint
+     * (PRD 0.2.14 cross-bugfix; manifests as "tag disappears after 新对话").
+     *
+     * This helper does the local UI clear that resetSession does, swaps
+     * `currentSessionId` to `newSessionId`, and notifies the parent via
+     * `onSessionIdChange` so the SSE auto-reconnect effect picks up the new
+     * session. No backend call is made.
+     */
+    adoptMigratedSession: (newSessionId: string) => void;
 
     // Tab-scoped API functions (use this Tab's Sidecar)
     // `opts.signal` cancels the call from the renderer side (e.g., useEffect
@@ -149,8 +170,12 @@ export interface TabContextValue extends TabState {
     // AskUserQuestion handling
     respondAskUserQuestion: (answers: Record<string, string> | null) => Promise<void>;
 
-    // PlanMode handling
-    respondExitPlanMode: (approved: boolean) => Promise<void>;
+    // PlanMode handling.
+    // `feedback` (issue #182): user's optional 「修改意见」 forwarded only on
+    // rejection; lets the AI revise the plan in the same turn.
+    // Returns true on success, false if the backend rejected the response or
+    // the network failed — caller should toast and let the user retry.
+    respondExitPlanMode: (approved: boolean, feedback?: string) => Promise<boolean>;
 
     // Queue actions
     cancelQueuedMessage: (queueId: string) => Promise<string | null>;
@@ -205,13 +230,14 @@ const defaultContextValue: TabContextValue = {
     loadSession: async () => false,
     loadOlderMessages: async () => { },
     resetSession: async () => false,
+    adoptMigratedSession: () => { },
     apiGet: async () => { throw new Error('Not in TabProvider'); },
     apiPost: async () => { throw new Error('Not in TabProvider'); },
     apiPut: async () => { throw new Error('Not in TabProvider'); },
     apiDelete: async () => { throw new Error('Not in TabProvider'); },
     respondPermission: async () => { },
     respondAskUserQuestion: async () => { },
-    respondExitPlanMode: async () => { },
+    respondExitPlanMode: async () => false,
     cancelQueuedMessage: async () => null,
     forceExecuteQueuedMessage: async () => false,
     onCronTaskExitRequested: { current: null },

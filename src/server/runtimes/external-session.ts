@@ -1515,84 +1515,98 @@ export function getRuntimePermissionModes(runtimeType: RuntimeType): unknown[] {
 /** Flush accumulated content blocks, persist to SessionStore, and broadcast completion.
  * Called by both turn_complete (Codex) and session_complete (CC) to avoid duplication. */
 async function persistTurnResult(): Promise<void> {
-  const turnDurationMs = currentTurnStartTime ? Date.now() - currentTurnStartTime : undefined;
-  flushAllPending();
+  // Defense-in-depth: the `session_complete` handler reads `persistInFlight`
+  // to decide whether to fire `setExternalSessionState('idle')` synchronously.
+  // When persistInFlight=true, idle is deferred to this function. If we throw
+  // BEFORE reaching the explicit setExternalSessionState('idle') below
+  // (e.g. JSON.stringify on a circular currentContentBlocks, or
+  // flushAllPending throws sync), the renderer would be stuck in `running`
+  // forever for that session. Outer try/finally guarantees idle ALWAYS fires.
+  // Caller still gets the error via the fire-and-forget `.catch` for logging.
+  // v0.2.14 cross-bugfix follow-up.
+  try {
+    const turnDurationMs = currentTurnStartTime ? Date.now() - currentTurnStartTime : undefined;
+    flushAllPending();
 
-  const usageData = buildPersistedTurnUsage();
-  const turnToolCount = currentContentBlocks.filter(b => b.type === 'tool_use').length;
-  const runtimeType = getCurrentRuntimeType();
+    const usageData = buildPersistedTurnUsage();
+    const turnToolCount = currentContentBlocks.filter(b => b.type === 'tool_use').length;
+    const runtimeType = getCurrentRuntimeType();
 
-  if (currentContentBlocks.length > 0) {
-    const content = JSON.stringify(currentContentBlocks);
-    allSessionMessages.push({
-      id: `assistant-${Date.now()}`,
-      role: 'assistant',
-      content,
-      timestamp: new Date().toISOString(),
-      durationMs: turnDurationMs,
-      usage: usageData,
-      toolCount: turnToolCount || undefined,
-    });
-    resetTurnAccumulators();
-  } else if (currentAssistantText.trim()) {
-    // Fallback: no structured blocks, just plain text (e.g. CC slash commands)
-    allSessionMessages.push({
-      id: `assistant-${Date.now()}`,
-      role: 'assistant',
-      content: currentAssistantText,
-      timestamp: new Date().toISOString(),
-      durationMs: turnDurationMs,
-      usage: usageData,
-    });
-    resetTurnAccumulators();
-  }
-
-  // Save cumulative messages to disk (saveSessionMessages uses .slice(existingCount) to append)
-  if (allSessionMessages.length > 0 && lastSessionId) {
-    try {
-      await saveSessionMessages(lastSessionId, allSessionMessages);
-      const lastMsg = allSessionMessages[allSessionMessages.length - 1];
-      await updateSessionMetadata(lastSessionId, {
-        lastActiveAt: new Date().toISOString(),
-        lastMessagePreview: extractTextPreview(lastMsg?.content ?? ''),
-        runtimeUsageTotals: lastPersistedRuntimeUsageTotals ?? undefined,
+    if (currentContentBlocks.length > 0) {
+      const content = JSON.stringify(currentContentBlocks);
+      allSessionMessages.push({
+        id: `assistant-${Date.now()}`,
+        role: 'assistant',
+        content,
+        timestamp: new Date().toISOString(),
+        durationMs: turnDurationMs,
+        usage: usageData,
+        toolCount: turnToolCount || undefined,
       });
-    } catch (err) {
-      console.error('[external-session] Failed to save session messages:', err);
+      resetTurnAccumulators();
+    } else if (currentAssistantText.trim()) {
+      // Fallback: no structured blocks, just plain text (e.g. CC slash commands)
+      allSessionMessages.push({
+        id: `assistant-${Date.now()}`,
+        role: 'assistant',
+        content: currentAssistantText,
+        timestamp: new Date().toISOString(),
+        durationMs: turnDurationMs,
+        usage: usageData,
+      });
+      resetTurnAccumulators();
     }
-  }
 
-  broadcast('chat:message-complete', {
-    ...(usageData ? {
-      model: usageData.model,
-      input_tokens: usageData.inputTokens,
-      output_tokens: usageData.outputTokens,
-      cache_read_tokens: usageData.cacheReadTokens,
-      cache_creation_tokens: usageData.cacheCreationTokens,
-    } : {}),
-    ...(turnToolCount > 0 ? { tool_count: turnToolCount } : {}),
-    ...(turnDurationMs ? { duration_ms: turnDurationMs } : {}),
-  });
-  trackServer('ai_turn_complete', {
-    source: lastScenario.type,
-    platform: lastScenario.type === 'im' ? lastScenario.platform : null,
-    runtime: runtimeType,
-    model: usageData?.model || lastRuntimeReportedModel || lastModel || null,
-    input_tokens: usageData?.inputTokens ?? 0,
-    output_tokens: usageData?.outputTokens ?? 0,
-    cache_read_tokens: usageData?.cacheReadTokens ?? 0,
-    cache_creation_tokens: usageData?.cacheCreationTokens ?? 0,
-    tool_count: turnToolCount,
-    duration_ms: turnDurationMs ?? 0,
-  });
-  setExternalSessionState('idle');
-  fireImCallback('complete', '');
-  // Pattern B/C: turn complete — clear active trace ID + unregister from registry.
-  if (activeRequestId) {
-    imRequestRegistry.setStatus(activeRequestId, 'completed');
-    imRequestRegistry.unregister(activeRequestId);
+    // Save cumulative messages to disk (saveSessionMessages uses .slice(existingCount) to append)
+    if (allSessionMessages.length > 0 && lastSessionId) {
+      try {
+        await saveSessionMessages(lastSessionId, allSessionMessages);
+        const lastMsg = allSessionMessages[allSessionMessages.length - 1];
+        await updateSessionMetadata(lastSessionId, {
+          lastActiveAt: new Date().toISOString(),
+          lastMessagePreview: extractTextPreview(lastMsg?.content ?? ''),
+          runtimeUsageTotals: lastPersistedRuntimeUsageTotals ?? undefined,
+        });
+      } catch (err) {
+        console.error('[external-session] Failed to save session messages:', err);
+      }
+    }
+
+    broadcast('chat:message-complete', {
+      ...(usageData ? {
+        model: usageData.model,
+        input_tokens: usageData.inputTokens,
+        output_tokens: usageData.outputTokens,
+        cache_read_tokens: usageData.cacheReadTokens,
+        cache_creation_tokens: usageData.cacheCreationTokens,
+      } : {}),
+      ...(turnToolCount > 0 ? { tool_count: turnToolCount } : {}),
+      ...(turnDurationMs ? { duration_ms: turnDurationMs } : {}),
+    });
+    trackServer('ai_turn_complete', {
+      source: lastScenario.type,
+      platform: lastScenario.type === 'im' ? lastScenario.platform : null,
+      runtime: runtimeType,
+      model: usageData?.model || lastRuntimeReportedModel || lastModel || null,
+      input_tokens: usageData?.inputTokens ?? 0,
+      output_tokens: usageData?.outputTokens ?? 0,
+      cache_read_tokens: usageData?.cacheReadTokens ?? 0,
+      cache_creation_tokens: usageData?.cacheCreationTokens ?? 0,
+      tool_count: turnToolCount,
+      duration_ms: turnDurationMs ?? 0,
+    });
+  } finally {
+    // Always reach idle, even if the body above threw. The
+    // session_complete handler counts on us to drain the deferred idle.
+    setExternalSessionState('idle');
+    fireImCallback('complete', '');
+    // Pattern B/C: turn complete — clear active trace ID + unregister from registry.
+    if (activeRequestId) {
+      imRequestRegistry.setStatus(activeRequestId, 'completed');
+      imRequestRegistry.unregister(activeRequestId);
+    }
+    activeRequestId = null;
   }
-  activeRequestId = null;
 }
 
 // ─── Private: UnifiedEvent → SSE broadcast ───
@@ -1872,58 +1886,77 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
       break;
     }
 
-    case 'session_complete':
+    case 'session_complete': {
       clearWatchdog();
       console.log(`[external-session] session_complete: subtype=${event.subtype}, result=${(event.result || '').length > 0 ? `${(event.result || '').length}chars` : 'empty'}, turnCompleted=${turnCompleted}, assistantText=${currentAssistantText.length}chars`);
-      {
-        // Pre-warm exit: process died after spawn but before any user turn
-        // started. `currentTurnStartTime === 0` distinguishes this from a
-        // mid-turn exit (which sets the timestamp at turn kickoff). Applies to
-        // BOTH subtypes:
-        //   - subtype='error' (SIGKILL / init timeout) → silent retry on send
-        //   - subtype='success' (graceful exit code 0 during our timeout kill)
-        //     → would otherwise fall through to persistTurnResult and broadcast
-        //     chat:message-complete — triggering a misleading "任务完成" OS
-        //     notification on an empty tab that never ran a turn.
-        const isPrewarmExit = !turnCompleted && currentTurnStartTime === 0;
-        if (isPrewarmExit) {
-          console.log(`[external-session] Ignoring pre-warm exit (subtype=${event.subtype}) — no user turn was in flight; next send will start fresh`);
-        } else if (event.subtype === 'success') {
-          // CC slash commands (e.g. /context, /cost) return output directly in `result`
-          // without streaming text_delta events. Only broadcast if NO turn completed
-          // (turnCompleted means text was already streamed + persisted normally).
-          if (event.result && !turnCompleted && !currentAssistantText.trim()) {
-            broadcast('chat:message-chunk', event.result);
-            currentAssistantText += event.result;
-            pendingTextBuffer += event.result;
-          }
-          // Only finalize if turn_complete didn't already (Codex emits turn_complete; CC uses session_complete only)
-          if (!turnCompleted) {
-            lastTurnSucceeded = true;
-            // Fire-and-forget: handleUnifiedEvent is a sync stream callback; persistTurnResult is async.
-            void persistTurnResult().catch((err) => console.error('[external-session] persistTurnResult (session_complete) failed:', err));
-          }
+      // Track whether persistTurnResult is in-flight (or was already fired by
+      // turn_complete). When true, persistTurnResult will broadcast
+      // chat:message-complete + setExternalSessionState('idle') itself, in
+      // that order. We MUST NOT fire idle synchronously below, because
+      // persistTurnResult is async (awaits disk writes) and the synchronous
+      // idle would race ahead of message-complete on the SSE wire — the
+      // renderer's chat:status idle handler clears isStreamingRef, and the
+      // subsequent flushPendingChunks at message-complete bails its updater,
+      // dropping every chunk that hadn't yet RAF-flushed. v0.2.14 cross-bugfix.
+      //
+      // Initialize from `turnCompleted`: turn_complete handler already fires
+      // persistTurnResult fire-and-forget (Codex/Gemini path), so it's in-flight
+      // regardless of whether this session_complete carries success or error
+      // subtype. Set this BEFORE the if/else so the error branch also honours
+      // the in-flight contract.
+      let persistInFlight = turnCompleted;
+      // Pre-warm exit: process died after spawn but before any user turn
+      // started. `currentTurnStartTime === 0` distinguishes this from a
+      // mid-turn exit (which sets the timestamp at turn kickoff). Applies to
+      // BOTH subtypes:
+      //   - subtype='error' (SIGKILL / init timeout) → silent retry on send
+      //   - subtype='success' (graceful exit code 0 during our timeout kill)
+      //     → would otherwise fall through to persistTurnResult and broadcast
+      //     chat:message-complete — triggering a misleading "任务完成" OS
+      //     notification on an empty tab that never ran a turn.
+      const isPrewarmExit = !turnCompleted && currentTurnStartTime === 0;
+      if (isPrewarmExit) {
+        console.log(`[external-session] Ignoring pre-warm exit (subtype=${event.subtype}) — no user turn was in flight; next send will start fresh`);
+      } else if (event.subtype === 'success') {
+        // CC slash commands (e.g. /context, /cost) return output directly in `result`
+        // without streaming text_delta events. Only broadcast if NO turn completed
+        // (turnCompleted means text was already streamed + persisted normally).
+        if (event.result && !turnCompleted && !currentAssistantText.trim()) {
+          broadcast('chat:message-chunk', event.result);
+          currentAssistantText += event.result;
+          pendingTextBuffer += event.result;
+        }
+        // Only finalize if turn_complete didn't already (Codex emits turn_complete; CC uses session_complete only)
+        if (!turnCompleted) {
+          lastTurnSucceeded = true;
+          // Fire-and-forget: handleUnifiedEvent is a sync stream callback; persistTurnResult is async.
+          void persistTurnResult().catch((err) => console.error('[external-session] persistTurnResult (session_complete) failed:', err));
+          persistInFlight = true;
+        }
+        // else: turn_complete already fired persistTurnResult — persistInFlight
+        // was already set true above by the `let persistInFlight = turnCompleted`
+        // initializer. The async broadcast it emits after chat:message-complete
+        // is the authoritative idle.
+      } else {
+        const errorMessage = event.result || 'Session ended with error';
+        // Suppress user-visible error when the external runtime's persistent process
+        // dies while idle (after a turn already completed, with no new turn in flight).
+        // Common cause: OS memory pressure / SIGKILL (exit 137) after tens of minutes
+        // of inactivity on Codex/Gemini. The next sendExternalMessage will hit the
+        // "Previous process exited, resuming" branch and transparently spawn a fresh
+        // process — the user never needed to see an error in the first place.
+        //
+        // Repro: user reported "Gemini process exited with code 137" toast after
+        // leaving a session idle for 26 minutes with no interaction. See
+        // ~/Downloads/myagents-logs-2026-04-14T17-28-53.txt final session_complete line.
+        const isIdleExit = turnCompleted && !currentAssistantText.trim();
+        if (isIdleExit) {
+          console.log(`[external-session] Ignoring idle-exit "${errorMessage}" — process was between turns; next message will auto-resume`);
         } else {
-          const errorMessage = event.result || 'Session ended with error';
-          // Suppress user-visible error when the external runtime's persistent process
-          // dies while idle (after a turn already completed, with no new turn in flight).
-          // Common cause: OS memory pressure / SIGKILL (exit 137) after tens of minutes
-          // of inactivity on Codex/Gemini. The next sendExternalMessage will hit the
-          // "Previous process exited, resuming" branch and transparently spawn a fresh
-          // process — the user never needed to see an error in the first place.
-          //
-          // Repro: user reported "Gemini process exited with code 137" toast after
-          // leaving a session idle for 26 minutes with no interaction. See
-          // ~/Downloads/myagents-logs-2026-04-14T17-28-53.txt final session_complete line.
-          const isIdleExit = turnCompleted && !currentAssistantText.trim();
-          if (isIdleExit) {
-            console.log(`[external-session] Ignoring idle-exit "${errorMessage}" — process was between turns; next message will auto-resume`);
-          } else {
-            broadcast('chat:agent-error', { message: errorMessage });
-            broadcast('chat:message-error', errorMessage);
-            fireImCallback('error', errorMessage);
-            resetTurnAccumulators(); // Prevent stale content leaking into next turn
-          }
+          broadcast('chat:agent-error', { message: errorMessage });
+          broadcast('chat:message-error', errorMessage);
+          fireImCallback('error', errorMessage);
+          resetTurnAccumulators(); // Prevent stale content leaking into next turn
         }
       }
       pendingPermissionSuggestions.clear();
@@ -1931,12 +1964,18 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
       pendingExternalAskUserQuestions.clear();
       pendingExternalInteractiveRequests.clear();
       externalSystemInitPayload = null;
-      setExternalSessionState('idle');
+      // Only set idle synchronously when persistTurnResult is NOT going to
+      // do it itself. Otherwise we'd race chat:status idle ahead of
+      // chat:message-complete (see persistInFlight comment above).
+      if (!persistInFlight) {
+        setExternalSessionState('idle');
+      }
       // Clean up module state — prevents stuck sessions on CC crash
       isRunning = false;
       activeProcess = null;
       activeRuntime = null;
       break;
+    }
 
     case 'usage':
       // Store latest token usage.

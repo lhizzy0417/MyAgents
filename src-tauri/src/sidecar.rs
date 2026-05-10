@@ -3639,12 +3639,17 @@ pub fn start_background_completion<R: Runtime>(
         }
     };
 
-    // Phase 2: Check session state (without lock - HTTP call)
+    // Phase 2: Check session state (without lock - HTTP call).
+    // (issue #174) `starting` is also "in flight" — the SDK subprocess has
+    // been launched but system_init hasn't arrived, and the user might be
+    // closing the tab in the up-to-10-minute startup-timeout window. Treat
+    // it the same as `running` so background completion attaches and keeps
+    // the bootstrapping subprocess alive instead of killing it on tab close.
     let state = check_sidecar_session_state(port);
-    let is_running = state.as_deref() == Some("running");
+    let is_active = matches!(state.as_deref(), Some("running") | Some("starting"));
 
-    if !is_running {
-        ulog_info!("[bg-completion] Session {} is not running (state: {:?}), no background completion needed", session_id, state);
+    if !is_active {
+        ulog_info!("[bg-completion] Session {} is not active (state: {:?}), no background completion needed", session_id, state);
         return Ok(BackgroundCompletionResult { started: false, session_id: result_id });
     }
 
@@ -3734,11 +3739,13 @@ fn poll_background_completion<R: Runtime>(
             }
         }
 
-        // Check session state via HTTP (lock released, no contention)
+        // Check session state via HTTP (lock released, no contention).
+        // (issue #174) `starting` keeps the poll alive — same rationale as
+        // the initial gate above: the subprocess is bootstrapping, not done.
         match check_sidecar_session_state(port) {
-            Some(ref state) if state == "running" => {
+            Some(ref state) if state == "running" || state == "starting" => {
                 consecutive_http_failures = 0;
-                ulog_debug!("[bg-completion] Session {} still running, continuing poll", session_id);
+                ulog_debug!("[bg-completion] Session {} still active (state: {}), continuing poll", session_id, state);
                 continue;
             }
             Some(ref state) => {

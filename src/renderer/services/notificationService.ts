@@ -1,34 +1,31 @@
 /**
- * System Notification Service
- * Sends system-level notifications when user is not focused on the app
+ * OS notification service.
+ *
+ * Front-end's only job here is "should we ask the OS to show a toast right
+ * now?" — gating on user focus and throttling. The actual toast rendering and
+ * (critically) click handling live in Rust (`notification.rs`), so the
+ * `tab_id` deep-link path is structural rather than a JS-side time-window
+ * race.
+ *
+ * Why no `@tauri-apps/plugin-notification` import: that package's
+ * `sendNotification` returns void on desktop and never gives us a handle to
+ * attach `onclick`, so click activation always silently failed on Windows.
+ * The Rust module bypasses the plugin's JS shim and uses
+ * `tauri-winrt-notification`'s `Toast::on_activated` directly.
  */
 
-import {
-    isPermissionGranted,
-    requestPermission,
-    sendNotification,
-} from '@tauri-apps/plugin-notification';
+import { invoke } from '@tauri-apps/api/core';
 
 import { isTauriEnvironment } from '../utils/browserMock';
 
-// Track if we've already requested permission this session
-let permissionRequested = false;
-
-// Throttle notifications to avoid notification bombing
 let lastNotifyTime = 0;
-const NOTIFY_THROTTLE_MS = 3000; // 3 seconds between notifications
+const NOTIFY_THROTTLE_MS = 3000;
 
-// Track window visibility state (updated by useTrayEvents hook)
 let isWindowVisible = true;
 
-// Pending navigation: when a notification is sent, store tabId + timestamp
-// so that on window focus-regain we can auto-switch to the relevant tab
-const PENDING_NAV_TIMEOUT_MS = 2_000; // 2 second window
-let pendingNavigation: { tabId: string; timestamp: number } | null = null;
-
 /**
- * Update window visibility state
- * Called by useTrayEvents when window is hidden/shown
+ * Update window visibility state.
+ * Called by useTrayEvents when window is hidden/shown.
  */
 export function setWindowVisible(visible: boolean): void {
     isWindowVisible = visible;
@@ -36,158 +33,85 @@ export function setWindowVisible(visible: boolean): void {
 }
 
 /**
- * Check if user focus is away from the current window/tab
- * Returns true if notification should be sent
+ * Returns true when the user isn't actively looking at the app, so a system
+ * notification is worth showing.
  */
 function shouldNotify(): boolean {
-    // Check if window is hidden to tray (most reliable for minimize-to-tray)
-    if (!isWindowVisible) {
-        return true;
-    }
-    // Check if document is hidden (user switched to another tab/window)
-    if (document.hidden) {
-        return true;
-    }
-    // Check if window doesn't have focus
-    if (!document.hasFocus()) {
-        return true;
-    }
+    if (!isWindowVisible) return true;
+    if (document.hidden) return true;
+    if (!document.hasFocus()) return true;
     return false;
 }
 
-/**
- * Ensure notification permission is granted
- * Requests permission if not already granted
- */
-async function ensurePermission(): Promise<boolean> {
-    if (!isTauriEnvironment()) {
-        return false;
-    }
-
-    try {
-        let granted = await isPermissionGranted();
-        if (!granted && !permissionRequested) {
-            permissionRequested = true;
-            const permission = await requestPermission();
-            granted = permission === 'granted';
-        }
-        return granted;
-    } catch (error) {
-        console.warn('[Notification] Failed to check/request permission:', error);
-        return false;
-    }
-}
-
-/**
- * Send a system notification
- * Only sends if user is not focused on the app.
- * If tabId is provided, stores it as pending navigation target.
- */
 async function notify(title: string, body?: string, tabId?: string): Promise<void> {
-    // Only notify when user is not focused
-    if (!shouldNotify()) {
-        return;
-    }
+    if (!isTauriEnvironment()) return;
+    if (!shouldNotify()) return;
 
-    // Throttle: avoid notification bombing when multiple events fire rapidly
     const now = Date.now();
-    if (now - lastNotifyTime < NOTIFY_THROTTLE_MS) {
-        return;
-    }
+    if (now - lastNotifyTime < NOTIFY_THROTTLE_MS) return;
     lastNotifyTime = now;
 
-    // Ensure we have permission
-    const hasPermission = await ensurePermission();
-    if (!hasPermission) {
-        return;
-    }
-
     try {
-        sendNotification({ title, body });
-        // Store pending navigation AFTER successful send
-        if (tabId) {
-            pendingNavigation = { tabId, timestamp: now };
-        }
+        await invoke('cmd_show_notification', { title, body: body ?? '', tabId: tabId ?? null });
     } catch (error) {
-        console.warn('[Notification] Failed to send notification:', error);
+        console.warn('[Notification] cmd_show_notification failed:', error);
     }
-}
-
-/**
- * Store a pending navigation target (for notifications sent from outside the service,
- * e.g. cron task notifications from Rust layer)
- */
-export function setPendingNavigation(tabId: string): void {
-    pendingNavigation = { tabId, timestamp: Date.now() };
-}
-
-/**
- * Consume the pending navigation target if within the time window.
- * Returns the tabId to navigate to, or null if expired/absent.
- * One-time consumption: clears the pending state after reading.
- */
-export function consumePendingNavigation(): string | null {
-    if (!pendingNavigation) return null;
-
-    const elapsed = Date.now() - pendingNavigation.timestamp;
-    const tabId = pendingNavigation.tabId;
-    pendingNavigation = null; // always consume
-
-    if (elapsed <= PENDING_NAV_TIMEOUT_MS) {
-        return tabId;
-    }
-    return null;
 }
 
 /**
  * Notify that AI has completed a response.
- * @param tabId - If provided, stores as pending navigation target for click-to-navigate
+ * @param tabId - Optional deep-link target consumed when the user clicks.
  */
 export function notifyMessageComplete(tabId?: string): void {
     void notify('MyAgents - 任务完成', '请您查看结果', tabId);
 }
 
 /**
- * Notify that a cron task has completed (triggered by Rust notification:show event).
- * Sends an OS notification and stores pending navigation if tabId is provided.
+ * Notify that a cron task has completed.
+ * Used by the cron path that originates inside Rust — kept on the front-end
+ * surface for symmetry, but the cron module emits via Rust directly so the
+ * normal flow doesn't pass through this function.
  */
 export function notifyCronTaskComplete(title: string, body: string, tabId?: string): void {
     void notify(title, body, tabId);
 }
 
-/**
- * Notify that AI is requesting permission
- */
 export function notifyPermissionRequest(toolName: string): void {
     void notify('MyAgents - 权限请求', `AI 请求使用工具 - ${toolName}`);
 }
 
-/**
- * Notify that AI is asking user a question
- */
 export function notifyAskUserQuestion(): void {
     void notify('MyAgents - 需求确认', 'AI 等待您的确认相关信息');
 }
 
-/**
- * Notify that AI is requesting plan mode approval (EnterPlanMode or ExitPlanMode)
- */
 export function notifyPlanModeRequest(): void {
     void notify('MyAgents - 方案审核', 'AI 等待您审核方案');
 }
 
 /**
- * Initialize notification service
- * Call this early in app lifecycle to pre-request permission
+ * Tell Rust the window has just been activated externally — flushes any
+ * pending click target the front-end didn't yet receive (covers macOS / Linux
+ * where the OS auto-activates the app on toast click but no in-process
+ * Activated callback fires).
+ */
+export async function consumePendingNotificationClick(): Promise<void> {
+    if (!isTauriEnvironment()) return;
+    try {
+        await invoke('cmd_consume_notification_click');
+    } catch (error) {
+        console.warn('[Notification] cmd_consume_notification_click failed:', error);
+    }
+}
+
+/**
+ * Initialize notification service.
+ *
+ * Permission flow is intentionally absent: desktop OS notifications under
+ * `tauri-plugin-notification` and the WinRT path don't require a runtime
+ * permission grant — macOS / Linux rely on system-level settings,
+ * Windows uses AUMID via NSIS shortcut. Anything we'd do here would just be
+ * theatre.
  */
 export async function initNotificationService(): Promise<void> {
-    if (!isTauriEnvironment()) {
-        return;
-    }
-    // Pre-check permission status (don't request yet, wait for first notification)
-    try {
-        await isPermissionGranted();
-    } catch {
-        // Ignore errors during init
-    }
+    // No-op kept for symmetry with existing call sites.
 }

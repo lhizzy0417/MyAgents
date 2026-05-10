@@ -1,6 +1,6 @@
 [package]
 name = "myagents"
-version = "0.2.13"
+version = "0.2.14"
 description = "MyAgents - Desktop Claude Code for everyone"
 authors = ["MyAgents Team <myagents.io@gmail.com>"]
 license = "Apache-2.0"
@@ -95,6 +95,13 @@ windows-sys = { version = "0.59", features = [
 # user-level skills into `<workspace>/.claude/skills/` — the Node.js
 # sidecar uses `symlinkSync(target, link, 'junction')` for the same reason.
 junction = "1.0"
+# WinRT toast notifications with click activation. `tauri-plugin-notification`
+# wraps this same crate but doesn't expose the `on_activated` callback we need
+# to bring the app to the foreground when the user clicks a toast. Promoting
+# it to a direct dependency lets `notification::show_with_navigation` register
+# the callback ourselves while still sharing the version locked in the dep
+# graph (notify-rust pulls 0.7.x transitively).
+tauri-winrt-notification = "0.7"
 
 [dev-dependencies]
 tempfile = "3.10"

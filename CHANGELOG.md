@@ -7,6 +7,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.2.14] - 2026-05-11
+
+> Session 当前由谁在驱动一目了然，对话能在桌面 ↔ 飞书/Telegram/微信之间无缝流转；顺手把通知系统、Plan 模式、IM 配置变更几条最痛的 papercut 都处理了。
+
+### Added
+
+- **顶栏会显示 session 当前绑定的 IM channel / 定时任务**：之前一个 session 是从飞书 channel 路由过来的，顶栏什么都没说，只能去历史抽屉里才能看出来。现在 session 标题后直接挂一个 `●飞书` / `●定时` 小标签，与历史抽屉风格一致。
+- **新对话按钮在 channel-bound session 上会一起把绑定挪到新 session**：之前桌面端点 + 新对话只是清空桌面，飞书 channel 还停在老 session 上——等于"我以为换了对话，其实只换了一边"。现在等价于在 IM 里发 `/new`：channel 跟着到新 session，桌面顶栏的 `●飞书` 标签保持不动。
+- **桌面 session 主动交接到 IM channel**：纯桌面 session 顶栏多了一个 `📤` 图标（与 channel 标签互斥，已绑定就消失）。点击弹窗列出当前工作区对应 Agent 的所有在线 channel，选中即把这条对话推过去——飞书/Telegram/钉钉 那边会收到一条「桌面端已将对话交接到此 channel」系统提示，IM 端用户接着聊就行；桌面端顶栏立即出现 channel 标签。继续在手机上工作的核心场景终于打通。
+- **桌面 session 里的发言会镜像到绑定的 IM channel**：之前是单向的——IM 用户发什么桌面看得到，桌面发什么 IM 看不到，导致 IM 端用户视角丢一段对话。现在桌面用户消息以 `[From: 桌面端用户消息]` 前缀推到 IM，AI 回复正常推送（与直接对 bot 提问的流式格式一致）。镜像范围：用户文本 + 用户上传的 PNG/JPG + AI 文本回复块；不镜像工具调用、`canUseTool` 审批卡片、partial chunk（避免双端冲突 + 信息噪音）。
+- **会话顶栏新增 ⋯ 菜单**：替代之前的条件式按钮，把 session 的 6 个常用操作（重命名 / 收藏 / 导出 md / 会话 Token 统计 / 上下文 Token 详情 / 绑定 Bot ▸ / 删除）聚合到一个稳定入口。"上下文 Token 详情" 直接以用户身份触发 `/context`，无需手动输入。
+- **AI 出错后可一键重发**：错误 banner 上的「召唤小助理」换成「重新发送」按钮——直接回退并重新发送上一条用户消息，不需要重新打字。
+- **Plan 模式可写修改意见**：AI 进入 plan 模式时，确认卡片下方多了一个文本框。留空提交是常规拒绝；填写反馈后提交则把意见送回 AI，AI 在同一回合内修订方案并重新出 plan，省去回到输入框重发的折腾。
+- **OS 通知：跨平台体验完整化**：(a) 通知点击会唤起前台并切到对应 tab，三平台都生效——Windows 之前在企业环境下点了没反应的问题也修了；(b) 通知声音可在设置里关掉（默认开），三平台用各自的系统默认音；(c) 「启用通知」主开关现在真的生效——之前它是装饰性的，关掉之后通知照样响。升级后如果你之前在配置里把通知关了，会保留你的选择。
+- **Agent 工作区 Runtime 变更时，IM bot 会自动迁到新会话**：之前在工作区把 Agent runtime 从 Claude Code CLI 切到 builtin（或反向）后，IM bot 还连在老 runtime 创建的 session 上——下次发消息要么没回应，要么报模型不存在。现在配置变更时会自动给 IM 推一条「Agent 工作区 Runtime 从「X」更新为「Y」，开始新会话（xxxxxxxx）」，新对话从干净的状态开始。老对话仍然完整保留在历史里，从桌面打开会按"它当时的 runtime + 配置"加载，跟其他历史会话表现一致。
+
+### Fixed
+
+- **AskUserQuestion / Plan 确认 / 权限请求弹窗不再 10 分钟后自动消失**：之前 AI 抛出选择题、计划确认或权限请求时，如果用户离开电脑超过 10 分钟回来，弹窗已经被静默清掉、AI 那边按"用户拒绝/未答"继续往下走——用户的体感是"刚才那个选择去哪了？"。Mac 睡眠唤醒时尤其明显，`setTimeout` 在唤醒瞬间就触发。修复后弹窗会一直停留直到用户回应（对齐 Claude Code CLI 行为）。
+- **IM bot 绑定在 Agent 配置热更新时不再丢失**（issue #169 同类）：之前在工作区改 MCP / Skills 等设置触发 sidecar 重启时，bot ↔ chat 的绑定会被一并清掉，要么收到"Channel 没有最近活跃的对话"提示，要么得在 IM 里重新发条消息才把绑定建回来。现在绑定在 sidecar 重启时正确保留。
+- **慢首次回合不再被错误标为 "AI 启动中"**：触发 `/context` 这类需要本地多轮内部计算的命令时（实测 40+ 秒），顶栏会一直停在 "AI 启动中（首次启动可能较慢）"，让人以为卡住了。现在用 SDK 自己的 ready 信号判断，启动期通常 3–5 秒就脱掉这个标签。
+- **会话统计弹窗不再被工作区面板遮盖**：在右侧工作区打开的情况下点 ⋯ → 会话 Token 消耗统计，弹窗以前会被工作区面板覆盖。
+- **Popover 外点击不再误关上层 ConfirmDialog**（issue #178）：之前在 Popover 内触发删除等需要二次确认的对话框，点确认按钮会被 Popover 当作"外部点击"误关，得用 Enter 才能确认。
+- **元宝 Channel Plugin 2.13.x 能正常启动**（issue #180）：之前装上后 bridge 直接报 "Plugin did not register a channel"，无法进 IM 流。
+
+### Internal
+
+- 抽 `drainPendingInteractiveRequests` 统一 helper 处理四类 pending request 的 drain。
+- Surface handover：`cmd_handover_session_to_channel` 重写 `peer_sessions[chat_key]` + 转移 `SidecarOwner::Agent` 所有权 + 通过 channel adapter 发送系统消息。镜像走新管理 API 端点 `/api/im/mirror`，Sidecar 在 desktop turn 的 user-message 持久化点 + AI text block-end 点 push。
+- Runtime-change 编排：`cmd_update_agent_config` 检测 runtime 变更后调 `freeze_and_rotate_for_runtime_change`，对每个 peer_session 走"sidecar HTTP `/api/session/freeze` 优先 / 文件锁兜底"双写路径打 `OwnedSessionSnapshot`，再 mint 新 UUID 替换 `peer_sessions[*].session_id`。新增 `OwnedSessionSnapshot` 共享类型（TS Pick + Rust struct），sidecar 端点和 Rust 兜底走对称的 selective patch（只写存在字段 + 自带 `configSnapshotAt = now`）。
+- Notification：Windows 走 `tauri-winrt-notification` 的 `on_activated` 闭包捕获 tab_id；macOS / Linux 走 `Empty / Single / Ambiguous` 三态 latch + 30s TTL（含两个 boundary case：旧 Single 过期当 Empty、旧 Ambiguous 过期重置为 Single）。`tray::show_main_window` 提为 `pub`，托盘点击 / 第二实例启动 / WinRT 通知点击三处共享。
+- `updateSessionMetadata` 的 read-modify-write 全量挪到 `withSessionsLock` 内部，杜绝并发 writer 互相覆盖（freeze 端点的高频写入暴露的 pre-existing race）。
+- `AbortSession` 在 provider-switch 终止后正确重置，避免下一条用户消息被 startup 守卫误判为"用户按了 Stop"丢弃；该守卫额外暴露 `chat:agent-error` 让 #183 的重发 banner 兜底任意 future 类似泄漏。
+
+---
+
 ## [0.2.13] - 2026-05-09
 
 > 0.2.12 紧急修复：消息显示两遍、多 Agent 状态错位、关闭 tab 后回切丢失 AI 回复。

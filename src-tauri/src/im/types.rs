@@ -420,7 +420,7 @@ pub struct ImConversation {
 }
 
 /// Per-peer session tracking in SessionRouter
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct PeerSession {
     pub session_key: String,
     pub session_id: String,

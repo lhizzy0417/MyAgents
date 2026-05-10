@@ -2775,20 +2775,15 @@ fn dispatch_notification(task: &Task, t: &StatusTransition) {
         return;
     };
 
-    // Fire desktop notification first (synchronous, best-effort).
-    let fire_desktop = |title: &str, body: &str| {
-        let _ = handle.emit(
-            "notification:show",
-            serde_json::json!({
-                "title": title,
-                "body": body,
-                "taskId": task.id,
-            }),
-        );
-    };
-
+    // Task Center notifications bring the window to the foreground on click
+    // but don't deep-link to a specific chat Tab — Tasks live in their own
+    // surface (the Task Center page), and no Tab is owned by a Task. The
+    // legacy implementation emitted `taskId` in the event payload but the
+    // front-end listener typed the field as `tabId`, so the value was always
+    // dropped. Pass `None` here and preserve that no-deep-link semantics
+    // exactly.
     if desktop_enabled {
-        fire_desktop(&title, &body);
+        crate::notification::show_with_navigation(&handle, &title, &body, None);
     }
 
     if let Some(channel) = bot_channel {
@@ -2821,13 +2816,11 @@ fn dispatch_notification(task: &Task, t: &StatusTransition) {
                 } else {
                     format!("(bot 推送失败，降级桌面通知) {}", summary)
                 };
-                let _ = handle_cloned.emit(
-                    "notification:show",
-                    serde_json::json!({
-                        "title": title_owned,
-                        "body": fallback_body,
-                        "taskId": task_id,
-                    }),
+                crate::notification::show_with_navigation(
+                    &handle_cloned,
+                    &title_owned,
+                    &fallback_body,
+                    None,
                 );
             }
         });

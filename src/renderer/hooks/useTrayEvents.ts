@@ -5,7 +5,10 @@ import { useEffect, useCallback, useRef } from 'react';
 import { emit } from '@tauri-apps/api/event';
 import { isTauriEnvironment } from '@/utils/browserMock';
 import { dismissTopmost } from '@/utils/closeLayer';
-import { setWindowVisible, consumePendingNavigation } from '@/services/notificationService';
+import {
+  setWindowVisible,
+  consumePendingNotificationClick,
+} from '@/services/notificationService';
 import { listenWithCleanup } from '@/utils/tauriListen';
 
 interface TrayEventsOptions {
@@ -15,8 +18,6 @@ interface TrayEventsOptions {
   onOpenSettings?: () => void;
   /** Callback when exit is requested (for confirmation if cron tasks are running) */
   onExitRequested?: () => Promise<boolean>;
-  /** Callback when notification click triggers navigation to a specific tab */
-  onNavigateToTab?: (tabId: string) => void;
   /** Callback for Cmd+W close-tab action (after overlay dismissal).
    *  closeCurrentTab() auto-creates launcher on last tab; launcher is a no-op. */
   onCmdWCloseTab?: () => void;
@@ -71,16 +72,20 @@ export function useTrayEvents(options: TrayEventsOptions) {
 
     let unlistenFocusChanged: (() => void) | null = null;
     const ac = new AbortController();
-    // Shared closure state: tray-hide handler sets it true so the next
-    // focus-restored event distinguishes "hidden → visible" (consume pending
-    // navigation) from "alt-tab focus" (don't hijack).
-    let wasHidden = false;
 
     const setupListeners = async () => {
       try {
         const { getCurrentWindow } = await import('@tauri-apps/api/window');
         const window = getCurrentWindow();
 
+        // window.onFocusChanged keeps the visibility tracker in sync (used by
+        // `shouldNotify()`). It also fires on macOS / Linux when the user
+        // clicks a banner that auto-activates the app — we ask Rust to flush
+        // any pending toast-click deep-link, since on those platforms the
+        // OS doesn't give us an in-process Activated callback. Windows
+        // doesn't need this hop: `Toast::on_activated` already emitted
+        // `notification:click` directly.
+        //
         // window.onFocusChanged is a Tauri window API (not Tauri event API),
         // so it isn't covered by `listenWithCleanup`. The hook still benefits
         // from the AbortController for symmetry — we manually invoke the
@@ -89,22 +94,8 @@ export function useTrayEvents(options: TrayEventsOptions) {
           if (ac.signal.aborted) return;
           console.debug('[useTrayEvents] Window focus changed:', focused);
           if (focused) {
-            // Only consume pending navigation when window transitions from hidden to visible
-            // (not on every focus event, which would hijack navigation on alt-tab)
-            const shouldConsumeNav = wasHidden;
-            wasHidden = false;
-
-            // Window is now visible and focused
             setWindowVisible(true);
-
-            if (shouldConsumeNav) {
-              // Check if a notification was recently sent — auto-navigate to that tab
-              const targetTabId = consumePendingNavigation();
-              if (targetTabId) {
-                console.log('[useTrayEvents] Auto-navigating to tab from notification:', targetTabId);
-                optionsRef.current.onNavigateToTab?.(targetTabId);
-              }
-            }
+            void consumePendingNotificationClick();
           }
         });
         if (ac.signal.aborted) {
@@ -142,7 +133,6 @@ export function useTrayEvents(options: TrayEventsOptions) {
           if (minimizeToTray) {
             const win = getCurrentWindow();
             await win.hide();
-            wasHidden = true;
             setWindowVisible(false);
             console.log('[useTrayEvents] Window hidden to tray');
           } else {

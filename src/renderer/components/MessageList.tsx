@@ -9,6 +9,7 @@ import { AskUserQuestionPrompt, type AskUserQuestionRequest } from '@/components
 import { ExitPlanModePrompt } from '@/components/ExitPlanModePrompt';
 import type { ExitPlanModeRequest } from '../../shared/types/planMode';
 import type { Message as MessageType } from '@/types/chat';
+import type { SessionState } from '@/context/TabContext';
 
 function formatElapsedTime(totalSeconds: number): string {
   const hours = Math.floor(totalSeconds / 3600);
@@ -53,9 +54,16 @@ interface MessageListProps {
   onAskUserQuestionCancel?: (requestId: string) => void;
   pendingExitPlanMode?: ExitPlanModeRequest | null;
   onExitPlanModeApprove?: () => void;
-  onExitPlanModeReject?: () => void;
+  onExitPlanModeReject?: (feedback?: string) => void;
   systemStatus?: string | null;
   isStreaming?: boolean;
+  /**
+   * (issue #174) Pulled in so the loading footer can swap the random
+   * "苦思冥想中…" thinking line for an explicit "AI 启动中…" hint while the
+   * SDK subprocess is alive but system_init hasn't arrived. Without this
+   * the user can't tell whether the long wait is startup or actual work.
+   */
+  sessionState?: SessionState;
   onRewind?: (messageId: string) => void;
   onRetry?: (assistantMessageId: string) => void;
   onFork?: (assistantMessageId: string) => void;
@@ -175,6 +183,7 @@ const MessageList = memo(function MessageList({
   onExitPlanModeReject,
   systemStatus,
   isStreaming,
+  sessionState,
   onRewind,
   onRetry,
   onFork,
@@ -203,13 +212,23 @@ const MessageList = memo(function MessageList({
     if (!pendingExitPlanMode || !onExitPlanModeApprove || !onExitPlanModeReject) return undefined;
     return (
       <div className="py-2">
-        <ExitPlanModePrompt request={pendingExitPlanMode} onApprove={onExitPlanModeApprove} onReject={onExitPlanModeReject} />
+        <ExitPlanModePrompt key={pendingExitPlanMode.requestId} request={pendingExitPlanMode} onApprove={onExitPlanModeApprove} onReject={onExitPlanModeReject} />
       </div>
     );
   }, [pendingExitPlanMode, onExitPlanModeApprove, onExitPlanModeReject]);
 
   const showStatus = isLoading || !!systemStatus;
-  const statusMessage = systemStatus ? resolveSystemStatus(systemStatus) : streamingStatusMessage;
+  // (issue #174) During 'starting' the SDK subprocess is alive but hasn't
+  // sent system_init — the random "苦思冥想中…" line would falsely imply the
+  // model is already thinking. Surface a startup-specific hint instead.
+  // systemStatus (e.g. compacting / api_retry) still wins because it carries
+  // a more specific signal that overrides both starting and the generic
+  // thinking line.
+  const statusMessage = systemStatus
+    ? resolveSystemStatus(systemStatus)
+    : sessionState === 'starting'
+      ? 'AI 启动中…（首次启动可能较慢）'
+      : streamingStatusMessage;
 
   // Fade-in
   const wasSessionLoadingRef = useRef(false);

@@ -1,5 +1,5 @@
-import { AlertTriangle, ArrowLeft, Bot, Globe, History, Loader2, Plus, PanelRightOpen, TerminalSquare, X } from 'lucide-react';
-import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { AlertTriangle, ArrowLeft, Globe, History, Loader2, Plus, PanelRightOpen, RotateCcw, TerminalSquare, X } from 'lucide-react';
+import { forwardRef, lazy, Suspense, useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState } from 'react';
 
 import { track } from '@/analytics';
 import { useCloseLayer } from '@/hooks/useCloseLayer';
@@ -11,6 +11,8 @@ import DirectoryPanel, { type DirectoryPanelHandle } from '@/components/Director
 import DropZoneOverlay from '@/components/DropZoneOverlay';
 import MessageList from '@/components/MessageList';
 import SessionHistoryDropdown from '@/components/SessionHistoryDropdown';
+import SessionSurfaceTags from '@/components/SessionSurfaceTags';
+import SessionMenuButton from '@/components/SessionMenuButton';
 import { FileActionProvider } from '@/context/FileActionContext';
 import SimpleChatInput, { type ImageAttachment, type SimpleChatInputHandle } from '@/components/SimpleChatInput';
 import QueryNavigator from '@/components/chat/QueryNavigator';
@@ -23,6 +25,8 @@ import WorkspaceConfigPanel, { type Tab as WorkspaceTab } from '@/components/Wor
 import CronTaskSettingsModal from '@/components/cron/CronTaskSettingsModal';
 import { useTabState, useTabActive } from '@/context/TabContext';
 import { useVirtuosoScroll } from '@/hooks/useVirtuosoScroll';
+import { useAgentStatuses } from '@/hooks/useAgentStatuses';
+import { useSessionSurfaces } from '@/hooks/useSessionSurfaces';
 import { useConfig } from '@/hooks/useConfig';
 import { useFileDropZone } from '@/hooks/useFileDropZone';
 import { useTauriFileDrop } from '@/hooks/useTauriFileDrop';
@@ -38,7 +42,7 @@ import CronTaskDetailPanel from '@/components/CronTaskDetailPanel';
 import type { CronSettingsResult } from '@/components/cron/CronTaskSettingsModal';
 import { isTauriEnvironment } from '@/utils/browserMock';
 import { isDebugMode } from '@/utils/debug';
-import { isImSource } from '@/utils/taskCenterUtils';
+import { isImSource, getChannelTypeLabel } from '@/utils/taskCenterUtils';
 import { type PermissionMode, type McpServerDefinition, getEffectiveModelAliases } from '@/config/types';
 import { syncMcpServerNames } from '@/components/tools/toolBadgeConfig';
 import {
@@ -88,14 +92,27 @@ function requiresSignedSessionHistory(providerId?: string): boolean {
   return SIGNED_HISTORY_PROVIDER_IDS.has(providerId);
 }
 
+/** Imperative handle exposed by SessionTitleEditor — lets the SessionMenuButton's
+ *  "重命名" item drive the same inline editor that title-click triggers. */
+export interface SessionTitleEditorHandle {
+  openRename: () => void;
+}
+
 /** Inline-editable session title — click to edit, Enter/Blur to save, Esc to cancel */
-function SessionTitleEditor({ title, onRename }: { title: string; onRename: (newTitle: string) => void }) {
+const SessionTitleEditor = forwardRef<
+  SessionTitleEditorHandle,
+  { title: string; onRename: (newTitle: string) => void }
+>(function SessionTitleEditor({ title, onRename }, ref) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(title);
   const inputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => { setDraft(title); }, [title]);
   useEffect(() => { if (editing) inputRef.current?.select(); }, [editing]);
+
+  useImperativeHandle(ref, () => ({
+    openRename: () => setEditing(true),
+  }), []);
 
   const commit = () => {
     const trimmed = draft.trim();
@@ -131,7 +148,7 @@ function SessionTitleEditor({ title, onRename }: { title: string; onRename: (new
       )}
     </div>
   );
-}
+});
 
 interface ChatProps {
   onBack?: () => void;
@@ -192,6 +209,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     stopResponse,
     loadSession,
     resetSession,
+    adoptMigratedSession,
     clearUnifiedLogs,
     respondPermission,
     respondAskUserQuestion,
@@ -260,6 +278,9 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
   const [showLogs, setShowLogs] = useState(false);
   const [showHistory, setShowHistory] = useState(false);
   const historyBtnRef = useRef<HTMLButtonElement>(null);
+  // Imperative handle for the inline title editor — lets the SessionMenuButton's
+  // "重命名" item invoke the same flow as clicking the title.
+  const titleEditorRef = useRef<SessionTitleEditorHandle>(null);
   // Narrow mode: workspace renders as overlay drawer instead of side panel
   // Initialize from window.innerWidth to avoid layout flash (FOUC) on first render
   const [isNarrowLayout, setIsNarrowLayout] = useState(() => typeof window !== 'undefined' && window.innerWidth < 768);
@@ -1033,18 +1054,26 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [initialMessage, isActive, sessionId, isConnected]);
 
-  // Close startup overlay when the AI actually starts processing — not when
-  // sendMessage returns. `sessionState === 'running'` is the authoritative
-  // "AI is working on a turn" signal (set by chat:status running, broadcast
-  // by the runtime once prewarm is done). `streamingMessage` covers the case
-  // where status events were missed but content has arrived. `agentError`
-  // covers async send failures: sendMessage is fire-and-forget so the
-  // autoSend try/catch can't observe backend rejection / network errors —
-  // those land on agentError instead, and the user needs to see the error
-  // banner immediately rather than wait out the 30s safety timeout.
+  // Close startup overlay as soon as the backend has acknowledged the request
+  // — either by transitioning to 'starting' (subprocess launched, system_init
+  // pending) or 'running' (turn actively processing). (issue #174) Including
+  // 'starting' is required because the overlay is z-30 and covers the input
+  // (z-20); leaving it up during 'starting' would hide both the new Stop
+  // button and the MessageList "AI 启动中…" hint, defeating the whole point
+  // of the new state. `streamingMessage` covers the case where status events
+  // were missed but content has arrived. `agentError` covers async send
+  // failures: sendMessage is fire-and-forget so autoSend's try/catch can't
+  // observe backend rejection / network errors — they land on agentError
+  // instead, and the user needs to see the error banner immediately rather
+  // than wait out the 30s safety timeout.
   useEffect(() => {
     if (!showStartupOverlay) return;
-    if (sessionState === 'running' || streamingMessage || agentError) {
+    if (
+      sessionState === 'running'
+      || sessionState === 'starting'
+      || streamingMessage
+      || agentError
+    ) {
       setShowStartupOverlay(false);
     }
   }, [showStartupOverlay, sessionState, streamingMessage, agentError]);
@@ -2022,8 +2051,11 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
       return false;  // Signal SimpleChatInput NOT to clear the input
     }
 
-    // Queue limit: max 5 queued messages
-    const isAiBusy = isLoading || sessionState === 'running';
+    // Queue limit: max 5 queued messages.
+    // (issue #174) 'starting' is also busy — SDK subprocess is launching but
+    // hasn't sent system_init yet. Including it prevents the queue cap from
+    // being bypassed while the user keeps typing during the startup window.
+    const isAiBusy = isLoading || sessionState === 'running' || sessionState === 'starting';
     if (isAiBusy && queuedMessages.length >= 5) {
       toastRef.current.warning('最多排队 5 条消息');
       return false;
@@ -2412,13 +2444,15 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     void respondAskUserQuestion(null);
   }, [respondAskUserQuestion]);
 
-  const handleExitPlanModeApprove = useCallback(() => {
-    void respondExitPlanMode(true);
+  const handleExitPlanModeApprove = useCallback(async () => {
+    const ok = await respondExitPlanMode(true);
+    if (!ok) toastRef.current.error('提交失败，请重试');
     // Mode restore is handled by the useEffect below reacting to resolved='approved'
   }, [respondExitPlanMode]);
 
-  const handleExitPlanModeReject = useCallback(() => {
-    void respondExitPlanMode(false);
+  const handleExitPlanModeReject = useCallback(async (feedback?: string) => {
+    const ok = await respondExitPlanMode(false, feedback);
+    if (!ok) toastRef.current.error('提交失败，请重试');
   }, [respondExitPlanMode]);
 
   // React to plan mode changes: auto-approved by SDK, or user-approved via card
@@ -2533,20 +2567,10 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
   }, [rewindTarget, apiPost, setMessages, setIsLoading, pauseAutoScroll]);
 
   // Retry = rewind to before user message + auto-resend
-  // Uses refs for messagesRef/toastRef/handleSendMessageRef — deps are all stable → reference stable
-  const handleRetry = useCallback((assistantMessageId: string) => {
-    const msgs = messagesRef.current;
-    const aIdx = msgs.findIndex(m => m.id === assistantMessageId);
-    if (aIdx < 0) return;
-
-    // Find the nearest real user message before this assistant message
-    // (skip synthetic task-notification messages which are injected as role='user')
-    let userMsg: typeof msgs[number] | null = null;
-    for (let i = aIdx - 1; i >= 0; i--) {
-      if (msgs[i].role === 'user' && !msgs[i].id.startsWith('task-notification-')) { userMsg = msgs[i]; break; }
-    }
-    if (!userMsg) return;
-
+  // Rewind to before the given user message and re-send its content.
+  // Shared by per-assistant retry (handleRetry) and banner-level retry
+  // (handleRetryLastUserMessage). Uses refs throughout so deps stay stable.
+  const performRetryFromUserMessage = useCallback((userMsg: typeof messagesRef.current[number]) => {
     const content = typeof userMsg.content === 'string' ? userMsg.content : '';
     const attachments = userMsg.attachments;
     const userMessageId = userMsg.id;
@@ -2599,6 +2623,35 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
       });
   }, [apiPost, setMessages, setIsLoading, pauseAutoScroll]); // all stable — refs handle the rest
 
+  // Uses refs for messagesRef/toastRef/handleSendMessageRef — deps are all stable → reference stable
+  const handleRetry = useCallback((assistantMessageId: string) => {
+    const msgs = messagesRef.current;
+    const aIdx = msgs.findIndex(m => m.id === assistantMessageId);
+    if (aIdx < 0) return;
+
+    // Find the nearest real user message before this assistant message
+    // (skip synthetic task-notification messages which are injected as role='user')
+    let userMsg: typeof msgs[number] | null = null;
+    for (let i = aIdx - 1; i >= 0; i--) {
+      if (msgs[i].role === 'user' && !msgs[i].id.startsWith('task-notification-')) { userMsg = msgs[i]; break; }
+    }
+    if (!userMsg) return;
+    performRetryFromUserMessage(userMsg);
+  }, [performRetryFromUserMessage]);
+
+  // Banner-level retry: find the last real user message in the session and rewind+resend it.
+  // Used by the agentError banner's 「重新发送」 button (issue #183).
+  const handleRetryLastUserMessage = useCallback(() => {
+    const msgs = messagesRef.current;
+    let userMsg: typeof msgs[number] | null = null;
+    for (let i = msgs.length - 1; i >= 0; i--) {
+      if (msgs[i].role === 'user' && !msgs[i].id.startsWith('task-notification-')) { userMsg = msgs[i]; break; }
+    }
+    if (!userMsg) return;
+    setAgentError(null);
+    performRetryFromUserMessage(userMsg);
+  }, [performRetryFromUserMessage, setAgentError]);
+
   // Fork = create a new independent session branch at a specific assistant message
   const handleFork = useCallback((assistantMessageId: string) => {
     setForkTarget(assistantMessageId);
@@ -2639,10 +2692,95 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     }
   }, [onSwitchSession, loadSession]);
 
+  // Surface tags (PRD 0.2.14): pull agent status snapshot for the channel pill.
+  // Single 5s polling instance per Chat tab — SessionHistoryDropdown maintains
+  // its own (only mounted when open) so they don't share, but the cost is low.
+  const { statuses: agentStatuses } = useAgentStatuses(true);
+  const surfaces = useSessionSurfaces(sessionId, agentStatuses, cronState.task);
+
+  // Handover-button visibility predicate (Q10 lockdown):
+  //   - session is currently NOT bound to any channel
+  //   - session was not originally created from an IM source (sessionMeta.source)
+  //   - workspace's Agent has at least one online channel to hand off to
+  //   - not a background-completing session
+  const availableHandoverChannels = useMemo(() => {
+    if (!currentAgent) return [];
+    const out: { agentId: string; agentName: string; channelId: string; channelType: string; channelName: string; sessionKey: string; platformLabel: string }[] = [];
+    const status = agentStatuses[currentAgent.id];
+    if (!status) return out;
+    for (const ch of status.channels) {
+      if (ch.status !== 'online') continue;
+      out.push({
+        agentId: status.agentId,
+        agentName: status.agentName,
+        channelId: ch.channelId,
+        channelType: ch.channelType,
+        // Prefer botUsername (e.g. `feishu_mino`) so the menu reads as
+        // `<localized platform> · <bot identity>` instead of falling back to
+        // the human-friendly Agent name (which would duplicate the agent dir).
+        channelName: ch.botUsername || ch.name || ch.channelType,
+        // sessionKey is computed server-side; UI doesn't need it for the candidate list
+        sessionKey: '',
+        platformLabel: getChannelTypeLabel(ch.channelType),
+      });
+    }
+    return out;
+  }, [currentAgent, agentStatuses]);
+
+/**
+   * Migrate the current channel binding to a new session id, then reset the
+   * tab onto the new session. Pulled out of `handleNewSession` so the
+   * SessionMenuButton's "新会话（保留绑定）" submenu item can drive the
+   * exact same flow without re-running the unbound fallback paths.
+   */
+  const newSessionKeepingBinding = useCallback(async () => {
+    const boundChannel = surfaces.channel;
+    if (!boundChannel || !sessionId) return;
+    try {
+      const { migrateChannelToNewSession } = await import('@/api/sessionHandoverClient');
+      const newSessionId = await migrateChannelToNewSession({
+        oldSessionId: sessionId,
+        sessionKey: boundChannel.sessionKey,
+      });
+      if (newSessionId) {
+        console.log(`[Chat] Channel-bound new conversation: ${sessionId.slice(0, 8)} → ${newSessionId.slice(0, 8)}`);
+        // CRITICAL: do NOT call resetSession() here.
+        //
+        // The Rust migrate already minted `newSessionId` on the running
+        // sidecar via /api/im/session/new AND rotated peer_sessions[*].session_id
+        // to it. If we additionally POST /chat/reset, the sidecar mints a
+        // SECOND id and the tab adopts the second mint — leaving the channel
+        // binding pointing at `newSessionId` while the tab is on a third id.
+        // Net effect: BOTH the old and new session lose the channel tag in
+        // the UI (peer_session never matches what the tab is showing). The
+        // dedicated soft-swap helper avoids the second mint.
+        adoptMigratedSession(newSessionId);
+        return;
+      }
+      // Migration returned null (handled error inside the client) — surface
+      // the failure to the user instead of silently no-op'ing, then still
+      // give them a fresh session so the menu click feels responsive.
+      console.warn('[Chat] migrateChannelToNewSession returned null; resetting without rebind');
+      toastRef.current.error('Channel 重绑失败，已就地重置');
+      await resetSession();
+    } catch (err) {
+      console.error('[Chat] Channel surface migration failed, falling back to plain reset:', err);
+      toastRef.current.error('Channel 重绑失败，已就地重置');
+      await resetSession();
+    }
+  }, [surfaces.channel, sessionId, resetSession, adoptMigratedSession]);
+
   // Internal handler for starting a new session
   // If AI is running, App.tsx handles it via background completion (returns true).
   // If AI is idle, falls back to resetSession (reuses Sidecar).
+  // PRD 0.2.14: when current session is IM-channel-bound, migrate the binding
+  // to the new session so the IM channel keeps routing here (matches IM `/new`).
   const handleNewSession = useCallback(async () => {
+    if (surfaces.channel && sessionId) {
+      await newSessionKeepingBinding();
+      return;
+    }
+
     if (onNewSession) {
       const handled = await onNewSession();
       if (handled) {
@@ -2660,7 +2798,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     } else {
       console.error('[Chat] Failed to start new session');
     }
-  }, [onNewSession, resetSession]);
+  }, [onNewSession, resetSession, surfaces.channel, sessionId, newSessionKeepingBinding]);
 
   return (
     <div className="relative flex h-full flex-row overflow-hidden overscroll-none bg-[var(--paper-elevated)] text-[var(--ink)]">
@@ -2695,10 +2833,37 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
               <>
                 <span className="flex-shrink-0 text-[var(--ink-subtle)]">/</span>
                 <SessionTitleEditor
+                  ref={titleEditorRef}
                   title={sessionTitle}
                   onRename={(newTitle) => onRenameSession?.(newTitle)}
                 />
               </>
+            )}
+            {/* Surface tags (channel/cron pill) — display-only since the menu owns actions */}
+            <SessionSurfaceTags channel={surfaces.channel} cron={surfaces.cron} />
+            {/* Session ⋯ menu — rename/favorite/export/stats/bot binding/delete */}
+            {sessionId && agentDir && (
+              <SessionMenuButton
+                sessionId={sessionId}
+                sessionTitle={sessionTitle ?? '此对话'}
+                workspacePath={agentDir}
+                boundChannel={surfaces.channel}
+                availableChannels={availableHandoverChannels}
+                cronProtected={surfaces.cron?.status === 'running'}
+                favorite={!!sessionMeta?.favorite}
+                // The inline editor only mounts once a session has a real
+                // title (see the `sessionTitle && sessionTitle !== 'New Tab' …`
+                // gate above). Mirror that condition here so the menu's
+                // 重命名 row reflects whether the editor exists to open.
+                canRename={!!sessionTitle && sessionTitle !== 'New Tab' && sessionTitle !== 'New Chat'}
+                // `/context` is a builtin SDK slash command — external runtimes
+                // (Claude Code CLI / Codex / Gemini) don't share this surface,
+                // so we omit the callback and let the menu hide the row entirely.
+                onShowContext={isExternalRuntime ? undefined : () => { void handleSendMessageRef.current('/context'); }}
+                onOpenRename={() => titleEditorRef.current?.openRename()}
+                onFavoriteChanged={(_, updated) => { if (updated) setSessionMeta(updated); }}
+                onDeleted={handleNewSession}
+              />
             )}
           </div>
           <div className="flex shrink-0 items-center gap-1">
@@ -2804,55 +2969,49 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
             onNewSession={handleNewSession}
           />
 
-          {agentError && (
+          {agentError && (() => {
+            // Find the last real user message — drives both the oversized-image
+            // rewind hint and the banner-level "重新发送" button (issue #183).
+            const msgs = messagesRef.current;
+            let lastUserMsg: typeof msgs[number] | null = null;
+            for (let i = msgs.length - 1; i >= 0; i--) {
+              if (msgs[i].role === 'user' && !msgs[i].id.startsWith('task-notification-')) { lastUserMsg = msgs[i]; break; }
+            }
+            const canRetry = !!lastUserMsg && !isLoading;
+            return (
             <div className="relative z-10 flex-shrink-0 border-b border-[var(--line)] bg-[var(--paper-inset)] px-4 py-2 text-[11px] text-[var(--ink)]">
               <div className="mx-auto flex max-w-3xl items-start gap-2">
                 <AlertTriangle className="mt-0.5 h-4 w-4 flex-shrink-0 text-[var(--accent)]" />
                 <div className="flex-1">
-                  <span className="font-semibold text-[var(--ink)]">Agent error: </span>
+                  <span className="font-semibold text-[var(--ink)]">AI 调用失败：</span>
                   <span className="text-[var(--ink-muted)]">{agentError}</span>
                   {/* Oversized image hint: detect API 400 about image dimensions and offer rewind.
                       Pattern synced with backend (agent-session.ts shouldResetSessionAfterError).
                       Known API error: "...image dimensions exceed max allowed size: 8000 pixels" */}
-                  {/image.*exceed.*max allowed size/i.test(agentError) && (() => {
-                    const msgs = messagesRef.current;
-                    let lastUserMsg = null;
-                    for (let i = msgs.length - 1; i >= 0; i--) {
-                      if (msgs[i].role === 'user' && !msgs[i].id.startsWith('task-notification-')) { lastUserMsg = msgs[i]; break; }
-                    }
-                    if (!lastUserMsg) return null;
-                    return (
-                      <div className="mt-1">
-                        <span className="text-[var(--ink-muted)]">工具截图超过模型处理限制，</span>
-                        <button
-                          type="button"
-                          onClick={() => { setAgentError(null); handleRewind(lastUserMsg!.id); }}
-                          className="text-[var(--accent)] underline underline-offset-2 hover:text-[var(--accent-hover)]"
-                        >
-                          点击时间回溯到之前
-                        </button>
-                      </div>
-                    );
-                  })()}
+                  {lastUserMsg && /image.*exceed.*max allowed size/i.test(agentError) && (
+                    <div className="mt-1">
+                      <span className="text-[var(--ink-muted)]">工具截图超过模型处理限制，</span>
+                      <button
+                        type="button"
+                        onClick={() => { setAgentError(null); handleRewind(lastUserMsg!.id); }}
+                        className="text-[var(--accent)] underline underline-offset-2 hover:text-[var(--accent-hover)]"
+                      >
+                        点击时间回溯到之前
+                      </button>
+                    </div>
+                  )}
                 </div>
                 <div className="flex flex-shrink-0 items-center gap-1.5">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      const providerName = currentProvider?.name || currentProvider?.id || '未知';
-                      const model = selectedModel || currentProvider?.primaryModel || '未知';
-                      const workspace = agentDir || '未知';
-                      const desc = `我在使用 AI 对话时遇到了报错，请帮我查询日志诊断问题并引导我解决：\n\n**报错信息**: ${agentError}\n**供应商**: ${providerName}\n**模型**: ${model}\n**工作区**: ${workspace}`;
-                      setAgentError(null);
-                      window.dispatchEvent(new CustomEvent(CUSTOM_EVENTS.LAUNCH_BUG_REPORT, {
-                        detail: { description: desc, appVersion: '' },
-                      }));
-                    }}
-                    className="flex items-center gap-1 rounded-md px-2 py-0.5 text-[10px] font-medium text-[var(--accent-warm)] transition-colors hover:bg-[var(--accent-warm-subtle)]"
-                  >
-                    <Bot className="h-3 w-3" />
-                    召唤小助理
-                  </button>
+                  {canRetry && (
+                    <button
+                      type="button"
+                      onClick={handleRetryLastUserMessage}
+                      className="flex items-center gap-1 rounded-md px-2 py-0.5 text-[10px] font-medium text-[var(--accent)] transition-colors hover:bg-[var(--accent-warm-subtle)]"
+                    >
+                      <RotateCcw className="h-3 w-3" />
+                      重新发送
+                    </button>
+                  )}
                   <button
                     type="button"
                     onClick={() => setAgentError(null)}
@@ -2864,7 +3023,8 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
                 </div>
               </div>
             </div>
-          )}
+            );
+          })()}
           {/* Unified Logs Panel - fullscreen modal displaying logs */}
           <UnifiedLogsPanel
             sseLogs={unifiedLogs}
@@ -2931,7 +3091,8 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
               onExitPlanModeApprove={handleExitPlanModeApprove}
               onExitPlanModeReject={handleExitPlanModeReject}
               systemStatus={rewindStatus || systemStatus}
-              isStreaming={isLoading || sessionState === 'running'}
+              isStreaming={isLoading || sessionState === 'running' || sessionState === 'starting'}
+              sessionState={sessionState}
               onRewind={isExternalRuntime ? undefined : handleRewind}
               onRetry={handleRetry}
               onFork={isExternalRuntime ? undefined : handleFork}
@@ -2970,7 +3131,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
             onSend={handleSendMessage}
             onStop={handleStop}
             active={isActive}
-            isLoading={isLoading || sessionState === 'running'}
+            isLoading={isLoading || sessionState === 'running' || sessionState === 'starting'}
             sessionState={sessionState}
             systemStatus={systemStatus}
             agentDir={agentDir}

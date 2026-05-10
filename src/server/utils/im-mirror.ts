@@ -1,0 +1,96 @@
+/**
+ * im-mirror — fan out desktop-driven session activity to a bound IM channel
+ * (PRD 0.2.14 Phase C).
+ *
+ * The function `mirrorIfChannelBound` posts to Rust's `/api/im/mirror`
+ * management API endpoint. Rust looks up which IM channel currently binds
+ * the given session id (`peer_sessions[*].session_id == sessionId`) and
+ * forwards the text via the channel adapter. If no channel is bound the
+ * server returns `{ mirrored: false }` and we silently move on — that's
+ * the common case for pure-desktop sessions.
+ *
+ * What we mirror (Q1·C / Q2 / Q5 lockdown):
+ *   * user role: full text with `[From: 桌面端用户消息]` prefix, plus PNG/JPG
+ *     attachments inline.
+ *   * assistant role: AI text block (one call per content_block_stop). NO
+ *     prefix — flows through to IM as plain bot reply, matching the
+ *     experience of asking the bot directly.
+ *
+ * What we do NOT mirror:
+ *   * tool_use / tool_result / canUseTool approval cards.
+ *   * partial chunks (delta events).
+ *   * non-image attachments (PDF / video / arbitrary binary).
+ *
+ * Failures are best-effort and logged to the unified log; the desktop
+ * conversation continues regardless.
+ */
+
+import { cancellableFetch } from './cancellation';
+
+export interface MirrorImage {
+    mimeType: string;
+    /** base64-encoded image data (no `data:` prefix) */
+    dataBase64: string;
+}
+
+export interface MirrorPayload {
+    sessionId: string;
+    role: 'user' | 'assistant';
+    text?: string;
+    images?: MirrorImage[];
+}
+
+/** Concise structural log marker so a quick `grep '\[mirror\]'` surfaces these
+ *  in unified logs without dumping verbose payload bodies. */
+const LOG = '[mirror]';
+
+/**
+ * Fire-and-forget mirror call. Caller MUST NOT await this on the critical
+ * path of message persistence (we don't want IM latency to gate Sidecar
+ * forward progress). The promise still resolves so call sites that want to
+ * observe completion (tests) can opt in.
+ *
+ * The function is a no-op when:
+ *   * `MYAGENTS_MANAGEMENT_PORT` is unset (Sidecar started without
+ *     management API — should not happen in production but safe defaults).
+ *   * `payload.text` is empty AND `payload.images` is empty/undefined.
+ *
+ * Quietly returns instead of throwing on transport / HTTP errors so a
+ * misbehaving channel can't bring down the desktop turn.
+ */
+export async function mirrorIfChannelBound(payload: MirrorPayload): Promise<void> {
+    const port = process.env.MYAGENTS_MANAGEMENT_PORT;
+    if (!port) return;
+
+    const hasText = !!(payload.text && payload.text.trim().length > 0);
+    const hasImages = !!(payload.images && payload.images.length > 0);
+    if (!hasText && !hasImages) return;
+
+    const url = `http://127.0.0.1:${port}/api/im/mirror`;
+    try {
+        const res = await cancellableFetch(
+            url,
+            {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload),
+            },
+            { timeoutMs: 10_000 },
+        );
+        if (!res.ok) {
+            console.warn(`${LOG} mirror request returned ${res.status}`);
+            return;
+        }
+        const json = (await res.json().catch(() => null)) as
+            | { mirrored?: boolean; textSent?: boolean; imagesSent?: number; imagesSkipped?: number }
+            | null;
+        if (json?.mirrored) {
+            console.log(
+                `${LOG} ok role=${payload.role} text=${json.textSent ? 'y' : 'n'} imgs=${json.imagesSent ?? 0}/${json.imagesSkipped ?? 0}`,
+            );
+        }
+    } catch (err) {
+        // Connect failure / timeout / abort. Mirror is best-effort.
+        console.warn(`${LOG} mirror failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+}
