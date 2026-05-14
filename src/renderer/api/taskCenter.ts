@@ -3,6 +3,7 @@
 
 import type {
   Thought,
+  ThoughtArchiveFilter,
   ThoughtCreateInput,
   ThoughtUpdateInput,
 } from '@/../shared/types/thought';
@@ -40,6 +41,12 @@ export function thoughtList(filter?: {
   tag?: string;
   query?: string;
   limit?: number;
+  /**
+   * Archive-state view filter (v0.2.16). Omit ≡ `'active'`. Pass `'all'`
+   * if the caller really does want both (e.g. search). Bottom line: the
+   * default behavior hides archived thoughts.
+   */
+  archived?: ThoughtArchiveFilter;
 }): Promise<Thought[]> {
   return inv('cmd_thought_list', { filter });
 }
@@ -54,6 +61,14 @@ export function thoughtUpdate(input: ThoughtUpdateInput): Promise<Thought> {
 
 export function thoughtDelete(id: string): Promise<void> {
   return inv('cmd_thought_delete', { id });
+}
+
+/**
+ * Toggle a thought's archive flag (v0.2.16). Idempotent — re-archiving an
+ * already-archived thought is a no-op. Returns the updated Thought.
+ */
+export function thoughtSetArchived(id: string, archived: boolean): Promise<Thought> {
+  return inv('cmd_thought_set_archived', { id, archived });
 }
 
 /** Per-source delete failure surfaced by `thoughtMerge` — the merge itself

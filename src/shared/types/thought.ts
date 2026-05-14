@@ -21,7 +21,21 @@ export interface Thought {
   updatedAt: number;
   /** Task IDs derived from this thought (bidirectional link "outgoing" side) */
   convertedTaskIds: string[];
+  /**
+   * "Soft-hide" flag (v0.2.16). Archived thoughts are excluded from the
+   * default ThoughtPanel list / Launcher 想法条 / `#` picker, but full-text
+   * search still returns them. May be `undefined` on legacy `.md` files
+   * written before v0.2.16; treat undefined as `false`.
+   */
+  archived?: boolean;
 }
+
+/**
+ * View filter for `thoughtList`. `undefined` is equivalent to `'active'`
+ * on the Rust side — old callers automatically inherit the "hide archived"
+ * default.
+ */
+export type ThoughtArchiveFilter = 'active' | 'archived' | 'all';
 
 /**
  * Payload accepted by `cmd_thought_create`.

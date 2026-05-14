@@ -184,8 +184,15 @@ impl SearchEngine {
             });
         };
         let start = std::time::Instant::now();
+        // Search intentionally spans archived thoughts too (v0.2.16 PRD
+        // §2.2 decision 4 — mailbox-archive semantics). The default
+        // ThoughtListFilter hides archived since v0.2.16, so we have to
+        // ask for `All` explicitly here.
         let all = store
-            .list(crate::thought::ThoughtListFilter::default())
+            .list(crate::thought::ThoughtListFilter {
+                archived: Some(crate::thought::ThoughtArchiveFilter::All),
+                ..Default::default()
+            })
             .await;
         let needle = query.trim().to_lowercase();
         let hits: Vec<ThoughtSearchHit> = all

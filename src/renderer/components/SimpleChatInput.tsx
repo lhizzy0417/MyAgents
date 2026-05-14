@@ -1168,9 +1168,13 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
     setIsThoughtSearching(true);
     let cancelled = false;
     const timer = setTimeout(() => {
+      // `#` picker is a passive surface — archived thoughts are
+      // intentionally excluded (v0.2.16). Explicitly tag `archived: 'active'`
+      // even though the backend default already hides them, so intent is
+      // visible at the call site.
       const filter = fileSearchQuery.length === 0
-        ? { limit: THOUGHT_RECENT_LIMIT }
-        : { query: fileSearchQuery, limit: THOUGHT_SOFT_CAP };
+        ? { limit: THOUGHT_RECENT_LIMIT, archived: 'active' as const }
+        : { query: fileSearchQuery, limit: THOUGHT_SOFT_CAP, archived: 'active' as const };
       thoughtList(filter)
         .then((rows) => {
           if (cancelled) return;

@@ -414,6 +414,7 @@ pub fn run() {
             thought::cmd_thought_delete,
             thought::cmd_thought_merge,
             thought::cmd_thought_open_dir,
+            thought::cmd_thought_set_archived,
             // Task Center — Task commands (v0.1.69)
             task::cmd_task_create_direct,
             task::cmd_task_create_from_alignment,

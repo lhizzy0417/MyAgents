@@ -14,25 +14,40 @@
 // surrounding gutter doesn't swallow clicks targeted at the cards behind
 // it; the inner pill takes pointer events back on for its buttons.
 
-import { Layers, Trash2, X } from 'lucide-react';
+import { Archive, ArchiveRestore, Layers, Trash2, X } from 'lucide-react';
 
 interface Props {
   /** Number of currently selected thoughts. Drives merge/delete enable state. */
   count: number;
   /** Click 「合并」 — only fires when `count >= 2`. */
   onMerge: () => void;
+  /** Click 「归档」/「取消归档」 — flips archive flag for every selected thought. */
+  onArchive: () => void;
   /** Click 「删除」 — opens a confirm dialog at the panel level. Only fires
    *  when `count >= 1`. */
   onDelete: () => void;
   /** Click 「取消」 — exit selectMode and clear selection. */
   onCancel: () => void;
+  /** Current panel view mode — drives archive button label / icon. */
+  viewMode: 'active' | 'archived';
   /** When true, action buttons are disabled (e.g. during merge/delete RPC). */
   busy?: boolean;
 }
 
-export function ThoughtBulkBar({ count, onMerge, onDelete, onCancel, busy }: Props) {
+export function ThoughtBulkBar({
+  count,
+  onMerge,
+  onArchive,
+  onDelete,
+  onCancel,
+  viewMode,
+  busy,
+}: Props) {
   const canMerge = count >= 2 && !busy;
+  const canArchive = count >= 1 && !busy;
   const canDelete = count >= 1 && !busy;
+  const archiveLabel = viewMode === 'archived' ? '取消归档' : '归档';
+  const ArchiveIcon = viewMode === 'archived' ? ArchiveRestore : Archive;
   return (
     <div className="pointer-events-none absolute inset-x-0 bottom-6 z-40 flex justify-center">
       <div
@@ -53,6 +68,16 @@ export function ThoughtBulkBar({ count, onMerge, onDelete, onCancel, busy }: Pro
         >
           <Layers className="h-3.5 w-3.5" strokeWidth={1.75} />
           合并
+        </button>
+        <button
+          type="button"
+          onClick={onArchive}
+          disabled={!canArchive}
+          title={viewMode === 'archived' ? '取消归档选中的想法' : '归档选中的想法'}
+          className="flex items-center gap-1.5 rounded-full px-3 py-1 text-[12px] text-[var(--ink-secondary)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)] disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-transparent disabled:hover:text-[var(--ink-secondary)]"
+        >
+          <ArchiveIcon className="h-3.5 w-3.5" strokeWidth={1.75} />
+          {archiveLabel}
         </button>
         <button
           type="button"

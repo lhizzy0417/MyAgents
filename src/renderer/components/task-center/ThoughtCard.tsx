@@ -18,6 +18,8 @@ import {
   useState,
 } from 'react';
 import {
+  Archive,
+  ArchiveRestore,
   CheckSquare,
   Check,
   MessageSquare,
@@ -26,7 +28,7 @@ import {
   Trash2,
   Zap,
 } from 'lucide-react';
-import { thoughtDelete, thoughtUpdate } from '@/api/taskCenter';
+import { thoughtDelete, thoughtSetArchived, thoughtUpdate } from '@/api/taskCenter';
 import { Popover } from '@/components/ui/Popover';
 import WorkspaceIcon from '@/components/launcher/WorkspaceIcon';
 import { useConfig } from '@/hooks/useConfig';
@@ -179,6 +181,23 @@ export function ThoughtCard({
       setBusy(false);
     }
   }, [thought.id, onChanged]);
+
+  const isArchived = thought.archived === true;
+  const handleToggleArchive = useCallback(async () => {
+    setShowMenu(false);
+    setBusy(true);
+    setError(null);
+    try {
+      const updated = await thoughtSetArchived(thought.id, !isArchived);
+      // Returning the updated thought lets the panel filter it out of the
+      // current view if the new archived state no longer matches viewMode.
+      onChanged(updated);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }, [thought.id, isArchived, onChanged]);
 
   const handleEditKeyDown = useCallback(
     (e: React.KeyboardEvent) => {
@@ -400,6 +419,24 @@ export function ThoughtCard({
                   多选
                 </button>
               )}
+              <button
+                type="button"
+                onClick={() => void handleToggleArchive()}
+                disabled={busy}
+                className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[12px] text-[var(--ink-secondary)] hover:bg-[var(--hover-bg)] hover:text-[var(--ink)] disabled:opacity-50"
+              >
+                {isArchived ? (
+                  <>
+                    <ArchiveRestore className="h-3.5 w-3.5" strokeWidth={1.5} />
+                    取消归档
+                  </>
+                ) : (
+                  <>
+                    <Archive className="h-3.5 w-3.5" strokeWidth={1.5} />
+                    归档
+                  </>
+                )}
+              </button>
               <button
                 type="button"
                 onClick={() => void handleDelete()}

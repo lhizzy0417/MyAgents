@@ -51,6 +51,15 @@ pub struct Thought {
     pub updated_at: i64,
     #[serde(default)]
     pub converted_task_ids: Vec<String>,
+    /// "Soft-hide" flag — archived thoughts don't appear in the default
+    /// ThoughtPanel list / Launcher 想法条 / `#` picker, but search still
+    /// returns them (mailbox-archive semantics, v0.2.16 PRD).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub archived: bool,
+}
+
+fn is_false(v: &bool) -> bool {
+    !*v
 }
 
 impl Thought {
@@ -65,8 +74,19 @@ impl Thought {
             created_at: now,
             updated_at: now,
             converted_task_ids: Vec::new(),
+            archived: false,
         }
     }
+}
+
+/// View filter for `list()`. `None` == `Active` — default behavior is to
+/// hide archived thoughts unless the caller explicitly opts in.
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ThoughtArchiveFilter {
+    Active,
+    Archived,
+    All,
 }
 
 /// Payload for `create`.
@@ -119,6 +139,11 @@ pub struct ThoughtListFilter {
     pub query: Option<String>,
     /// If set, cap the number of returned rows (most recent first).
     pub limit: Option<usize>,
+    /// Archive-state filter. `None` (default) == `Active` — old callers
+    /// that don't know about archiving naturally get the "hide archived"
+    /// behavior the PRD specifies.
+    #[serde(default)]
+    pub archived: Option<ThoughtArchiveFilter>,
 }
 
 /// In-memory + on-disk thought store. Singleton managed by Tauri.
@@ -251,6 +276,17 @@ impl ThoughtStore {
         let inner = self.inner.read().await;
         let mut thoughts: Vec<Thought> = inner.values().map(|(t, _)| t.clone()).collect();
 
+        // Archive filter first — narrows the candidate set before any
+        // tag/query scan. Default (None) is Active, so any historical
+        // caller that doesn't know about this field gets the "hide
+        // archived" behavior the PRD requires.
+        let archive_mode = filter.archived.unwrap_or(ThoughtArchiveFilter::Active);
+        match archive_mode {
+            ThoughtArchiveFilter::Active => thoughts.retain(|t| !t.archived),
+            ThoughtArchiveFilter::Archived => thoughts.retain(|t| t.archived),
+            ThoughtArchiveFilter::All => {}
+        }
+
         if let Some(tag) = filter.tag.as_deref() {
             let needle = tag.to_lowercase();
             thoughts.retain(|t| t.tags.iter().any(|x| x.to_lowercase() == needle));
@@ -266,6 +302,34 @@ impl ThoughtStore {
             thoughts.truncate(limit);
         }
         thoughts
+    }
+
+    /// Toggle archive state for a thought. Disk write goes through the
+    /// same atomic tmp+rename path as `update`, so a crash midway can't
+    /// produce a half-written frontmatter.
+    pub async fn set_archived(&self, id: &str, archived: bool) -> Result<Thought, String> {
+        let mut inner = self.inner.write().await;
+        let (existing, path) = inner
+            .get(id)
+            .ok_or_else(|| format!("Thought not found: {}", id))?
+            .clone();
+
+        let mut updated = existing;
+        if updated.archived == archived {
+            return Ok(updated); // idempotent — no-op
+        }
+        updated.archived = archived;
+        updated.updated_at = now_ms();
+
+        let serialized = serialize_thought(&updated);
+        self.write_atomic(&path, &serialized)?;
+        inner.insert(updated.id.clone(), (updated.clone(), path));
+        ulog_info!(
+            "[thought] {} id={}",
+            if archived { "archived" } else { "unarchived" },
+            id
+        );
+        Ok(updated)
     }
 
     pub async fn get(&self, id: &str) -> Option<Thought> {
@@ -423,6 +487,9 @@ impl ThoughtStore {
             created_at: now,
             updated_at: now,
             converted_task_ids: merged_converted,
+            // Merge always produces a fresh, active note — archived state
+            // is intentionally not propagated (see PRD §2.2 decision 2).
+            archived: false,
         };
         let new_path = self.file_path_for(&new_thought);
         let serialized = serialize_thought(&new_thought);
@@ -601,6 +668,12 @@ fn serialize_thought(t: &Thought) -> String {
         "convertedTaskIds: {}\n",
         encode_string_list(&t.converted_task_ids)
     ));
+    // `archived: false` is the implicit default — omit it so existing
+    // frontmatter doesn't grow a useless field for every thought ever
+    // written. Only emit when the flag is actually set.
+    if t.archived {
+        out.push_str("archived: true\n");
+    }
     out.push_str("---\n\n");
     out.push_str(&t.content);
     if !t.content.ends_with('\n') {
@@ -626,6 +699,7 @@ fn parse_thought_file(raw: &str) -> Result<Thought, String> {
     let mut tags: Vec<String> = Vec::new();
     let mut images: Vec<String> = Vec::new();
     let mut converted_task_ids: Vec<String> = Vec::new();
+    let mut archived = false;
 
     for line in fm.lines() {
         let line = line.trim();
@@ -644,6 +718,7 @@ fn parse_thought_file(raw: &str) -> Result<Thought, String> {
             "convertedTaskIds" => {
                 converted_task_ids = decode_string_list(value).unwrap_or_default()
             }
+            "archived" => archived = value == "true",
             _ => {}
         }
     }
@@ -668,6 +743,7 @@ fn parse_thought_file(raw: &str) -> Result<Thought, String> {
         created_at,
         updated_at,
         converted_task_ids,
+        archived,
     })
 }
 
@@ -755,6 +831,17 @@ pub async fn cmd_thought_delete(
     id: String,
 ) -> Result<(), String> {
     state.delete(&id).await
+}
+
+/// Toggle a thought's archive flag. Idempotent — re-archiving an
+/// already-archived thought is a no-op. v0.2.16 PRD.
+#[tauri::command]
+pub async fn cmd_thought_set_archived(
+    state: tauri::State<'_, ManagedThoughtStore>,
+    id: String,
+    archived: bool,
+) -> Result<Thought, String> {
+    state.set_archived(&id, archived).await
 }
 
 /// Merge `sourceIds` into a single new thought, then delete the sources.
@@ -865,6 +952,7 @@ mod tests {
             created_at: 1_700_000_000_000,
             updated_at: 1_700_000_000_000,
             converted_task_ids: vec![],
+            archived: false,
         };
         let s = serialize_thought(&t);
         let parsed = parse_thought_file(&s).unwrap();
@@ -1026,6 +1114,122 @@ mod tests {
         assert!(err.contains("at least 2"));
         // Source untouched.
         assert!(store.get(&a.id).await.is_some());
+    }
+
+    #[tokio::test]
+    async fn archive_round_trip_persists_in_frontmatter() {
+        let dir = tempdir().unwrap();
+        let id;
+        {
+            let store = ThoughtStore::new(dir.path().to_path_buf());
+            let t = store
+                .create(ThoughtCreateInput {
+                    content: "to be archived".to_string(),
+                    images: vec![],
+                })
+                .await
+                .unwrap();
+            id = t.id.clone();
+            assert!(!t.archived);
+            let archived = store.set_archived(&id, true).await.unwrap();
+            assert!(archived.archived);
+            // Idempotent re-archive — no failure.
+            let again = store.set_archived(&id, true).await.unwrap();
+            assert!(again.archived);
+        }
+        // Re-open the store; archived flag survives disk round-trip.
+        let store2 = ThoughtStore::new(dir.path().to_path_buf());
+        let reloaded = store2.get(&id).await.unwrap();
+        assert!(reloaded.archived, "archived flag lost across reload");
+        // Unarchive flips it back.
+        let unarchived = store2.set_archived(&id, false).await.unwrap();
+        assert!(!unarchived.archived);
+    }
+
+    #[tokio::test]
+    async fn list_filter_archive_partitions() {
+        let dir = tempdir().unwrap();
+        let store = ThoughtStore::new(dir.path().to_path_buf());
+        let a = store
+            .create(ThoughtCreateInput {
+                content: "alpha".to_string(),
+                images: vec![],
+            })
+            .await
+            .unwrap();
+        let b = store
+            .create(ThoughtCreateInput {
+                content: "beta".to_string(),
+                images: vec![],
+            })
+            .await
+            .unwrap();
+        store.set_archived(&b.id, true).await.unwrap();
+
+        // Default (None) hides archived
+        let default_list = store.list(ThoughtListFilter::default()).await;
+        assert_eq!(default_list.len(), 1);
+        assert_eq!(default_list[0].id, a.id);
+
+        // Explicit Active mirrors default
+        let active = store
+            .list(ThoughtListFilter {
+                archived: Some(ThoughtArchiveFilter::Active),
+                ..Default::default()
+            })
+            .await;
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].id, a.id);
+
+        // Archived returns only b
+        let archived = store
+            .list(ThoughtListFilter {
+                archived: Some(ThoughtArchiveFilter::Archived),
+                ..Default::default()
+            })
+            .await;
+        assert_eq!(archived.len(), 1);
+        assert_eq!(archived[0].id, b.id);
+
+        // All returns both
+        let all = store
+            .list(ThoughtListFilter {
+                archived: Some(ThoughtArchiveFilter::All),
+                ..Default::default()
+            })
+            .await;
+        assert_eq!(all.len(), 2);
+    }
+
+    #[test]
+    fn serialize_omits_archived_when_false() {
+        // Backward-compat guarantee: existing .md files never grow an
+        // `archived: false` line just because the binary was updated.
+        let t = Thought {
+            id: "x".to_string(),
+            content: "body".to_string(),
+            tags: vec![],
+            images: vec![],
+            created_at: 1,
+            updated_at: 1,
+            converted_task_ids: vec![],
+            archived: false,
+        };
+        let s = serialize_thought(&t);
+        assert!(!s.contains("archived"), "should omit archived when false: {s}");
+
+        let t2 = Thought { archived: true, ..t };
+        let s2 = serialize_thought(&t2);
+        assert!(s2.contains("archived: true"));
+    }
+
+    #[test]
+    fn parse_thought_file_without_archived_defaults_to_false() {
+        // Backward-compat: a frontmatter from before this PR (no `archived`
+        // line) must round-trip with archived = false.
+        let raw = "---\nid: legacy-1\ncreatedAt: 1700000000000\nupdatedAt: 1700000000000\ntags: []\nimages: []\nconvertedTaskIds: []\n---\n\nlegacy body\n";
+        let t = parse_thought_file(raw).unwrap();
+        assert!(!t.archived);
     }
 
     #[tokio::test]

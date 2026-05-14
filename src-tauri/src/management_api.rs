@@ -1381,6 +1381,9 @@ struct ThoughtListQuery {
     tag: Option<String>,
     query: Option<String>,
     limit: Option<usize>,
+    /// `active` (default) / `archived` / `all`. CLI parity with v0.2.16
+    /// archive feature so `myagents thought list --archived` works.
+    archived: Option<String>,
 }
 
 async fn thought_list_handler(
@@ -1392,11 +1395,20 @@ async fn thought_list_handler(
             "error": "thought store not initialized"
         }));
     };
+    let archive_mode = match q.archived.as_deref() {
+        Some("archived") => Some(thought::ThoughtArchiveFilter::Archived),
+        Some("all") => Some(thought::ThoughtArchiveFilter::All),
+        // Missing or "active" → default Active behavior; anything else
+        // we ignore rather than 400 so a typo doesn't surface as a hard
+        // CLI failure.
+        _ => Some(thought::ThoughtArchiveFilter::Active),
+    };
     let thoughts = store
         .list(thought::ThoughtListFilter {
             tag: q.tag,
             query: q.query,
             limit: q.limit,
+            archived: archive_mode,
         })
         .await;
     Json(serde_json::json!({ "ok": true, "thoughts": thoughts }))

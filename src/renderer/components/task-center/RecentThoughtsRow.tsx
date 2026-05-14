@@ -36,7 +36,10 @@ export function RecentThoughtsRow({
     let cancelled = false;
     (async () => {
       try {
-        const list = await thoughtList({ limit });
+        // Launcher strip is a passive recent-activity view — archived
+        // thoughts shouldn't bubble up here even though search would
+        // still find them.
+        const list = await thoughtList({ limit, archived: 'active' });
         if (!cancelled) {
           setThoughts(list);
           setLoaded(true);
