@@ -24,6 +24,19 @@ export interface WorkspaceTreeModel {
   closePath: (path: string) => void;
   togglePath: (path: string) => void;
   isOpen: (path: string) => boolean;
+  /**
+   * Returns the latest `openPaths`. Callers that live outside React's
+   * render flow (an async refresh routine, a `useCallback` declared
+   * before this hook is called in its parent) use this instead of closing
+   * over `openPaths` directly.
+   *
+   * Identity note: the returned callback's identity changes whenever
+   * `openPaths` mutates. Consumers that need a stable reference (e.g. for
+   * a `useCallback` dep array that should not invalidate on every
+   * expand/collapse) should mirror this into a ref via `useEffect`,
+   * matching the project's ref-mirror pattern (toastRef, onSavedRef, etc).
+   */
+  getOpenPaths: () => ReadonlySet<string>;
   getRangeSelection: (anchorPath: string, targetPath: string) => string[];
   getStickyAncestors: (
     firstVisibleIndex: number,
@@ -38,6 +51,14 @@ export function useWorkspaceTreeModel({
   maxStickyDepth = 3,
 }: UseWorkspaceTreeModelOptions): WorkspaceTreeModel {
   const [openPaths, setOpenPaths] = useState<Set<string>>(() => new Set());
+  // `getOpenPaths` identity changes when `openPaths` mutates. Consumers that
+  // want a stable reference (e.g. a `useCallback` declared in a parent
+  // component above this hook call) should mirror it into a ref via
+  // `useEffect`, matching the project's ref-mirror pattern.
+  const getOpenPaths = useCallback(
+    (): ReadonlySet<string> => openPaths,
+    [openPaths],
+  );
 
   const nodeMetaByPath = useMemo(
     () => buildWorkspaceNodeMetaByPath(rootChildren),
@@ -127,6 +148,7 @@ export function useWorkspaceTreeModel({
 
   return {
     closePath,
+    getOpenPaths,
     getRangeSelection,
     getStickyAncestors,
     isOpen,

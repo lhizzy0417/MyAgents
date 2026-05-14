@@ -49,6 +49,7 @@ import { useWorkspaceFileService } from "@/hooks/useWorkspaceFileService";
 import type {
   DirectoryTreeNode,
   DirectoryTree,
+  ExpandDirectoryResult,
 } from "../../shared/dir-types";
 import { isImageFile, isPreviewable } from "../../shared/fileTypes";
 import type { CapabilityInitialSelect } from "../../shared/skillsTypes";
@@ -83,6 +84,11 @@ import AgentCapabilitiesPanel from "./AgentCapabilitiesPanel";
 import WorkspaceIcon from "./launcher/WorkspaceIcon";
 import { useWorkspaceTreeModel } from "./workspace-tree/useWorkspaceTreeModel";
 import { WorkspaceTreeViewport } from "./workspace-tree/WorkspaceTreeViewport";
+import {
+  applyChildrenMap,
+  collectFreshUpdates,
+  mergeLazyChildren,
+} from "./workspace-tree/treeMerge";
 import type { VisibleTreeRow } from "./workspace-tree/treeTypes";
 
 // Lazy load FilePreviewModal - it includes heavy SyntaxHighlighter
@@ -264,6 +270,20 @@ const DirectoryPanel = memo(
     const previewReqIdRef = useRef(0);
     const treeContainerRef = useRef<HTMLDivElement>(null);
     const importInputRef = useRef<HTMLInputElement>(null);
+    // Monotonic counter for "latest refresh wins". `rawRefresh` is async
+    // (dirTree + cascade of dirExpand calls), and multiple triggers (fs
+    // watcher, tool-complete bump, 120s polling, manual refresh) can
+    // overlap. A stale in-flight refresh resolving after a newer one
+    // would otherwise stamp stale data onto `directoryInfo`. Same pattern
+    // as `previewReqIdRef` above.
+    const refreshReqIdRef = useRef(0);
+    // Bridge ref: `rawRefresh` is declared above `useWorkspaceTreeModel`
+    // (which produces the canonical `getOpenPaths`). Reading the latest
+    // openPaths through this ref keeps `rawRefresh`'s identity stable
+    // and avoids re-ordering the entire component body.
+    const getOpenPathsRef = useRef<() => ReadonlySet<string>>(
+      () => new Set<string>(),
+    );
 
     // Context menu and dialog states
     const [contextMenu, setContextMenu] = useState<ContextMenuState>(null);
@@ -411,8 +431,18 @@ const DirectoryPanel = memo(
     // Track previous item count to only log when changed
     const prevItemCountRef = useRef(-1);
 
-    // Raw refresh — fetches full directory tree from backend.
-    // Not debounced; used for initial load and explicit user actions (manual refresh button).
+    // Raw refresh — fetches the directory tree non-destructively.
+    // Not debounced; used for initial load and explicit user actions (manual
+    // refresh button). The debounced wrapper below coalesces watcher / tool /
+    // polling triggers.
+    //
+    // Why non-destructive: `dirTree()` returns a depth-4 capped tree, and
+    // `dirExpand()` returns at most depth=3 sub-trees. The renderer's
+    // `directoryInfo` is built incrementally as the user expands deep folders.
+    // A naive `setDirectoryInfo(data)` wipes those lazy patches and collapses
+    // every previously-expanded depth-5+ branch on every refresh — which fires
+    // every AI tool completion, every save, every fs watcher event, and every
+    // 120s polling tick. See `treeMerge.ts` for the merge + re-fetch logic.
     //
     // MUST NOT invalidate the file search index here. This runs on every file
     // watcher event (AI tool completion, Monaco save, external edits), so
@@ -423,8 +453,58 @@ const DirectoryPanel = memo(
     // session gets a fresh index exactly once.
     const rawRefresh = useCallback(() => {
       setError(null);
-      fileService.dirTree()
-        .then((data) => {
+      const reqId = ++refreshReqIdRef.current;
+      const isStillCurrent = () => reqId === refreshReqIdRef.current;
+      void (async () => {
+        try {
+          const data = await fileService.dirTree();
+          if (!isStillCurrent()) return; // superseded by newer refresh
+
+          // Re-fetch the expansion frontier: for every `openPaths` entry that
+          // sits at a `loaded:false` boundary in the fresh tree, kick a
+          // dirExpand. Cascades across rounds until all open boundaries are
+          // resolved (capped at maxIterations as a safety net).
+          //
+          // `isLoading` prevents racing with a user-driven `expandDir` on the
+          // same path (the user click is in-flight; let it commit its own
+          // result rather than double-fetching and risking a stale stomp).
+          //
+          // `shouldContinue` cancels the cascade when a newer refresh fires —
+          // without it a slow cascade keeps burning IPCs after its result is
+          // already dead.
+          const openPaths = getOpenPathsRef.current();
+          const updates =
+            openPaths.size > 0
+              ? await collectFreshUpdates(
+                  data.tree,
+                  openPaths,
+                  fileService.dirExpand,
+                  {
+                    isLoading: (path) => loadingDirsRef.current.has(path),
+                    shouldContinue: isStillCurrent,
+                  },
+                )
+              : new Map<string, ExpandDirectoryResult>();
+          if (!isStillCurrent()) return; // superseded mid-cascade
+
+          // Single setState commits the combined result: new top-level skeleton
+          // + stale fallback for any expanded branch we couldn't refetch +
+          // fresh dirExpand patches on top.
+          //
+          // The reqId re-check inside the updater closes a React-19 concurrent-
+          // rendering hole: setState updaters can be evaluated after a newer
+          // refresh has already bumped `refreshReqIdRef`. Returning `prev` in
+          // that window prevents a brief flash of stale data before the newer
+          // refresh's updater runs.
+          setDirectoryInfo((prev) => {
+            if (!isStillCurrent()) return prev;
+            const base = prev
+              ? mergeLazyChildren(data.tree, prev.tree)
+              : data.tree;
+            const merged = applyChildrenMap(base, updates);
+            return { ...data, tree: merged };
+          });
+
           const newCount = data.tree?.children?.length || 0;
           if (newCount !== prevItemCountRef.current) {
             console.log(
@@ -432,9 +512,8 @@ const DirectoryPanel = memo(
             );
             prevItemCountRef.current = newCount;
           }
-          setDirectoryInfo(data);
-        })
-        .catch((err) => {
+        } catch (err) {
+          if (!isStillCurrent()) return;
           // PRD 0.2.7 Phase D: switching from sidecar HTTP to Rust invoke
           // means we no longer have to wait for sidecar readiness before
           // refreshing — Rust commands are always live. A failure here is
@@ -445,7 +524,8 @@ const DirectoryPanel = memo(
               : "Failed to load directory info",
           );
           console.error("[DirectoryPanel] Failed to refresh:", err);
-        });
+        }
+      })();
     }, [fileService]);
 
     // Debounced refresh — coalesces rapid triggers (file watcher + tool completion
@@ -664,6 +744,7 @@ const DirectoryPanel = memo(
     );
     const {
       closePath,
+      getOpenPaths,
       getRangeSelection,
       getStickyAncestors,
       nodeMetaByPath,
@@ -675,6 +756,13 @@ const DirectoryPanel = memo(
       rootChildren: treeData,
       selectedPaths,
     });
+    // Bridge: `rawRefresh` (declared above `useWorkspaceTreeModel`) reads
+    // expansion state through this ref. Mirror via useEffect so we don't
+    // write a ref during render — matches the project's other ref-mirror
+    // sites (toastRef, onSavedRef, etc).
+    useEffect(() => {
+      getOpenPathsRef.current = getOpenPaths;
+    }, [getOpenPaths]);
 
     // Pending-selection paths — used by 「新建笔记」 to keep the synthetic
     // newly-created file selected through the brief window between
