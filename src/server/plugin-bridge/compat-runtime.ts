@@ -165,6 +165,30 @@ function chunkByNewline(text: string, limit: number): string[] {
 }
 
 /**
+ * Default mention semantics for inbound messages whose plugin did NOT set
+ * `IsMention` / `WasMentioned` / `isMention` on the dispatch context.
+ *
+ * Private chats are always directed at the bot, so default to `true`.
+ *
+ * For group chats the conservative default is `false` — only plugins that
+ * actually parse mention info (e.g. Feishu sets `WasMentioned` via
+ * `mentionedBot(ctx.mentions)`) should opt into the mention gate.
+ *
+ * **WeCom exception**: the WeCom AI-Bot platform only delivers
+ * `aibot_msg_callback` for group chats when the bot is explicitly @-mentioned.
+ * Every group message we receive from the wecom plugin is therefore an
+ * @-mention by platform invariant, but the plugin's `buildMessageContext()`
+ * does not encode that signal. Without this override the Rust IM router's
+ * `GroupActivation::Mention` gate silently buffers wecom group messages
+ * forever (see PRD 0.2.16 / unified-2026-05-14 log post 14:19:49 trace).
+ */
+function defaultIsMentionForGroup(pluginId: string): boolean {
+  // WeCom: platform only delivers group callbacks on @-mention.
+  if (pluginId === 'wecom') return true;
+  return false;
+}
+
+/**
  * Create a compat channel runtime that routes inbound messages to Rust.
  */
 export function createCompatRuntime(rustPort: number, botId: string, pluginId: string) {
@@ -436,7 +460,8 @@ export function createCompatRuntime(rustPort: number, botId: string, pluginId: s
           const chatType = String(ctx.ChatType || ctx.chatType || 'direct');
           const messageId = String(ctx.MessageSid || ctx.messageSid || ctx.MessageId || '');
           const groupId = String(ctx.QQGroupOpenid || ctx.GroupId || ctx.groupId || '');
-          const isMention = ctx.IsMention ?? ctx.WasMentioned ?? ctx.isMention ?? (chatType !== 'group');
+          const isMention = ctx.IsMention ?? ctx.WasMentioned ?? ctx.isMention
+            ?? (chatType === 'group' ? defaultIsMentionForGroup(currentPluginId) : true);
           const groupName = String(ctx.GroupSubject || ctx.GroupName || ctx.groupName || '') || undefined;
           const threadId = String(ctx.MessageThreadId || ctx.threadId || '') || undefined;
           const replyToBody = String(ctx.ReplyToBody || ctx.replyToBody || '') || undefined;
@@ -573,9 +598,11 @@ export function createCompatRuntime(rustPort: number, botId: string, pluginId: s
           const messageId = String(ctx.MessageSid || ctx.messageSid || ctx.MessageId || '');
           const groupId = String(ctx.QQGroupOpenid || ctx.GroupId || ctx.groupId || '');
           // Default isMention by chatType: private=true (always directed at bot),
-          // group=false (conservative — only if plugin explicitly flags it as mention).
-          // OpenClaw Feishu plugin sets WasMentioned via mentionedBot(ctx.mentions).
-          const isMention = ctx.IsMention ?? ctx.WasMentioned ?? ctx.isMention ?? (chatType !== 'group');
+          // group=plugin-specific (see defaultIsMentionForGroup — wecom group
+          // callbacks are mention-only by platform invariant; other plugins
+          // default to false unless they set WasMentioned explicitly).
+          const isMention = ctx.IsMention ?? ctx.WasMentioned ?? ctx.isMention
+            ?? (chatType === 'group' ? defaultIsMentionForGroup(currentPluginId) : true);
 
           // Group metadata from OpenClaw plugin dispatch context
           const groupName = String(ctx.GroupSubject || ctx.GroupName || ctx.groupName || '') || undefined;

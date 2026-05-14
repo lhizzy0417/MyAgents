@@ -2382,6 +2382,11 @@ async fn create_bot_instance<R: Runtime>(
                         if !is_allowed_user && !group_approved {
                             // Buffer history even for unapproved groups so AI has context
                             // when the group is eventually approved or an allowedUser @triggers.
+                            // Log so operators can tell this from a silent route drop.
+                            ulog_info!(
+                                "[im] Group message buffered (unapproved group, sender not in allowedUsers): chat_id={}, sender={}, platform={:?}",
+                                msg.chat_id, msg.sender_id, msg.platform,
+                            );
                             group_history_for_loop.lock().await.push(
                                 &session_key,
                                 GroupHistoryEntry {
@@ -2401,6 +2406,13 @@ async fn create_bot_instance<R: Runtime>(
                         );
                         let activation = group_activation_for_loop.read().await.clone();
                         if activation == GroupActivation::Mention && !msg.is_mention && !is_plugin_command {
+                            // Mention-mode gate: log so a missing IsMention from a bridge
+                            // plugin (the 0.2.16 wecom group bug) is diagnosable from
+                            // unified-log alone instead of requiring source dives.
+                            ulog_info!(
+                                "[im] Group message buffered (Mention mode, not @-mentioned): chat_id={}, sender={}, platform={:?}, is_mention={}",
+                                msg.chat_id, msg.sender_id, msg.platform, msg.is_mention,
+                            );
                             group_history_for_loop.lock().await.push(
                                 &session_key,
                                 GroupHistoryEntry {
