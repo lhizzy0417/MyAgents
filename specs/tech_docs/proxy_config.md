@@ -121,13 +121,42 @@ pub fn build_client_with_proxy(builder: ClientBuilder) -> Client {
 if let Some(proxy_settings) = read_proxy_settings() {
     cmd.env("HTTP_PROXY", proxy_url);
     cmd.env("HTTPS_PROXY", proxy_url);
+    cmd.env("http_proxy", proxy_url);  // lower-case for stacks that only read those
+    cmd.env("https_proxy", proxy_url);
     cmd.env("NO_PROXY", "localhost,...");
+    cmd.env("no_proxy", "localhost,...");
+
+    // Issue #194 — `ALL_PROXY` (curl-style "use proxy for everything") takes
+    // precedence over HTTP_PROXY/HTTPS_PROXY in many HTTP stacks (reqwest,
+    // openssl, curl). If the launching shell exported `ALL_PROXY` it would
+    // shadow the proxy we inject above. Strip both casings unconditionally.
+    cmd.env_remove("ALL_PROXY");
+    cmd.env_remove("all_proxy");
+
     cmd.env("MYAGENTS_PROXY_INJECTED", "1"); // TypeScript 端区分显式注入 vs 系统继承
 } else {
-    // 继承系统网络行为，但始终注入 NO_PROXY 保护 Node.js 的 localhost fetch 调用
+    // 继承系统网络行为，但始终注入 NO_PROXY 保护 Node.js 的 localhost fetch 调用。
+    // 注意：未配 MyAgents proxy 时 **不** 剥离继承的 `ALL_PROXY`——
+    // "未配置 = 继承系统" 的设计语义包含 system 层的 `ALL_PROXY` 设置。
+    // 用户视角的对应入口是 Settings → 网络代理 关闭开关。
     cmd.env("NO_PROXY", "localhost,...");
+    cmd.env("no_proxy", "localhost,...");
 }
 ```
+
+#### 2.1 外部 Runtime 的 `envPolicy` override（PRD 0.2.16）
+
+`apply_to_subprocess` 给所有 Rust spawn 的子进程（Sidecar、Plugin Bridge、updater、tray helpers ...）的 proxy env 设定一个**基线**。外部 AI Runtime（Claude Code CLI / Codex / Gemini）在 Sidecar 进程内再 spawn 时，可以由用户在 Agent 设置里选 `runtimeConfig.envPolicy.proxy` 进一步覆盖：
+
+| 字面量 | 行为 | 适用场景 |
+|--------|------|---------|
+| `'myagents'`（默认） | 保留 Rust 注入的 proxy var——上游 Sidecar 的 `process.env.HTTP_PROXY` 已是 MyAgents 配置的代理 | 绝大多数用户 |
+| `'terminal'` | 剥掉继承的 proxy var，恢复用户 interactive shell 在 `~/.zshrc` / `~/.bashrc` 里 export 的（Sidecar 启动时 `shell.ts::warmupShellPath` 抓的 8 个 var） | 用户终端能访问的 endpoint 在 MyAgents 里访问不到 |
+| `'direct'` | 剥掉所有 proxy var | Clash TUN / transparent proxy / VPN 等系统层路由用户 |
+
+实现在 `src/server/runtimes/env-utils.ts::augmentedProcessEnv(policy)`，未知字面量 fallback 到 `'myagents'`（防御纵深）。disk 上的 envPolicy 必须通过 `env-utils.resolveAgentEnvPolicy(workspacePath)` 读取——它做 proxy 字面量校验并对未知值 warn-log，**禁止**裸 cast。
+
+诊断面板（`RuntimeDiagnosticsBanner`）展示实际生效的 `RuntimeEffectiveEnv`，让用户直接看到 envPolicy 决定的 proxy var 落在 Runtime 子进程的具体值。详见 `tech_docs/multi_agent_runtime.md` 「Runtime 诊断 + envPolicy」节。
 
 #### 3. Rust Updater (`updater.rs`)
 
