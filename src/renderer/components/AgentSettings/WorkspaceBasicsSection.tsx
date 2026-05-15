@@ -16,6 +16,7 @@ import { ALL_WORKSPACE_ICON_IDS, DEFAULT_WORKSPACE_ICON } from '@/assets/workspa
 import WorkspaceIcon from '../launcher/WorkspaceIcon';
 import RuntimeSelector from '../RuntimeSelector';
 import type { RuntimeType, RuntimeDetections } from '../../../shared/types/runtime';
+import { buildRuntimeChangePatch } from '../../../shared/types/runtime';
 import { invoke } from '@tauri-apps/api/core';
 import { useToast } from '@/components/Toast';
 
@@ -82,7 +83,11 @@ export default function WorkspaceBasicsSection({ project, agent, agentDir }: Wor
   const handleRuntimeChange = useCallback(async (runtime: RuntimeType) => {
     if (!agent) return;
     try {
-      await patchAgentConfig(agent.id, { runtime });
+      // buildRuntimeChangePatch scrubs cross-runtime non-portable fields
+      // (model / permissionMode / additionalArgs) — see its doc in
+      // shared/types/runtime.ts. Keep all 4 runtime-change callsites
+      // funneling through this single helper.
+      await patchAgentConfig(agent.id, buildRuntimeChangePatch(agent.runtimeConfig, runtime));
       refreshConfig();
       const label = runtime === 'claude-code' ? 'Claude Code'
         : runtime === 'codex' ? 'Codex'

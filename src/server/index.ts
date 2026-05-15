@@ -8922,6 +8922,23 @@ description: >
       startPeriodicSweep(collectActivePaths);
       cleanupStalePlaywrightProfile();
 
+      // Issue #194 follow-up — one-time scrub for stale agent.runtimeConfig
+      // fields from before buildRuntimeChangePatch existed. Idempotent via
+      // per-agent `_runtimeConfigScrubV1` marker; subsequent boots short-
+      // circuit per agent. See doc comment in the migration module.
+      try {
+        const { scrubStaleRuntimeConfig } = await import('./migrations/scrub-stale-runtime-config');
+        const result = await scrubStaleRuntimeConfig();
+        if (result.scannedAgents > 0) {
+          console.log(`[migration] runtimeConfig scrub: scanned=${result.scannedAgents} scrubbed=${result.scrubbedAgents}`);
+          for (const d of result.details) {
+            console.log(`[migration] runtimeConfig scrub: agent=${d.agentId} runtime=${d.runtime} dropped=${JSON.stringify(d.dropped)}`);
+          }
+        }
+      } catch (err) {
+        console.warn('[migration] runtimeConfig scrub failed (non-fatal):', err instanceof Error ? err.message : String(err));
+      }
+
       currentInitPhase = 'skill-seed';
       setDeferredInitPhase(currentInitPhase);
       seedBundledSkills();

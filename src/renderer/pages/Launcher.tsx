@@ -31,7 +31,7 @@ import { patchAgentConfig, getAgentById } from '@/config/services/agentConfigSer
 import { persistInputOptionChange } from '@/api/persistInputOption';
 import { createCronTask, startCronTask, startCronScheduler } from '@/api/cronTaskClient';
 import type { RuntimeType, RuntimeModelInfo, RuntimePermissionMode, RuntimeDetections } from '../../shared/types/runtime';
-import { CC_MODELS, CC_PERMISSION_MODES, CODEX_PERMISSION_MODES, GEMINI_PERMISSION_MODES } from '../../shared/types/runtime';
+import { CC_MODELS, CC_PERMISSION_MODES, CODEX_PERMISSION_MODES, GEMINI_PERMISSION_MODES, buildRuntimeChangePatch } from '../../shared/types/runtime';
 import { apiGetJson } from '@/api/apiFetch';
 import { isBrowserDevMode, pickFolderForDialog } from '@/utils/browserMock';
 import { useAgentStatuses } from '@/hooks/useAgentStatuses';
@@ -349,12 +349,19 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
             return;
         }
         try {
-            await patchAgentConfig(selectedWorkspace.agentId, { runtime });
+            // buildRuntimeChangePatch scrubs cross-runtime non-portable fields
+            // (model / permissionMode / additionalArgs). All 4 runtime-change
+            // callsites funnel through this helper. See doc in
+            // shared/types/runtime.ts.
+            await patchAgentConfig(
+                selectedWorkspace.agentId,
+                buildRuntimeChangePatch(selectedAgent?.runtimeConfig, runtime),
+            );
         } catch (err) {
             console.error('[Launcher] runtime change failed:', err);
             toastRef.current.error('切换 Runtime 失败，请重试');
         }
-    }, [selectedWorkspace?.agentId]);
+    }, [selectedWorkspace?.agentId, selectedAgent?.runtimeConfig]);
 
     const handleLauncherProviderChange = useCallback((providerId: string | undefined, targetModel?: string) => {
         setLauncherProviderId(providerId);

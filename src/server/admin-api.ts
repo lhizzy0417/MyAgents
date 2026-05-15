@@ -61,11 +61,13 @@ import {
   RUNTIME_DISPLAY_NAMES,
   getRuntimePermissionModes,
   getDefaultRuntimePermissionMode,
+  buildRuntimeChangePatch,
   type RuntimeType,
   type RecoveryHint,
   type RuntimePermissionMode,
   type RuntimeModelInfo,
   type RuntimeDetection,
+  type RuntimeConfig,
 } from '../shared/types/runtime';
 import { getExternalRuntime, isRuntimeSupported } from './runtimes/factory';
 import { queryRuntimeModels } from './runtimes/external-session';
@@ -1028,6 +1030,36 @@ export async function handleAgentSet(payload: { id: string; key: string; value: 
   const protectedFields = ['id', 'channels'];
   if (protectedFields.includes(key)) {
     return { success: false, error: `Cannot directly set field '${key}'. Use specific commands instead.` };
+  }
+
+  // `runtime` field has a cross-runtime scrub policy (see
+  // buildRuntimeChangePatch doc in shared/types/runtime.ts). A blind spread
+  // here would leak the previous runtime's model/permissionMode/additionalArgs
+  // into the new runtime — Codex CLI then rejects e.g. a Gemini model with
+  // "model is not supported when using ChatGPT account". Route through the
+  // helper so the CLI `myagents agent set <id> runtime codex` path stays in
+  // lockstep with the Chat / Settings / Launcher in-app paths.
+  if (key === 'runtime') {
+    if (typeof value !== 'string') {
+      return { success: false, error: 'runtime must be a string' };
+    }
+    if (!VALID_RUNTIMES.includes(value as RuntimeType)) {
+      return {
+        success: false,
+        error: `Unknown runtime: '${value}'. Valid: ${VALID_RUNTIMES.join(', ')}.`,
+      };
+    }
+    return modifyAgent(
+      id,
+      agent => {
+        const patch = buildRuntimeChangePatch(
+          agent.runtimeConfig as RuntimeConfig | undefined,
+          value as RuntimeType,
+        );
+        return { ...agent, runtime: patch.runtime, runtimeConfig: patch.runtimeConfig };
+      },
+      'set',
+    );
   }
 
   return modifyAgent(id, agent => ({ ...agent, [key]: value }), 'set');

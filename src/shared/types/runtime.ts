@@ -150,6 +150,64 @@ export interface RuntimeConfig {
 }
 
 /**
+ * Field families on RuntimeConfig grouped by "are they portable across
+ * runtimes". Used by `buildRuntimeChangePatch` and the startup migration to
+ * decide what to scrub when `agent.runtime` changes.
+ *
+ *  - **NOT portable**: model / permissionMode / additionalArgs — model lists
+ *    and permission vocabularies are wholly disjoint between Codex (`gpt-*`,
+ *    `suggest/auto-edit/full-auto`), Claude Code (`sonnet/opus/haiku`,
+ *    `default/acceptEdits/bypassPermissions`), and Gemini (`gemini-*`,
+ *    `default/autoEdit/yolo/plan`). Carrying a value from one runtime to
+ *    another guarantees the new runtime either rejects it (Codex CLI:
+ *    "model is not supported when using ChatGPT account") or silently
+ *    falls back to defaults — both worse than starting clean.
+ *  - **Portable**: envPolicy — per-agent network routing choice that has
+ *    nothing to do with which CLI is in use.
+ *
+ * The split lives here (single source of truth) so the migration and the
+ * write-time helper can't drift.
+ */
+export const RUNTIME_CONFIG_PER_RUNTIME_FIELDS = [
+  'model',
+  'permissionMode',
+  'additionalArgs',
+] as const satisfies readonly (keyof RuntimeConfig)[];
+
+/**
+ * Build the `{ runtime, runtimeConfig }` patch to apply when an agent's
+ * runtime is being changed. Centralizes the "drop non-portable fields"
+ * policy so every callsite (in-chat switch, Settings panel, Launcher
+ * selector, `myagents agent set runtime <v>` CLI) behaves identically.
+ *
+ * Returns `runtimeConfig: undefined` instead of `{}` when scrubbing empties
+ * the object so the caller's atomic-merge logic doesn't persist a noise
+ * `runtimeConfig: {}` entry.
+ *
+ * Cross-bugfix for issue #194 follow-up: pre-existing bug class where Gemini's
+ * persisted `runtimeConfig.model` would leak into Codex sessions after a
+ * runtime switch. Activated by commit `8020803e` (May 2) when
+ * persistInputOption.ts started correctly writing external-runtime model to
+ * `runtimeConfig.model` (previously it was wrongly going to `agent.model`,
+ * masking the bug). See commit message of the migration commit for the full
+ * archaeology.
+ */
+export function buildRuntimeChangePatch(
+  currentRuntimeConfig: RuntimeConfig | undefined,
+  newRuntime: RuntimeType,
+): { runtime: RuntimeType; runtimeConfig: RuntimeConfig | undefined } {
+  if (!currentRuntimeConfig) {
+    return { runtime: newRuntime, runtimeConfig: undefined };
+  }
+  const next: RuntimeConfig = { ...currentRuntimeConfig };
+  for (const k of RUNTIME_CONFIG_PER_RUNTIME_FIELDS) {
+    delete next[k];
+  }
+  const hasFields = Object.keys(next).length > 0;
+  return { runtime: newRuntime, runtimeConfig: hasFields ? next : undefined };
+}
+
+/**
  * Runtime metadata for UI display
  */
 export interface RuntimeInfo {

@@ -56,7 +56,7 @@ import { BrowserPanelContext } from '@/context/BrowserPanelContext';
 import { BROWSER_BLANK_URL } from '@/components/browserConstants';
 import { CUSTOM_EVENTS, isPendingSessionId } from '../../shared/constants';
 import type { CapabilityInitialSelect } from '../../shared/skillsTypes';
-import { CC_MODELS, CC_PERMISSION_MODES, CODEX_PERMISSION_MODES, GEMINI_PERMISSION_MODES, getDefaultRuntimePermissionMode, getRuntimePermissionModes } from '../../shared/types/runtime';
+import { CC_MODELS, CC_PERMISSION_MODES, CODEX_PERMISSION_MODES, GEMINI_PERMISSION_MODES, getDefaultRuntimePermissionMode, getRuntimePermissionModes, buildRuntimeChangePatch } from '../../shared/types/runtime';
 import type { RuntimeType, RuntimeDetections, RuntimeConfig } from '../../shared/types/runtime';
 import type { InitialMessage } from '@/types/tab';
 // CronTaskConfig type is used via useCronTask hook
@@ -746,28 +746,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
       ? saved
       : (getDefaultRuntimePermissionMode(currentRuntime) || 'default');
     setRuntimePermissionMode(effective);
-    // Cross-bugfix #2 — defensive model carry-over scrub mirrors the
-    // permissionMode guard above. Model lists are heterogeneous across
-    // runtimes (CC: sonnet/opus/haiku, Codex: gpt-*, Gemini: gemini-*) and
-    // Codex CLI rejects mismatched models at thread/start with
-    // "The 'gemini-3.1-pro-preview' model is not supported when using Codex
-    // with a ChatGPT account". confirmRuntimeChange clears runtimeConfig.model
-    // at persist time, but legacy agents persisted before that fix could
-    // still have stale values — and CC's static catalogue is the only one we
-    // can validate against without waiting for an async fetch. The lightweight
-    // prefix heuristic below catches obvious mismatches across all three
-    // runtimes; dynamic models that don't match are resolved by the
-    // queryModels effect a few lines later.
-    const savedModel = cfg?.model;
-    const looksLikeRuntime = (m: string, rt: typeof currentRuntime): boolean => {
-      if (rt === 'codex') return /^(gpt|o1|o3|codex|chatgpt)/i.test(m);
-      if (rt === 'gemini') return /^gemini/i.test(m);
-      if (rt === 'claude-code') return /^(sonnet|opus|haiku|claude)/i.test(m);
-      return true;
-    };
-    setRuntimeModel(savedModel && looksLikeRuntime(savedModel, currentRuntime)
-      ? savedModel
-      : undefined);
+    setRuntimeModel(cfg?.model);
     // eslint-disable-next-line react-hooks/exhaustive-deps -- intentional: only re-sync on runtime transitions, not on every currentAgent.runtimeConfig edit
   }, [currentRuntime, isExternalRuntime]);
 
@@ -2301,30 +2280,14 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     // is non-fatal (fork is done, user already sees the new Tab opening);
     // we surface a secondary toast so the inconsistency isn't silent.
     //
-    // Cross-runtime carry-over scrub (cross-bugfix #2): models and permission
-    // modes don't transfer across runtimes (gemini-3.1-pro-preview vs gpt-5.5
-    // vs sonnet — wholly disjoint vocabularies + Codex CLI explicitly rejects
-    // gemini-* with "model is not supported when using Codex with a ChatGPT
-    // account"). The renderer-side useEffect at line ~740 already validates
-    // permissionMode against the new runtime's enum; model lacks that guard
-    // because Codex/Gemini lists are fetched dynamically. Clearing both at
-    // persist time means the new Tab starts on the runtime's defaults instead
-    // of inheriting a value that's guaranteed wrong. additionalArgs is
-    // similarly runtime-specific so we drop it too (e.g. Gemini's `--acp`
-    // pseudo-flags vs Codex's `-c key=value` overrides).
+    // buildRuntimeChangePatch centralizes the "drop non-portable
+    // runtimeConfig fields (model / permissionMode / additionalArgs), keep
+    // envPolicy" policy — see its doc comment for the bug-class rationale.
+    // All 4 runtime-change callsites (here / Settings / Launcher / agent
+    // set CLI) MUST go through this helper.
     if (currentAgent.id) {
       try {
-        const currentRc = (currentAgent.runtimeConfig as Record<string, unknown> | undefined) ?? {};
-        const scrubbedRc: Record<string, unknown> = { ...currentRc };
-        delete scrubbedRc.model;
-        delete scrubbedRc.permissionMode;
-        delete scrubbedRc.additionalArgs;
-        // envPolicy (proxy) IS retained — it's a per-agent network-routing
-        // choice that doesn't depend on which CLI is in use.
-        await patchAgentConfig(currentAgent.id, {
-          runtime,
-          runtimeConfig: scrubbedRc as typeof currentAgent.runtimeConfig,
-        });
+        await patchAgentConfig(currentAgent.id, buildRuntimeChangePatch(currentAgent.runtimeConfig, runtime));
       } catch (err) {
         console.warn('[chat] Runtime fork succeeded but agent template update failed:', err);
         toastRef.current.warning('新 Tab 已打开，但工作区默认 Runtime 未能更新');
