@@ -23,7 +23,10 @@ import { buildGithubZipCandidates, SkillUrlError, type ResolvedSkillSource } fro
 const MAX_TARBALL_BYTES = 50 * 1024 * 1024; // 50 MB total download
 const MAX_FILES_PER_REPO = 2000;             // plenty for 99% of skill repos
 const MAX_FILE_BYTES = 5 * 1024 * 1024;      // 5 MB per file (skill assets rarely exceed this)
-const FETCH_TIMEOUT_MS = 60_000;             // 60 s hard timeout
+// 5 min — covers slow CN proxies + ~40-file subdirectory repos which can take
+// 30s+ even with `git clone`. Previous value (60s) was the hard cap users hit
+// repeatedly (#193). Caller-side budgets (sidecarSelf, Rust proxy) must be ≥ this.
+const FETCH_TIMEOUT_MS = 300_000;
 
 // ---------------------------------------------------------------------------
 // Public API

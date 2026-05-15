@@ -33,9 +33,26 @@ fn next_generation() -> u64 {
 // - 120s (2 minutes) allows for slow API responses
 // - Covers model generation time for complex requests
 //
+// HTTP_PROXY_LONG_TIMEOUT: For endpoints that legitimately need longer
+// - Skill install-from-url downloads GitHub tarballs over slow/proxied networks
+//   (sidecar `FETCH_TIMEOUT_MS` is 300s; we add a 60s buffer so the inner
+//   timeout wins). Keep this list small — bumping the default is worse than
+//   carving out specific known-long paths.
+//
 // TODO v0.2.0: Make these configurable via Settings
 const SSE_READ_TIMEOUT_SECS: u64 = 60;
 const HTTP_PROXY_TIMEOUT_SECS: u64 = 120;
+const HTTP_PROXY_LONG_TIMEOUT_SECS: u64 = 360;
+
+/// Endpoints that need the long-timeout budget. Keep this list short — most
+/// sidecar work should finish in seconds, not minutes.
+fn proxy_timeout_for(url_path: &str) -> u64 {
+    if url_path.ends_with("/api/skill/install-from-url") {
+        HTTP_PROXY_LONG_TIMEOUT_SECS
+    } else {
+        HTTP_PROXY_TIMEOUT_SECS
+    }
+}
 
 /// Single SSE connection for a Tab
 struct SseConnection {
@@ -507,8 +524,9 @@ pub async fn proxy_http_request(app: AppHandle, request: HttpRequest) -> Result<
     // Enable tcp_nodelay to disable Nagle's algorithm for faster response times
     // Force HTTP/1.1 for compatibility with Bun server (HTTP/2 may cause connection issues on Windows)
     // Use short-lived connection pool to balance performance and stability
+    let timeout_secs = proxy_timeout_for(url_path);
     let client = crate::local_http::builder()
-        .timeout(std::time::Duration::from_secs(HTTP_PROXY_TIMEOUT_SECS))
+        .timeout(std::time::Duration::from_secs(timeout_secs))
         .tcp_nodelay(true)
         .http1_only()  // Force HTTP/1.1 for SSE compatibility
         .pool_idle_timeout(std::time::Duration::from_secs(5))
