@@ -13,6 +13,7 @@ import type {
   RuntimeDetection, RuntimeModelInfo, RuntimePermissionMode, RuntimeType,
   RuntimeAuthStatus, RuntimeFeatureFlag, RuntimeMcpServerInfo, RuntimeAppInfo,
   RuntimeDiagnostics, RuntimeDiagnosticsStatus, RuntimeEffectiveEnv,
+  RuntimeProxyPolicy,
 } from '../../shared/types/runtime';
 import { CODEX_PERMISSION_MODES } from '../../shared/types/runtime';
 import type { AgentRuntime, RuntimeProcess, SessionStartOptions, UnifiedEvent, UnifiedEventCallback, ImagePayload } from './types';
@@ -418,7 +419,7 @@ function sanitizeProxyUrl(url: string | undefined): string | undefined {
 function buildEffectiveEnvSnapshot(
   env: Record<string, string | undefined>,
   cwd: string,
-  proxyPolicy: 'myagents' | 'terminal' | 'direct' = 'myagents',
+  proxyPolicy: RuntimeProxyPolicy = 'myagents',
 ): RuntimeEffectiveEnv {
   const path = env.PATH || env.Path || '';
   const pathHead = path.split(process.platform === 'win32' ? ';' : ':')
@@ -434,7 +435,7 @@ function buildEffectiveEnvSnapshot(
     },
     // Reflects the agent's runtimeConfig.envPolicy.proxy resolved at session
     // start (issue #194). 'myagents' = MyAgents-configured proxy is injected;
-    // 'terminal' = inherited from user's interactive shell; 'direct' = no proxy.
+    // 'terminal' = inherited from user's interactive shell.
     proxyPolicy,
     pathHead,
     myagentsProxyInjected: env.MYAGENTS_PROXY_INJECTED === '1',
@@ -464,7 +465,7 @@ async function collectCodexDiagnostics(
    * declares this nullable. Earlier code passed `''`, which serde could reject.
    */
   threadId: string | null,
-  proxyPolicy: 'myagents' | 'terminal' | 'direct' = 'myagents',
+  proxyPolicy: RuntimeProxyPolicy = 'myagents',
 ): Promise<RuntimeDiagnostics> {
   const status: RuntimeDiagnosticsStatus = {};
 

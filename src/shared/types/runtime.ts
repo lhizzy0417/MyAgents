@@ -122,14 +122,23 @@ export interface RuntimePermissionMode {
  * - `direct` — Strip all proxy vars. Best when system-level proxy (Clash
  *    TUN, transparent proxy) handles routing.
  */
-export type RuntimeProxyPolicy = 'myagents' | 'terminal' | 'direct';
+export type RuntimeProxyPolicy = 'myagents' | 'terminal';
 
 /**
  * Per-agent env policy for external-runtime subprocesses (issue #194).
  *
  * Today only `proxy` matters; the structure is extensible because the same
- * dimension (override vs inherit vs strip) is likely to apply to other env
- * surfaces (locale, XDG, custom Codex-specific env) as needs surface.
+ * dimension (override vs inherit) is likely to apply to other env surfaces
+ * (locale, XDG, custom Codex-specific env) as needs surface.
+ *
+ * Historical note: 0.2.16 dev shipped a third `'direct'` literal that stripped
+ * every proxy var (for users on Clash TUN / VPN). It was removed before
+ * 0.2.16 release — the UI was confusing and `'terminal'` already covers the
+ * case (a user on TUN typically has no proxy var set in their shell, so
+ * `terminal` mode = no proxy injected = same result). Disk values of
+ * `'direct'` on existing installs fall through `resolveAgentEnvPolicy`'s
+ * validator and default to `'myagents'`; users who relied on stripping
+ * MyAgents proxy can pick `terminal` from the UI.
  */
 export interface RuntimeEnvPolicy {
   proxy?: RuntimeProxyPolicy;
@@ -525,7 +534,7 @@ export interface RuntimeEffectiveEnv {
     all?: string;
     no?: string;
   } | null;
-  proxyPolicy?: 'myagents' | 'terminal' | 'direct';
+  proxyPolicy?: RuntimeProxyPolicy;
   /** First few PATH entries for visibility (full PATH would be too noisy). */
   pathHead?: string[];
   /** True when MYAGENTS_PROXY_INJECTED=1 reached the runtime. */

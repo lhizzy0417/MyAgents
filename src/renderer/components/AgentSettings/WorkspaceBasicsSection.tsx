@@ -336,20 +336,25 @@ export default function WorkspaceBasicsSection({ project, agent, agentDir }: Wor
             // Read current policy; default to 'myagents' for backwards compat.
             // runtimeConfig is on AgentConfig as a free-form record — keep the
             // narrow `as` cast so we don't expand its public schema unnecessarily.
+            // Legacy disk values (the removed `'direct'` from 0.2.16 dev) fall
+            // through the literal narrowing and read as default `'myagents'`,
+            // matching the server-side `resolveAgentEnvPolicy` validator.
             const rc = (agent.runtimeConfig as Record<string, unknown> | undefined) ?? {};
-            const envPolicy = (rc.envPolicy as { proxy?: 'myagents' | 'terminal' | 'direct' } | undefined) ?? {};
-            const proxyMode: 'myagents' | 'terminal' | 'direct' = envPolicy.proxy ?? 'myagents';
+            const rawPolicy = (rc.envPolicy as { proxy?: unknown } | undefined)?.proxy;
+            const proxyMode: 'myagents' | 'terminal' =
+              rawPolicy === 'terminal' ? 'terminal' : 'myagents';
 
-            const onSelect = (next: 'myagents' | 'terminal' | 'direct') => {
+            const onSelect = (next: 'myagents' | 'terminal') => {
+              const prevEnvPolicy = (rc.envPolicy as Record<string, unknown> | undefined) ?? {};
               const nextRc = {
                 ...rc,
-                envPolicy: { ...(envPolicy as object), proxy: next },
+                envPolicy: { ...prevEnvPolicy, proxy: next },
               };
               void patchAgentConfig(agent.id, { runtimeConfig: nextRc } as Partial<Omit<AgentConfig, 'id'>>);
             };
 
             const radio = (
-              value: 'myagents' | 'terminal' | 'direct',
+              value: 'myagents' | 'terminal',
               label: string,
               hint: string,
             ) => (
@@ -378,11 +383,10 @@ export default function WorkspaceBasicsSection({ project, agent, agentDir }: Wor
 
             return (
               <div className="flex items-start gap-3">
-                <label className="w-14 shrink-0 pt-2 text-sm text-[var(--ink-muted)]">代理</label>
-                <div className="flex-1 grid grid-cols-1 gap-2 sm:grid-cols-3">
+                <label className="w-14 shrink-0 pt-2 text-sm text-[var(--ink-muted)]">网络代理</label>
+                <div className="flex-1 grid grid-cols-1 gap-2 sm:grid-cols-2">
                   {radio('myagents', 'MyAgents 代理', '使用 MyAgents 设置里的代理（默认）')}
-                  {radio('terminal', '跟随终端', '继承终端 shell 的 HTTP_PROXY 等环境变量')}
-                  {radio('direct', '直连', '不注入任何代理，依赖系统/Clash TUN')}
+                  {radio('terminal', '跟随终端', '等同于在你电脑的终端里手动启动——继承 shell 里 export 的代理变量')}
                 </div>
               </div>
             );

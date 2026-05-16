@@ -65,9 +65,14 @@ function which(command: string, opts?: { PATH?: string }): string | null {
  *  - `terminal`: replace the inherited proxy vars with whatever the user's
  *    interactive shell exports (detected during shell.ts warmup). If warmup
  *    found nothing, all proxy vars are stripped — that's terminal parity for
- *    users who don't export proxies in their rc.
- *  - `direct`: strip all proxy vars unconditionally. For setups where system-
- *    level routing (Clash TUN, transparent proxy, VPN) handles networking.
+ *    users who don't export proxies in their rc, which also serves the
+ *    Clash-TUN / VPN case (system-level routing handles networking, no
+ *    application proxy needed).
+ *
+ * 0.2.16 dev briefly shipped a third `'direct'` literal that unconditionally
+ * stripped all proxy vars. Removed before release — `terminal` covers the
+ * same TUN/VPN case for users whose shell has no proxy set. Existing disk
+ * `'direct'` values fall through validation and default to `'myagents'`.
  */
 export function augmentedProcessEnv(
   policy?: RuntimeEnvPolicy,
@@ -75,38 +80,34 @@ export function augmentedProcessEnv(
   const env = getShellEnv();
 
   // Defense-in-depth: only act on the explicit allowlist. An unknown value
-  // (forward-compat: a future policy literal not yet implemented here, or a
-  // malformed config that slipped past upstream validation) MUST behave as
-  // `'myagents'` — i.e. don't strip the user's proxy env on a guess.
-  // Codex review #5 found that the previous code's else-arm treated unknown
-  // values as `terminal` after stripping proxies.
+  // (forward-compat: a future policy literal not yet implemented here, a
+  // deprecated literal like the removed `'direct'`, or a malformed config
+  // that slipped past upstream validation) MUST behave as `'myagents'` —
+  // i.e. don't strip the user's proxy env on a guess.
   const rawPolicy = policy?.proxy;
-  const proxyPolicy: 'myagents' | 'terminal' | 'direct' =
-    rawPolicy === 'terminal' || rawPolicy === 'direct' ? rawPolicy : 'myagents';
+  const proxyPolicy: 'myagents' | 'terminal' =
+    rawPolicy === 'terminal' ? 'terminal' : 'myagents';
 
   if (proxyPolicy === 'myagents') {
-    // Legacy behaviour — leave inherited proxy vars in place. Rust's
+    // Legacy / default — leave inherited proxy vars in place. Rust's
     // `apply_to_subprocess` already populated them in the Sidecar's env.
     return env;
   }
 
-  // Both 'terminal' and 'direct' start by stripping every proxy var we know.
-  // Drop the MyAgents-injected marker too so downstream code doesn't mistake
-  // a stripped env for a MyAgents-controlled one.
+  // 'terminal' — strip every inherited proxy var, then restore whatever the
+  // user's interactive shell would set. Drop the MyAgents-injected marker
+  // too so downstream code doesn't mistake a stripped env for a MyAgents-
+  // controlled one.
   for (const k of PROXY_KEYS_ALL) delete env[k];
   delete env.MYAGENTS_PROXY_INJECTED;
 
-  if (proxyPolicy === 'direct') {
-    return env;
-  }
-
-  // 'terminal' — restore what the user's interactive shell would set.
   const detected = getDetectedTerminalProxyEnv();
   if (detected) {
     for (const [k, v] of Object.entries(detected)) {
       // Skip empty values — those mean "user has the var unset". The strip
       // above already removed inherited values, so leaving them out is the
-      // correct terminal-parity outcome.
+      // correct terminal-parity outcome (and also serves Clash-TUN / VPN
+      // users whose shell typically has no proxy set).
       if (v && v.length > 0) {
         env[k] = v;
       }
@@ -149,13 +150,18 @@ export async function resolveAgentEnvPolicy(
     if (!raw || typeof raw !== 'object') return undefined;
     const policyObj = raw as Record<string, unknown>;
     const proxyRaw = policyObj.proxy;
-    const proxy: 'myagents' | 'terminal' | 'direct' | undefined =
-      proxyRaw === 'myagents' || proxyRaw === 'terminal' || proxyRaw === 'direct'
+    const proxy: 'myagents' | 'terminal' | undefined =
+      proxyRaw === 'myagents' || proxyRaw === 'terminal'
         ? proxyRaw
         : undefined;
     if (proxyRaw !== undefined && proxy === undefined) {
+      // Covers legacy `'direct'` from 0.2.16 dev (removed before release) and
+      // any other malformed value (`'inherit'` typo, `true` from wrong UI
+      // wire). Silent fallback to the safe default — UI will re-render
+      // showing `'MyAgents 代理'` selected and user can pick `'terminal'` if
+      // they previously relied on stripping proxy.
       console.warn(
-        `[env-utils] Ignoring invalid envPolicy.proxy=${JSON.stringify(proxyRaw)} for ${workspacePath} — defaulting to 'myagents'`,
+        `[env-utils] Ignoring unsupported envPolicy.proxy=${JSON.stringify(proxyRaw)} for ${workspacePath} — defaulting to 'myagents'`,
       );
     }
     return { proxy };

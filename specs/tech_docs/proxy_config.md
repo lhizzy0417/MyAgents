@@ -151,10 +151,11 @@ if let Some(proxy_settings) = read_proxy_settings() {
 | 字面量 | 行为 | 适用场景 |
 |--------|------|---------|
 | `'myagents'`（默认） | 保留 Rust 注入的 proxy var——上游 Sidecar 的 `process.env.HTTP_PROXY` 已是 MyAgents 配置的代理 | 绝大多数用户 |
-| `'terminal'` | 剥掉继承的 proxy var，恢复用户 interactive shell 在 `~/.zshrc` / `~/.bashrc` 里 export 的（Sidecar 启动时 `shell.ts::warmupShellPath` 抓的 8 个 var） | 用户终端能访问的 endpoint 在 MyAgents 里访问不到 |
-| `'direct'` | 剥掉所有 proxy var | Clash TUN / transparent proxy / VPN 等系统层路由用户 |
+| `'terminal'` | 剥掉继承的 proxy var，恢复用户 interactive shell 在 `~/.zshrc` / `~/.bashrc` 里 export 的（Sidecar 启动时 `shell.ts::warmupShellPath` 抓的 8 个 var）；语义 = "等同于在你电脑的终端里手动启动这个 CLI" | 用户终端能访问的 endpoint 在 MyAgents 里访问不到；Clash TUN / VPN 用户（shell 通常无 proxy export，结果是无 proxy 注入） |
 
 实现在 `src/server/runtimes/env-utils.ts::augmentedProcessEnv(policy)`，未知字面量 fallback 到 `'myagents'`（防御纵深）。disk 上的 envPolicy 必须通过 `env-utils.resolveAgentEnvPolicy(workspacePath)` 读取——它做 proxy 字面量校验并对未知值 warn-log，**禁止**裸 cast。
+
+> 0.2.16 dev 阶段曾有第三档 `'direct'`（无条件剥 proxy），dogfooding 反馈选项太多后于 release 前移除。Terminal 档已覆盖原 `'direct'` 的核心 use case（TUN/VPN 用户 shell 没 proxy → terminal 模式结果就是无 proxy 注入）。存量 `'direct'` 在校验白名单里 fallback 到 `'myagents'`。
 
 诊断面板（`RuntimeDiagnosticsBanner`）展示实际生效的 `RuntimeEffectiveEnv`，让用户直接看到 envPolicy 决定的 proxy var 落在 Runtime 子进程的具体值。详见 `tech_docs/multi_agent_runtime.md` 「Runtime 诊断 + envPolicy」节。
 
