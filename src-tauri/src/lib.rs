@@ -566,11 +566,24 @@ pub fn run() {
             // (custom titlebar + native traffic lights at LogicalPosition).
             // Windows handles decorations later in setup (see "Windows: Remove
             // system decorations" block below); the builder runs uniformly.
+            //
+            // Traffic light Y must align to the custom titlebar's vertical
+            // centerline. The titlebar is `h-11` (44px) in
+            // `src/renderer/components/CustomTitleBar.tsx`; traffic lights are
+            // ~13px tall on macOS. Centering math: Y_top = (44 - 13) / 2 ≈ 15.
+            // We use 14 (matching X) — that lands icon-center at ~Y=20, within
+            // 2px of the titlebar's 22px geometric center, visually centered.
+            //
+            // History: the original `tauri.conf.json` shipped with Y=20 since
+            // the OSS init in c8dfef81 (2026-01-26) — icons sat ~4-5px below
+            // the tab content the whole time. c3ef3c7f migrated the value
+            // verbatim into this builder (no regression introduced by the
+            // migration; pre-existing miscenter caught later).
             #[cfg(target_os = "macos")]
             let main_window_builder = main_window_builder
                 .hidden_title(true)
                 .title_bar_style(tauri::TitleBarStyle::Overlay)
-                .traffic_light_position(LogicalPosition::new(14.0, 20.0));
+                .traffic_light_position(LogicalPosition::new(14.0, 14.0));
 
             main_window_builder
                 .build()
