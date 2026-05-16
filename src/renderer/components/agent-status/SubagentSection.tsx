@@ -9,7 +9,6 @@
 
 import { memo, useCallback } from 'react';
 
-import { formatTokens } from './format';
 import { SubagentRunningIcon } from './icons';
 import type { SubagentStatus } from './types';
 import { useElapsedSeconds } from './useElapsedSeconds';
@@ -27,60 +26,50 @@ interface SubagentRowProps {
 
 function SubagentRow({ subagent, onJumpToTool }: SubagentRowProps) {
   const elapsed = useElapsedSeconds(subagent.startedAt);
-  const totalTokens = subagent.inputTokens + subagent.outputTokens;
 
   const onClick = useCallback(() => {
     if (!subagent.id) return;
     onJumpToTool(subagent.id);
   }, [subagent.id, onJumpToTool]);
 
+  // 单行紧凑布局：[●] agentType[后台] description(truncate)…  elapsed
+  // tokens / tool count 在收起单行里省略；用户要细节就跳转到对话流里的 TaskTool 卡片看。
+  // 完整 description 走 title 属性 tooltip。
+  const titleParts = [
+    subagent.agentType,
+    subagent.mode === 'background' ? '[后台]' : null,
+    subagent.description,
+  ].filter(Boolean);
+  const tooltip = titleParts.join(' · ');
+
   return (
     <button
       type="button"
       onClick={onClick}
-      className="group flex w-full items-start gap-2 px-3 py-1.5 text-left transition-colors hover:bg-[var(--paper-inset)]/60"
+      title={tooltip}
+      className="group flex w-full items-center gap-2 px-3 py-1.5 text-left transition-colors hover:bg-[var(--paper-inset)]/60"
     >
-      <span className="mt-1">
-        <SubagentRunningIcon />
-      </span>
-      <div className="min-w-0 flex-1">
-        {/* Line 1: agent type + [bg] badge */}
-        <div className="flex items-center gap-1.5">
-          <span className="text-[13px] font-medium text-[var(--ink)] truncate">
-            {subagent.agentType}
+      <SubagentRunningIcon />
+      <div className="flex min-w-0 flex-1 items-baseline gap-1.5 text-[12px]">
+        <span className="shrink-0 font-medium text-[var(--ink)]">
+          {subagent.agentType}
+        </span>
+        {subagent.mode === 'background' && (
+          <span className="shrink-0 rounded-full bg-[var(--accent)]/10 px-1.5 py-0.5 text-[10px] font-medium text-[var(--accent)]">
+            后台
           </span>
-          {subagent.mode === 'background' && (
-            <span className="rounded bg-[var(--paper-inset)] px-1 text-[9px] font-semibold uppercase tracking-wider text-[var(--ink-muted)]">
-              bg
-            </span>
-          )}
-        </div>
-        {/* Line 2: description (truncate) */}
-        {subagent.description && (
-          <div
-            className="text-[11px] text-[var(--ink-muted)] truncate"
-            title={subagent.description}
-          >
-            {subagent.description}
-          </div>
         )}
-        {/* Line 3: elapsed · tokens · tools */}
-        <div className="mt-0.5 flex flex-wrap items-center gap-x-2 text-[11px] tabular-nums text-[var(--ink-muted)]">
-          {elapsed && <span>{elapsed}</span>}
-          {totalTokens > 0 && (
-            <>
-              <span aria-hidden>·</span>
-              <span>{formatTokens(totalTokens)} tokens</span>
-            </>
-          )}
-          {subagent.toolCount > 0 && (
-            <>
-              <span aria-hidden>·</span>
-              <span>{subagent.toolCount} tools</span>
-            </>
-          )}
-        </div>
+        {subagent.description && (
+          <span className="min-w-0 flex-1 truncate text-[var(--ink-muted)]">
+            {subagent.description}
+          </span>
+        )}
       </div>
+      {elapsed && (
+        <span className="shrink-0 tabular-nums text-[11px] text-[var(--ink-muted)]">
+          {elapsed}
+        </span>
+      )}
     </button>
   );
 }
@@ -103,7 +92,8 @@ const SubagentSection = memo(function SubagentSection({ subagents, containerRef:
           {subagents.length}
         </span>
       </div>
-      <div className="max-h-[200px] overflow-y-auto">
+      {/* V6: 行间分隔线（subtle，不抢视觉） */}
+      <div className="max-h-[160px] divide-y divide-[var(--line-subtle)]/60 overflow-y-auto">
         {subagents.map(s => (
           <MemoSubagentRow key={s.id} subagent={s} onJumpToTool={onJumpToTool} />
         ))}

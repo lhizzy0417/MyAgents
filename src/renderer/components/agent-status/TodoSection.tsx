@@ -58,8 +58,8 @@ const TodoSection = memo(function TodoSection({ todos }: TodoSectionProps) {
           {completed}/{todos.length}
         </span>
       </div>
-      {/* 上限 ~300px overflow auto——通常 todos < 20，不引虚拟化 */}
-      <div className="max-h-[300px] overflow-y-auto">
+      {/* 上限 ~200px overflow auto——通常 todos < 20，不引虚拟化 */}
+      <div className="max-h-[200px] overflow-y-auto">
         {todos.map(todo => (
           <MemoTodoRow key={todo.key} todo={todo} />
         ))}

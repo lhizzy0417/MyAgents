@@ -35,6 +35,31 @@ function tryParseTodoResult(result: string | undefined): TodoWriteResultShape | 
   }
 }
 
+// 从历史 task-notification 消息抽出已完成的 BG toolUseId 集合。
+// TabProvider 在 chat:task-notification 事件里 setHistoryMessages 注入一条
+// id=`task-notification-{taskId}`, content=`<task-notification>{JSON}</task-notification>`
+// 的 user message。JSON 包含 { taskId, toolUseId, status, summary, description }。
+// 这条消息是持久化的（落 session.jsonl），比 renderer 进程级 backgroundTaskStatus
+// 模块更可靠——Cmd+R 重载 / LRU 驱逐都不丢。是 B1 ship-blocker 的兜底防线。
+function collectCompletedBgToolIdsFromHistory(messages: Message[]): Set<string> {
+  const set = new Set<string>();
+  for (const msg of messages) {
+    if (!msg.id.startsWith('task-notification-')) continue;
+    if (typeof msg.content !== 'string') continue;
+    const match = msg.content.match(/<task-notification>([\s\S]+?)<\/task-notification>/);
+    if (!match) continue;
+    try {
+      const parsed = JSON.parse(match[1]) as { toolUseId?: string; status?: string };
+      if (parsed.toolUseId && parsed.status) {
+        set.add(parsed.toolUseId);
+      }
+    } catch {
+      // 损坏的 notification 跳过，不影响其他判定
+    }
+  }
+  return set;
+}
+
 /**
  * 从 messages 派生当前面板状态。
  *
@@ -60,6 +85,9 @@ export function useAgentStatusState(messages: Message[]): AgentStatusState {
   return useMemo<AgentStatusState>(() => {
     let todos: TodoItem[] = [];
     const subagents: SubagentStatus[] = [];
+
+    // B1 兜底：历史里所有 task-notification 消息里的 toolUseId 都视为已完成。
+    const completedBgFromHistory = collectCompletedBgToolIdsFromHistory(messages);
 
     // 单次正序遍历：collect 所有候选 + 同步活跃 subagents + 后台 subagent 候选。
     // todos 取最后一个有效 TodoWrite。
@@ -93,11 +121,11 @@ export function useAgentStatusState(messages: Message[]): AgentStatusState {
           const isBackground = input?.run_in_background === true;
 
           if (isBackground) {
-            // 后台任务过滤条件（Codex C3 修复）：
-            //   1. 必须已经在本 renderer 生命周期内被 task-started 注册过
-            //   2. 状态不是 terminal
-            // 缺其一就跳过——避免 LRU 驱逐 / 跨 renderer 重启场景下，把历史里 tool_use
-            // 块对应的早已结束的后台任务错绘成「还在运行」。
+            // 后台任务过滤条件，三道防线（任一命中 → 视为已完成 → 跳过）：
+            //   1. 历史里有对应 task-notification 消息（最可靠，扛 Cmd+R / LRU 驱逐）
+            //   2. backgroundTaskStatus 模块里 status 是 terminal（运行期间正常完成路径）
+            //   3. 模块里根本没注册过（要么没启动要么已被 LRU 驱逐 → 不应复活僵尸）
+            if (completedBgFromHistory.has(tool.id)) continue;
             if (!isBackgroundTaskRegistered(tool.id)) continue;
             const status = getBackgroundTaskStatus(tool.id);
             if (isTerminalStatus(status)) continue;

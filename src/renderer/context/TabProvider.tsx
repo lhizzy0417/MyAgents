@@ -2109,9 +2109,14 @@ export default function TabProvider({
                     setBackgroundTaskStatus(payload.taskId, payload.status, payload.toolUseId);
                     // Inject a visible notification message into the chat so the user
                     // understands why AI continues responding (prevents "AI talking to itself" UX).
+                    // toolUseId 写进 JSON 是给 PRD 0.2.17 Agent Status Panel 用的「持久化完成证据」：
+                    // backgroundTaskStatus 模块是 renderer 进程级 Map，Cmd+R / LRU 驱逐后会丢；
+                    // 注入到消息历史里能扛住这些场景，让 useAgentStatusState 反查到「这条 BG 任务
+                    // 在历史里已经 notified-complete」。
                     const description = getBackgroundTaskDescription(payload.taskId);
                     const notificationData = JSON.stringify({
                         taskId: payload.taskId,
+                        toolUseId: payload.toolUseId,
                         status: payload.status,
                         summary: payload.summary ?? '',
                         description: description ?? '',
