@@ -57,6 +57,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - CLI `myagents model list` 对禁用 provider 显示 `disabled` 状态。
 - 修改文案：Settings 添加按钮 → 「添加供应商」。
 
+### Chat — Agent Status 悬浮面板
+
+- **新增 Chat 顶部「Agent Status」悬浮条**：把当前轮里的 Todo 进度（`x/y` 完成）和正在运行的 SubAgent 聚合成一条紧凑长条，点击展开看全部条目和子 Agent 详情。Todo 全部 ☑ 后驻留 0.5s 让用户看到「全完成」瞬间，再 1.5s 平滑淡出释放 DOM。
+- **SubAgent 子卡片可点击跳转**：从列表里点子 Agent 直接 scroll 到对话流里发起它的 tool call 并高亮。
+- **后台完成不消失**：BG turn 完成的 SubAgent 仍然显示，方便用户回看刚才发生了什么；与 chat input 同款 `max-w-3xl` 居中宽度对齐。
+
+### Fixed
+
+- **订阅登录识别**（#203）：用 Claude Code CLI v2.1.x 只跑过 `claude auth login` 的用户，OAuth token 写在 macOS Keychain（或 `~/.credentials.json`）但 `~/.claude.json` 没有 `oauthAccount` 元数据，以前会被 MyAgents 误判成「未登录」。现在改为两级探测：先看 oauthAccount 拿账号信息，没有就直接探 Keychain / credentials 文件，再让 SDK 真实 verify，能登就让你登。
+- **Cron 任务 `--model` 在外部 Runtime 生效**（#204）：以前 `myagents task create-direct --runtime codex --model X` 的 `--model` 会被 Agent 默认模型覆盖掉（特别是 Codex 这种和默认模型名不一样的 Runtime，会直接 404 报 unknown model）。已在 cron 执行路径六处分支统一精度："任务里写的 model" 优先于 "Agent 快照里的 model"。
+- **Plugin Bridge 加载稳定性**（#202）：修复 SDK shim 在解析包含 `{` `}` 注释的 export 块时 brace 匹配错位，导致部分插件无法加载。
+
 ---
 
 ## [0.2.16] - 2026-05-16
