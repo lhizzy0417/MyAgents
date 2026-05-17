@@ -2109,9 +2109,14 @@ export default function TabProvider({
                     setBackgroundTaskStatus(payload.taskId, payload.status, payload.toolUseId);
                     // Inject a visible notification message into the chat so the user
                     // understands why AI continues responding (prevents "AI talking to itself" UX).
+                    // toolUseId 写进 JSON 是给 PRD 0.2.17 Agent Status Panel 用的「持久化完成证据」：
+                    // backgroundTaskStatus 模块是 renderer 进程级 Map，Cmd+R / LRU 驱逐后会丢；
+                    // 注入到消息历史里能扛住这些场景，让 useAgentStatusState 反查到「这条 BG 任务
+                    // 在历史里已经 notified-complete」。
                     const description = getBackgroundTaskDescription(payload.taskId);
                     const notificationData = JSON.stringify({
                         taskId: payload.taskId,
+                        toolUseId: payload.toolUseId,
                         status: payload.status,
                         summary: payload.summary ?? '',
                         description: description ?? '',
@@ -2289,6 +2294,26 @@ export default function TabProvider({
             case 'config:changed': {
                 // Admin CLI modified config — notify global ConfigProvider to refresh
                 console.log('[TabProvider] config:changed via Admin CLI', data);
+                window.dispatchEvent(new CustomEvent('myagents:config-changed', { detail: data }));
+                break;
+            }
+
+            // PRD 0.2.17 — plugin lifecycle. The Settings page's GlobalPluginsPanel
+            // listens to the dispatched DOM events; we re-broadcast via window so
+            // multiple Tab subscribers (renderer instances of the same panel)
+            // converge on the same refresh trigger.
+            case 'plugin:install-progress': {
+                window.dispatchEvent(new CustomEvent('myagents:plugin-install-progress', { detail: data }));
+                break;
+            }
+            case 'plugins:changed': {
+                window.dispatchEvent(new CustomEvent('myagents:plugins-changed', { detail: data }));
+                // Plugins live on AppConfig.{plugins, enabledPlugins} —
+                // also nudge ConfigProvider to re-read so consumers like
+                // SimpleChatInput's plugins submenu and Agent settings
+                // pick up the install/toggle without needing a manual
+                // refresh. Without this the Chat tool menu shows "no
+                // plugins" even after the user just enabled 13 of them.
                 window.dispatchEvent(new CustomEvent('myagents:config-changed', { detail: data }));
                 break;
             }

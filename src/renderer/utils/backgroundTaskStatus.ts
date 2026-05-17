@@ -173,6 +173,29 @@ export function getBackgroundTaskStatus(key: string): string | undefined {
     return statuses.get(taskId);
 }
 
+/**
+ * Whether a background task identified by toolUseId has been registered in
+ * this renderer's lifetime (i.e., chat:task-started observed).
+ *
+ * Used by PRD 0.2.17 Agent Status Panel to distinguish three cases that
+ * `getBackgroundTaskStatus` cannot:
+ *   - undefined + registered  → currently running, no terminal notification yet
+ *   - terminal status + registered → completed (within retain window)
+ *   - undefined + NOT registered → either never started in this renderer
+ *     (e.g., full Cmd+R reload), OR LRU-evicted from the terminal cache.
+ *     In both cases we should treat as "not active" — the panel should not
+ *     resurrect ancient tasks just because their tool_use blocks live in
+ *     session history. (Codex review C3.)
+ *
+ * Note: `enforceTerminalCap` evicts toolUseIdToTaskId entries for old
+ * terminal tasks, so this function naturally stops returning true for them.
+ * For genuinely still-running tasks the mapping is never evicted (capping
+ * only touches the `terminalOrder` set).
+ */
+export function isBackgroundTaskRegistered(toolUseId: string): boolean {
+    return toolUseIdToTaskId.has(toolUseId);
+}
+
 /** Clear all entries — call on session reset to prevent unbounded growth. */
 export function clearAllBackgroundTaskStatuses(): void {
     statuses.clear();

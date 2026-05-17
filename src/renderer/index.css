@@ -593,6 +593,16 @@ button:disabled {
   animation: indeterminate 1.5s ease-in-out infinite;
 }
 
+/* PRD 0.2.17 — Agent Status Panel 点击 SubAgent 行后短暂高亮目标 TaskTool 卡片 */
+@keyframes agent-status-flash {
+  0%   { background-color: var(--accent-warm-subtle); }
+  100% { background-color: transparent; }
+}
+.agent-status-flash {
+  animation: agent-status-flash 1.5s ease-out;
+  border-radius: 0.5rem;
+}
+
 
 /* Terminal-like monospace typography for tool calls */
 .tool-input {

@@ -7,7 +7,7 @@ import { randomUUID } from 'crypto';
 import { homedir } from 'os';
 import { join } from 'path';
 import { existsSync, readFileSync } from 'fs';
-import { execSync } from 'child_process';
+import { execFileSync, execSync } from 'child_process';
 import { query } from '@anthropic-ai/claude-agent-sdk';
 import { resolveClaudeCodeCli, buildClaudeSessionEnv, startOneShotBridge } from './agent-session';
 import { applyContextWindowSuffix } from './utils/model-capabilities';
@@ -400,35 +400,73 @@ export async function fetchSdkSupportedModels(): Promise<Array<{ value: string; 
 }
 
 /**
- * Check if Anthropic subscription credentials exist locally
- * Claude CLI stores OAuth account info in ~/.claude.json file
+ * Issue #203: `claude auth login` only writes the OAuth token to its primary store
+ * (macOS Keychain or `~/.claude/.credentials.json`). The `oauthAccount` metadata
+ * inside `~/.claude.json` is only populated after the CLI's REPL fetches account
+ * info from the API — users who only ran `claude auth login` (without ever
+ * launching `claude` interactively) end up authenticated yet showing as "not
+ * logged in" here. So we probe the token store directly as a fallback, and treat
+ * `oauthAccount` as enrichment-only.
+ */
+function hasOAuthTokenStored(): boolean {
+  if (existsSync(join(homedir(), '.claude', '.credentials.json'))) {
+    return true;
+  }
+  if (process.platform === 'darwin') {
+    try {
+      const account = process.env.USER || process.env.LOGNAME || '';
+      if (!account) return false;
+      execFileSync(
+        '/usr/bin/security',
+        ['find-generic-password', '-s', 'Claude Code-credentials', '-a', account],
+        { stdio: ['ignore', 'ignore', 'ignore'], timeout: 1500 },
+      );
+      return true;
+    } catch {
+      return false;
+    }
+  }
+  return false;
+}
+
+/**
+ * Check if Anthropic subscription credentials exist locally.
+ * Two-tier detection (see Issue #203):
+ *   1. `~/.claude.json::oauthAccount` — fast path with rich account info
+ *   2. fallback probe of the OAuth token store (Keychain on macOS,
+ *      `~/.claude/.credentials.json` elsewhere) — covers the "just ran
+ *      `claude auth login`" case where the JSON cache hasn't been seeded yet
  */
 export function checkAnthropicSubscription(): SubscriptionStatus {
   const claudeJsonPath = join(homedir(), '.claude.json');
 
-  if (!existsSync(claudeJsonPath)) {
-    return { available: false };
+  if (existsSync(claudeJsonPath)) {
+    try {
+      const content = readFileSync(claudeJsonPath, 'utf-8');
+      const config = JSON.parse(content);
+
+      if (config.oauthAccount && config.oauthAccount.accountUuid) {
+        return {
+          available: true,
+          path: claudeJsonPath,
+          info: {
+            accountUuid: config.oauthAccount.accountUuid,
+            email: config.oauthAccount.emailAddress,
+            displayName: config.oauthAccount.displayName,
+            organizationName: config.oauthAccount.organizationName,
+          }
+        };
+      }
+    } catch {
+      // File exists but can't read/parse — fall through to token probe
+    }
   }
 
-  // Check if ~/.claude.json has oauthAccount field (indicates logged in)
-  try {
-    const content = readFileSync(claudeJsonPath, 'utf-8');
-    const config = JSON.parse(content);
-
-    if (config.oauthAccount && config.oauthAccount.accountUuid) {
-      return {
-        available: true,
-        path: claudeJsonPath,
-        info: {
-          accountUuid: config.oauthAccount.accountUuid,
-          email: config.oauthAccount.emailAddress,
-          displayName: config.oauthAccount.displayName,
-          organizationName: config.oauthAccount.organizationName,
-        }
-      };
-    }
-  } catch {
-    // File exists but can't read/parse
+  if (hasOAuthTokenStored()) {
+    return {
+      available: true,
+      info: {},
+    };
   }
 
   return { available: false };

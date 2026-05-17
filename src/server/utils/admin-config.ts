@@ -22,7 +22,7 @@ import { resolve } from 'path';
 import { getHomeDirOrNull } from './platform';
 import { stripBom } from '../../shared/utils';
 import type { McpServerDefinition } from '../../shared/config-types';
-import { PRESET_MCP_SERVERS, PRESET_PROVIDERS } from '../../shared/config-types';
+import { applyProviderEnablementAndOrder, isProviderEnabled, PRESET_MCP_SERVERS, PRESET_PROVIDERS } from '../../shared/config-types';
 import type { SessionMetadata } from '../types/session';
 import { ensureDirSync } from './fs-utils';
 import { withFileLock, FileBusyError } from './file-lock';
@@ -72,6 +72,8 @@ export interface AdminAppConfig {
   defaultProviderId?: string;
   providerApiKeys?: Record<string, string>;
   providerVerifyStatus?: Record<string, { status: string; verifiedAt?: string }>;
+  providerOrder?: string[];
+  disabledProviderIds?: string[];
   // Agent
   agents?: AgentConfigSlim[];
   // Allow passthrough of all other fields
@@ -87,6 +89,8 @@ export interface AgentConfigSlim {
   providerId?: string;
   model?: string;
   channels?: ChannelConfigSlim[];
+  /** PRD 0.2.17 — plugins this Agent enables (subset of globally-visible). */
+  enabledPluginIds?: string[];
   [key: string]: unknown;
 }
 
@@ -376,6 +380,30 @@ export function loadCustomProviderFiles(): Array<Record<string, unknown>> {
   } catch { return []; }
 }
 
+type ProviderRecord = Record<string, unknown> & { id: string; enabled?: unknown };
+
+function hasProviderId(provider: Record<string, unknown>): provider is ProviderRecord {
+  return typeof provider.id === 'string' && provider.id.length > 0;
+}
+
+export function getAllEffectiveProviders(config?: AdminAppConfig): ProviderRecord[] {
+  const c = config ?? loadConfig();
+  const presetProviders = ((PRESET_PROVIDERS ?? []) as unknown as Array<Record<string, unknown>>)
+    .filter(hasProviderId);
+  const customProviders = loadCustomProviderFiles().filter(hasProviderId);
+  return applyProviderEnablementAndOrder([...presetProviders, ...customProviders], c);
+}
+
+export function findEffectiveProvider(id: string, config?: AdminAppConfig): ProviderRecord | null {
+  if (!id) return null;
+  return getAllEffectiveProviders(config).find(provider => provider.id === id) ?? null;
+}
+
+export function isProviderDisabled(providerId: string, config?: AdminAppConfig): boolean {
+  const provider = findEffectiveProvider(providerId, config);
+  return !!provider && !isProviderEnabled(provider);
+}
+
 // ---------------------------------------------------------------------------
 // Provider resolution (Sidecar self-resolve — eliminates dependency on providerEnvJson snapshots)
 // ---------------------------------------------------------------------------
@@ -404,8 +432,10 @@ export function resolveProviderEnv(
 ): ResolvedProviderEnv | undefined {
   if (!providerId) return undefined;
 
-  const provider = findProvider(providerId);
+  const c = config ?? loadConfig();
+  const provider = findEffectiveProvider(providerId, c);
   if (!provider) return undefined;
+  if (!isProviderEnabled(provider)) return undefined;
 
   // Subscription providers don't use providerEnv (SDK uses built-in OAuth)
   if (provider.type === 'subscription') return undefined;
@@ -414,7 +444,6 @@ export function resolveProviderEnv(
   // (Codex review): a value like `"  "` is truthy and would silently be
   // sent to the upstream as the Authorization header, producing an opaque
   // 401 instead of an actionable "no API key" error.
-  const c = config ?? loadConfig();
   const apiKey = (c.providerApiKeys ?? {})[providerId];
   if (!apiKey || !apiKey.trim()) return undefined;
 
@@ -476,6 +505,34 @@ export function findAgentByWorkspacePath(agentDir: string): AgentConfigSlim | un
   return agents.find(a =>
     typeof a.workspacePath === 'string' && a.workspacePath.replace(/\\/g, '/') === normalized
   );
+}
+
+/**
+ * Decode a frozen providerEnv snapshot, enforcing the global enablement gate.
+ *
+ * Snapshot semantics: sessions / agents / cron tasks freeze provider env at
+ * config time, so live edits to baseUrl/apiKey don't break a running session
+ * ("snapshot wins"). But "provider globally disabled" must override the
+ * snapshot — otherwise cron / IM handover paths silently keep using credentials
+ * for a provider the user just turned off.
+ *
+ * Single source of truth for every snapshot consumer (resolveWorkspaceConfig,
+ * cron followAgent, IM handover). Returns undefined when:
+ *   - snapshot is missing or malformed
+ *   - providerId is known and currently disabled (caller must fail loud)
+ */
+export function decodeProviderEnvSnapshot(
+  snapshotJson: string | null | undefined,
+  providerId: string | null | undefined,
+  config?: AdminAppConfig,
+): ResolvedProviderEnv | undefined {
+  if (!snapshotJson) return undefined;
+  if (providerId && isProviderDisabled(providerId, config)) return undefined;
+  try {
+    return JSON.parse(snapshotJson) as ResolvedProviderEnv;
+  } catch {
+    return undefined;
+  }
 }
 
 /** Result of self-resolution for a workspace */
@@ -558,23 +615,22 @@ export function resolveWorkspaceConfig(
   // Snapshot env wins: if the session froze providerEnvJson, prefer that — even if
   // the providerId still resolves cleanly today, the session's intent was the snapshot
   // value (e.g., a custom baseUrl that has since been edited at the agent level).
+  // EXCEPT when providerId is globally disabled — decodeProviderEnvSnapshot enforces this.
   if (sessionMeta?.providerEnvJson) {
-    try {
-      providerEnv = JSON.parse(sessionMeta.providerEnvJson) as ResolvedProviderEnv;
-    } catch { /* malformed snapshot — keep providerEnv from above */ }
+    const decoded = decodeProviderEnvSnapshot(sessionMeta.providerEnvJson, providerId, config);
+    if (decoded) providerEnv = decoded;
   } else if (!providerEnv && agent?.providerEnvJson) {
     // Backward-compat: legacy sessions without a snapshot fall back to agent's persisted env
-    try {
-      providerEnv = JSON.parse(agent.providerEnvJson as string) as ResolvedProviderEnv;
-    } catch { /* ignore malformed snapshot */ }
+    const decoded = decodeProviderEnvSnapshot(agent.providerEnvJson as string, providerId, config);
+    if (decoded) providerEnv = decoded;
   }
 
   // --- Resolve Model ---
   // Priority: session.model → agent.model → provider's primaryModel (if resolved)
   let model = sessionMeta?.model ?? (agent?.model as string | undefined) ?? undefined;
   if (!model && providerId) {
-    const provider = findProvider(providerId);
-    if (provider) {
+    const provider = findEffectiveProvider(providerId, config);
+    if (provider && isProviderEnabled(provider)) {
       model = (provider as Record<string, unknown>).primaryModel as string | undefined;
     }
   }

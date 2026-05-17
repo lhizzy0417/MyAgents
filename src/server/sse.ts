@@ -118,6 +118,12 @@ export const SSE_EVENT_PRIORITIES: Readonly<Record<string, SseEventPriority>> = 
   'cron:task-exit-requested': 'critical',
   'mcp:oauth-expired': 'critical',
   'config:changed': 'critical',
+  // Plugin lifecycle (PRD 0.2.17). install-progress is per-install progress
+  // phase, plugins:changed is the invalidation signal for the Plugins panel.
+  // Both are infrequent and structural — critical guarantees they don't get
+  // coalesced or dropped under load.
+  'plugin:install-progress': 'critical',
+  'plugins:changed': 'critical',
   'queue:added': 'critical',
   'queue:started': 'critical',
   'queue:cancelled': 'critical',

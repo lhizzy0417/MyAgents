@@ -15,6 +15,7 @@ import SessionSurfaceTags from '@/components/SessionSurfaceTags';
 import SessionMenuButton from '@/components/SessionMenuButton';
 import { FileActionProvider } from '@/context/FileActionContext';
 import SimpleChatInput, { type ImageAttachment, type SimpleChatInputHandle } from '@/components/SimpleChatInput';
+import AgentStatusPanel from '@/components/agent-status/AgentStatusPanel';
 import QueryNavigator from '@/components/chat/QueryNavigator';
 import ChatSearchPanel from '@/components/ChatSearchPanel';
 import { useChatSearch, isHighlightApiSupported } from '@/hooks/useChatSearch';
@@ -957,6 +958,17 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
           await apiPost('/api/mcp/set', { servers: effective });
         }
 
+        // 1b. PRD 0.2.17 — Sync plugin selection (Launcher → new Tab handoff).
+        // Both `setWorkspaceEnabledPlugins` local state AND a session-enable
+        // push so the sidecar's commonQueryOptions picks up the choice on
+        // first pre-warm. Symmetric with MCP above.
+        if (initialMessage.enabledPluginIds) {
+          setWorkspaceEnabledPlugins(initialMessage.enabledPluginIds);
+          await apiPost('/api/cc-plugin/session-enable', {
+            enabledIds: initialMessage.enabledPluginIds,
+          });
+        }
+
         // 3. Update local UI state to reflect Launcher choices
         if (initialMessage.permissionMode) {
           // External runtime has its own permission mode state (runtimePermissionMode),
@@ -1264,6 +1276,13 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     currentAgent?.mcpEnabledServers ?? currentProject?.mcpEnabledServers ?? []
   );
 
+  // PRD 0.2.17 — Claude plugin per-workspace enable state. Init from Agent
+  // (preferred) or Project. Layer 1 (global visibility) is applied later
+  // when computing the dropdown candidate list.
+  const [workspaceEnabledPlugins, setWorkspaceEnabledPlugins] = useState<string[]>(
+    currentAgent?.enabledPluginIds ?? currentProject?.enabledPluginIds ?? []
+  );
+
   // Track which session's cron task state has been loaded
   const cronLoadedSessionRef = useRef<string | null>(null);
 
@@ -1521,6 +1540,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     runtimeModel?: string | null;
     permissionMode?: PermissionMode;
     mcpEnabledServers?: string[];
+    enabledPluginIds?: string[];
   }) => {
     if (!currentProject) return;
     const result = await persistInputOptionChange({
@@ -1534,6 +1554,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
         runtimeModel: patch.runtimeModel,
         permissionMode: patch.permissionMode,
         mcpEnabledServers: patch.mcpEnabledServers,
+        enabledPluginIds: patch.enabledPluginIds,
       },
       patchProject,
       patchAgentConfig,
@@ -1547,6 +1568,12 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
       },
       getAllMcpServers,
       getGlobalMcpEnabled: getEnabledMcpServerIds,
+      // PRD 0.2.17 — push plugin selection to the running sidecar so the
+      // SDK options for the next pre-warm pick up the change immediately,
+      // mirroring the MCP push above.
+      pushPluginsToSidecar: async (enabledIds) => {
+        await apiPost('/api/cc-plugin/session-enable', { enabledIds });
+      },
     });
     if (!result.ok) {
       console.error('[chat] tab config dual-write failed:', result.errors);
@@ -1575,6 +1602,18 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     // here ran AFTER persist and left the helper's plumbing as dead code.
     void persistTabConfigChange({ mcpEnabledServers: newEnabled });
   }, [workspaceMcpEnabled, persistTabConfigChange]);
+
+  // PRD 0.2.17 — Claude plugin per-workspace toggle. Mirrors MCP exactly:
+  // optimistic local update + dual-write via persistTabConfigChange (which
+  // also pushes /api/cc-plugin/session-enable to the running sidecar so
+  // the SDK options pick up the new plugin set on next pre-warm).
+  const handleWorkspacePluginToggle = useCallback(async (pluginId: string, enabled: boolean) => {
+    const newEnabled = enabled
+      ? [...workspaceEnabledPlugins, pluginId]
+      : workspaceEnabledPlugins.filter(id => id !== pluginId);
+    setWorkspaceEnabledPlugins(newEnabled);
+    void persistTabConfigChange({ enabledPluginIds: newEnabled });
+  }, [workspaceEnabledPlugins, persistTabConfigChange]);
 
   // Sync selectedModel when provider changes (skip initial mount to preserve project-stored model)
   const providerInitRef = useRef(true);
@@ -2457,6 +2496,36 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     }
   }, [pauseAutoScroll, virtuosoRef]);
 
+  // PRD 0.2.17 Agent Status Panel — 点击 SubAgent 行跳转到对话流中对应 TaskTool。
+  // 先用 Virtuoso 把承载该 tool 的 message 滚进视口（解决虚拟化卸载场景），下一帧
+  // 等 DOM 挂载后再通过 querySelector 找到 data-tool-id 元素 scrollIntoView + 高亮。
+  // 双阶段是因为 Virtuoso scrollToIndex 只能定位到 message 粒度，更精细的 tool 卡片
+  // 位置还得靠 DOM 测量。
+  const handleJumpToTool = useCallback((toolId: string) => {
+    const msgs = messagesRef.current;
+    const index = msgs.findIndex(m =>
+      Array.isArray(m.content)
+      && m.content.some(b => b.type === 'tool_use' && b.tool?.id === toolId),
+    );
+    if (index < 0) return;
+    pauseAutoScroll(2000);
+    virtuosoRef.current?.scrollToIndex({ index, behavior: 'smooth', align: 'center' });
+    // Virtuoso 滚动是异步的，给两帧时间让 row 挂载（折叠态也已挂载，单帧通常够；
+    // 虚拟化卸载场景要等 row 真正 mount + 子树渲染完）
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        const root = chatContentRef.current;
+        if (!root) return;
+        // Tauri WebView 是 WebKit；CSS.escape 自 2014 普适支持，不需要 fallback
+        const el = root.querySelector<HTMLElement>(`[data-tool-id="${CSS.escape(toolId)}"]`);
+        if (!el) return;
+        el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        el.classList.add('agent-status-flash');
+        window.setTimeout(() => el.classList.remove('agent-status-flash'), 1500);
+      });
+    });
+  }, [pauseAutoScroll, virtuosoRef]);
+
   // Stable callbacks for MessageList (extracted from inline arrows to enable memo)
   const handlePermissionDecision = useCallback((decision: 'deny' | 'allow_once' | 'always_allow') => {
     void respondPermission(decision);
@@ -3165,6 +3234,19 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
             onElaborate={handleElaborateSelection}
           />
 
+          {/* PRD 0.2.17 — Agent Status Panel：悬浮在输入框上方的 Todo + SubAgent 聚合面板。
+              Lazy mount：未触发 TodoWrite / Task 工具时整段不渲染（panel 内部判定）。
+              当前仅 Builtin SDK；外部 Runtime（Codex/CC/Gemini）下显式 gate 关闭，避免它们
+              如果未来 emit 出 `tool.name === 'Task'` 的归一化事件意外触发面板（PRD D15）。
+              onJumpToTool 由 Chat 实现是因为 Virtuoso scrollToIndex 需要 messages 索引 + ref。 */}
+          {!isExternalRuntime && (
+            <AgentStatusPanel
+              messages={messages}
+              containerRef={chatContentRef}
+              onJumpToTool={handleJumpToTool}
+            />
+          )}
+
           {/* Floating input with integrated cron task components */}
           <SimpleChatInput
             ref={chatInputRef}
@@ -3193,6 +3275,23 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
             globalMcpEnabled={globalMcpEnabled}
             mcpServers={mcpServers}
             onWorkspaceMcpToggle={handleWorkspaceMcpToggle}
+            // PRD 0.2.17 — Claude plugins. globallyVisiblePlugins is the
+            // Layer 1 (Settings 开关 ON) candidate list; workspaceEnabledPlugins
+            // is the Layer 2 actually-enabled subset for this workspace.
+            globallyVisiblePlugins={(config.plugins ?? [])
+              .filter(p => config.enabledPlugins?.[p.id] === true)
+              .map(p => ({
+                id: p.id,
+                name: p.name,
+                description: p.description,
+                // mcpServerNames is added by sidecar's `/api/cc-plugin/list`
+                // and lives only on PluginListItem (not on the bare
+                // PluginEntry stored in AppConfig). Chat doesn't fetch
+                // list here — the field is undefined; the chat submenu
+                // hides the line gracefully. v0.2.18 may add a lazy fetch.
+              }))}
+            workspaceEnabledPlugins={workspaceEnabledPlugins}
+            onWorkspacePluginToggle={handleWorkspacePluginToggle}
             onRefreshProviders={refreshProviderData}
             onOpenAgentSettings={handleOpenAgentSettings}
             onWorkspaceRefresh={triggerWorkspaceRefresh}

@@ -149,7 +149,9 @@ const VirtuosoFooter = memo(function VirtuosoFooter({
         </div>
       )}
       {showStatus && <StatusTimer message={statusMessage} />}
-      <div style={{ height: 280 }} aria-hidden="true" />
+      {/* Footer spacer: 既给 floating input 让位（~128px），也给 AgentStatusPanel
+          展开态（最多 ~240px）预留 clearance，避免完全遮住末条消息。 */}
+      <div style={{ height: 360 }} aria-hidden="true" />
     </div>
   );
 });

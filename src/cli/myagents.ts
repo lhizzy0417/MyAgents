@@ -165,7 +165,8 @@ Commands:
   thought   Manage Task Center thoughts (list/create)
   im        IM runtime actions for current chat (send-media)
   widget    Generative UI widget design guidelines (readme)
-  plugin    Manage OpenClaw channel plugins
+  plugin    Manage OpenClaw channel plugins (IM npm-packaged adapters)
+  cc-plugin Manage Claude plugins (PRD 0.2.17 — Anthropic plugin protocol)
   config    Read/write application config
   status    Show app running state
   version   Show app version
@@ -225,6 +226,10 @@ Examples:
     # Same per-task override flags as create-direct apply here.
   myagents thought list
   myagents plugin list
+  myagents cc-plugin list
+  myagents cc-plugin install anthropics/example-plugin
+  myagents cc-plugin install file:///path/to/dev-plugin
+  myagents cc-plugin enable my-plugin
   myagents version
   myagents reload
 
@@ -380,6 +385,10 @@ function printResult(group: string, action: string, result: Record<string, unkno
   }
   if (group === 'plugin' && action === 'list') {
     printPluginList(result.data as Array<Record<string, unknown>>);
+    return;
+  }
+  if (group === 'cc-plugin' && action === 'list') {
+    printCcPluginList(result.data as Array<Record<string, unknown>>);
     return;
   }
   if (group === 'task' && action === 'list') {
@@ -936,7 +945,10 @@ function printModelList(providers: Array<Record<string, unknown>>): void {
   const pad = (s: string, n: number) => s.padEnd(n);
   console.log(pad('ID', 24) + pad('Status', 12) + 'Name');
   for (const p of providers) {
-    console.log(pad(String(p.id), 24) + pad(String(p.status), 12) + String(p.name));
+    // Disabled providers retain their verify status but the disabled label
+    // overrides — they can't be used until re-enabled in Settings.
+    const status = p.enabled === false ? 'disabled' : String(p.status);
+    console.log(pad(String(p.id), 24) + pad(status, 12) + String(p.name));
   }
 }
 
@@ -1099,6 +1111,28 @@ function printChannelList(channels: Array<Record<string, unknown>>): void {
     console.log(pad(id, 38) + pad(type, 26) + pad(enabled, 10) + name);
   }
   console.log(`\n${channels.length} channel(s)`);
+}
+
+function printCcPluginList(plugins: Array<Record<string, unknown>>): void {
+  if (!plugins || plugins.length === 0) {
+    console.log('No Claude plugins installed.');
+    return;
+  }
+  const pad = (s: string, n: number) => s.padEnd(n);
+  console.log(pad('STATUS', 10) + pad('NAME', 24) + pad('VERSION', 12) + pad('SOURCE', 24) + 'DESCRIPTION');
+  for (const p of plugins) {
+    const enabled = p.enabled === true;
+    const status = p.status as string;
+    const statusLabel = status === 'ok'
+      ? (enabled ? '✓ enabled' : '· disabled')
+      : `! ${status}`;
+    const name = String(p.name ?? '?').slice(0, 22);
+    const version = String(p.version ?? '?').slice(0, 10);
+    const source = String(p.sourceUrl ?? '').slice(0, 22);
+    const desc = String(p.description ?? '');
+    console.log(pad(statusLabel, 10) + pad(name, 24) + pad(version, 12) + pad(source, 24) + desc);
+  }
+  console.log(`\n${plugins.length} plugin(s) installed`);
 }
 
 function printPluginList(plugins: Array<Record<string, unknown>>): void {
@@ -1795,6 +1829,34 @@ function buildRequestBody(
   if (group === 'plugin') {
     if (action === 'install') return { npmSpec: rest[0] || flags.npmSpec };
     if (action === 'remove') return { pluginId: rest[0] || flags.pluginId };
+    return {};
+  }
+
+  // Claude Plugin commands (PRD 0.2.17). Separate group from the OpenClaw
+  // channel-plugin `plugin` above — different concept, different storage.
+  if (group === 'cc-plugin') {
+    if (action === 'install') {
+      return {
+        sourceUrl: rest[0] || flags.sourceUrl || flags.url,
+      };
+    }
+    if (action === 'uninstall') {
+      return {
+        // Allow either positional name or full id via flag
+        id: flags.id,
+        name: rest[0],
+        purgeData: !!flags.purgeData,
+      };
+    }
+    if (action === 'enable' || action === 'disable') {
+      return { id: flags.id, name: rest[0] };
+    }
+    if (action === 'show') {
+      return { id: rest[0] || flags.id };
+    }
+    if (action === 'list') {
+      return {};
+    }
     return {};
   }
 

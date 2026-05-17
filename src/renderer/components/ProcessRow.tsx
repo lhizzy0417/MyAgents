@@ -208,8 +208,15 @@ const ProcessRow = memo(function ProcessRow({
         }
     }
 
+    // PRD 0.2.17 Agent Status Panel：当本 row 是 Task/Agent 工具时挂 data-tool-id 锚点。
+    // 必须放在最外层（不是 TaskTool 内部），这样折叠态/展开态都保留锚点；点击 panel 行
+    // 跳转能 scrollIntoView 到这里。
+    const toolAnchorId = isTaskTool ? block.tool?.id : undefined;
     return (
-        <div className={`group select-none ${index < totalBlocks - 1 ? 'border-b border-[var(--line-subtle)]' : ''}`}>
+        <div
+            className={`group select-none ${index < totalBlocks - 1 ? 'border-b border-[var(--line-subtle)]' : ''}`}
+            data-tool-id={toolAnchorId}
+        >
             <button
                 type="button"
                 onClick={handleToggle}

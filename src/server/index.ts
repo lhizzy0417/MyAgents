@@ -81,6 +81,29 @@ import { sanitizeFolderName, isWindowsReservedName } from '../shared/utils';
 import { resolveSkillUrl } from './skills/url-resolver';
 import { fetchSkillZip, TarballFetchError } from './skills/tarball-fetcher';
 import { analyseTree, buildInstallPayload, writeSkillFiles, type SkillCandidate } from './skills/installer';
+import {
+  installPlugin,
+  uninstallPlugin,
+  togglePlugin,
+  listInstalledPlugins,
+  getPluginDetail,
+  PluginStoreError,
+} from './plugins/store';
+
+/**
+ * Lazy bridge to agent-session.schedulePluginDeferredRestart — the latter
+ * lives in a module index.ts cannot statically import (circular dep with
+ * MCP / agent wiring). Dynamic import is cached after first call so the
+ * cost is only paid once per process.
+ */
+async function schedulePluginRestartLazy(): Promise<void> {
+  try {
+    const mod = await import('./agent-session');
+    mod.schedulePluginDeferredRestart();
+  } catch (err) {
+    console.warn('[plugins] schedulePluginRestartLazy failed (non-fatal):', err);
+  }
+}
 import type { SessionSource } from './types/session';
 import { parseAgentFrontmatter, parseFullAgentContent, serializeAgentContent } from '../shared/agentCommands';
 import { scanAgents, readWorkspaceConfig, writeWorkspaceConfig, loadEnabledAgents, readAgentMeta, writeAgentMeta, findAgent } from './agents/agent-loader';
@@ -518,7 +541,7 @@ import {
   updateSessionMetadata,
   getAttachmentPath,
 } from './SessionStore';
-import { findAgentByWorkspacePath, findProvider, getAllMcpServers, getEffectiveMcpServers, resolveProviderEnv } from './utils/admin-config';
+import { decodeProviderEnvSnapshot, findAgentByWorkspacePath, findProvider, getAllMcpServers, getEffectiveMcpServers, isProviderDisabled, resolveProviderEnv } from './utils/admin-config';
 import { snapshotForOwnedSession } from './utils/session-snapshot';
 import { resolveSessionConfig } from './utils/resolve-session-config';
 import type { AgentConfig } from '../shared/types/agent';
@@ -668,6 +691,11 @@ function resolveCronProviderRouting(
   if (!provider) {
     throw new Error(
       `Provider '${providerId}' not found in config — task references a provider that has been deleted. Re-select a provider in 任务编辑 → 高级配置.`,
+    );
+  }
+  if (isProviderDisabled(providerId)) {
+    throw new Error(
+      `Provider '${providerId}' is disabled — re-enable it in 设置 → 模型供应商 → 启用和排序, or re-select a provider in 任务编辑 → 高级配置.`,
     );
   }
   if (provider.type === 'subscription') {
@@ -1015,6 +1043,33 @@ function seedBundledSkills(): void {
 }
 
 /**
+ * Ensure the ~/.myagents/plugins/ directory tree exists for Claude Plugin
+ * support (PRD 0.2.17). Unlike skills, plugins are never seeded by the app —
+ * the user installs them via UI/CLI, and the directories below merely have
+ * to exist so first-install doesn't have to MkDir-A-Path twice.
+ *
+ *   ~/.myagents/plugins/                  plugin install root
+ *   ~/.myagents/plugins/data/             ${CLAUDE_PLUGIN_DATA} parent
+ *
+ * Idempotent. Called at sidecar startup alongside seedBundledSkills.
+ */
+function ensurePluginsDirs(): void {
+  try {
+    const homeDir = getHomeDirOrNull();
+    if (!homeDir) {
+      console.warn('[plugins] HOME not resolvable — skipping ensurePluginsDirs');
+      return;
+    }
+    const root = join(homeDir, '.myagents', 'plugins');
+    const dataRoot = join(root, 'data');
+    ensureDirSync(root);
+    ensureDirSync(dataRoot);
+  } catch (err) {
+    console.warn('[plugins] ensurePluginsDirs failed (non-fatal):', err);
+  }
+}
+
+/**
  * Clean up stale Playwright MCP profile lock files left by a crashed Chromium.
  *
  * Independent of the agent-browser bundle removal — this exists because
@@ -1240,10 +1295,28 @@ async function routeAdminApi(pathname: string, payload: Record<string, unknown>)
     });
   }
 
-  // Plugin commands
+  // OpenClaw Channel Plugin commands (npm-packaged IM channel adapters)
   if (route === 'plugin/list') return await api.handlePluginList();
   if (route === 'plugin/install') return await api.handlePluginInstall(payload as Parameters<typeof api.handlePluginInstall>[0]);
   if (route === 'plugin/remove') return await api.handlePluginUninstall(payload as Parameters<typeof api.handlePluginUninstall>[0]);
+
+  // Claude Plugin commands (PRD 0.2.17) — Anthropic-spec plugin directories
+  // containing skills/agents/MCP/hooks. Different concept from the OpenClaw
+  // channel plugins above; namespaced as `cc-plugin` to avoid collision.
+  if (route === 'cc-plugin/list') return await api.handleCcPluginList();
+  if (route === 'cc-plugin/show') return await api.handleCcPluginShow(payload as Parameters<typeof api.handleCcPluginShow>[0]);
+  if (route === 'cc-plugin/install') return await api.handleCcPluginInstall(payload as Parameters<typeof api.handleCcPluginInstall>[0]);
+  if (route === 'cc-plugin/uninstall') return await api.handleCcPluginUninstall(payload as Parameters<typeof api.handleCcPluginUninstall>[0]);
+  if (route === 'cc-plugin/enable') return await api.handleCcPluginToggle({
+    id: payload.id as string | undefined,
+    name: payload.name as string | undefined,
+    enabled: true,
+  });
+  if (route === 'cc-plugin/disable') return await api.handleCcPluginToggle({
+    id: payload.id as string | undefined,
+    name: payload.name as string | undefined,
+    enabled: false,
+  });
 
   // Skill commands
   if (route === 'skill/list') return await api.handleSkillList();
@@ -2595,9 +2668,15 @@ async function main() {
               return jsonResponse({ success: false, error: errMsg }, 400);
             }
             if (payload.model) effectiveModel = payload.model;
-            if (effectiveRuntimeConfig) {
-              effectiveRuntimeConfig = { ...effectiveRuntimeConfig, model: payload.model ?? effectiveRuntimeConfig.model };
-            }
+            // Issue #204: defense-in-depth for external-runtime tasks landing
+            // on a non-followAgent intent. Always construct (not gated on
+            // existence), and let canonical `runtimeConfig.model` win over
+            // CLI-shorthand `payload.model` over any pre-existing value.
+            effectiveRuntimeConfig = {
+              ...(payload.runtimeConfig ?? {}),
+              model: payload.runtimeConfig?.model ?? payload.model ?? effectiveRuntimeConfig?.model,
+              permissionMode: payload.runtimeConfig?.permissionMode ?? payload.permissionMode ?? effectiveRuntimeConfig?.permissionMode,
+            };
             console.log(`[cron] execute providerId=${payload.providerId} resolved=${effectiveProviderEnv === 'subscription' ? 'subscription' : (effectiveProviderEnv as ProviderEnv).baseUrl ?? 'anthropic'} model=${effectiveModel ?? 'default'}`);
           } else if (intent === 'followAgent') {
             if (currentSessionId) {
@@ -2607,10 +2686,16 @@ async function main() {
                 const resolved = resolveSessionConfig(sessionMeta, agent, undefined, 'owned');
                 if (resolved.model !== undefined) effectiveModel = resolved.model;
                 if (resolved.providerEnvJson) {
-                  try {
-                    effectiveProviderEnv = JSON.parse(resolved.providerEnvJson) as ProviderEnv;
-                  } catch (e) {
-                    console.warn(`[cron] execute followAgent: failed to parse providerEnvJson for session ${currentSessionId}, falling back to task-frozen value`, e);
+                  // Snapshot gate: disabled providers must not bypass the global enablement
+                  // contract via stale providerEnvJson. decodeProviderEnvSnapshot returns
+                  // undefined → caller fails loud (cron Task → Blocked at next layer).
+                  const decoded = decodeProviderEnvSnapshot(resolved.providerEnvJson, resolved.providerId);
+                  if (decoded) {
+                    effectiveProviderEnv = decoded as ProviderEnv;
+                  } else if (resolved.providerId && isProviderDisabled(resolved.providerId)) {
+                    console.warn(`[cron] execute followAgent: provider ${resolved.providerId} is globally disabled — refusing frozen snapshot for session ${currentSessionId}`);
+                  } else {
+                    console.warn(`[cron] execute followAgent: failed to decode providerEnvJson for session ${currentSessionId}, falling back to task-frozen value`);
                   }
                 } else if (resolved.providerId) {
                   // Issue #197 — agent persists `providerId` (post-PRD 0.2.9
@@ -2640,10 +2725,18 @@ async function main() {
                   }
                 }
                 if (resolved.runtime !== 'builtin') {
+                  // Issue #204: task overrides win over agent snapshot for
+                  // external runtimes. Precedence: explicit `runtimeConfig.model`
+                  // (canonical task shape from UI) → `payload.model` (CLI passes
+                  // `--model X` to top-level Task.model for external runtime →
+                  // forwarded here) → agent snapshot fallback. Without honoring
+                  // `payload.model`, `myagents task create-direct --runtime codex
+                  // --model X` silently runs with the agent's default model and
+                  // the runtime CLI 404s on the wrong model id.
                   effectiveRuntimeConfig = {
                     ...(payload.runtimeConfig ?? {}),
-                    model: resolved.model ?? payload.runtimeConfig?.model,
-                    permissionMode: resolved.permissionMode ?? payload.runtimeConfig?.permissionMode,
+                    model: payload.runtimeConfig?.model ?? payload.model ?? resolved.model,
+                    permissionMode: payload.runtimeConfig?.permissionMode ?? payload.permissionMode ?? resolved.permissionMode,
                   };
                 }
               }
@@ -2658,9 +2751,15 @@ async function main() {
             // agent-session.ts:5381-5383 treats undefined as "keep current".
             effectiveProviderEnv = 'subscription';
             if (payload.model) effectiveModel = payload.model;
-            if (effectiveRuntimeConfig) {
-              effectiveRuntimeConfig = { ...effectiveRuntimeConfig, model: payload.model ?? effectiveRuntimeConfig.model };
-            }
+            // Issue #204: defense-in-depth for external-runtime tasks landing
+            // on a non-followAgent intent. Always construct (not gated on
+            // existence), and let canonical `runtimeConfig.model` win over
+            // CLI-shorthand `payload.model` over any pre-existing value.
+            effectiveRuntimeConfig = {
+              ...(payload.runtimeConfig ?? {}),
+              model: payload.runtimeConfig?.model ?? payload.model ?? effectiveRuntimeConfig?.model,
+              permissionMode: payload.runtimeConfig?.permissionMode ?? payload.permissionMode ?? effectiveRuntimeConfig?.permissionMode,
+            };
           } else if (intent === 'explicit') {
             if (!payload.providerEnv) {
               console.error(`[cron] execute intent=explicit but payload.providerEnv is missing — refusing to run`);
@@ -2673,9 +2772,15 @@ async function main() {
             }
             effectiveProviderEnv = payload.providerEnv;
             if (payload.model) effectiveModel = payload.model;
-            if (effectiveRuntimeConfig) {
-              effectiveRuntimeConfig = { ...effectiveRuntimeConfig, model: payload.model ?? effectiveRuntimeConfig.model };
-            }
+            // Issue #204: defense-in-depth for external-runtime tasks landing
+            // on a non-followAgent intent. Always construct (not gated on
+            // existence), and let canonical `runtimeConfig.model` win over
+            // CLI-shorthand `payload.model` over any pre-existing value.
+            effectiveRuntimeConfig = {
+              ...(payload.runtimeConfig ?? {}),
+              model: payload.runtimeConfig?.model ?? payload.model ?? effectiveRuntimeConfig?.model,
+              permissionMode: payload.runtimeConfig?.permissionMode ?? payload.permissionMode ?? effectiveRuntimeConfig?.permissionMode,
+            };
           }
 
           // Cron tasks are unattended — "user didn't pick" must map to the
@@ -2904,9 +3009,15 @@ async function main() {
             return jsonResponse({ success: false, error: errMsg }, 400);
           }
           if (payload.model) effectiveModel = payload.model;
-          if (effectiveRuntimeConfig) {
-            effectiveRuntimeConfig = { ...effectiveRuntimeConfig, model: payload.model ?? effectiveRuntimeConfig.model };
-          }
+          // Issue #204: defense-in-depth for external-runtime tasks landing
+          // on a non-followAgent intent. Always construct (not gated on
+          // existence), and let canonical `runtimeConfig.model` win over
+          // CLI-shorthand `payload.model` over any pre-existing value.
+          effectiveRuntimeConfig = {
+            ...(payload.runtimeConfig ?? {}),
+            model: payload.runtimeConfig?.model ?? payload.model ?? effectiveRuntimeConfig?.model,
+            permissionMode: payload.runtimeConfig?.permissionMode ?? payload.permissionMode ?? effectiveRuntimeConfig?.permissionMode,
+          };
           console.log(`[cron] execute-sync providerId=${payload.providerId} resolved=${effectiveProviderEnv === 'subscription' ? 'subscription' : (effectiveProviderEnv as ProviderEnv).baseUrl ?? 'anthropic'} runMode=${effectiveRunMode} model=${effectiveModel ?? 'default'}`);
         } else if (intent === 'followAgent') {
           // Legacy snapshot-based resolution.
@@ -2918,10 +3029,15 @@ async function main() {
               const resolved = resolveSessionConfig(sessionMeta, agent, undefined, 'owned');
               if (resolved.model !== undefined) effectiveModel = resolved.model;
               if (resolved.providerEnvJson) {
-                try {
-                  effectiveProviderEnv = JSON.parse(resolved.providerEnvJson) as ProviderEnv;
-                } catch (e) {
-                  console.warn(`[cron] execute-sync followAgent: failed to parse providerEnvJson for session ${snapshotSessionId}, falling back to task-frozen value`, e);
+                // Snapshot gate: see /cron/execute above. decodeProviderEnvSnapshot
+                // refuses the snapshot when providerId is globally disabled.
+                const decoded = decodeProviderEnvSnapshot(resolved.providerEnvJson, resolved.providerId);
+                if (decoded) {
+                  effectiveProviderEnv = decoded as ProviderEnv;
+                } else if (resolved.providerId && isProviderDisabled(resolved.providerId)) {
+                  console.warn(`[cron] execute-sync followAgent: provider ${resolved.providerId} is globally disabled — refusing frozen snapshot for session ${snapshotSessionId}`);
+                } else {
+                  console.warn(`[cron] execute-sync followAgent: failed to decode providerEnvJson for session ${snapshotSessionId}, falling back to task-frozen value`);
                 }
               } else if (resolved.providerId) {
                 // Issue #197 — see /cron/execute above for the full rationale.
@@ -2946,13 +3062,21 @@ async function main() {
                 }
               }
               if (resolved.runtime !== 'builtin') {
+                // Issue #204: task overrides win over agent snapshot for
+                // external runtimes. Precedence: explicit `runtimeConfig.model`
+                // (canonical task shape from UI) → `payload.model` (CLI passes
+                // `--model X` to top-level Task.model for external runtime →
+                // forwarded here) → agent snapshot fallback. Without honoring
+                // `payload.model`, `myagents task create-direct --runtime codex
+                // --model X` silently runs with the agent's default model and
+                // the runtime CLI 404s on the wrong model id.
                 effectiveRuntimeConfig = {
                   ...(payload.runtimeConfig ?? {}),
-                  model: resolved.model ?? payload.runtimeConfig?.model,
-                  permissionMode: resolved.permissionMode ?? payload.runtimeConfig?.permissionMode,
+                  model: payload.runtimeConfig?.model ?? payload.model ?? resolved.model,
+                  permissionMode: payload.runtimeConfig?.permissionMode ?? payload.permissionMode ?? resolved.permissionMode,
                 };
               }
-              console.log(`[cron] execute-sync intent=followAgent session=${snapshotSessionId} runMode=${effectiveRunMode} snapshotLocked=${Boolean(sessionMeta.configSnapshotAt)} model=${effectiveModel ?? 'default'} runtime=${resolved.runtime}`);
+              console.log(`[cron] execute-sync intent=followAgent session=${snapshotSessionId} runMode=${effectiveRunMode} snapshotLocked=${Boolean(sessionMeta.configSnapshotAt)} model=${effectiveModel ?? 'default'} runtime=${resolved.runtime} runtimeConfigModel=${effectiveRuntimeConfig?.model ?? 'default'}`);
             }
           }
           // #119 followAgent backward-compat: pre-#119 the pragmatic fix
@@ -2971,9 +3095,15 @@ async function main() {
           // See /cron/execute above for the full rationale.
           effectiveProviderEnv = 'subscription';
           if (payload.model) effectiveModel = payload.model;
-          if (effectiveRuntimeConfig) {
-            effectiveRuntimeConfig = { ...effectiveRuntimeConfig, model: payload.model ?? effectiveRuntimeConfig.model };
-          }
+          // Issue #204: defense-in-depth for external-runtime tasks landing
+          // on a non-followAgent intent. Always construct (not gated on
+          // existence), and let canonical `runtimeConfig.model` win over
+          // CLI-shorthand `payload.model` over any pre-existing value.
+          effectiveRuntimeConfig = {
+            ...(payload.runtimeConfig ?? {}),
+            model: payload.runtimeConfig?.model ?? payload.model ?? effectiveRuntimeConfig?.model,
+            permissionMode: payload.runtimeConfig?.permissionMode ?? payload.permissionMode ?? effectiveRuntimeConfig?.permissionMode,
+          };
           console.log(`[cron] execute-sync intent=subscription runMode=${effectiveRunMode} model=${effectiveModel ?? 'default'} (snapshot bypassed)`);
         } else if (intent === 'explicit') {
           // Cron explicitly wants its captured provider — never inherit from agent.
@@ -2993,9 +3123,15 @@ async function main() {
           }
           effectiveProviderEnv = payload.providerEnv;
           if (payload.model) effectiveModel = payload.model;
-          if (effectiveRuntimeConfig) {
-            effectiveRuntimeConfig = { ...effectiveRuntimeConfig, model: payload.model ?? effectiveRuntimeConfig.model };
-          }
+          // Issue #204: defense-in-depth for external-runtime tasks landing
+          // on a non-followAgent intent. Always construct (not gated on
+          // existence), and let canonical `runtimeConfig.model` win over
+          // CLI-shorthand `payload.model` over any pre-existing value.
+          effectiveRuntimeConfig = {
+            ...(payload.runtimeConfig ?? {}),
+            model: payload.runtimeConfig?.model ?? payload.model ?? effectiveRuntimeConfig?.model,
+            permissionMode: payload.runtimeConfig?.permissionMode ?? payload.permissionMode ?? effectiveRuntimeConfig?.permissionMode,
+          };
           // Type-narrow for the log: the explicit branch can only land on a
           // ProviderEnv object (assigned just above from `payload.providerEnv`,
           // which the early-return refuses to be undefined). Mirror the
@@ -6816,6 +6952,213 @@ async function main() {
         }
       }
 
+      // ============= CLAUDE PLUGINS API (PRD 0.2.17) =============
+      //
+      // Plugin endpoints follow the "fixed names before wildcards" red-line
+      // (CLAUDE.md): /list, /install, /uninstall, /toggle, /detail all
+      // collapse to a single keyword segment so there's no `/:id` wildcard
+      // collision. Detail-by-id intentionally uses a query parameter for the
+      // same reason — keeps route matching unambiguous.
+
+      // GET /api/plugin/list - list installed plugins with status
+      if (pathname === '/api/cc-plugin/list' && request.method === 'GET') {
+        try {
+          const items = listInstalledPlugins();
+          return jsonResponse({ success: true, plugins: items });
+        } catch (error) {
+          console.error('[api/plugin/list] Error:', error);
+          return jsonResponse(
+            { success: false, error: error instanceof Error ? error.message : 'List failed' },
+            500,
+          );
+        }
+      }
+
+      // GET /api/plugin/detail?id=<plugin-id> - full manifest + component inventory
+      if (pathname === '/api/cc-plugin/detail' && request.method === 'GET') {
+        const id = url.searchParams.get('id');
+        if (!id) return jsonResponse({ success: false, error: 'id 参数必填' }, 400);
+        try {
+          const item = getPluginDetail(id);
+          if (!item) return jsonResponse({ success: false, error: '插件未安装' }, 404);
+          return jsonResponse({ success: true, plugin: item });
+        } catch (error) {
+          console.error('[api/plugin/detail] Error:', error);
+          return jsonResponse(
+            { success: false, error: error instanceof Error ? error.message : 'Detail failed' },
+            500,
+          );
+        }
+      }
+
+      // POST /api/cc-plugin/inspect - resolve + fetch + analyse WITHOUT
+      // writing. Used by the install dialog to decide whether to show the
+      // direct-install path or the multi-plugin picker (batch import).
+      // Returns the analysis verbatim — multi-plugin mode carries per-
+      // candidate manifest data so the picker can render name/version/desc.
+      if (pathname === '/api/cc-plugin/inspect' && request.method === 'POST') {
+        try {
+          const body = (await request.json()) as { sourceUrl?: string };
+          if (!body.sourceUrl || typeof body.sourceUrl !== 'string') {
+            return jsonResponse({ success: false, error: 'sourceUrl 参数必填' }, 400);
+          }
+          const { inspectPluginSource } = await import('./plugins/store');
+          const analysis = await inspectPluginSource(body.sourceUrl);
+          return jsonResponse({ success: true, sourceUrl: body.sourceUrl, analysis });
+        } catch (error) {
+          const message = error instanceof Error ? error.message : 'Inspect failed';
+          const status = error instanceof PluginStoreError ? error.statusCode : 500;
+          if (status >= 500) {
+            console.error('[api/cc-plugin/inspect] Error:', error);
+          }
+          return jsonResponse({ success: false, error: message }, status);
+        }
+      }
+
+      // POST /api/cc-plugin/install - install from URL/path; broadcasts progress.
+      // Optional `subPath` body param picks one candidate out of a
+      // multi-plugin tree — used by the batch install loop in the picker UI.
+      if (pathname === '/api/cc-plugin/install' && request.method === 'POST') {
+        let installId: string | undefined;
+        try {
+          const body = (await request.json()) as {
+            sourceUrl?: string;
+            installId?: string;
+            subPath?: string;
+          };
+          if (!body.sourceUrl || typeof body.sourceUrl !== 'string') {
+            return jsonResponse({ success: false, error: 'sourceUrl 参数必填' }, 400);
+          }
+          installId = body.installId || crypto.randomUUID();
+          const finalId = installId;
+          broadcast('plugin:install-progress', {
+            installId: finalId,
+            phase: 'fetching',
+            message: body.sourceUrl,
+          });
+          const { entry } = await installPlugin(body.sourceUrl, {
+            onProgress: (phase, message) => {
+              broadcast('plugin:install-progress', { installId: finalId, phase, message });
+            },
+            subPath: typeof body.subPath === 'string' && body.subPath ? body.subPath : undefined,
+          });
+          broadcast('plugin:install-progress', { installId: finalId, phase: 'done' });
+          broadcast('plugins:changed', { reason: 'install' });
+          await schedulePluginRestartLazy();
+          return jsonResponse({ success: true, entry, installId: finalId });
+        } catch (error) {
+          const message = error instanceof Error ? error.message : 'Install failed';
+          const status = error instanceof PluginStoreError ? error.statusCode : 500;
+          if (installId) {
+            broadcast('plugin:install-progress', { installId, phase: 'failed', error: message });
+          }
+          if (status >= 500) {
+            console.error('[api/plugin/install] Error:', error);
+          }
+          return jsonResponse({ success: false, error: message }, status);
+        }
+      }
+
+      // POST /api/plugin/uninstall - body { id, purgeData? }
+      if (pathname === '/api/cc-plugin/uninstall' && request.method === 'POST') {
+        try {
+          const body = (await request.json()) as { id?: string; purgeData?: boolean };
+          if (!body.id || typeof body.id !== 'string') {
+            return jsonResponse({ success: false, error: 'id 参数必填' }, 400);
+          }
+          const { removed, warning } = await uninstallPlugin(body.id, { purgeData: !!body.purgeData });
+          broadcast('plugins:changed', { reason: 'uninstall' });
+          await schedulePluginRestartLazy();
+          return jsonResponse({ success: true, removed, ...(warning ? { warning } : {}) });
+        } catch (error) {
+          const message = error instanceof Error ? error.message : 'Uninstall failed';
+          const status = error instanceof PluginStoreError ? error.statusCode : 500;
+          console.error('[api/plugin/uninstall] Error:', error);
+          return jsonResponse({ success: false, error: message }, status);
+        }
+      }
+
+      // POST /api/plugin/toggle - body { id, enabled }
+      if (pathname === '/api/cc-plugin/toggle' && request.method === 'POST') {
+        try {
+          const body = (await request.json()) as { id?: string; enabled?: boolean };
+          if (!body.id || typeof body.id !== 'string') {
+            return jsonResponse({ success: false, error: 'id 参数必填' }, 400);
+          }
+          if (typeof body.enabled !== 'boolean') {
+            return jsonResponse({ success: false, error: 'enabled 参数必填 (boolean)' }, 400);
+          }
+          // NOTE: this endpoint toggles the GLOBAL VISIBILITY gate
+          // (AppConfig.enabledPlugins). It does NOT activate the plugin in
+          // any workspace — per-workspace activation goes through
+          // /api/cc-plugin/workspace-enable below. Settings panel uses
+          // this; chat input / Agent settings use workspace-enable.
+          const { entry, enabled } = await togglePlugin(body.id, body.enabled);
+          broadcast('plugins:changed', { reason: 'toggle' });
+          // Restart in case the toggle hid a plugin currently injected via
+          // session override / Agent default — store filter skips it on
+          // next options build.
+          await schedulePluginRestartLazy();
+          return jsonResponse({ success: true, entry, enabled });
+        } catch (error) {
+          const message = error instanceof Error ? error.message : 'Toggle failed';
+          const status = error instanceof PluginStoreError ? error.statusCode : 500;
+          if (status >= 500) {
+            console.error('[api/cc-plugin/toggle] Error:', error);
+          }
+          return jsonResponse({ success: false, error: message }, status);
+        }
+      }
+
+      // POST /api/cc-plugin/workspace-enable - body { workspacePath, enabledIds[] }
+      // Sets the per-workspace plugin enable list (stored on Agent.enabledPluginIds).
+      // Single source of truth shared by the Agent settings panel and the chat
+      // input "插件" submenu — both UIs call this, then push to the active
+      // sidecar via /api/cc-plugin/session-enable to take immediate effect.
+      if (pathname === '/api/cc-plugin/workspace-enable' && request.method === 'POST') {
+        try {
+          const body = (await request.json()) as { workspacePath?: string; enabledIds?: string[] };
+          if (!body.workspacePath || typeof body.workspacePath !== 'string') {
+            return jsonResponse({ success: false, error: 'workspacePath 参数必填' }, 400);
+          }
+          if (!Array.isArray(body.enabledIds)) {
+            return jsonResponse({ success: false, error: 'enabledIds 必须是 string[]' }, 400);
+          }
+          const ids = body.enabledIds.filter((s): s is string => typeof s === 'string');
+          const { setWorkspaceEnabledPlugins } = await import('./plugins/store');
+          const result = await setWorkspaceEnabledPlugins(body.workspacePath, ids);
+          broadcast('plugins:changed', { reason: 'workspace-enable' });
+          return jsonResponse({ success: true, ...result });
+        } catch (error) {
+          const message = error instanceof Error ? error.message : 'Workspace enable failed';
+          const status = error instanceof PluginStoreError ? error.statusCode : 500;
+          console.error('[api/cc-plugin/workspace-enable] Error:', error);
+          return jsonResponse({ success: false, error: message }, status);
+        }
+      }
+
+      // POST /api/cc-plugin/session-enable - body { enabledIds[] | null }
+      // Push a per-Tab override to THIS sidecar (the current session). null
+      // clears the override back to Agent-default tracking. Triggers a
+      // deferred restart so the next pre-warm picks up the new plugin set.
+      if (pathname === '/api/cc-plugin/session-enable' && request.method === 'POST') {
+        try {
+          const body = (await request.json()) as { enabledIds?: string[] | null };
+          const ids = body.enabledIds === null || body.enabledIds === undefined
+            ? null
+            : Array.isArray(body.enabledIds)
+              ? body.enabledIds.filter((s): s is string => typeof s === 'string')
+              : null;
+          const { setSessionEnabledPluginIds } = await import('./agent-session');
+          setSessionEnabledPluginIds(ids);
+          return jsonResponse({ success: true, enabledIds: ids });
+        } catch (error) {
+          const message = error instanceof Error ? error.message : 'Session enable failed';
+          console.error('[api/cc-plugin/session-enable] Error:', error);
+          return jsonResponse({ success: false, error: message }, 500);
+        }
+      }
+
       // ============= COMMANDS MANAGEMENT API =============
       // GET /api/command-items - List all commands
       // Supports ?agentDir= for listing commands from a specific workspace (e.g. from Launcher)
@@ -8094,9 +8437,12 @@ async function main() {
                 resolvedModel = snapshotMeta.model;
               }
               if (snapshotMeta.providerEnvJson) {
-                try {
-                  resolvedProviderEnv = JSON.parse(snapshotMeta.providerEnvJson) as ProviderEnv;
-                } catch { /* malformed snapshot — fall back to live */ }
+                // Snapshot gate: if the desktop handover's providerId is now
+                // globally disabled, refuse the frozen snapshot — fall back to
+                // live payload.providerEnv (which the user can also disable by
+                // restarting the bot). decodeProviderEnvSnapshot enforces this.
+                const decoded = decodeProviderEnvSnapshot(snapshotMeta.providerEnvJson, snapshotMeta.providerId);
+                if (decoded) resolvedProviderEnv = decoded as ProviderEnv;
               }
             }
 
@@ -8947,6 +9293,8 @@ description: >
       setDeferredInitPhase(currentInitPhase);
       seedBundledSkills();
       console.log('[startup] seedBundledSkills done');
+
+      ensurePluginsDirs();
 
       currentInitPhase = 'socks-bridge';
       setDeferredInitPhase(currentInitPhase);

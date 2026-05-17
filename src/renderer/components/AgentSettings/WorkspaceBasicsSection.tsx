@@ -39,7 +39,7 @@ export default function WorkspaceBasicsSection({ project, agent, agentDir }: Wor
     [project?.displayName, project?.name],
   );
   const [name, setName] = useState(canonicalName);
-  const [openPopup, setOpenPopup] = useState<'icon' | 'model' | 'permission' | 'mcp' | null>(null);
+  const [openPopup, setOpenPopup] = useState<'icon' | 'model' | 'permission' | 'mcp' | 'plugins' | null>(null);
   const [mcpServers, setMcpServers] = useState<McpServerDefinition[]>([]);
   const [globalEnabledMcp, setGlobalEnabledMcp] = useState<string[]>([]);
   const isMountedRef = useRef(true);
@@ -130,9 +130,9 @@ export default function WorkspaceBasicsSection({ project, agent, agentDir }: Wor
     await refreshConfig();
   }, [project, agent, patchProject, refreshConfig]);
 
-  // Save AI config (model, provider, permission, mcp).
+  // Save AI config (model, provider, permission, mcp, plugins).
   // AgentConfig is the single source of truth when available; fallback to Project for non-agent workspaces.
-  const saveAgentConfig = useCallback(async (updates: Partial<Pick<AgentConfig, 'providerId' | 'model' | 'permissionMode' | 'mcpEnabledServers'>>) => {
+  const saveAgentConfig = useCallback(async (updates: Partial<Pick<AgentConfig, 'providerId' | 'model' | 'permissionMode' | 'mcpEnabledServers' | 'enabledPluginIds'>>) => {
     if (agent) {
       // patchAgentConfig auto-resolves providerEnvJson when providerId changes
       await patchAgentConfig(agent.id, updates);
@@ -144,6 +144,7 @@ export default function WorkspaceBasicsSection({ project, agent, agentDir }: Wor
       if (updates.model !== undefined) projectSync.model = updates.model;
       if (updates.permissionMode !== undefined) projectSync.permissionMode = updates.permissionMode;
       if (updates.mcpEnabledServers !== undefined) projectSync.mcpEnabledServers = updates.mcpEnabledServers;
+      if (updates.enabledPluginIds !== undefined) projectSync.enabledPluginIds = updates.enabledPluginIds;
       if (Object.keys(projectSync).length > 0) {
         await patchProject(project.id, projectSync);
       }
@@ -181,6 +182,31 @@ export default function WorkspaceBasicsSection({ project, agent, agentDir }: Wor
       : [...current, serverId];
     void saveAgentConfig({ mcpEnabledServers: newEnabled });
   }, [agent?.mcpEnabledServers, saveAgentConfig]);
+
+  // PRD 0.2.17 — Claude plugin enable list. Same two-layer model as MCP:
+  // candidate pool = AppConfig.plugins ∩ enabledPlugins (Layer 1 visibility
+  // gate from Settings); per-Agent enable list is the subset chosen here.
+  const visiblePlugins = useMemo(
+    () => (config.plugins ?? []).filter(p => config.enabledPlugins?.[p.id] === true),
+    [config.plugins, config.enabledPlugins],
+  );
+  const effectiveEnabledPlugins = agent?.enabledPluginIds ?? project?.enabledPluginIds;
+  const enabledPluginNames = visiblePlugins
+    .filter(p => effectiveEnabledPlugins?.includes(p.id))
+    .map(p => p.name);
+  const pluginSummary = enabledPluginNames.length === 0
+    ? '未启用插件'
+    : enabledPluginNames.length <= 2
+      ? enabledPluginNames.join(' / ')
+      : `${enabledPluginNames.slice(0, 2).join(' / ')} +${enabledPluginNames.length - 2}`;
+
+  const handlePluginToggle = useCallback((pluginId: string) => {
+    const current = agent?.enabledPluginIds ?? project?.enabledPluginIds ?? [];
+    const newEnabled = current.includes(pluginId)
+      ? current.filter(id => id !== pluginId)
+      : [...current, pluginId];
+    void saveAgentConfig({ enabledPluginIds: newEnabled });
+  }, [agent?.enabledPluginIds, project?.enabledPluginIds, saveAgentConfig]);
 
   // Derived display values — read from AgentConfig (source of truth), fallback to Project.
   //
@@ -544,6 +570,53 @@ export default function WorkspaceBasicsSection({ project, agent, agentDir }: Wor
                   );
                 })
               )}
+            </div>
+          </>
+        )}
+      </div>
+      )}
+
+      {/* Plugins (PRD 0.2.17) — same shape as MCP row above. Hidden when
+       *  external runtime (CC/Codex/Gemini manage their own plugins).
+       *  Renders nothing when no plugin is globally visible — avoids an
+       *  empty "未启用插件" row for users who haven't installed any. */}
+      {currentRuntime === 'builtin' && visiblePlugins.length > 0 && (
+      <div className="relative flex items-center gap-3">
+        <label className="w-14 shrink-0 text-sm text-[var(--ink-muted)]">插件</label>
+        <button
+          className="flex flex-1 items-center justify-between rounded-lg border border-[var(--line)] px-3 py-1.5 text-left text-sm text-[var(--ink)] transition-colors hover:border-[var(--line-strong)]"
+          onClick={() => setOpenPopup(openPopup === 'plugins' ? null : 'plugins')}
+        >
+          <span className="truncate">{pluginSummary}</span>
+          <ChevronRight className="h-3.5 w-3.5 shrink-0 text-[var(--ink-subtle)]" />
+        </button>
+
+        {openPopup === 'plugins' && (
+          <>
+            <div className="fixed inset-0 z-40" onMouseDown={(e) => { if (e.target === e.currentTarget) setOpenPopup(null); }} />
+            <div className="absolute left-20 top-0 z-50 max-h-[300px] w-[320px] overflow-y-auto overscroll-contain rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-2 shadow-lg">
+              {visiblePlugins.map(plugin => {
+                const checked = effectiveEnabledPlugins?.includes(plugin.id) ?? false;
+                return (
+                  <label
+                    key={plugin.id}
+                    className="flex cursor-pointer items-center gap-3 rounded-lg p-2 transition-colors hover:bg-[var(--hover-bg)]"
+                  >
+                    <input
+                      type="checkbox"
+                      checked={checked}
+                      onChange={() => handlePluginToggle(plugin.id)}
+                      className="h-4 w-4 rounded border-[var(--line)]"
+                    />
+                    <div className="min-w-0 flex-1">
+                      <p className="text-sm text-[var(--ink)]">{plugin.name}</p>
+                      {plugin.description && (
+                        <p className="truncate text-xs text-[var(--ink-muted)]">{plugin.description}</p>
+                      )}
+                    </div>
+                  </label>
+                );
+              })}
             </div>
           </>
         )}

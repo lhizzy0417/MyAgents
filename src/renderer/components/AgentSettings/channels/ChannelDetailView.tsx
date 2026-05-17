@@ -14,7 +14,7 @@ import { isTauriEnvironment } from '@/utils/browserMock';
 import { listenWithCleanup } from '@/utils/tauriListen';
 import { useToast } from '@/components/Toast';
 import { useConfig } from '@/hooks/useConfig';
-import { getEffectiveModelAliases, getProviderModels } from '@/config/types';
+import { getEffectiveModelAliases, getProviderModels, isProviderEnabled } from '@/config/types';
 import { patchAgentConfig, invokeStartAgentChannel } from '@/config/services/agentConfigService';
 import { resolveEffectiveConfig } from '../../../../shared/types/agent';
 import BotTokenInput from '../../ImSettings/components/BotTokenInput';
@@ -415,6 +415,7 @@ export default function ChannelDetailView({
     const providerOptions = useMemo(() => {
         const options = [{ value: '', label: '默认 (继承 Agent)' }];
         for (const p of providers) {
+            if (!isProviderEnabled(p)) continue;
             if (p.type === 'subscription') continue;
             if (p.type === 'api' && apiKeys[p.id]) {
                 options.push({ value: p.id, label: p.name });

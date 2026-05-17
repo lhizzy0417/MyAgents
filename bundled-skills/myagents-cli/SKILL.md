@@ -258,6 +258,26 @@ myagents plugin remove <pluginId>                       # 卸载
 
 安装走内置 Node.js 的 npm，可能需要 10-30 秒。卸载前会检查是否有 Channel 还在用这个插件——有的话先把 Channel 移掉。
 
+### Claude 插件（cc-plugin） — PRD 0.2.17
+
+```bash
+myagents cc-plugin list                                 # 已装 Claude 插件 + 启停状态
+myagents cc-plugin install <source>                     # 来源：owner/repo / GitHub URL / 直链 zip / file:///abs
+myagents cc-plugin uninstall <name> [--purgeData]       # 卸载（数据目录默认保留）
+myagents cc-plugin enable <name>                        # 启用（下次 session 生效）
+myagents cc-plugin disable <name>                       # 禁用
+myagents cc-plugin show <id|name>                       # 详情（含 manifest + 组件清单）
+```
+
+**与上面 `plugin` 的区别：** `cc-plugin` 是 Anthropic 官方的 Claude Plugin 协议（自带 skills/agents/MCP/hooks 的目录），落在 `~/.myagents/plugins/<name>/`；启用后由 SDK 自动装载组件。`plugin`（无前缀）则是 OpenClaw 的 IM 渠道插件，两套体系不冲突。
+
+**何时用：**
+- "粘个 GitHub URL 装个插件" → `cc-plugin install owner/repo`
+- "装本地正在调的插件" → `cc-plugin install file:///path/to/plugin`
+- "禁掉 X 插件" → `cc-plugin disable X`
+
+启停 / 安装 / 卸载后会触发 SDK 柔性重启（500ms 防抖），下一次发消息时 plugin 内组件才生效。外部 Runtime（Claude Code CLI / Codex / Gemini）下不读取这里——它们各自管自己的 plugin 体系。
+
 ### 通用配置 + 状态（config / status / version / reload）
 
 ```bash

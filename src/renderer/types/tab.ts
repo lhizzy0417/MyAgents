@@ -58,6 +58,11 @@ export interface InitialMessage {
     images?: ImageAttachment[];
     permissionMode?: PermissionMode;
     mcpEnabledServers?: string[];
+    /** PRD 0.2.17 — Claude plugin ids the user chose in Launcher's tool
+     *  menu. Carried into the new Tab as initial selection (Chat seeds
+     *  workspaceEnabledPlugins from this); mirrors mcpEnabledServers
+     *  semantics exactly. */
+    enabledPluginIds?: string[];
     /** Builtin runtime 的 (provider, model) 选择 — 类型上强制成对 */
     builtinSelection?: { providerId: string; model: string };
     /** External runtime 的 model — 没有 provider 概念 */

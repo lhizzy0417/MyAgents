@@ -11,7 +11,6 @@
  */
 
 import type { McpServerDefinition } from '../shared/config-types';
-import { PRESET_PROVIDERS } from '../shared/config-types';
 import { SDK_RESERVED_MCP_NAMES } from './agent-session';
 import {
   loadConfig,
@@ -23,8 +22,9 @@ import {
   redactSecret,
   findProvider,
   findAgentByWorkspacePath,
+  getAllEffectiveProviders,
+  isProviderDisabled,
   getProvidersDir,
-  loadCustomProviderFiles,
   type AdminAppConfig,
   type AgentConfigSlim,
   type ChannelConfigSlim,
@@ -776,17 +776,7 @@ export function handleModelList(): AdminResponse {
   const apiKeys = config.providerApiKeys ?? {};
   const verifyStatus = config.providerVerifyStatus ?? {};
 
-  // Load preset providers (statically imported — see top of file).
-  // Cast via `unknown` because `Provider` doesn't carry a string index
-  // signature; the downstream loop accesses fields by name through `String(p.id)`
-  // and `p.config as Record<string, unknown> | undefined`, which works on
-  // both shapes uniformly.
-  const presetProviders: Array<Record<string, unknown>> = (PRESET_PROVIDERS ?? []) as unknown as Array<Record<string, unknown>>;
-
-  // Load custom providers
-  const customProviders = loadCustomProviderFiles();
-
-  const allProviders = [...presetProviders, ...customProviders];
+  const allProviders = getAllEffectiveProviders(config);
   const data = allProviders.map(p => {
     const id = String(p.id);
     const cfg = p.config as Record<string, unknown> | undefined;
@@ -797,6 +787,7 @@ export function handleModelList(): AdminResponse {
       baseUrl: cfg?.baseUrl ? String(cfg.baseUrl) : undefined,
       isBuiltin: !!p.isBuiltin,
       protocol: p.apiProtocol ? String(p.apiProtocol) : 'anthropic',
+      enabled: p.enabled !== false,
       hasApiKey: !!apiKeys[id],
       status: (verifyStatus[id] as Record<string, unknown>)?.status ?? 'not-set',
     };
@@ -822,6 +813,9 @@ export async function handleModelSetKey(payload: { id: string; apiKey: string })
 export async function handleModelSetDefault(payload: { id: string }): Promise<AdminResponse> {
   const { id } = payload;
   if (!id) return { success: false, error: 'Missing required field: id' };
+  if (isProviderDisabled(id)) {
+    return { success: false, error: `Provider '${id}' is disabled. Re-enable it before setting it as default.` };
+  }
 
   await atomicModifyConfig(c => ({
     ...c,
@@ -974,7 +968,7 @@ export async function handleModelRemove(payload: { id: string }): Promise<AdminR
     return { success: false, error: `Custom provider '${id}' not found.` };
   }
 
-  // Clean up API key and verify status
+  // Clean up API key, verify status, and enablement/order stale IDs
   await atomicModifyConfig(c => {
     const apiKeys = { ...(c.providerApiKeys ?? {}) };
     delete apiKeys[id];
@@ -982,7 +976,18 @@ export async function handleModelRemove(payload: { id: string }): Promise<AdminR
     delete verifyStatus[id];
     // If this was the default provider, clear it
     const defaultId = c.defaultProviderId === id ? undefined : c.defaultProviderId;
-    return { ...c, providerApiKeys: apiKeys, providerVerifyStatus: verifyStatus, defaultProviderId: defaultId };
+    // Strip the deleted id from providerOrder / disabledProviderIds so disk
+    // state doesn't grow unbounded across delete-and-re-add cycles.
+    const providerOrder = c.providerOrder?.filter(pid => pid !== id);
+    const disabledProviderIds = c.disabledProviderIds?.filter(pid => pid !== id);
+    return {
+      ...c,
+      providerApiKeys: apiKeys,
+      providerVerifyStatus: verifyStatus,
+      defaultProviderId: defaultId,
+      providerOrder: providerOrder && providerOrder.length > 0 ? providerOrder : undefined,
+      disabledProviderIds: disabledProviderIds && disabledProviderIds.length > 0 ? disabledProviderIds : undefined,
+    };
   });
 
   broadcast('config:changed', { section: 'model', action: 'remove', id });
@@ -1397,12 +1402,38 @@ Options for 'update' <id>:
 
 See 'myagents cron readme' for long-form usage + exit-from-task flow.`,
 
-  plugin: `myagents plugin — Manage OpenClaw channel plugins
+  plugin: `myagents plugin — Manage OpenClaw channel plugins (IM adapters from npm)
 
 Commands:
   list                     List installed plugins
   install <npm-spec>       Install a plugin from npm
-  remove <plugin-id>       Uninstall a plugin`,
+  remove <plugin-id>       Uninstall a plugin
+
+Note: for Claude plugins (Anthropic plugin protocol — skills + agents + MCP
++ hooks bundled as a directory), use 'myagents cc-plugin' instead.`,
+
+  'cc-plugin': `myagents cc-plugin — Manage Claude plugins (PRD 0.2.17)
+
+Commands:
+  list                                       List installed plugins + enabled state
+  install <source>                           Install from owner/repo, github URL,
+                                             .zip URL, or file:///abs/path
+  uninstall <name|--id ID> [--purgeData]     Remove plugin; data dir kept unless --purgeData
+  enable <name|--id ID>                      Enable an installed plugin
+  disable <name|--id ID>                     Disable without uninstalling
+  show <name|--id ID>                        Show manifest + component inventory
+
+Examples:
+  myagents cc-plugin install anthropics/example-plugin
+  myagents cc-plugin install https://github.com/foo/bar/tree/v1.0/sub/plugin
+  myagents cc-plugin install file:///Users/me/dev/my-plugin
+  myagents cc-plugin enable my-plugin
+  myagents cc-plugin show my-plugin
+  myagents cc-plugin uninstall my-plugin --purgeData
+
+Plugins land in ~/.myagents/plugins/<name>/ and are activated on next session
+pre-warm (~1s). Different concept from OpenClaw channel plugins above —
+unrelated storage, unrelated semantics.`,
 
   runtime: `myagents runtime — Inspect Agent Runtimes (v0.1.69+)
 
@@ -2550,6 +2581,94 @@ export async function handlePluginInstall(payload: { npmSpec: string }): Promise
 export async function handlePluginUninstall(payload: { pluginId: string }): Promise<AdminResponse> {
   const resp = await managementApi('/api/plugin/uninstall', 'POST', payload);
   return wrapMgmtResponse(resp);
+}
+
+// ---------------------------------------------------------------------------
+// Claude Plugin handlers (PRD 0.2.17) — thin wrappers over the Node Sidecar's
+// /api/cc-plugin/* routes. Named "cc-plugin" END-TO-END (admin command, HTTP
+// path, store module) to avoid collision with the pre-existing OpenClaw
+// channel-plugin commands (`myagents plugin list/install/remove`) above
+// which target the Rust Management API at /api/plugin/*. Concepts are
+// unrelated: OpenClaw plugins are npm-packaged IM channel adapters, Claude
+// plugins are the Anthropic-spec directories containing skills/agents/MCP/
+// hooks. Diagnostic curls now resolve unambiguously per process.
+//
+// Read paths (list / detail) call the store module directly — same process,
+// no need for the HTTP loopback hop. Write paths (install / uninstall /
+// toggle) go through sidecarSelf so the existing route handler can
+// broadcast SSE progress / trigger pre-warm restart; they get the
+// skill-tier 330s timeout because a github tarball can easily exceed the
+// default 10s.
+// ---------------------------------------------------------------------------
+
+export async function handleCcPluginList(): Promise<AdminResponse> {
+  const { listInstalledPlugins } = await import('./plugins/store');
+  return { success: true, data: listInstalledPlugins() };
+}
+
+export async function handleCcPluginShow(payload: { id?: string; name?: string }): Promise<AdminResponse> {
+  const { listInstalledPlugins, getPluginDetail } = await import('./plugins/store');
+  let id = payload.id;
+  if (!id && payload.name) {
+    const found = listInstalledPlugins().find(p => p.name === payload.name);
+    if (found) id = found.id;
+  }
+  if (!id) return { success: false, error: 'id or name is required' };
+  const item = getPluginDetail(id);
+  if (!item) return { success: false, error: '插件未安装' };
+  return { success: true, data: item };
+}
+
+export async function handleCcPluginInstall(payload: { sourceUrl?: string; url?: string }): Promise<AdminResponse> {
+  const sourceUrl = payload.sourceUrl ?? payload.url;
+  if (!sourceUrl) return { success: false, error: 'sourceUrl is required' };
+  const { json } = await sidecarSelf(
+    '/api/cc-plugin/install',
+    'POST',
+    { sourceUrl },
+    { timeoutMs: SKILL_INSTALL_LOOPBACK_TIMEOUT_MS },
+  );
+  if (json.success) {
+    return { success: true, data: json.entry, hint: 'Plugin installed. Active after the next session pre-warm.' };
+  }
+  return { success: false, error: typeof json.error === 'string' ? json.error : 'Failed to install plugin' };
+}
+
+export async function handleCcPluginUninstall(payload: { id?: string; name?: string; purgeData?: boolean }): Promise<AdminResponse> {
+  const { listInstalledPlugins } = await import('./plugins/store');
+  let id = payload.id;
+  if (!id && payload.name) {
+    const found = listInstalledPlugins().find(p => p.name === payload.name);
+    if (found) id = found.id;
+  }
+  if (!id) return { success: false, error: 'id or name is required' };
+  const { json } = await sidecarSelf(
+    '/api/cc-plugin/uninstall',
+    'POST',
+    { id, purgeData: !!payload.purgeData },
+    // Bumped to skill-tier so directory removal on slow disks (e.g. spinning
+    // rust with large node_modules data dirs) doesn't abort half-way.
+    { timeoutMs: SKILL_INSTALL_LOOPBACK_TIMEOUT_MS },
+  );
+  if (json.success) {
+    return { success: true, data: json.removed, hint: 'Plugin removed.' };
+  }
+  return { success: false, error: typeof json.error === 'string' ? json.error : 'Failed to uninstall plugin' };
+}
+
+export async function handleCcPluginToggle(payload: { id?: string; name?: string; enabled: boolean }): Promise<AdminResponse> {
+  const { listInstalledPlugins } = await import('./plugins/store');
+  let id = payload.id;
+  if (!id && payload.name) {
+    const found = listInstalledPlugins().find(p => p.name === payload.name);
+    if (found) id = found.id;
+  }
+  if (!id) return { success: false, error: 'id or name is required' };
+  const { json } = await sidecarSelf('/api/cc-plugin/toggle', 'POST', { id, enabled: payload.enabled });
+  if (json.success) {
+    return { success: true, data: json.entry, hint: payload.enabled ? 'Plugin enabled.' : 'Plugin disabled.' };
+  }
+  return { success: false, error: typeof json.error === 'string' ? json.error : 'Failed to toggle plugin' };
 }
 
 // ---------------------------------------------------------------------------

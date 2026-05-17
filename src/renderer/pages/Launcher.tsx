@@ -19,7 +19,7 @@ import { AddWorkspaceMenu, BrandSection, RecentTasks, TemplateLibraryDialog, Wor
 import WorkspaceConfigPanel from '@/components/WorkspaceConfigPanel';
 import { useConfig } from '@/hooks/useConfig';
 import { useTaskCenterData } from '@/hooks/useTaskCenterData';
-import { type Project, type PermissionMode, type McpServerDefinition } from '@/config/types';
+import { type Project, type PermissionMode, type McpServerDefinition, isProviderEnabled } from '@/config/types';
 import { CUSTOM_EVENTS } from '../../shared/constants';
 import {
     getAllMcpServers,
@@ -155,6 +155,10 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
     const [launcherMcpServers, setLauncherMcpServers] = useState<McpServerDefinition[]>([]);
     const [launcherGlobalMcpEnabled, setLauncherGlobalMcpEnabled] = useState<string[]>([]);
     const [launcherWorkspaceMcpEnabled, setLauncherWorkspaceMcpEnabled] = useState<string[]>([]);
+    // PRD 0.2.17 — Launcher's per-session plugin selection. Default seeded
+    // from launcherLastUsed once config loads (effect below); transient
+    // selection is carried into the new Tab via InitialMessage.
+    const [launcherEnabledPlugins, setLauncherEnabledPlugins] = useState<string[]>([]);
 
     // Resolve AgentConfig for selected workspace (source of truth for AI settings)
     const selectedAgent = useMemo(() => {
@@ -243,6 +247,16 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
         })();
     }, [isActive]);
 
+    // PRD 0.2.17 — Launcher plugin toggle (local state only; persisted via
+    // launcherLastUsed at send time and carried to the new Tab via
+    // InitialMessage.enabledPluginIds). No disk write here — Launcher
+    // has no Agent context to write the per-Agent enable list against.
+    const handleLauncherPluginToggle = useCallback((pluginId: string, enabled: boolean) => {
+        setLauncherEnabledPlugins(prev =>
+            enabled ? [...prev, pluginId] : prev.filter(id => id !== pluginId),
+        );
+    }, []);
+
     // Handle workspace MCP toggle — delegates to the shared dual-write helper
     // (PRD 0.2.7) so launcher and chat-tab persist identical fields.
     const handleWorkspaceMcpToggle = useCallback((serverId: string, enabled: boolean) => {
@@ -278,6 +292,7 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
         if (lastUsed.providerId) setLauncherProviderId(lastUsed.providerId);
         if (lastUsed.model) setLauncherSelectedModel(lastUsed.model);
         if (lastUsed.mcpEnabledServers) setLauncherWorkspaceMcpEnabled(lastUsed.mcpEnabledServers);
+        if (lastUsed.enabledPluginIds) setLauncherEnabledPlugins(lastUsed.enabledPluginIds);
     }, [isLoading, config.launcherLastUsed]);
 
     // Extract runtimeConfig primitives for stable useEffect deps (avoid object reference)
@@ -430,11 +445,25 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
             ? pairBuiltinSelection(launcherProvider, launcherSelectedModel)
             : undefined;
         const runtimeModel = isExternalRuntime ? launcherSelectedModel : undefined;
+        // PRD 0.2.17 — only carry plugins that are still globally visible
+        // (Settings 开关 ON) to avoid silently re-enabling hidden plugins
+        // when Launcher's last-used list is older than the current visibility
+        // state.
+        const launcherVisiblePluginIds = new Set(
+            (config.plugins ?? [])
+                .filter(p => config.enabledPlugins?.[p.id] === true)
+                .map(p => p.id),
+        );
+        const carriedEnabledPlugins = launcherEnabledPlugins.filter(id =>
+            launcherVisiblePluginIds.has(id),
+        );
+
         const initialMessage: InitialMessage = {
             text,
             images,
             permissionMode: launcherPermissionMode,
             mcpEnabledServers: launcherWorkspaceMcpEnabled.filter(id => launcherGlobalMcpEnabled.includes(id)),
+            ...(carriedEnabledPlugins.length > 0 ? { enabledPluginIds: carriedEnabledPlugins } : {}),
             ...(builtinSelection ? { builtinSelection } : {}),
             ...(runtimeModel ? { runtimeModel } : {}),
             ...(cron ? { cron } : {}),
@@ -447,6 +476,7 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
                 model: launcherSelectedModel,
                 permissionMode: launcherPermissionMode,
                 mcpEnabledServers: launcherWorkspaceMcpEnabled,
+                enabledPluginIds: launcherEnabledPlugins,
             },
         }).catch(err => console.warn('[Launcher] Failed to save launcherLastUsed:', err));
 
@@ -538,6 +568,7 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
         onLaunchProject(selectedWorkspace, undefined, initialMessage);
     }, [selectedWorkspace, launcherProvider, launcherPermissionMode,
         launcherSelectedModel, launcherWorkspaceMcpEnabled, launcherGlobalMcpEnabled,
+        launcherEnabledPlugins, config.plugins, config.enabledPlugins,
         isExternalRuntime, launcherRuntime,
         touchProject, onLaunchProject, updateConfig]);
 
@@ -680,7 +711,9 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
         if (!agentOverlay) return;
         const project = projects.find(p => p.path === agentOverlay.workspacePath);
         if (!project) return;
-        const effectiveProvider = launcherProvider ?? providers[0];
+        // Fallback path must respect global enablement — providers[0] can be the
+        // first ordered provider which the user disabled in Settings → 启用和排序.
+        const effectiveProvider = launcherProvider ?? providers.find(isProviderEnabled);
         if (!effectiveProvider) {
             toastRef.current.error('没有可用的 Provider，请先在设置中配置');
             return;
@@ -757,6 +790,15 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
                         globalMcpEnabled={launcherGlobalMcpEnabled}
                         mcpServers={launcherMcpServers}
                         onWorkspaceMcpToggle={handleWorkspaceMcpToggle}
+                        // PRD 0.2.17 — same plugin props as Chat. Source from
+                        // AppConfig (Layer 1 visibility gate); Layer 2 is
+                        // Launcher's transient selection (handed off to new
+                        // Tab via InitialMessage.enabledPluginIds).
+                        globallyVisiblePlugins={(config.plugins ?? [])
+                            .filter(p => config.enabledPlugins?.[p.id] === true)
+                            .map(p => ({ id: p.id, name: p.name, description: p.description }))}
+                        workspaceEnabledPlugins={launcherEnabledPlugins}
+                        onWorkspacePluginToggle={handleLauncherPluginToggle}
                         onRefreshProviders={refreshProviderData}
                         onGoToSettings={handleGoToSettings}
                         runtime={isExternalRuntime ? launcherRuntime : undefined}

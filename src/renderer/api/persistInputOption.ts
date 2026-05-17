@@ -38,6 +38,9 @@ export interface InputOptionFields {
   permissionMode?: PermissionMode;
   /** MCP server ids enabled at the workspace level. */
   mcpEnabledServers?: string[];
+  /** PRD 0.2.17 — Claude plugin ids enabled at the workspace level. Mirrors
+   *  mcpEnabledServers exactly (project + agent + snapshot dual-write). */
+  enabledPluginIds?: string[];
 }
 
 export interface PersistInputOptionParams {
@@ -77,6 +80,12 @@ export interface PersistInputOptionParams {
    *  iff `pushMcpToSidecar` and `fields.mcpEnabledServers` are both set. */
   getAllMcpServers?: () => Promise<McpServerDefinition[]>;
   getGlobalMcpEnabled?: () => Promise<string[]>;
+
+  /** PRD 0.2.17 — live sidecar push for plugin enabled set. Chat-tab only
+   *  (same reasoning as pushMcpToSidecar). When provided + fields.enabledPluginIds
+   *  is set, the helper POSTs /api/cc-plugin/session-enable so the running
+   *  session restart picks up the new plugin selection immediately. */
+  pushPluginsToSidecar?: (enabledIds: string[]) => Promise<unknown>;
 }
 
 /** Subset of the session snapshot fields we touch. Defined here (not imported
@@ -86,6 +95,7 @@ export interface SessionSnapshotPatch {
   model?: string | null;
   permissionMode?: PermissionMode;
   mcpEnabledServers?: string[];
+  enabledPluginIds?: string[];
 }
 
 /**
@@ -158,6 +168,17 @@ export async function persistInputOptionChange(
     }
   }
 
+  // Plugin sidecar push — same shape as MCP. The session-enable endpoint
+  // applies AppConfig.enabledPlugins visibility gate inside the sidecar, so
+  // we just send the workspace-selected IDs and let the backend filter.
+  if (params.pushPluginsToSidecar && params.fields.enabledPluginIds !== undefined) {
+    try {
+      await params.pushPluginsToSidecar(params.fields.enabledPluginIds);
+    } catch (e) {
+      errors.push(`sidecar plugin push: ${describe(e)}`);
+    }
+  }
+
   return { ok: errors.length === 0, errors };
 }
 
@@ -185,6 +206,9 @@ function buildProjectPatch(
   if (fields.mcpEnabledServers !== undefined) {
     patch.mcpEnabledServers = fields.mcpEnabledServers;
   }
+  if (fields.enabledPluginIds !== undefined) {
+    patch.enabledPluginIds = fields.enabledPluginIds;
+  }
   return patch;
 }
 
@@ -211,6 +235,9 @@ function buildSnapshotPatch(params: PersistInputOptionParams): SessionSnapshotPa
   if (fields.mcpEnabledServers !== undefined) {
     patch.mcpEnabledServers = fields.mcpEnabledServers;
   }
+  if (fields.enabledPluginIds !== undefined) {
+    patch.enabledPluginIds = fields.enabledPluginIds;
+  }
   return patch;
 }
 
@@ -225,6 +252,9 @@ function buildAgentPatch(
   }
   if (fields.mcpEnabledServers !== undefined) {
     patch.mcpEnabledServers = fields.mcpEnabledServers;
+  }
+  if (fields.enabledPluginIds !== undefined) {
+    patch.enabledPluginIds = fields.enabledPluginIds;
   }
 
   // Permission mode + model split by runtime. The historical Chat.tsx bug

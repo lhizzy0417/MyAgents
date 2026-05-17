@@ -71,6 +71,7 @@
 | SDK 自定义 Tool / `createSdkMcpServer` | `tech_docs/sdk_custom_tools_guide.md` |
 | React 稳定性 5 条规则 | `tech_docs/react_stability_rules.md` |
 | Tool Attachment 管道 / 富媒体产物归一化 | `tech_docs/tool_attachment_pipeline.md` |
+| Claude Plugin 加载（PRD 0.2.17）/ SDK Options.plugins / 安装管线 | `tech_docs/plugin_loading.md` |
 
 ---
 
