@@ -712,6 +712,31 @@ export function useCronTask(options: UseCronTaskOptions) {
 
   // Restore state from an existing cron task (for app restart recovery)
   const restoreFromTask = useCallback((task: CronTask) => {
+    // Issue #206 root-cause fix (companion to 224b0b7a which only patched
+    // the overlay symptom in SimpleChatInput). `runMode === 'new_session'`
+    // rotates a fresh sessionId per execution (see Rust
+    // `cron_task.rs::rotate_new_session_id`), so any sid the user reaches
+    // via 任务详情 →「关联会话」is already a DETACHED one-shot transcript
+    // of a past run — the cron task is not "bound" to it in any live sense,
+    // and the next execution will mint a yet-newer sid. Restoring the task
+    // into `cronState` for such a session would (a) make every consumer of
+    // `cronState.task` (overlay gate, session-switch guard at Chat:2791,
+    // `useSessionSurfaces`, the save-vs-create branch at Chat:3752, the
+    // sessionId-sync effect at Chat:1177) incorrectly treat this historical
+    // chat as a live cron workbench, and (b) force every new consumer added
+    // later to re-discover the same `runMode !== 'new_session'` guard.
+    // Single source of truth: skip restore here. `single_session` mode
+    // (continuous reuse of one sid as the cron's workbench) keeps the
+    // original behavior — that's the only mode where the session IS the
+    // cron's live context.
+    if (task.runMode === 'new_session') {
+      console.log(
+        '[useCronTask] Skipping restore for new_session task — historical detached session:',
+        task.id,
+        'sid:', task.sessionId,
+      );
+      return;
+    }
     console.log('[useCronTask] Restoring from task:', task.id, task.status);
     // Reverse-derive executionTarget from runMode. Rust's CronTask schema
     // doesn't store executionTarget (it's a UI-only distinction that the
@@ -724,9 +749,10 @@ export function useCronTask(options: UseCronTaskOptions) {
     // `runMode==='single_session'`; `'new_task'` ↔ `'new_session'`.
     // schedule.kind === 'loop' forces single_session in the modal but
     // doesn't constrain executionTarget; recover from runMode is still
-    // the right inverse.
-    const recoveredExecutionTarget: 'current_session' | 'new_task' =
-      task.runMode === 'new_session' ? 'new_task' : 'current_session';
+    // the right inverse. Note: after the `new_session` early-return above,
+    // TS narrows `task.runMode` to `'single_session'`, so the inverse
+    // collapses to the constant 'current_session' branch.
+    const recoveredExecutionTarget: 'current_session' | 'new_task' = 'current_session';
     setState({
       isEnabled: true,
       config: {
