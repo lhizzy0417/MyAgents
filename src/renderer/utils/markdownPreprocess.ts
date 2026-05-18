@@ -75,12 +75,15 @@ export function preprocessMarkdownContent(content: string): string {
   // guess the model's intent.
 
   // 2d. Fix unordered list items at LINE START ONLY
-  // "-item" -> "- item"
-  processed = processed.replace(/^-([^\s\-\n])/gm, '- $1');
+  // "-item" -> "- item". Exclude digits so negative-leading values like
+  // "-50% drop" at line start don't get rewritten into a list item.
+  processed = processed.replace(/^-([^\s\-\n\d])/gm, '- $1');
 
   // 2e. Fix ordered list items at LINE START ONLY
-  // "1.item" -> "1. item"
-  processed = processed.replace(/^(\d+\.)([^\s\n])/gm, '$1 $2');
+  // "1.item" -> "1. item". Exclude digits so version numbers / dates /
+  // IPs like "0.2.18", "2026.5.18", "192.168.1.1" at line start don't get
+  // rewritten into an ordered list (which then swallows the rest of the line).
+  processed = processed.replace(/^(\d+\.)([^\s\n\d])/gm, '$1 $2');
 
   // Step 3: Restore protected code blocks and inline code
   // Multiple passes needed: table blocks may contain inline code placeholders,

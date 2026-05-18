@@ -32,6 +32,32 @@ describe('preprocessMarkdownContent', () => {
     expect(preprocessMarkdownContent('##Title')).toBe('##Title');
   });
 
+  // Version numbers, dates, and IPs at line start MUST NOT get rewritten into
+  // ordered lists. `0.2.18` → `0. 2.18` would render "2.18" as an ordered-list
+  // item and swallow the rest of the line.
+  test('leaves numeric.dot tokens at line start as plain text', () => {
+    expect(preprocessMarkdownContent('0.2.18 修了 markdown bug')).toBe('0.2.18 修了 markdown bug');
+    expect(preprocessMarkdownContent('2026.5.18 是个好日子')).toBe('2026.5.18 是个好日子');
+    expect(preprocessMarkdownContent('192.168.1.1 gateway')).toBe('192.168.1.1 gateway');
+  });
+
+  test('still adds space for real ordered-list-style "N.token"', () => {
+    expect(preprocessMarkdownContent('1.item')).toBe('1. item');
+    expect(preprocessMarkdownContent('3.步骤')).toBe('3. 步骤');
+  });
+
+  // Negative-leading values at line start MUST NOT get rewritten into unordered
+  // list items.
+  test('leaves negative-leading values at line start as plain text', () => {
+    expect(preprocessMarkdownContent('-50% 下降')).toBe('-50% 下降');
+    expect(preprocessMarkdownContent('-5°C')).toBe('-5°C');
+  });
+
+  test('still adds space for real unordered-list-style "-token"', () => {
+    expect(preprocessMarkdownContent('-item')).toBe('- item');
+    expect(preprocessMarkdownContent('-步骤')).toBe('- 步骤');
+  });
+
   // Issue #167 — Chinese-tuned models (DeepSeek, MiniMax, …) emit full-width
   // punctuation U+FF0A `＊` in place of ASCII `*`, so bold rendered as literal
   // ＊＊P1＊＊ instead of <strong>P1</strong>. Normalize paired patterns only.
