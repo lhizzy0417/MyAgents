@@ -311,12 +311,22 @@ impl ImAdapter for BridgeAdapter {
         // Poll /status with retries — loadPlugin() may still be running
         // (health check only verifies HTTP server is up, not that the plugin is loaded)
         let max_attempts = 30; // 30 * 500ms = 15s max wait for plugin load + credential validation
+        let mut last_err: Option<String> = None;
         for attempt in 0..max_attempts {
-            let resp = self.client
-                .get(self.url("/status"))
-                .send()
-                .await
-                .map_err(|e| format!("Bridge status check failed: {}", e))?;
+            // Connection-level errors (port not yet bound) MUST be retried, not
+            // returned immediately — bridge spawns the HTTP listener after
+            // loadPlugin() finishes, so first attempts can hit ECONNREFUSED
+            // before the bridge has a chance to listen. (#211)
+            let resp = match self.client.get(self.url("/status")).send().await {
+                Ok(r) => r,
+                Err(e) => {
+                    last_err = Some(format!("Bridge status check failed: {}", e));
+                    if attempt < max_attempts - 1 {
+                        tokio::time::sleep(Duration::from_millis(500)).await;
+                    }
+                    continue;
+                }
+            };
 
             if !resp.status().is_success() {
                 return Err(format!("Bridge returned status {}", resp.status()));
@@ -347,7 +357,7 @@ impl ImAdapter for BridgeAdapter {
             }
         }
 
-        Err("Bridge plugin not ready after 15s (registration or credential validation may have failed)".to_string())
+        Err(last_err.unwrap_or_else(|| "Bridge plugin not ready after 15s (registration or credential validation may have failed)".to_string()))
     }
 
     async fn register_commands(&self) -> AdapterResult<()> {
