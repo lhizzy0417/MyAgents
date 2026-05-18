@@ -66,11 +66,13 @@ export function preprocessMarkdownContent(content: string): string {
   // "F# tutorial" from being rewritten into headings.
   processed = processed.replace(/([^\n#\p{L}\p{N}])(#{1,6}\s+)(?=\S)/gu, '$1\n\n$2');
 
-  // 2c. Ensure headers at the start of lines have a space after # (if missing)
-  // "##Title" -> "## Title" (only at line start). Exclude `#<digit>` so that
-  // issue / PR references like `#210` at line start aren't rewritten into a
-  // heading (CommonMark `# 210` is an H1).
-  processed = processed.replace(/^(#{1,6})([^\s#\n\d])/gm, '$1 $2');
+  // 2c removed: We used to auto-insert a space after a leading `#` to fix
+  // AI-emitted `##Title` (missing space). But that rule can't distinguish a
+  // heading from a tag — `#210`, `#heihei`, `#标题` are all common as plain
+  // tags / issue refs, and rewriting them into `# 210` / `# heihei` / `# 标题`
+  // turned the whole line into an `<h1>` (CommonMark requires the space). Per
+  // spec, `#text` (no space) is NOT a heading; trust the spec rather than
+  // guess the model's intent.
 
   // 2d. Fix unordered list items at LINE START ONLY
   // "-item" -> "- item"
