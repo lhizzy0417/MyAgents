@@ -34,6 +34,7 @@ pub mod workspace_files;
 mod tray;
 mod updater;
 pub mod utils;
+pub mod wake_lock;
 
 use sidecar::{
     cleanup_stale_sidecars, cleanup_stale_sidecars_preamble, init_startup_cleanup_barrier,
@@ -601,6 +602,11 @@ pub fn run() {
                 .hidden_title(true)
                 .title_bar_style(tauri::TitleBarStyle::Overlay);
 
+            // `main_window` is only consumed by the macOS-gated traffic-light
+            // inset block below. On other platforms the `.build()?` call
+            // remains for its side effect (constructing + showing the window);
+            // the binding itself is intentionally unused, hence the cfg_attr.
+            #[cfg_attr(not(target_os = "macos"), allow(unused_variables))]
             let main_window = main_window_builder
                 .build()
                 .map_err(|e| {

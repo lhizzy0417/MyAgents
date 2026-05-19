@@ -350,6 +350,14 @@ export function useChatSearch({
   // eslint-disable-next-line react-hooks/refs
   firstItemIndexRef.current = firstItemIndex;
   const summariesRef = useRef<MessageMatchSummary[]>([]);
+  // Timestamp of the user's most recent next/prev click. `reconcile()` runs on
+  // a debounce (DEBOUNCE_MS) after `messages` changes (streaming, append, …);
+  // if the user clicked next/prev during the debounce window, the unconditional
+  // index rewrite at the end of `reconcile()` would clobber their new position
+  // with one re-anchored from the *pre-click* index (the one we captured at
+  // entry to `reconcile()`). Guard it with a grace window > DEBOUNCE_MS so that
+  // user navigation always wins over the message-array-churn recompute.
+  const userNavigatedAtRef = useRef<number>(0);
 
   const supported = useMemo(() => {
     const ok = isHighlightApiSupported();
@@ -482,6 +490,18 @@ export function useChatSearch({
           const occ = Math.min(priorPos.occInMessage, newCount - 1);
           nextFlat = offset + occ;
         }
+      }
+      // If the user clicked next/prev during this debounce window, their
+      // position is more authoritative than the re-anchored one. Keep
+      // `currentIndexRef.current` but clamp it into the new total so we don't
+      // index past the end after a shrink.
+      const recentNavigationGraceMs = DEBOUNCE_MS + 100;
+      const userInteractedDuringDebounce =
+        !resetFocus &&
+        userNavigatedAtRef.current > 0 &&
+        Date.now() - userNavigatedAtRef.current < recentNavigationGraceMs;
+      if (userInteractedDuringDebounce && total > 0) {
+        nextFlat = priorFlat < 0 ? 0 : Math.min(priorFlat, total - 1);
       }
       currentIndexRef.current = nextFlat;
       setMatchCount(total);
@@ -640,6 +660,7 @@ export function useChatSearch({
     const total = summariesRef.current.reduce((acc, s) => acc + s.count, 0);
     if (total === 0) return;
     const nextIdx = (currentIndexRef.current + 1) % total;
+    userNavigatedAtRef.current = Date.now();
     currentIndexRef.current = nextIdx;
     setCurrentIndex(nextIdx);
     focusCurrent();
@@ -650,6 +671,7 @@ export function useChatSearch({
     if (total === 0) return;
     const cur = currentIndexRef.current;
     const nextIdx = cur - 1 < 0 ? total - 1 : cur - 1;
+    userNavigatedAtRef.current = Date.now();
     currentIndexRef.current = nextIdx;
     setCurrentIndex(nextIdx);
     focusCurrent();

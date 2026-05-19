@@ -246,6 +246,15 @@ interface SimpleChatInputProps {
   queuedMessages?: QueuedMessageInfo[];
   onCancelQueued?: (queueId: string) => void;
   onForceExecuteQueued?: (queueId: string) => void;
+  // Agent status panel slot — Chat owns AgentStatusPanel (it needs messages /
+  // chatContentRef / handleJumpToTool) and hands it in as a slot. The slot is
+  // rendered as a sibling to QueuedMessagesPanel inside a shared flex row above
+  // the input box; both cards inherit positioning from that row so they can no
+  // longer overlap. AgentStatusPanel internally handles its own mount /
+  // fade-in lifecycle (returns null when no agent activity), so passing the
+  // slot unconditionally is safe — `:empty` collapses the row when both kids
+  // render null.
+  agentStatusSlot?: React.ReactNode;
 }
 
 // Used when the slash command service is unavailable (browser dev mode) or
@@ -366,6 +375,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
   queuedMessages = [],
   onCancelQueued,
   onForceExecuteQueued,
+  agentStatusSlot,
   workspacePath = null,
 }, ref) {
   const isLauncherMode = mode === 'launcher';
@@ -1602,7 +1612,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
     <>
     <div className={isLauncherMode
       ? 'relative flex w-full justify-center'
-      : 'pointer-events-none absolute inset-x-0 bottom-0 z-20 flex justify-center px-4 pb-4'
+      : 'pointer-events-none absolute inset-x-0 bottom-0 z-20 flex flex-col items-center px-4 pb-4'
     }>
       {/* Gradient fade overlay (chat mode only) */}
       {!isLauncherMode && (
@@ -1614,20 +1624,42 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
         />
       )}
 
+      {/* Floating panel row above the input — hosts AgentStatusPanel (Todo
+          badge) on the left and QueuedMessagesPanel on the right. They used
+          to render independently with overlapping z-20 / similar Y, which
+          let the queue paint over the Todo badge. Now they're siblings in
+          one flex row: the Todo card carries `[&:not(:only-child)]:mr-auto`
+          so it self-pushes left when queue is present, and stays right
+          (justify-end) when alone. `items-end` bottom-aligns the two cards
+          (a single-row Todo bar sits slightly higher than the queue card —
+          natural heights kept so an expanded AgentStatusPanel doesn't
+          stretch the queue card into a mostly-empty tall panel). `empty:hidden`
+          collapses the row + mb-2 gap when both children render null (no
+          agent activity + no queue).
+          The row sits OUTSIDE the input container (sibling, not child) so
+          its `pointer-events-none` lets empty space fall all the way through
+          to chatContentRef where the message list lives — otherwise the
+          ancestor `pointer-events-auto` input container would catch the
+          click and block message selection (Codex review). Cards themselves
+          override with `pointer-events-auto`. */}
+      {!isLauncherMode && (
+        <div className="pointer-events-none mb-2 flex w-full max-w-3xl items-end justify-end gap-2 empty:hidden">
+          {agentStatusSlot}
+          {queuedMessages.length > 0 && (
+            <QueuedMessagesPanel
+              messages={queuedMessages}
+              onCancel={(queueId) => onCancelQueued?.(queueId)}
+              onForceExecute={(queueId) => onForceExecuteQueued?.(queueId)}
+            />
+          )}
+        </div>
+      )}
+
       {/* Input container */}
       <div className={isLauncherMode
         ? 'relative w-full'
         : 'pointer-events-auto relative w-full max-w-3xl'
       }>
-        {/* Queued messages floating above the input */}
-        {!isLauncherMode && (
-          <QueuedMessagesPanel
-            messages={queuedMessages}
-            onCancel={(queueId) => onCancelQueued?.(queueId)}
-            onForceExecute={(queueId) => onForceExecuteQueued?.(queueId)}
-          />
-        )}
-
         {/* Cron task status bar — shown when cron mode is enabled but the task
          *  hasn't started yet. PRD 0.2.7 D1: launcher SHOULD show this so the
          *  user sees their staged cron config; the actual cron creation happens

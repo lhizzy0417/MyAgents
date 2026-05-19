@@ -1883,8 +1883,13 @@ async function persistTurnResult(): Promise<void> {
       ...(turnToolCount > 0 ? { tool_count: turnToolCount } : {}),
       ...(turnDurationMs ? { duration_ms: turnDurationMs } : {}),
     });
+    // PRD 0.2.19 — session_id joins back to renderer session_new for full funnel.
+    // `lastSessionId` is typed `string` and bootstrap-initialized to `''`, so we
+    // coerce empty to null here. Analytics tolerates null and groups those as
+    // "pre-session" (negligible volume — only first turn before any id lands).
     trackServer('ai_turn_complete', {
       source: lastScenario.type,
+      session_id: lastSessionId || null,
       platform: lastScenario.type === 'im' ? lastScenario.platform : null,
       runtime: runtimeType,
       model: usageData?.model || lastRuntimeReportedModel || lastModel || null,

@@ -3,6 +3,17 @@
  * 埋点统计类型定义
  */
 
+import type { RuntimeType } from '../../shared/types/runtime';
+
+/**
+ * 埋点上报的 runtime 字段类型 = SDK runtime + `'unknown'` 兜底。
+ *
+ * 复用 `RuntimeType` 是为了避免与 SDK 来源漂移——RuntimeType 增删 runtime 时
+ * 本类型自动跟随。`'unknown'` 仅在 caller 显式选择"未知"分桶时使用；正常路径
+ * `normalizeRuntime()` 永远返回 RuntimeType，不会落到 `'unknown'`。
+ */
+export type AnalyticsRuntime = RuntimeType | 'unknown';
+
 /**
  * 基础事件参数（SDK 自动填充）
  */
@@ -28,6 +39,38 @@ export interface BaseEventParams {
  *   - `im`          IM Bot（飞书 / Telegram / 钉钉）
  */
 export type Source = 'desktop' | 'cli' | 'cli_agent' | 'cron' | 'im';
+
+/**
+ * UI 入口面 —— `source` 维度内"desktop 渠道"的二级细分。
+ *
+ * `source` 回答"哪个进程触发"（desktop/cli/cron/im），`surface` 回答
+ * "desktop 内部哪个 UI 表面触发"。两者正交，配合解释"用户究竟是怎么开始
+ * 用 MyAgents 的"。详见 `analytics_design.md` §4.4。
+ *
+ * 取值约定：
+ *   - `launcher_input`   启动页输入框直接发首条消息（New Tab 空状态 + 用户打字）
+ *   - `agent_card`       右侧 Agent 工作区卡片点击
+ *   - `history_click`    右上历史对话列表点击（仅出现在 `history_open` params 上；session_switch 不显式重复）
+ *   - `new_chat_button`  Chat 内"新对话"按钮（走 resetSession 或 handleNewSession 路径）
+ *   - `cmd_k`            命令面板（v0.2.19 未实现，预留）
+ *   - `external_link`    URL Scheme / 深链唤起（v0.2.19 未实现，预留）
+ *   - `cron`             定时任务（非 desktop，统一到 surface 列方便分析）
+ *   - `im`               IM Bot
+ *   - `unknown`          兜底，正常路径不应出现
+ *
+ * 注意：曾经存在 `tab_create_blank` —— v0.2.19 实现期间确认它没有实际触发路径
+ * （任何 surface 实际产生事件的入口都已识别），删除以避免 enum 与代码脱节。
+ */
+export type Surface =
+  | 'launcher_input'
+  | 'agent_card'
+  | 'history_click'
+  | 'new_chat_button'
+  | 'cmd_k'
+  | 'external_link'
+  | 'cron'
+  | 'im'
+  | 'unknown';
 
 /**
  * 事件名称枚举
@@ -103,7 +146,56 @@ export type EventName =
   | 'thought_create';
 
 /**
+ * session_new 事件参数
+ *
+ * 这是整个会话生命周期的"出生证明"。下游所有 session-scoped 事件通过
+ * `session_id` 反查这条记录拿 provenance，不要在每个下游事件上重复
+ * 打 `triggered_by`。详见 `analytics_design.md` §4.4 / §4.5。
+ */
+export interface SessionNewParams {
+  /** SDK Session ID（与 ~/.myagents/sessions/*.jsonl 文件名一致） */
+  session_id: string;
+  /** UI 入口面 —— surface 维度由 caller 在 session 创建前显式打 */
+  triggered_by: Surface;
+  /** 该 session 跑在哪个 runtime 下 */
+  runtime: AnalyticsRuntime;
+  /** session 创建时是否带了首条消息（Agent card 点击 / launcher 输入 = true） */
+  has_initial_message: boolean;
+  /** SHA-256(local_pepper + ':' + agent_name) 前 16 字节 hex；pepper 永不上传，
+   *  无绑定 agent 填 null。详见 `analytics/hash.ts`。 */
+  agent_hash: string | null;
+}
+
+/**
+ * workspace_open 事件参数
+ *
+ * 用户从右侧 Agent 卡片打开工作区时触发（无 sessionId）。如果带了 sessionId
+ * 走 `history_open` 路径。
+ */
+export interface WorkspaceOpenParams {
+  /** SHA-256(local_pepper + ':' + agent_name) 前 16 字节 hex；pepper 永不上传，
+   *  无绑定 agent 填 null。详见 `analytics/hash.ts`。 */
+  agent_hash: string | null;
+  /** 目标工作区的 runtime */
+  runtime: AnalyticsRuntime;
+}
+
+/**
+ * history_open 事件参数
+ *
+ * 用户点击历史对话列表项时触发（带 sessionId）。语义上是 session_switch
+ * 的前置（surface 入口），但物理上经过 handleLaunchProject 同一函数。
+ */
+export interface HistoryOpenParams {
+  agent_hash: string | null;
+  runtime: AnalyticsRuntime;
+}
+
+/**
  * message_send 事件参数
+ *
+ * `session_id` 由 Active Context 自动注入（见 tracker.ts::setAnalyticsContext），
+ * caller 无需手动传。同名规则适用于本文件下方所有"session-scoped"事件。
  */
 export interface MessageSendParams {
   mode: string;           // 权限模式: auto | confirm | deny
@@ -112,6 +204,7 @@ export interface MessageSendParams {
   has_image: boolean;     // 是否含图片
   has_file: boolean;      // 是否含文件
   is_cron: boolean;       // 是否为心跳循环任务发送
+  // session_id 由 Active Context 自动注入
 }
 
 /**

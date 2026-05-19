@@ -2534,6 +2534,26 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     });
   }, [pauseAutoScroll, virtuosoRef]);
 
+  // PRD 0.2.17 / v0.2.19 — AgentStatusPanel 现在通过 slot 注入 SimpleChatInput，
+  // 与 QueuedMessagesPanel 同居一个 flex 行（避免两者撞 z-20 / 同 Y 重叠）。
+  // useMemo 让 slot 元素 identity 在 messages 不变时保持稳定，从而尽量让
+  // SimpleChatInput 的 React.memo 在非流式 Chat 重渲染时仍能跳过。流式期间
+  // messages 高频变化会让 memo 失效，这是已知折中——AgentStatusPanel 内部用
+  // useAgentStatusState 衍生 todos/subagents，最终 DOM 仅在派生态变化时才改，
+  // 渲染成本由 React 协调器吸收。
+  const agentStatusSlot = useMemo(
+    () => isExternalRuntime
+      ? undefined
+      : (
+        <AgentStatusPanel
+          messages={messages}
+          containerRef={chatContentRef}
+          onJumpToTool={handleJumpToTool}
+        />
+      ),
+    [isExternalRuntime, messages, handleJumpToTool],
+  );
+
   // Stable callbacks for MessageList (extracted from inline arrows to enable memo)
   const handlePermissionDecision = useCallback((decision: 'deny' | 'allow_once' | 'always_allow') => {
     void respondPermission(decision);
@@ -2792,7 +2812,11 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
 
   // Handler for selecting a session from history dropdown
   const handleSelectSession = useCallback((id: string) => {
-    track('session_switch');
+    // PRD 0.2.19 cross-review fix (B3): explicitly stamp session_switch with the
+    // TARGET session id, not the source. Without this, Active Context auto-inject
+    // attaches the pre-switch session id (still the "source") because the switch
+    // hasn't completed yet, making the event semantics "from→to" backwards.
+    track('session_switch', { session_id: id });
     if (onSwitchSession) {
       onSwitchSession(id);
     } else {
@@ -3242,20 +3266,16 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
             onElaborate={handleElaborateSelection}
           />
 
-          {/* PRD 0.2.17 — Agent Status Panel：悬浮在输入框上方的 Todo + SubAgent 聚合面板。
-              Lazy mount：未触发 TodoWrite / Task 工具时整段不渲染（panel 内部判定）。
-              当前仅 Builtin SDK；外部 Runtime（Codex/CC/Gemini）下显式 gate 关闭，避免它们
-              如果未来 emit 出 `tool.name === 'Task'` 的归一化事件意外触发面板（PRD D15）。
-              onJumpToTool 由 Chat 实现是因为 Virtuoso scrollToIndex 需要 messages 索引 + ref。 */}
-          {!isExternalRuntime && (
-            <AgentStatusPanel
-              messages={messages}
-              containerRef={chatContentRef}
-              onJumpToTool={handleJumpToTool}
-            />
-          )}
-
-          {/* Floating input with integrated cron task components */}
+          {/* Floating input with integrated cron task components.
+              PRD 0.2.17 — AgentStatusPanel (Todo + SubAgent 聚合) 现在作为 slot
+              传给 SimpleChatInput，与 QueuedMessagesPanel 同居一个 flex 行，避
+              免两者用各自的 absolute 定位在输入框上方同 Y 抢同一片右上角导致
+              z-20 paint-order 冲突（v0.2.19 修复：发消息时 queue panel 把 Todo
+              覆盖掉）。Lazy mount 仍由 AgentStatusPanel 内部判定（未触发
+              TodoWrite / Task 工具时返回 null）。外部 Runtime 下 slot 直接传
+              undefined，避免它们若未来 emit 出 `tool.name === 'Task'` 的归一化
+              事件意外触发面板（PRD D15）。onJumpToTool 由 Chat 实现是因为
+              Virtuoso scrollToIndex 需要 messages 索引 + ref。 */}
           <SimpleChatInput
             ref={chatInputRef}
             onSend={handleSendMessage}
@@ -3320,6 +3340,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
             queuedMessages={queuedMessages}
             onCancelQueued={handleCancelQueuedVoid}
             onForceExecuteQueued={handleForceExecuteQueuedVoid}
+            agentStatusSlot={agentStatusSlot}
           />
         </div>
       </div>

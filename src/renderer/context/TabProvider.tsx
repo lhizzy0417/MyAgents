@@ -13,7 +13,11 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { flushSync } from 'react-dom';
 import type { ReactNode } from 'react';
 
-import { track } from '@/analytics';
+import { track, consumePendingSurface, setPendingSurface, hashAgentNameSync } from '@/analytics';
+import type { Surface } from '@/analytics';
+import { useConfigData } from '@/config/useConfigData';
+import { getAgentByWorkspacePath } from '@/config/services/agentConfigService';
+import { normalizeRuntime } from '@/utils/sessionOpenPlan';
 import { generateSessionTitle } from '@/api/sessionClient';
 import type { SessionMetadata } from '@/api/sessionClient';
 import { createSseConnection, type SseConnection } from '@/api/SseConnection';
@@ -290,6 +294,40 @@ export default function TabProvider({
     const apiGetJson = useMemo(() => createApiGetJson(tabId, currentSessionIdRef), [tabId]);
     const apiPutJson = useMemo(() => createApiPutJson(tabId, currentSessionIdRef), [tabId]);
     const apiDeleteJson = useMemo(() => createApiDelete(tabId, currentSessionIdRef), [tabId]);
+
+    // Analytics meta resolver — used by session_new tracking.
+    // Reads through config to look up the agent bound to this tab's agentDir;
+    // returns ('unknown' / null) when no agent is bound, which is itself a
+    // useful signal (means launcher / no-agent session).
+    const { config: appConfig } = useConfigData();
+    const analyticsMetaRef = useRef({
+        runtime: 'builtin' as 'builtin' | 'claude-code' | 'codex' | 'gemini' | 'unknown',
+        agentHash: null as string | null,
+    });
+    useEffect(() => {
+        if (!agentDir) {
+            analyticsMetaRef.current = { runtime: 'builtin', agentHash: null };
+            return;
+        }
+        const agent = getAgentByWorkspacePath(appConfig, agentDir);
+        const runtime = agent ? normalizeRuntime(agent.runtime) : 'builtin';
+        const agentHash = hashAgentNameSync(agent?.name ?? null);
+        analyticsMetaRef.current = { runtime, agentHash };
+    }, [appConfig, agentDir]);
+
+    // PRD 0.2.19 cross-review fix (B2): Tab-scoped track wrapper that always
+    // attaches THIS tab's session_id (from `currentSessionIdRef`) AND tab_id
+    // (from the closure-captured `tabId` prop), not the global Active Context.
+    //
+    // Without this, SSE callbacks that fire on an inactive Tab inherit the
+    // foreground Tab's session_id/tab_id from `setAnalyticsContext`, join to
+    // the wrong session/tab, and make multi-tab analytics actively misleading
+    // (Codex BLOCKER #1 + cross-review fix: tab_id was previously bypassed).
+    // Stable callback — `tabId` is a stable prop, `currentSessionIdRef` is a
+    // ref so it always reads the latest id.
+    const trackTabEvent = useCallback((event: string, params: Record<string, string | number | boolean | null | undefined> = {}): void => {
+        track(event, { session_id: currentSessionIdRef.current ?? null, tab_id: tabId, ...params });
+    }, [tabId]);
 
     // ── Split message state: history (stable during streaming) + streaming (updates on every SSE event)
     const [historyMessages, setHistoryMessages] = useState<Message[]>([]);
@@ -568,8 +606,17 @@ export default function TabProvider({
             }
             console.log(`[TabProvider ${tabId}] resetSession complete`);
 
-            // Track session_new event
-            track('session_new');
+            // PRD 0.2.19 cross-review fix (B1): defer session_new tracking to
+            // chat:system-init. Tracking here used to pass `currentSessionIdRef.current`
+            // (intentionally still the OLD session id — see L574-580) as the new
+            // session's `session_id`, polluting analytics joins. Now we instead set
+            // a pending surface so the chat:system-init handler — which has the
+            // newly-minted id — tracks session_new with the right id.
+            //
+            // `isNewSessionRef.current` is already true (set above), which the
+            // organic-mint detector in chat:system-init uses to know that the
+            // upcoming id-change is an intentional reset (vs spurious sync).
+            setPendingSurface(tabId, 'new_chat_button');
 
             return true;
         } catch (error) {
@@ -1335,7 +1382,7 @@ export default function TabProvider({
                 const tool = data as ToolUse;
 
                 // Track tool_use event
-                track('tool_use', { tool: tool.name });
+                trackTabEvent('tool_use', { tool: tool.name });
 
                 // Synchronously record toolUseId → toolName for file-modifying tool detection.
                 // This map is read in chat:tool-result-complete to trigger directory refresh.
@@ -1391,7 +1438,7 @@ export default function TabProvider({
                 const tool = data as ToolUse;
 
                 // Track tool_use event (server-side tools)
-                track('tool_use', { tool: tool.name });
+                trackTabEvent('tool_use', { tool: tool.name });
 
                 // Server tools come with complete input, no streaming
                 const toolSimple: ToolUseSimple = {
@@ -1686,7 +1733,7 @@ export default function TabProvider({
                     });
                 }
                 // Always track message_complete, use defaults if payload is missing
-                track('message_complete', {
+                trackTabEvent('message_complete', {
                     model: completePayload?.model,
                     input_tokens: completePayload?.input_tokens ?? 0,
                     output_tokens: completePayload?.output_tokens ?? 0,
@@ -1747,7 +1794,7 @@ export default function TabProvider({
                 }
 
                 // Track message_stop event
-                track('message_stop');
+                trackTabEvent('message_stop');
                 break;
             }
 
@@ -1777,7 +1824,7 @@ export default function TabProvider({
                 }
 
                 // Track message_error event (don't include actual error message for privacy)
-                track('message_error');
+                trackTabEvent('message_error');
                 break;
             }
 
@@ -1818,6 +1865,28 @@ export default function TabProvider({
                     // Use our sessionId (for SessionStore matching) not SDK's session_id
                     const newSessionId = payload.sessionId;
                     if (newSessionId && currentSessionIdRef.current !== newSessionId) {
+                        // PRD 0.2.19 cross-review fix (B1, B4): unified session_new tracking
+                        // happens here for ALL three paths (after we have the real id):
+                        //
+                        //   - launcher_input: oldId=null|pending, isNewSessionRef=false
+                        //     → fallback surface 'launcher_input', has_initial_message=true
+                        //   - agent_card:     oldId=pending,      isNewSessionRef=false
+                        //     → pendingSurface set by App.handleLaunchProject = 'agent_card'
+                        //   - new_chat_button (reset OR App.handleNewSession bg-completion):
+                        //     either isNewSessionRef=true (explicit resetSession) OR oldId=pending
+                        //     (handleNewSession created a new sidecar/pending id) →
+                        //     pendingSurface set to 'new_chat_button'
+                        //
+                        // The detector below catches all three. For the rare case where a
+                        // non-birth id-sync slips through (none known today), the
+                        // pendingSurface registry's consume-once semantics + the
+                        // !currentSessionId/!pending guard limit damage.
+                        const oldId = currentSessionIdRef.current;
+                        const isSessionBirth =
+                            isNewSessionRef.current ||
+                            oldId === null ||
+                            isPendingSessionId(oldId);
+
                         console.log(`[TabProvider ${tabId}] Auto-syncing sessionId from system_init: ${newSessionId}`);
                         // Update the ref synchronously alongside the state dispatch so that
                         // async handlers (cron sync, loadOlderMessages) running their
@@ -1828,6 +1897,34 @@ export default function TabProvider({
                         // Notify parent (App.tsx) to update Tab.sessionId for Session singleton constraint
                         // This ensures history dropdown can detect if this session is already open
                         onSessionIdChangeRef.current?.(newSessionId);
+
+                        if (isSessionBirth) {
+                            // Fallback policy:
+                            //   - isNewSessionRef.current === true → explicit reset path,
+                            //     resetSession should have setPendingSurface('new_chat_button'),
+                            //     so fallback to 'new_chat_button' even if pending was lost
+                            //   - otherwise → organic mint via launcher input (most common
+                            //     case where caller didn't setPendingSurface)
+                            const fallback: Surface = isNewSessionRef.current ? 'new_chat_button' : 'launcher_input';
+                            const surface = consumePendingSurface(tabId, fallback);
+                            const meta = analyticsMetaRef.current;
+                            // has_initial_message: 'new_chat_button' creates an empty session
+                            // (user must type after); the other surfaces all carry a first
+                            // message (either typed in launcher or piggybacked on agent_card).
+                            const hasInitialMessage = surface !== 'new_chat_button';
+                            // Explicit tab_id — this track call is inside an SSE handler
+                            // that may fire on a backgrounded tab; without an explicit value
+                            // it would inherit the foreground tab's tab_id from Active Context.
+                            // (cross-review fix matching trackTabEvent's behavior.)
+                            track('session_new', {
+                                session_id: newSessionId,
+                                tab_id: tabId,
+                                triggered_by: surface,
+                                runtime: meta.runtime,
+                                has_initial_message: hasInitialMessage,
+                                agent_hash: meta.agentHash,
+                            });
+                        }
                     }
                 }
                 break;
@@ -2330,7 +2427,7 @@ export default function TabProvider({
                 }
             }
         }
-    }, [appendLog, appendUnifiedLog, tabId, moveStreamingToHistory, setStreamingMessage, postJson, clearInteractiveState, flushPendingChunks, flushPendingChunksNow, flushAllPendingToolDeltas, flushPendingToolInputDelta, flushPendingToolResultDelta, flushPendingSubagentToolInputDelta, flushPendingSubagentToolResultDelta, clearSessionActive, resetPaginationState]);
+    }, [appendLog, appendUnifiedLog, tabId, moveStreamingToHistory, setStreamingMessage, postJson, clearInteractiveState, flushPendingChunks, flushPendingChunksNow, flushAllPendingToolDeltas, flushPendingToolInputDelta, flushPendingToolResultDelta, flushPendingSubagentToolInputDelta, flushPendingSubagentToolResultDelta, clearSessionActive, resetPaginationState, trackTabEvent]);
 
     // Recovery guard — prevents concurrent recovery from both SSE failed + session-sidecar:restarted
     const recoveryInFlightRef = useRef(false);
@@ -2694,7 +2791,7 @@ export default function TabProvider({
             providerEnv: providerEnv ?? 'subscription',
         }).then((response) => {
             if (response.success) {
-                track('message_send', {
+                trackTabEvent('message_send', {
                     mode: permissionMode ?? 'auto',
                     model: model ?? 'default',
                     skill,
@@ -3460,9 +3557,9 @@ export default function TabProvider({
 
         // Track permission decision
         if (decision === 'deny') {
-            track('permission_deny', { tool: toolName });
+            trackTabEvent('permission_deny', { tool: toolName });
         } else {
-            track('permission_grant', { tool: toolName, type: decision });
+            trackTabEvent('permission_grant', { tool: toolName, type: decision });
         }
 
         // Clear pending permission immediately for UI responsiveness
@@ -3474,7 +3571,7 @@ export default function TabProvider({
         } catch (error) {
             console.error('[TabProvider] Failed to send permission response:', error);
         }
-    }, [pendingPermission, postJson]);
+    }, [pendingPermission, postJson, trackTabEvent]);
 
     // Respond to AskUserQuestion request
     const respondAskUserQuestion = useCallback(async (answers: Record<string, string> | null) => {

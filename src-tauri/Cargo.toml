@@ -1,6 +1,6 @@
 [package]
 name = "myagents"
-version = "0.2.18"
+version = "0.2.19"
 description = "MyAgents - Desktop Claude Code for everyone"
 authors = ["MyAgents Team <myagents.io@gmail.com>"]
 license = "Apache-2.0"
@@ -96,6 +96,13 @@ objc2-app-kit = { version = "0.3.2", default-features = false, features = ["NSWi
 windows-sys = { version = "0.59", features = [
     "Win32_Foundation",
     "Win32_System_Threading",
+    # `wake_lock::windows::PlatformImpl` calls `PowerCreateRequest` +
+    # `PowerSetRequest` (PowerRequestSystemRequired | PowerRequestAwayModeRequired)
+    # to keep the OS from idle-sleeping during long-running cron tasks.
+    # HANDLE-based on purpose — `SetThreadExecutionState` is per-thread and
+    # silently leaks the assertion across Tokio worker resumption; see
+    # `src/wake_lock/windows.rs` for the trade-off.
+    "Win32_System_Power",
 ] }
 # `junction` creates NTFS directory junctions without admin / Developer Mode
 # (`std::os::windows::fs::symlink_dir` would otherwise need ERROR_PRIVILEGE_NOT_HELD

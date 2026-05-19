@@ -15,66 +15,69 @@ interface QueuedMessagesPanelProps {
 export default function QueuedMessagesPanel({ messages, onCancel, onForceExecute }: QueuedMessagesPanelProps) {
   if (messages.length === 0) return null;
 
+  // 卡片级 DOM——父级是 SimpleChatInput 里的 `flex items-end justify-end gap-2`
+  // 行（和 AgentStatusPanel 共享）。`pointer-events-auto` 抢回行容器
+  // `pointer-events-none` 屏蔽的点击；不再自带 `mb-2 flex justify-end`，那部分
+  // 现在由行容器统一负责，否则 items-end / mr-auto / :only-child 检测会被多余
+  // 一层 wrapper 干扰。
   return (
-    <div className="mb-2 flex justify-end">
-      <div
-        className="min-w-[120px] max-w-[33%] rounded-xl border border-[var(--line)] px-3 py-2 shadow-sm backdrop-blur-sm"
-        style={{ backgroundColor: 'color-mix(in srgb, var(--paper) 88%, transparent)' }}
-      >
-        {/* Header */}
-        <div className="mb-1.5 flex items-center gap-1 text-xs text-[var(--ink-muted)]">
-          <Clock size={11} />
-          <span>排队中 ({messages.length})</span>
-        </div>
+    <div
+      className="pointer-events-auto min-w-[120px] max-w-[33%] rounded-xl border border-[var(--line)] px-3 py-2 shadow-sm backdrop-blur-sm"
+      style={{ backgroundColor: 'color-mix(in srgb, var(--paper) 88%, transparent)' }}
+    >
+      {/* Header */}
+      <div className="mb-1.5 flex items-center gap-1 text-xs text-[var(--ink-muted)]">
+        <Clock size={11} />
+        <span>排队中 ({messages.length})</span>
+      </div>
 
-        {/* Message list */}
-        <div className="space-y-1">
-          {messages.map((qm) => (
-            <div key={qm.queueId} className="group flex items-center gap-1.5">
-              {/* Message text */}
-              <div className="min-w-0 flex-1 truncate text-sm text-[var(--ink)]">
-                {qm.text.length > 60 ? qm.text.slice(0, 60) + '...' : qm.text}
+      {/* Message list */}
+      <div className="space-y-1">
+        {messages.map((qm) => (
+          <div key={qm.queueId} className="group flex items-center gap-1.5">
+            {/* Message text */}
+            <div className="min-w-0 flex-1 truncate text-sm text-[var(--ink)]">
+              {qm.text.length > 60 ? qm.text.slice(0, 60) + '...' : qm.text}
+            </div>
+
+            {/* Images indicator */}
+            {qm.images && qm.images.length > 0 && (
+              <div className="flex shrink-0 gap-0.5">
+                {qm.images.slice(0, 2).map((img) => (
+                  <div key={img.id} className="h-5 w-5 overflow-hidden rounded border border-[var(--ink-muted)]/20">
+                    <img src={img.preview} alt={img.name} className="h-full w-full object-cover" />
+                  </div>
+                ))}
               </div>
+            )}
 
-              {/* Images indicator */}
-              {qm.images && qm.images.length > 0 && (
-                <div className="flex shrink-0 gap-0.5">
-                  {qm.images.slice(0, 2).map((img) => (
-                    <div key={img.id} className="h-5 w-5 overflow-hidden rounded border border-[var(--ink-muted)]/20">
-                      <img src={img.preview} alt={img.name} className="h-full w-full object-cover" />
-                    </div>
-                  ))}
-                </div>
-              )}
-
-              {/* Action buttons — visible on hover.
-                  (v0.2.12) In-flight items (already yielded to CLI subprocess)
-                  hide the × cancel button: the message has crossed the
-                  process boundary and the SDK exposes no retract API,
-                  so honest UX is "no cancel button when cancel won't
-                  work". The ▷ force-execute (interrupt + send) button
-                  stays available for both states. */}
-              <div className="flex shrink-0 items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100">
+            {/* Action buttons — visible on hover.
+                (v0.2.12) In-flight items (already yielded to CLI subprocess)
+                hide the × cancel button: the message has crossed the
+                process boundary and the SDK exposes no retract API,
+                so honest UX is "no cancel button when cancel won't
+                work". The ▷ force-execute (interrupt + send) button
+                stays available for both states. */}
+            <div className="flex shrink-0 items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100">
+              <button
+                onClick={() => onForceExecute(qm.queueId)}
+                title="立即发送"
+                className="rounded p-0.5 text-[var(--ink-muted)] hover:bg-[var(--surface-hover)] hover:text-[var(--ink)]"
+              >
+                <Play size={12} />
+              </button>
+              {!qm.isInFlight && (
                 <button
-                  onClick={() => onForceExecute(qm.queueId)}
-                  title="立即发送"
+                  onClick={() => onCancel(qm.queueId)}
+                  title="取消排队"
                   className="rounded p-0.5 text-[var(--ink-muted)] hover:bg-[var(--surface-hover)] hover:text-[var(--ink)]"
                 >
-                  <Play size={12} />
+                  <X size={12} />
                 </button>
-                {!qm.isInFlight && (
-                  <button
-                    onClick={() => onCancel(qm.queueId)}
-                    title="取消排队"
-                    className="rounded p-0.5 text-[var(--ink-muted)] hover:bg-[var(--surface-hover)] hover:text-[var(--ink)]"
-                  >
-                    <X size={12} />
-                  </button>
-                )}
-              </div>
+              )}
             </div>
-          ))}
-        </div>
+          </div>
+        ))}
       </div>
     </div>
   );

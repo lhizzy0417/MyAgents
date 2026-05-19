@@ -573,6 +573,7 @@ export async function updateSessionMetadata(
         | 'providerId'
         | 'providerEnvJson'
         | 'configSnapshotAt'
+        | 'pendingContinueAfterAbort'
     >>
 ): Promise<SessionMetadata | null> {
     // Race-safe read-modify-write — must happen entirely under

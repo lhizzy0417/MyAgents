@@ -1037,33 +1037,50 @@ export default function ChannelDetailView({
                         {isGroupsExpanded_ && (
                             <div className="space-y-4 px-5 pb-5">
                                 {/* Group activation mode */}
-                                <div className="flex items-center justify-between">
-                                    <div>
-                                        <p className="text-sm font-medium text-[var(--ink)]">群聊触发方式</p>
-                                        <p className="text-xs text-[var(--ink-muted)]">
-                                            {(channel.groupActivation ?? 'mention') === 'mention'
-                                                ? '仅在 @Bot 或回复 Bot 时响应'
-                                                : '收到所有群消息，AI 自行判断是否回复'}
-                                        </p>
-                                    </div>
-                                    <div className="flex rounded-lg bg-[var(--paper-inset)] p-0.5">
-                                        {(['mention', 'always'] as GroupActivation[]).map(mode => (
-                                            <button
-                                                key={mode}
-                                                onClick={async () => {
-                                                    await patchChannel({ groupActivation: mode });
-                                                }}
-                                                className={`rounded-md px-3 py-1 text-xs font-medium transition-all ${
-                                                    (channel.groupActivation ?? 'mention') === mode
-                                                        ? 'bg-[var(--accent)] text-white'
-                                                        : 'text-[var(--ink-muted)] hover:text-[var(--ink)]'
-                                                }`}
-                                            >
-                                                {mode === 'mention' ? '@提及' : '全部消息'}
-                                            </button>
-                                        ))}
-                                    </div>
-                                </div>
+                                {(() => {
+                                    const isWecom = channel.type === 'openclaw:wecom';
+                                    const effectiveMode: GroupActivation = isWecom ? 'mention' : (channel.groupActivation ?? 'mention');
+                                    return (
+                                        <div className="flex items-center justify-between">
+                                            <div>
+                                                <p className="text-sm font-medium text-[var(--ink)]">群聊触发方式</p>
+                                                <p className="text-xs text-[var(--ink-muted)]">
+                                                    {isWecom
+                                                        ? '企微 AI Bot 平台仅在 @机器人 时下发群消息回调，无法接收未 @ 的消息'
+                                                        : effectiveMode === 'mention'
+                                                            ? '仅在 @Bot 或回复 Bot 时响应'
+                                                            : '收到所有群消息，AI 自行判断是否回复'}
+                                                </p>
+                                            </div>
+                                            <div className="flex rounded-lg bg-[var(--paper-inset)] p-0.5">
+                                                {(['mention', 'always'] as GroupActivation[]).map(mode => {
+                                                    const disabled = isWecom && mode === 'always';
+                                                    const selected = effectiveMode === mode;
+                                                    return (
+                                                        <button
+                                                            key={mode}
+                                                            disabled={disabled}
+                                                            title={disabled ? '企微 AI Bot 平台限制：仅在 @机器人 时下发群消息回调，因此该模式不可用' : undefined}
+                                                            onClick={async () => {
+                                                                if (disabled) return;
+                                                                await patchChannel({ groupActivation: mode });
+                                                            }}
+                                                            className={`rounded-md px-3 py-1 text-xs font-medium transition-all ${
+                                                                disabled
+                                                                    ? 'cursor-not-allowed text-[var(--ink-muted)] opacity-40'
+                                                                    : selected
+                                                                        ? 'bg-[var(--accent)] text-white'
+                                                                        : 'text-[var(--ink-muted)] hover:text-[var(--ink)]'
+                                                            }`}
+                                                        >
+                                                            {mode === 'mention' ? '@提及' : '全部消息'}
+                                                        </button>
+                                                    );
+                                                })}
+                                            </div>
+                                        </div>
+                                    );
+                                })()}
                                 {/* Group list */}
                                 <GroupPermissionList
                                     permissions={groupPerms}

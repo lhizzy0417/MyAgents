@@ -2946,6 +2946,24 @@ async fn execute_task_directly(
 ) -> Result<(bool, Option<String>, Option<String>, Option<String>), String> {
     ulog_info!("[CronTask] execute_task_directly starting for task {}", task.id);
 
+    // Hold a system wake-lock for the duration of this cron execution to
+    // prevent idle-sleep from killing the SDK's long-lived HTTPS stream to
+    // the Anthropic API. Real incident: 2026-05-19 19:11 — Mac went idle
+    // during an issue-triage cron, TCP stream died, SDK never detected the
+    // dead socket, watchdog killed the turn at 19:26 with empty output.
+    // `.ok()` so wake-lock failure never aborts the cron (running without
+    // protection ≡ pre-wake-lock behavior).
+    let _wake_lock = crate::wake_lock::WakeLock::acquire(&format!(
+        "cron task {} ({})",
+        task.id,
+        task.name.as_deref().unwrap_or("unnamed")
+    ))
+    .map_err(|e| {
+        ulog_warn!("[CronTask] wake-lock acquire failed for {}: {} — continuing without protection", task.id, e);
+        e
+    })
+    .ok();
+
     // Emit debug event: entering function
     let _ = handle.emit("cron:debug", serde_json::json!({
         "taskId": task.id,

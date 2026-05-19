@@ -1,7 +1,17 @@
 import { useCallback, useEffect, useState, useRef, memo } from 'react';
 import { arrayMove } from '@dnd-kit/sortable';
 
-import { initAnalytics, track } from '@/analytics';
+import {
+  initAnalytics,
+  track,
+  setAnalyticsContext,
+  clearAnalyticsContext,
+  setPendingSurface,
+  clearPendingSurface,
+  hashAgentName,
+  hashAgentNameSync,
+} from '@/analytics';
+import type { Surface } from '@/analytics';
 import { stopTabSidecar, startGlobalSidecar, initGlobalSidecarReadyPromise, markGlobalSidecarReady, getGlobalServerUrl, getSessionActivation, updateSessionTab, ensureSessionSidecar, releaseSessionSidecar, activateSession, deactivateSession, upgradeSessionId, getSessionPort, stopSseProxy, startBackgroundCompletion, cancelBackgroundCompletion, updateGlobalServerUrl } from '@/api/tauriClient';
 import ConfirmDialog from '@/components/ConfirmDialog';
 import BugReportOverlay from '@/components/BugReportOverlay';
@@ -266,6 +276,36 @@ export default function App() {
 
   const activeTabIdRef = useRef(activeTabId);
   activeTabIdRef.current = activeTabId;
+
+  // Analytics Active Context — propagate active tab's sessionId/tabId so that
+  // downstream track() calls auto-inject these into params (see analytics/tracker.ts).
+  // Pending session ids (createPendingSessionId placeholders) are filtered out:
+  // they're per-tab UI scaffolding, not the real SDK session id, and would not
+  // join with session_new in the analytics pipeline.
+  useEffect(() => {
+    if (!activeTabId) {
+      clearAnalyticsContext();
+      return;
+    }
+    const activeTab = tabs.find((t) => t.id === activeTabId);
+    const sid = activeTab?.sessionId ?? null;
+    setAnalyticsContext({
+      tabId: activeTabId,
+      sessionId: sid && !isPendingSessionId(sid) ? sid : null,
+    });
+  }, [activeTabId, tabs]);
+
+  // PRD 0.2.19 cross-review fix: prewarm agent_hash cache when config.agents
+  // loads/changes, so the first `workspace_open` / `session_new` for each agent
+  // already has agent_hash populated. Without this, `hashAgentNameSync` returns
+  // null on first call (computes async + caches), creating a small tail of
+  // null-hash events. Prewarm reduces the tail to near zero.
+  useEffect(() => {
+    const agents = config?.agents ?? [];
+    for (const a of agents) {
+      if (a.name) void hashAgentName(a.name);
+    }
+  }, [config]);
 
   const appProvidersRef = useRef(appProviders);
   appProvidersRef.current = appProviders;
@@ -654,6 +694,11 @@ export default function App() {
     // Track tab_close event with correct count
     track('tab_close', { view: tab.view, tab_count: actualTabCount });
 
+    // Drop any leftover pending surface for this tab to avoid leaking it into
+    // a later (unrelated) session_new — the analytics module keeps these
+    // module-level until consumed.
+    clearPendingSurface(tabId);
+
     // ========== IMMEDIATE UI UPDATE (non-blocking) ==========
     // Update UI state first for instant response
     if (isLastTab) {
@@ -903,11 +948,33 @@ export default function App() {
     }
     launchingTabRef.current = activeTabId;
 
-    // Track workspace_open or history_open event
-    if (sessionId) {
-      track('history_open');
-    } else {
-      track('workspace_open');
+    // Resolve agent meta for analytics. `getAgentByWorkspacePath` may return
+    // undefined when the workspace isn't bound to any agent (rare — happens
+    // for ad-hoc paths) — in that case agent_hash=null + runtime='builtin'
+    // as the natural fallback.
+    //
+    // Surface set is DEFERRED to after `targetTabId` is finalized below — when
+    // Scenario 3 creates a new tab, the new TabProvider's chat:system-init must
+    // consume the surface from THE NEW tabId, not the original activeTabId.
+    // Tracked here for review feedback B2/H2 (Codex BLOCKER, Codex HIGH).
+    let pendingSurfaceForLaunch: Surface | null = null;
+    {
+      const cfg = configRef.current;
+      const agent = getAgentByWorkspacePath(cfg, project.path);
+      const runtime = agent ? normalizeRuntime(agent.runtime) : 'builtin';
+      const agent_hash = hashAgentNameSync(agent?.name ?? null);
+
+      if (sessionId) {
+        // history_click path: switching to existing session, no new session
+        // minted, so we do NOT plan a surface. Explicit `session_id: null`
+        // suppresses Active Context auto-injection of a stale source-session id.
+        track('history_open', { agent_hash, runtime, session_id: null });
+      } else {
+        // workspace_open path: agent_card (no initialMessage) vs launcher_input
+        // (initialMessage present). Stored locally; applied with final targetTabId.
+        pendingSurfaceForLaunch = initialMessage ? 'launcher_input' : 'agent_card';
+        track('workspace_open', { agent_hash, runtime, session_id: null });
+      }
     }
 
     setTabErrors((prev) => ({ ...prev, [activeTabId]: null }));
@@ -1091,6 +1158,15 @@ export default function App() {
       // string, which we surface via `setTabErrors` → Launcher.startError.
       // For finer-grained UX (inline phase banner during the brief
       // pending → ready window) callers can use `useSessionReady`.
+      // PRD 0.2.19 review fix (H2): apply pending surface to the FINAL target tab
+      // (Scenario 3 may have rerouted `targetTabId` to a freshly-created tab).
+      // Set BEFORE ensureSessionSidecar — the backend may emit chat:system-init
+      // synchronously once readiness lands, and the target TabProvider needs to
+      // consume the surface from this tabId at that moment.
+      if (pendingSurfaceForLaunch) {
+        setPendingSurface(targetTabId, pendingSurfaceForLaunch);
+      }
+
       const result = await ensureSessionSidecar(effectiveSessionId, project.path, 'tab', targetTabId);
       console.log(`[App] Session Sidecar ensured: port=${result.port}, isNew=${result.isNew}`);
 
@@ -1135,6 +1211,13 @@ export default function App() {
     } catch (err) {
       const errorMsg = err instanceof Error ? err.message : String(err);
       console.error('[App] Failed to start:', errorMsg);
+
+      // PRD 0.2.19 review fix (H3): clear pending surface on launch failure so
+      // a later unrelated session_new doesn't inherit a stale surface from this
+      // failed attempt. Cover both candidate tabIds (Scenario 3 retarget case).
+      clearPendingSurface(targetTabId);
+      if (targetTabId !== activeTabId) clearPendingSurface(activeTabId);
+
       // Surface the error on the tab the user is actually looking at — when
       // the stale jump-to-tab fallthrough rerouted us to `plan.tabId`, the
       // visible tab is `targetTabId`, not the originally-active one. Writing
@@ -1669,6 +1752,13 @@ export default function App() {
       await stopSseProxy(tabId);
       await releaseSessionSidecar(oldSessionId, 'tab', tabId);
       await deactivateSession(oldSessionId);
+
+      // PRD 0.2.19 cross-review fix (B4): mark the upcoming session_new as
+      // 'new_chat_button' provenance. handleNewSession is the AI-running variant
+      // of resetSession (user clicked "新对话" while AI was still streaming) —
+      // without this, chat:system-init would fall back to 'launcher_input' and
+      // silently misclassify all AI-running new-session opens.
+      setPendingSurface(tabId, 'new_chat_button');
 
       // Create new pending session with new Sidecar
       const pendingSessionId = createPendingSessionId(tabId);

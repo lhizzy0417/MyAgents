@@ -20,7 +20,22 @@
  */
 
 // 核心功能
-export { track, initAnalytics, flushEvents, isEnabled } from './tracker';
+export {
+  track,
+  initAnalytics,
+  flushEvents,
+  isEnabled,
+  // Active Context API（v0.2.19）
+  setAnalyticsContext,
+  clearAnalyticsContext,
+  getAnalyticsContext,
+} from './tracker';
+
+// 隐私哈希（v0.2.19）
+export { hashAgentName, hashAgentNameSync } from './hash';
+
+// Pending Surface registry（v0.2.19）—— session_new 之前 caller 打 surface，consumer 消费
+export { setPendingSurface, consumePendingSurface, clearPendingSurface } from './pendingSurface';
 
 // 类型导出
 export type {
@@ -29,6 +44,10 @@ export type {
   MessageSendParams,
   MessageCompleteParams,
   Source,
+  Surface,
+  SessionNewParams,
+  WorkspaceOpenParams,
+  HistoryOpenParams,
   TaskCreateParams,
   TaskRunParams,
   TaskStopParams,
