@@ -34,6 +34,7 @@ pub mod workspace_files;
 mod tray;
 mod updater;
 pub mod utils;
+pub mod wake_lock;
 
 use sidecar::{
     cleanup_stale_sidecars, cleanup_stale_sidecars_preamble, init_startup_cleanup_barrier,

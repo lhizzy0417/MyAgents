@@ -96,6 +96,10 @@ objc2-app-kit = { version = "0.3.2", default-features = false, features = ["NSWi
 windows-sys = { version = "0.59", features = [
     "Win32_Foundation",
     "Win32_System_Threading",
+    # `wake_lock::windows::PlatformImpl` calls `SetThreadExecutionState`
+    # (ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_AWAYMODE_REQUIRED) to keep
+    # the OS from idle-sleeping during long-running cron tasks.
+    "Win32_System_Power",
 ] }
 # `junction` creates NTFS directory junctions without admin / Developer Mode
 # (`std::os::windows::fs::symlink_dir` would otherwise need ERROR_PRIVILEGE_NOT_HELD
