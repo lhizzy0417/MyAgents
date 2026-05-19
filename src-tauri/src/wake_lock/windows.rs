@@ -59,6 +59,19 @@ pub struct PlatformImpl {
     _reason_buf: Vec<u16>,
 }
 
+// SAFETY: `HANDLE` is a Win32 kernel-object handle, defined in windows-sys
+// as `*mut c_void`. Raw pointers are `!Send` by default, but Win32
+// power-request handles are documented as thread-agnostic — MSDN allows
+// `PowerSetRequest` / `PowerClearRequest` / `CloseHandle` to be called
+// from any thread on the same handle. Since `WakeLock` is RAII
+// single-owner (the handle never has two simultaneous accessors), Send is
+// exactly what we need: a future holding `WakeLock` across `.await` must
+// be `Send` for `tauri::async_runtime::spawn` to accept it, and Drop
+// must work on whichever Tokio worker resumes the future. We do NOT
+// implement `Sync` — concurrent `&WakeLock` access is neither needed
+// nor exposed by the API.
+unsafe impl Send for PlatformImpl {}
+
 impl PlatformImpl {
     pub fn acquire(reason: &str) -> Result<Self, String> {
         // Build NUL-terminated UTF-16 reason string.
