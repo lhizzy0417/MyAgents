@@ -43,11 +43,19 @@
 // which drained the same entry and emitted a *second* identical event. The
 // strict cfg-split below makes the bug structurally unrepresentable.
 
+// `Mutex` / `Duration` / `Instant` only feed the non-Windows fallback
+// click-latch path below. Windows uses the WinRT `on_activated` closure
+// which captures per-toast state synchronously and needs none of these.
+#[cfg(not(target_os = "windows"))]
 use std::sync::Mutex;
+#[cfg(not(target_os = "windows"))]
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Runtime};
+// `NotificationExt` powers `show_via_plugin` (the macOS / Linux toast
+// path). Windows goes through `tauri_winrt_notification::Toast` directly.
+#[cfg(not(target_os = "windows"))]
 use tauri_plugin_notification::NotificationExt;
 
 use crate::utils::bom::strip_bom;

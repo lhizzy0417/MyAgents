@@ -6,8 +6,6 @@ use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
 use std::process::{Child, Stdio};
-#[cfg(windows)]
-use std::process::Command;
 use std::sync::atomic::{AtomicU16, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 #[cfg(unix)]

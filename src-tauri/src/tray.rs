@@ -12,7 +12,10 @@ use tauri::{
 use tauri::image::Image;
 
 use crate::utils::bom::strip_bom;
-use crate::{ulog_debug, ulog_error, ulog_info, ulog_warn};
+use crate::{ulog_debug, ulog_error, ulog_info};
+// `ulog_warn` is only used inside the macOS template-icon load fallback.
+#[cfg(target_os = "macos")]
+use crate::ulog_warn;
 
 /// Menu item IDs for tray right-click menu
 const MENU_OPEN: &str = "open";
