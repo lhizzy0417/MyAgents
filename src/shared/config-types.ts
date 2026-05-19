@@ -812,9 +812,21 @@ export const PRESET_PROVIDERS: Provider[] = [
     primaryModel: 'Pro/zai-org/GLM-5.1',
     isBuiltin: true,
     authType: 'api_key',
+    // SiliconFlow 的 Anthropic 兼容层（baseUrl '/'）对 Kimi K2.5 等模型返回非规范的
+    // `thinking` content block，SDK 解析失败抛 'Content block is not a text block'
+    // (issue #216, 报告者一日撞 43 次)。OpenAI 兼容层（baseUrl '/v1'）是
+    // SiliconFlow 的主营路径，质量稳定，reasoning_content / tool_calls 都标准。
+    // 走 OpenAI 协议 → 经 OpenAI Bridge 翻译 → SDK 拿到合法 Anthropic 响应，
+    // 顺带复用 translate/messages.ts:33 已有的 Kimi K2.5 reasoning_content 适配。
+    apiProtocol: 'openai',
+    // 32K 是横跨所有 6 个模型的安全上限（MiniMax M2.5 实际 cap 8K，会被上游
+    // 静默截到 8K；Kimi K2.5/K2.6 用足）。SDK 默认会发 Claude-级 max_tokens
+    // (≥128K)，Bridge 在 handler.ts:218 用这个值覆盖后再发上游——不配会导致
+    // 上游用其默认（≈4K），长输出被截。
+    maxOutputTokens: 32768,
     websiteUrl: 'https://cloud.siliconflow.cn/me/models',
     config: {
-      baseUrl: 'https://api.siliconflow.cn/',
+      baseUrl: 'https://api.siliconflow.cn/v1',
       disableNonessential: true,
     },
     modelAliases: { sonnet: 'Pro/zai-org/GLM-5.1', opus: 'Pro/moonshotai/Kimi-K2.6', haiku: 'stepfun-ai/Step-3.5-Flash' },
