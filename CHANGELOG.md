@@ -11,6 +11,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.2.19] - 2026-05-20
+
+> 主修「长跑 cron 任务被系统休眠杀掉」这一类问题：cron 执行期间主动向系统申请「防 idle sleep」锁，三平台（macOS / Windows / Linux）全部支持；万一锁不住（用户合上盖子、Linux 无 systemd），AI 下次回到这个 session 时会自动续跑上次未完成的任务，不用手动 "继续"。另外修了 Chat Cmd+F 翻页被流式更新打断、SiliconFlow 上的 Kimi K2.5 模型一日挂死 43 次（[#216](https://github.com/hAcKlyc/MyAgents/issues/216)）等社区报告的问题。
+
+### Added
+
+- **Cron 期间防止系统进入 idle sleep**：长跑 cron 任务（比如 `/issue-triage` 这种 6 小时一次的）以前会卡死在系统休眠后——TCP 流被中间设备 RST，SDK 没察觉，watchdog 10 分钟后才 kill 出空 output。现在 cron 执行期间自动持有一个系统级 wake-lock 断言（macOS `IOPMAssertion` / Windows `PowerCreateRequest` / Linux `systemd-inhibit`），整个任务期间机器不会自己睡过去。合盖、按电源键、用户主动 sleep 仍然挡不住——这是 OS 设计，没有应用能绕。
+- **响应超时自动续跑**：watchdog 超时中止一个有实际产出的 turn 后，session 会被标记「待续跑」并落盘。你下次在这个 session 里发任何一条消息（Chat / IM / 任务派发都行），系统会先自动发一条英文 `<system-reminder>` 让 AI 基于已有上下文续跑上次未完成的工作，然后再处理你的新消息。同一个 session 一次中止只续一次，避免循环重试浪费 token；空 turn（一字未吐就超时）不触发续跑。
+
+### Fixed
+
+- **Chat Cmd+F 搜索翻页被流式更新打断**（[#214](https://github.com/hAcKlyc/MyAgents/issues/214)）：消息流式刷新或父组件 re-render 时会触发一个 150ms 防抖的 reconcile，原本会无条件覆盖用户刚点的 next/prev 跳转位置，看起来像「卡在最后一个匹配」。现在 reconcile 检测到用户刚翻过页就保留用户的位置。
+- **SiliconFlow 上的 Kimi K2.5 等模型挂死**（[#216](https://github.com/hAcKlyc/MyAgents/issues/216)）：SiliconFlow 的 Anthropic 兼容层对这类模型返回非规范的 thinking block，SDK 抛 `Content block is not a text block` 直接挂死会话（报告者一天遇到 43 次）。预设改走它的 OpenAI 兼容层（`/v1`），reasoning_content / tool_calls 都标准，已有的 OpenAI Bridge 也显式适配 Kimi K2.5 的 reasoning_content。
+- **Chat 输入框 Todo 卡片被发送队列遮住**：AgentStatusPanel 与 QueuedMessagesPanel 都在输入框正上方右对齐 z-20 渲染，发消息后排队卡会盖住 Todo。两者合并到同一行 flex 排布，不再抢 Z 层。
+- **WeCom 群聊「全部消息」开关说明**：企微 AI Bot 平台 webhook 仅在 @ 机器人时下发事件，原生没有「未 @ 也响应所有群消息」的能力。设置页里禁用该渠道的「全部消息」开关并给出 tooltip 说明，避免用户误以为关掉就能跑。
+
+---
+
 ## [0.2.18] - 2026-05-19
 
 > 引入「Session 间异步消息」——AI 现在可以用一行 `myagents session send` 让另一个 session 帮忙处理子任务，跑完自动把结果推回。Chat 顶部 Cmd+F 长会话搜索打通虚拟化，再也不会出现 "0 matches"。CLI 端 `task` 补齐缺口，从命令行就能搭起带 IM 推送的循环任务。配套修了一批 cron 历史会话、IM 渠道、Markdown 渲染上的细碎问题。
