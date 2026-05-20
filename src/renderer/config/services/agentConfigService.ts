@@ -495,37 +495,119 @@ export async function invokeStartAgentChannel(
  * Stop a running agent channel AND persist `channel.enabled = false` so the
  * channel stays stopped across app restarts (issue #219).
  *
- * Pair this with `invokeStartAgentChannel` — these two are the "user-initiated
+ * Paired with `startAndEnableAgentChannel` — these two are the "user-initiated
  * lifecycle" operations. They MUST be symmetric: start flips enabled to true,
  * stop flips it to false. Otherwise auto_start_all_enabled_agent_channels in
- * the Rust layer re-launches the channel on next app start despite the user
- * having explicitly stopped it.
+ * the Rust layer re-launches a channel the user explicitly stopped (or worse,
+ * leaves a re-enabled channel un-runnable).
  *
  * DO NOT use this for:
- *  - Transient stop+restart (e.g. credential refresh) — keep enabled untouched
- *  - Channel deletion — remove from channels[] instead of flipping a flag
- *  - Agent-level disable — patch `agent.enabled = false`, the auto-start
- *    auto_start_all_enabled_agent_channels gate handles the rest
+ *  - Transient stop+restart (e.g. credential refresh) — call cmd_stop_agent_channel
+ *    + invokeStartAgentChannel directly, keep enabled untouched
+ *  - Channel deletion — remove from channels[] in a patchAgentConfig call
+ *  - Agent-level disable — patch `agent.enabled = false`; the Rust
+ *    auto_start_all_enabled_agent_channels gate handles per-channel rollup
  *
- * Best-effort on the runtime stop: even if cmd_stop_agent_channel throws
- * (channel might already be stopped, or sidecar lost), still persist the
- * enabled=false to honor the user's intent.
+ * Implementation notes (review-by-codex v1 → v2):
+ *  - Takes IDs (not an `agent` snapshot) so concurrent channel additions /
+ *    credential writes / name syncs aren't clobbered by a stale whole-array
+ *    patch (codex F1 against the v1 helper).
+ *  - Mutates inside `atomicModifyConfig` against the freshest on-disk config,
+ *    not the caller's React prop. Throws if the agent or channel disappeared
+ *    between click and persist (was a silent no-op in v1).
+ *  - Persists BEFORE the runtime stop: if the process crashes between persist
+ *    and runtime stop, restart sees enabled=false and won't auto-launch. The
+ *    inverse order would silently re-launch a stopped channel on the next boot.
+ *  - Runtime stop is best-effort: channel may already be down or sidecar gone;
+ *    the persisted enabled=false is what makes the stop survive restarts.
  */
 export async function stopAndDisableAgentChannel(
-  agent: AgentConfig,
+  agentId: string,
   channelId: string,
 ): Promise<void> {
+  const { atomicModifyConfig } = await import('@/config/services/appConfigService');
+  await atomicModifyConfig(config => {
+    const agents = [...(config.agents ?? [])];
+    const aIdx = agents.findIndex(a => a.id === agentId);
+    if (aIdx < 0) {
+      throw new Error(`stopAndDisableAgentChannel: agent ${agentId} not found in config`);
+    }
+    const channels = [...(agents[aIdx].channels ?? [])];
+    const cIdx = channels.findIndex(c => c.id === channelId);
+    if (cIdx < 0) {
+      throw new Error(`stopAndDisableAgentChannel: channel ${channelId} not found in agent ${agentId}`);
+    }
+    if (channels[cIdx].enabled === false) {
+      // Already disabled (e.g. re-click after a failed runtime stop). atomicModifyConfig
+      // short-circuits the disk write when before === after — idempotent by design.
+      return config;
+    }
+    channels[cIdx] = { ...channels[cIdx], enabled: false };
+    agents[aIdx] = { ...agents[aIdx], channels };
+    return { ...config, agents };
+  });
   const { isTauriEnvironment } = await import('@/utils/browserMock');
   if (isTauriEnvironment()) {
     const { invoke } = await import('@tauri-apps/api/core');
     try {
-      await invoke('cmd_stop_agent_channel', { agentId: agent.id, channelId });
+      await invoke('cmd_stop_agent_channel', { agentId, channelId });
     } catch (e) {
-      console.warn('[agentConfigService] cmd_stop_agent_channel failed (continuing to persist disabled):', e);
+      // Channel may already be stopped or sidecar lost. Persistence above already
+      // landed, so the next restart respects the user's intent.
+      console.warn('[agentConfigService] cmd_stop_agent_channel failed (enabled=false already persisted):', e);
     }
   }
-  const updatedChannels = (agent.channels ?? []).map(ch =>
-    ch.id === channelId ? { ...ch, enabled: false } : ch,
-  );
-  await patchAgentConfig(agent.id, { channels: updatedChannels });
+}
+
+/**
+ * Symmetric counterpart to `stopAndDisableAgentChannel`: persist
+ * `channel.enabled = true` against the latest on-disk config, then start the
+ * runtime instance using a fresh snapshot.
+ *
+ * Why both helpers exist (v2 of #219): the channel-list UI greys out the
+ * start button when `channel.enabled` is false. Before this helper, list-view's
+ * "start" only invoked the runtime; if the user had previously disabled the
+ * channel, the button was greyed and they couldn't restart from the list at
+ * all — forced to navigate to the channel detail view. With this helper +
+ * removing the disabled gate, both list and detail can fully re-enable.
+ *
+ * Returns the fresh `(agent, channel)` snapshot that was actually written, so
+ * the caller doesn't depend on a separate read-back race.
+ */
+export async function startAndEnableAgentChannel(
+  agentId: string,
+  channelId: string,
+): Promise<void> {
+  const { atomicModifyConfig } = await import('@/config/services/appConfigService');
+  const updatedConfig = await atomicModifyConfig(config => {
+    const agents = [...(config.agents ?? [])];
+    const aIdx = agents.findIndex(a => a.id === agentId);
+    if (aIdx < 0) {
+      throw new Error(`startAndEnableAgentChannel: agent ${agentId} not found in config`);
+    }
+    const channels = [...(agents[aIdx].channels ?? [])];
+    const cIdx = channels.findIndex(c => c.id === channelId);
+    if (cIdx < 0) {
+      throw new Error(`startAndEnableAgentChannel: channel ${channelId} not found in agent ${agentId}`);
+    }
+    if (channels[cIdx].enabled === true) {
+      // Already enabled — atomicModifyConfig will skip the write.
+      return config;
+    }
+    channels[cIdx] = { ...channels[cIdx], enabled: true };
+    agents[aIdx] = { ...agents[aIdx], channels };
+    return { ...config, agents };
+  });
+  // Re-read the freshly-written snapshot for invokeStartAgentChannel. Reading
+  // from updatedConfig (return value of atomicModifyConfig) instead of looking
+  // up again on disk keeps the start-time view consistent with what we just
+  // persisted — even if another writer lands between persist and start.
+  const freshAgent = updatedConfig.agents?.find(a => a.id === agentId);
+  const freshChannel = freshAgent?.channels?.find(c => c.id === channelId);
+  if (!freshAgent || !freshChannel) {
+    // Shouldn't happen — modifier above throws on missing — but guard explicitly
+    // so the runtime invoke doesn't get garbage.
+    throw new Error(`startAndEnableAgentChannel: post-persist read of ${agentId}/${channelId} returned nothing`);
+  }
+  await invokeStartAgentChannel(freshAgent, freshChannel);
 }

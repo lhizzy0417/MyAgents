@@ -6,7 +6,7 @@ import { Plus, X, Loader2 } from 'lucide-react';
 import type { AgentConfig, ChannelConfig, ChannelType } from '../../../../shared/types/agent';
 import type { AgentStatusData, ChannelStatusData } from '@/hooks/useAgentStatuses';
 import OverlayBackdrop from '@/components/OverlayBackdrop';
-import { invokeStartAgentChannel, stopAndDisableAgentChannel } from '@/config/services/agentConfigService';
+import { startAndEnableAgentChannel, stopAndDisableAgentChannel } from '@/config/services/agentConfigService';
 import ChannelPlatformSelect from '../channels/ChannelPlatformSelect';
 import ChannelWizard from '../channels/ChannelWizard';
 import ChannelDetailView from '../channels/ChannelDetailView';
@@ -69,14 +69,18 @@ export default function AgentChannelsSection({ agent, status, onAgentChanged }: 
   const handleStartChannel = useCallback(async (channel: ChannelConfig) => {
     setLoading(channel.id);
     try {
-      await invokeStartAgentChannel(agent, channel);
+      // issue #219 v2 symmetry: flip enabled=true alongside the runtime start.
+      // Without this, a channel that was previously stopped (enabled=false)
+      // could only be re-launched runtime-wise but would still be skipped by
+      // auto_start_all_enabled_agent_channels on next restart.
+      await startAndEnableAgentChannel(agent.id, channel.id);
       onAgentChanged();
     } catch (e) {
       console.error('[AgentChannels] Start failed:', e);
     } finally {
       if (isMountedRef.current) setLoading(null);
     }
-  }, [agent, onAgentChanged]);
+  }, [agent.id, onAgentChanged]);
 
   const handleStopChannel = useCallback(async (channelId: string) => {
     setLoading(channelId);
@@ -85,14 +89,14 @@ export default function AgentChannelsSection({ agent, status, onAgentChanged }: 
       // app restarts. Plain cmd_stop_agent_channel only kills the runtime
       // instance; auto_start_all_enabled_agent_channels would re-launch it
       // next launch because channel.enabled is still true on disk.
-      await stopAndDisableAgentChannel(agent, channelId);
+      await stopAndDisableAgentChannel(agent.id, channelId);
       onAgentChanged();
     } catch (e) {
       console.error('[AgentChannels] Stop failed:', e);
     } finally {
       if (isMountedRef.current) setLoading(null);
     }
-  }, [agent, onAgentChanged]);
+  }, [agent.id, onAgentChanged]);
 
   // Close overlay and refresh
   const closeOverlay = useCallback(() => {
@@ -224,7 +228,11 @@ export default function AgentChannelsSection({ agent, status, onAgentChanged }: 
                     e.stopPropagation();
                     if (isRunning) { handleStopChannel(channel.id); } else { handleStartChannel(channel); }
                   }}
-                  disabled={isLoading || !channel.enabled}
+                  // issue #219 v2: removed `!channel.enabled` gate. handleStartChannel
+                  // now flips enabled=true via startAndEnableAgentChannel, so the user
+                  // can fully restart a disabled channel from list-view (previously
+                  // forced them to navigate to detail view to re-enable).
+                  disabled={isLoading}
                 >
                   {isLoading ? (
                     <Loader2 className="h-3.5 w-3.5 animate-spin" />
