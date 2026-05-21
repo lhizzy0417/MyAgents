@@ -333,7 +333,11 @@ fn inject_terminal_env(cmd: &mut CommandBuilder, app: &AppHandle, sidecar_port: 
 
     // Bundled Bun directory
     if let Ok(resource_dir) = app.path().resource_dir() {
-        let resource_dir: std::path::PathBuf = resource_dir;
+        // #229 (same bug class): on Windows resource_dir() may carry the `\\?\`
+        // extended-length prefix. cmd.exe / PowerShell don't honor `\\?\` entries
+        // in PATH lookups, so a prefixed nodejs/binaries dir would be invisible to
+        // the embedded terminal. Strip it before these paths cross into the shell.
+        let resource_dir = crate::sidecar::normalize_external_path(resource_dir);
 
         #[cfg(target_os = "macos")]
         {

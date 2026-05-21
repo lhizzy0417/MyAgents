@@ -1073,7 +1073,14 @@ pub fn cmd_sync_cli<R: Runtime>(
             .resource_dir()
             .ok()
             .map(|r| r.join("nodejs").join("node.exe"))
-            .filter(|p| p.exists());
+            .filter(|p| p.exists())
+            // #229: resource_dir() on Windows can return a `\\?\`-prefixed
+            // extended-length path. That prefix is fine for Rust std file APIs
+            // (.exists() above accepts it), but once baked into myagents.cmd as
+            // literal text, cmd.exe cannot execute it and reports "The system
+            // cannot find the path specified." Strip the prefix at this Rust→
+            // cmd.exe boundary, per the red line in CLAUDE.md.
+            .map(crate::sidecar::normalize_external_path);
 
         let dst_cmd = bin_dir.join("myagents.cmd");
         let cmd_contents = if let Some(node_path) = bundled_node {
