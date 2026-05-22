@@ -176,4 +176,23 @@ describe('widget tag false-positive guards', () => {
     expect(segs[1]).toMatchObject({ type: 'widget', title: 'real', isComplete: true });
     expect((segs[0] as { content: string }).content).toContain('Mentioning <generative-ui-widget> inline here.');
   });
+
+  // Regression: a line-start widget whose JS/HTML body contains the literal
+  // string `<generative-ui-widget>` (outside any code fence — widget bodies are
+  // raw HTML/JS, not markdown, so they are NOT masked) used to mis-bound the
+  // close search on that literal, miss the real close, and report the whole
+  // widget as `isComplete:false`, swallowing everything after it.
+  test('line-start widget whose body contains a literal open-tag string still completes', () => {
+    const input = [
+      '<generative-ui-widget title="x">',
+      '<script>const tag = "<generative-ui-widget>"; document.body.dataset.t = tag;</script>',
+      '</generative-ui-widget>',
+      '',
+      'Trailing prose.',
+    ].join('\n');
+    const segs = parseWidgetTags(input);
+    expect(segs.map((s) => s.type)).toEqual(['widget', 'text']);
+    expect(segs[0]).toMatchObject({ type: 'widget', title: 'x', isComplete: true });
+    expect((segs[1] as { content: string }).content).toContain('Trailing prose.');
+  });
 });

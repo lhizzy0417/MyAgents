@@ -79,15 +79,28 @@ function findNextWidget(masked: string, original: string): FoundWidget | null {
     while (j > 0 && (masked[j - 1] === ' ' || masked[j - 1] === '\t')) j--;
     const isLineStart = j === 0 || masked[j - 1] === '\n';
 
-    // Bound the close search by the next candidate open, so widget A can't
-    // consume widget B's closing tag. Search in `masked` (NOT `original`) so a
-    // close that only appears inside inline-code / fenced prose ("end with
+    // Bound the close search by the next LINE-START widget open, so widget A
+    // can't consume a genuinely separate widget B's closing tag. We bound only
+    // on a line-start open (the contract-compliant shape of a real top-level
+    // widget): a MID-LINE open match is either a weak-model inline widget
+    // (parsed in its own scan iteration) or — the bug this guards — a literal
+    // `<generative-ui-widget>` tag-name string sitting inside THIS widget's own
+    // JS/HTML body. Bounding on ANY open match (the previous behaviour) let such
+    // a literal cut the window short, so `lastIndexOf` missed the real close and
+    // the whole widget was mis-flagged `isComplete:false`, swallowing the rest
+    // of the message. Search in `masked` (NOT `original`) so a close that only
+    // appears inside inline-code / fenced prose ("end with
     // `</generative-ui-widget>`") doesn't count. lastIndexOf within the bound
     // stays robust to a literal close-tag string sitting in the widget's own JS.
     const boundRe = new RegExp(WIDGET_OPEN_SRC, 'gi');
     boundRe.lastIndex = openEnd;
-    const next = boundRe.exec(masked);
-    const searchEnd = next ? next.index : masked.length;
+    let searchEnd = masked.length;
+    let bm: RegExpExecArray | null;
+    while ((bm = boundRe.exec(masked)) !== null) {
+      let bk = bm.index;
+      while (bk > 0 && (masked[bk - 1] === ' ' || masked[bk - 1] === '\t')) bk--;
+      if (bk === 0 || masked[bk - 1] === '\n') { searchEnd = bm.index; break; }
+    }
     const closeRel = masked.slice(openEnd, searchEnd).toLowerCase().lastIndexOf(closeStr);
     const closeIdx = closeRel === -1 ? -1 : openEnd + closeRel;
 
