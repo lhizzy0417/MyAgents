@@ -2522,6 +2522,93 @@ fn check_global_sidecar_status(manager: &ManagedSidecarManager) -> Option<(u16, 
     Some((instance.port, instance.is_running(), created_at))
 }
 
+/// How often to poll session-state for the turn wake-lock. Idle sleep triggers
+/// after minutes of no user input, so a 10s poll asserts the lock long before
+/// the OS can sleep and drop the SDK's HTTPS stream.
+const WAKE_LOCK_POLL_INTERVAL_SECS: u64 = 10;
+
+/// Holds a single process-wide system wake-lock (prevents idle sleep) while ANY
+/// managed sidecar has an in-flight AI turn (session-state `running`/`starting`).
+///
+/// WHY: the SDK keeps a long-lived HTTPS stream to the model API; if the host
+/// idle-sleeps mid-turn that socket dies and the SDK never notices, so the turn
+/// stalls (and historically the 10-min watchdog then killed it). Cron already
+/// held a wake-lock per execution (`cron_task.rs`); interactive turns did not —
+/// so "walk away during a long task" let the Mac sleep and lose the turn. This
+/// generalizes the protection to every turn type by reading the same
+/// `/api/session-state` the background-completion poller already uses.
+///
+/// One assertion is enough system-wide, so we hold/release a single RAII
+/// `WakeLock` based on whether any sidecar is currently active. This complements
+/// the suspension-aware inactivity watchdog: the wake-lock *prevents* idle sleep
+/// during active turns; the watchdog handles the sleep we cannot prevent
+/// (lid close / forced sleep) by not counting suspended time as inactivity.
+pub async fn monitor_turn_wake_lock(
+    manager: ManagedSidecarManager,
+    shutdown: Arc<std::sync::atomic::AtomicBool>,
+) {
+    use std::sync::atomic::Ordering::Relaxed;
+
+    // RAII: dropping this releases the OS assertion (also on loop break / task drop).
+    let mut wake_lock: Option<crate::wake_lock::WakeLock> = None;
+
+    loop {
+        tokio::time::sleep(Duration::from_secs(WAKE_LOCK_POLL_INTERVAL_SECS)).await;
+        if shutdown.load(Relaxed) {
+            break; // wake_lock drops here → assertion released
+        }
+
+        // Snapshot live sidecar ports under the lock; never hold the mutex
+        // across the (blocking) HTTP poll below.
+        let ports: Vec<u16> = match manager.lock() {
+            Ok(guard) => guard
+                .sidecars
+                .values()
+                .filter(|sc| sc.is_reusable())
+                .map(|sc| sc.port)
+                .collect(),
+            // A poisoned lock is permanent — if we kept `continue`-ing we'd hold
+            // the wake-lock (block idle sleep) forever. Release it and retry.
+            Err(_) => {
+                wake_lock = None;
+                continue;
+            }
+        };
+
+        // Poll session-state off the async runtime (check_sidecar_session_state
+        // is blocking). A dead/unreachable sidecar returns None → not active.
+        let any_active = tokio::task::spawn_blocking(move || {
+            ports.iter().any(|&port| {
+                matches!(
+                    check_sidecar_session_state(port).as_deref(),
+                    Some("running") | Some("starting")
+                )
+            })
+        })
+        .await
+        .unwrap_or(false);
+
+        match (any_active, wake_lock.is_some()) {
+            (true, false) => {
+                wake_lock = crate::wake_lock::WakeLock::acquire("active AI turn")
+                    .map_err(|e| {
+                        ulog_warn!("[wake-lock] turn wake-lock acquire failed: {} — continuing without protection", e);
+                        e
+                    })
+                    .ok();
+                if wake_lock.is_some() {
+                    ulog_debug!("[wake-lock] acquired — an AI turn is active");
+                }
+            }
+            (false, true) => {
+                wake_lock = None; // drop releases the OS assertion
+                ulog_debug!("[wake-lock] released — no active AI turns");
+            }
+            _ => {}
+        }
+    }
+}
+
 /// Background health monitor for the Global Sidecar.
 /// Periodically checks if the Global Sidecar is alive and auto-restarts it when it dies.
 /// Emits `global-sidecar:restarted` Tauri event with the new URL on successful restart.

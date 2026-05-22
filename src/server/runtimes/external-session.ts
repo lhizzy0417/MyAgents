@@ -7,6 +7,7 @@
 
 import { broadcast } from '../sse';
 import { killWithEscalation } from './utils/kill-with-escalation';
+import { InactivityWatchdog } from '../utils/inactivity-watchdog';
 import { buildSystemPromptAppend } from '../system-prompt';
 import type { InteractionScenario } from '../system-prompt';
 import type { AgentRuntime, RuntimeProcess, UnifiedEvent, ImagePayload } from './types';
@@ -49,7 +50,7 @@ let startingPromise: Promise<void> | null = null;  // Guard against concurrent s
 // prewarm is going to land on the same session it wants to switch to — making the
 // switch a no-op without paying the 8-10s gemini --acp cold-start.
 let startingSessionId: string | null = null;
-let watchdogTimer: ReturnType<typeof setTimeout> | null = null;  // Hung process detection
+let watchdogTimer: ReturnType<typeof setInterval> | null = null;  // Hung process detection (suspension-aware interval)
 
 // Track session context for multi-turn resume (CC -p mode exits after each turn)
 let lastSessionId = '';
@@ -165,7 +166,7 @@ function resetModuleState(): void {
   turnCompleted = false;
   startingPromise = null;
   startingSessionId = null;
-  if (watchdogTimer) { clearTimeout(watchdogTimer); watchdogTimer = null; }
+  if (watchdogTimer) { clearInterval(watchdogTimer); watchdogTimer = null; }
   lastRuntimeSessionId = '';
   lastModel = '';
   lastRuntimeReportedModel = '';
@@ -330,21 +331,39 @@ function flushAllPending(): void {
 }
 
 // ─── Watchdog timer (10 min inactivity → kill hung process) ───
+//
+// Suspension-aware: an interval drives the check and credits process-suspension
+// gaps (macOS sleep / App Nap) so they are not counted as inactivity — same
+// fix as the builtin watchdog. See utils/inactivity-watchdog.ts. (Previously a
+// reset-on-activity setTimeout, which fired on resume because its deadline
+// elapsed in wall-clock during sleep — a turn the runtime never actually hung.)
 const WATCHDOG_TIMEOUT_MS = 10 * 60 * 1000;
+const WATCHDOG_INTERVAL_MS = 30 * 1000;
+const externalWatchdog = new InactivityWatchdog({ timeoutMs: WATCHDOG_TIMEOUT_MS, intervalMs: WATCHDOG_INTERVAL_MS });
 
+/** Record runtime activity (and start the interval on the first call of a turn). */
 function resetWatchdog(): void {
-  if (watchdogTimer) clearTimeout(watchdogTimer);
-  watchdogTimer = setTimeout(async () => {
-    console.error('[external-session] Watchdog timeout — no activity for 10 minutes, killing process');
+  externalWatchdog.markActivity();
+  if (watchdogTimer) return; // already armed — markActivity above is the reset
+  externalWatchdog.reset();
+  watchdogTimer = setInterval(() => {
+    const { fire, suspendedMs } = externalWatchdog.evaluateTick();
+    if (suspendedMs > 0) {
+      console.log(`[external-session] Watchdog: credited ${Math.round(suspendedMs / 1000)}s process suspension (sleep/App Nap) — not counted as inactivity`);
+    }
+    if (!fire) return;
+    clearWatchdog();
+    console.error('[external-session] Watchdog: no runtime activity for 10 minutes of active time, killing process');
     broadcast('chat:agent-error', { message: 'External runtime timed out (no activity for 10 minutes)' });
     broadcast('chat:message-error', 'External runtime timed out');
     fireImCallback('error', 'External runtime timed out');
-    await stopExternalSession();
-  }, WATCHDOG_TIMEOUT_MS);
+    void stopExternalSession();
+  }, WATCHDOG_INTERVAL_MS);
+  watchdogTimer.unref?.();
 }
 
 function clearWatchdog(): void {
-  if (watchdogTimer) { clearTimeout(watchdogTimer); watchdogTimer = null; }
+  if (watchdogTimer) { clearInterval(watchdogTimer); watchdogTimer = null; }
 }
 
 // ─── Turn outcome tracking (stale text protection for cron/heartbeat) ───

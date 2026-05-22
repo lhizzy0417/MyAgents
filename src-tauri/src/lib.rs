@@ -123,6 +123,7 @@ pub fn run() {
     let sidecar_state_for_exit = sidecar_state.clone();
     let sidecar_state_for_monitor = sidecar_state.clone();
     let sidecar_state_for_session_monitor = sidecar_state.clone();
+    let sidecar_state_for_wakelock_monitor = sidecar_state.clone();
     let sidecar_state_for_terminal_forwarder = sidecar_state.clone();
 
     let im_state_for_management = im_bot_state.clone();
@@ -143,6 +144,7 @@ pub fn run() {
     let cleanup_done_for_exit = cleanup_done.clone();
     let cleanup_done_for_monitor = cleanup_done.clone();
     let cleanup_done_for_session_monitor = cleanup_done.clone();
+    let cleanup_done_for_wakelock_monitor = cleanup_done.clone();
     let cleanup_done_for_agent_monitor = cleanup_done.clone();
     let cleanup_done_for_terminal_forwarder = cleanup_done.clone();
 
@@ -931,6 +933,20 @@ pub fn run() {
                 ).await;
             });
             ulog_info!("[App] Session sidecar health monitor spawned");
+
+            // Start the turn wake-lock monitor: holds a system wake-lock (prevents
+            // idle sleep) while ANY sidecar has an in-flight AI turn, so a long
+            // interactive/cron turn isn't killed when the Mac idle-sleeps and drops
+            // the SDK's HTTPS stream. Cron already had per-execution coverage; this
+            // generalizes it to interactive turns. (Pairs with the suspension-aware
+            // watchdog, which handles the unpreventable lid-close case.)
+            tauri::async_runtime::spawn(async move {
+                sidecar::monitor_turn_wake_lock(
+                    sidecar_state_for_wakelock_monitor,
+                    cleanup_done_for_wakelock_monitor,
+                ).await;
+            });
+            ulog_info!("[App] Turn wake-lock monitor spawned");
 
             // Start Agent Channel health monitor (15s initial delay)
             let app_handle_for_agent_monitor = app.handle().clone();

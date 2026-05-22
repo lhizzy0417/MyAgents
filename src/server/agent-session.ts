@@ -8,6 +8,7 @@ import { getScriptDir, getBundledNodeDir, getSystemNodeDirs, getBundledRuntimePa
 import { getCrossPlatformEnv, isSkillBlockedOnPlatform } from './utils/platform';
 import { ensureDirSync, isDirEntry } from './utils/fs-utils';
 import { applyContextWindowSuffix, lookupModelContextLength, modelSupportsModality } from './utils/model-capabilities';
+import { InactivityWatchdog } from './utils/inactivity-watchdog';
 import { processImage, resizeToolImageContent, classifyImageError } from './utils/imageResize';
 import { writeBase64FilesToAgentDir } from './utils/workspace-files';
 import { ensureGitignorePattern } from './utils/gitignore';
@@ -8477,21 +8478,29 @@ async function startStreamingSession(preWarm = false): Promise<void> {
     // path can read it. Reset here so a new turn starts at 0 even if a
     // prior turn ended via abort/restart without clearing it.
     inFlightToolCount = 0;
-    let lastSdkEventAt = Date.now();
     const API_WATCHDOG_INTERVAL_MS = 30_000;
     const WATCHDOG_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes — unified for API and MCP tools
+    // Suspension-aware: only counts time the process was actually running, so
+    // macOS sleep / App Nap doesn't get mistaken for a hung turn. See
+    // utils/inactivity-watchdog.ts. markActivity() is called per SDK event
+    // below; the gate (`!isStreamingMessage`) means evaluateTick only runs
+    // during an active turn — the credited tick-gap on the first post-idle tick
+    // naturally absorbs inter-turn idle.
+    const watchdog = new InactivityWatchdog({ timeoutMs: WATCHDOG_TIMEOUT_MS, intervalMs: API_WATCHDOG_INTERVAL_MS });
     let watchdogFired = false;
     apiWatchdogId = setInterval(async () => {
       // Only check during active turns (not pre-warm, not idle between turns)
       if (!isStreamingMessage || isPreWarming) return;
       if (watchdogFired) return;
-      const now = Date.now();
-      const noRecentSdkEvents = now - lastSdkEventAt > WATCHDOG_TIMEOUT_MS;
+      const { fire: noRecentSdkEvents, suspendedMs } = watchdog.evaluateTick();
+      if (suspendedMs > 0) {
+        console.log(`[agent] Watchdog: credited ${Math.round(suspendedMs / 1000)}s process suspension (sleep/App Nap) — not counted as inactivity`);
+      }
 
       if (noRecentSdkEvents) {
         watchdogFired = true;
         const toolInfo = inFlightToolCount > 0 ? `（${inFlightToolCount} 个工具执行中）` : '';
-        console.error(`[agent] Watchdog: no SDK event for ${WATCHDOG_TIMEOUT_MS / 1000}s${toolInfo} — aborting`);
+        console.error(`[agent] Watchdog: no SDK event for ${WATCHDOG_TIMEOUT_MS / 1000}s of active time${toolInfo} — aborting`);
 
         // ─── DELAYED CONTINUE (set flag) ─────────────────────────────────
         // This is the ONE AND ONLY site that sets `pendingContinueAfterAbort`.
@@ -8544,7 +8553,7 @@ async function startStreamingSession(preWarm = false): Promise<void> {
 
     for await (const sdkMessage of querySession) {
       messageCount++;
-      lastSdkEventAt = Date.now();
+      watchdog.markActivity();
       // Flip turn-scoped substantive-activity flag on first non-init frame.
       // `system/init` is the boilerplate startup frame and must not count
       // as "this turn produced output" for the watchdog auto-resume decision.
@@ -9162,8 +9171,44 @@ async function startStreamingSession(preWarm = false): Promise<void> {
           }
           continue;
         }
+        // (#228) Suppress SDK-synthetic transcript material from the user-visible
+        // channel. The SDK emits "synthetic" user messages for several internal
+        // purposes that must never reach the chat UI nor be persisted to
+        // SessionStore, because they have no user-visible semantics and their
+        // uuids belong to post-compact sessions (rewind anchors break):
+        //   - `isCompactSummary: true` — the post-`compact_boundary` continuation
+        //     prompt carrying the prior-conversation summary. In long
+        //     conversations the summary text often embeds historical
+        //     `<local-command-stdout>` substrings from prior /cost or /compact
+        //     echoes, which previously slipped past the local-command branch
+        //     below and materialized as a phantom user bubble.
+        //   - `isMeta: true` — meta messages (e.g. tool-trigger prompts CLI emits).
+        //   - `isSynthetic: true` — generic SDK-synthetic marker (also used
+        //     for some queued-command pseudo-replays below; covered for
+        //     defense-in-depth).
+        //   - `isVisibleInTranscriptOnly: true` — explicit SDK marker for
+        //     "show in transcript file only, never user-visible" (semantic
+        //     superset of the above).
+        // These flags are runtime properties of the live SDK stream events
+        // (verified against on-disk transcript JSONL); the public
+        // `SDKUserMessage` type only declares `isSynthetic?`. UUID tracking
+        // is still skipped (matches the prior `!isSynthetic` guard).
+        const syntheticFlags = sdkMessage as {
+          isCompactSummary?: boolean;
+          isMeta?: boolean;
+          isSynthetic?: boolean;
+          isVisibleInTranscriptOnly?: boolean;
+        };
+        if (
+          syntheticFlags.isCompactSummary ||
+          syntheticFlags.isMeta ||
+          syntheticFlags.isSynthetic ||
+          syntheticFlags.isVisibleInTranscriptOnly
+        ) {
+          continue;
+        }
         // Track SDK user UUID — only for non-synthetic messages
-        if (!(sdkMessage as { isSynthetic?: boolean }).isSynthetic && sdkMessage.uuid) {
+        if (sdkMessage.uuid) {
           currentSessionUuids.add(sdkMessage.uuid);
           liveSessionUuids.add(sdkMessage.uuid);
           for (let i = messages.length - 1; i >= 0; i--) {
@@ -9179,9 +9224,16 @@ async function startStreamingSession(preWarm = false): Promise<void> {
         if (sdkMessage.message?.content) {
           const messageContent = sdkMessage.message.content;
 
-          // Handle local command output (e.g., /cost, /context commands)
-          // SDK sends these as user messages with string content wrapped in <local-command-stdout> tags
-          if (typeof messageContent === 'string' && messageContent.includes('<local-command-stdout>')) {
+          // Handle local command output (e.g., /cost, /context commands).
+          // SDK sends these as user messages with string content wrapped in
+          // <local-command-stdout> tags. (#228) Match `startsWith` (after
+          // whitespace trim), not `includes` — real CLI echoes always begin
+          // with the tag, but arbitrary text bodies (e.g. compact summaries
+          // that quote prior conversation verbatim) may embed the tag as a
+          // substring and used to false-positive into the user-visible
+          // channel. The synthetic guard above is the primary defense; this
+          // tightening is belt-and-suspenders.
+          if (typeof messageContent === 'string' && messageContent.trimStart().startsWith('<local-command-stdout>')) {
             const localCommandMessage: MessageWire = {
               id: String(messageSequence++),
               role: 'user',
