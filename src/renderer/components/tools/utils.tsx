@@ -54,13 +54,13 @@ export function ToolHeader({ icon, label, toolName, tool }: ToolHeaderProps) {
   // Otherwise fall back to passed icon for backward compatibility
   let displayIcon = config?.icon || icon;
 
-  // If using config icon (size-2.5), resize it to size-3 for header visibility
-  // This ensures icons match between badge and header while maintaining readability
+  // Config icons carry a flat `size-4` class; resize to size-3 for the denser header.
+  // This ensures icons match between badge and header while maintaining readability.
   if (config?.icon && isValidElement(displayIcon)) {
     const element = displayIcon as React.ReactElement<{ className?: string }>;
     const existingProps = element.props as { className?: string };
     const existingClassName = existingProps?.className || '';
-    // Replace size-2.5 with size-3, or add size-3 if no size class exists
+    // Replace any size-* with size-3, or add size-3 if no size class exists
     const newClassName =
       existingClassName ? existingClassName.replace(/size-\d+(\.\d+)?/g, 'size-3') : 'size-3';
     displayIcon = cloneElement(element, {
@@ -266,7 +266,7 @@ export function ThinkingHeader({ isComplete, durationMs }: ThinkingHeaderProps) 
   const config = getThinkingBadgeConfig();
   const label = getThinkingExpandedLabel(isComplete, durationMs);
 
-  // Resize icon from size-2.5 to size-3 for header visibility
+  // Resize the icon's flat size class to size-3 for header visibility
   let displayIcon = config.icon;
   if (isValidElement(displayIcon)) {
     const element = displayIcon as React.ReactElement<{ className?: string }>;

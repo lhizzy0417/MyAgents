@@ -191,13 +191,22 @@ export interface ToolBadgeConfig {
   };
 }
 
-// Unified tool badge configuration - single source of truth
+// Unified tool badge configuration - single source of truth.
+//
+// Icons carry a flat `size-4` class (16px) on the SVG itself. ProcessRow renders
+// them inside a `[&>svg]:size-4` container, but that override compiles to native
+// CSS nesting under Tailwind v4 — its specificity only wins on nesting-capable
+// engines. On an older Windows WebView2 the nested rule didn't apply, so an
+// authored `size-2.5` (10px) icon stayed small and looked off-center beside the
+// flat-`size-4` spinner/brain icons. A flat size class is engine-independent.
+// ToolHeader (utils.tsx) rewrites this size class to `size-3` for its denser
+// header via regex, so the flat base size here does not change that view.
 export function getToolBadgeConfig(toolName: string): ToolBadgeConfig {
   switch (toolName) {
     // File operations - Green/Emerald
     case 'Read':
       return {
-        icon: <FileText className="size-2.5" />,
+        icon: <FileText className="size-4" />,
         colors: {
           border: 'border-emerald-200/60 dark:border-emerald-500/30',
           bg: 'bg-emerald-50/80 dark:bg-emerald-500/10',
@@ -209,7 +218,7 @@ export function getToolBadgeConfig(toolName: string): ToolBadgeConfig {
       };
     case 'Write':
       return {
-        icon: <FilePen className="size-2.5" />,
+        icon: <FilePen className="size-4" />,
         colors: {
           border: 'border-emerald-200/60 dark:border-emerald-500/30',
           bg: 'bg-emerald-50/80 dark:bg-emerald-500/10',
@@ -221,7 +230,7 @@ export function getToolBadgeConfig(toolName: string): ToolBadgeConfig {
       };
     case 'Edit':
       return {
-        icon: <FileEdit className="size-2.5" />,
+        icon: <FileEdit className="size-4" />,
         colors: {
           border: 'border-emerald-200/60 dark:border-emerald-500/30',
           bg: 'bg-emerald-50/80 dark:bg-emerald-500/10',
@@ -235,7 +244,7 @@ export function getToolBadgeConfig(toolName: string): ToolBadgeConfig {
     case 'Bash':
     case 'BashOutput':
       return {
-        icon: <Terminal className="size-2.5" />,
+        icon: <Terminal className="size-4" />,
         colors: {
           border: 'border-amber-200/60 dark:border-amber-500/30',
           bg: 'bg-amber-50/80 dark:bg-amber-500/10',
@@ -247,7 +256,7 @@ export function getToolBadgeConfig(toolName: string): ToolBadgeConfig {
       };
     case 'KillShell':
       return {
-        icon: <XCircle className="size-2.5" />,
+        icon: <XCircle className="size-4" />,
         colors: {
           border: 'border-amber-200/60 dark:border-amber-500/30',
           bg: 'bg-amber-50/80 dark:bg-amber-500/10',
@@ -260,7 +269,7 @@ export function getToolBadgeConfig(toolName: string): ToolBadgeConfig {
     // Search operations - Purple/Violet
     case 'Grep':
       return {
-        icon: <SearchCode className="size-2.5" />,
+        icon: <SearchCode className="size-4" />,
         colors: {
           border: 'border-violet-200/60 dark:border-violet-500/30',
           bg: 'bg-violet-50/80 dark:bg-violet-500/10',
@@ -272,7 +281,7 @@ export function getToolBadgeConfig(toolName: string): ToolBadgeConfig {
       };
     case 'Glob':
       return {
-        icon: <Search className="size-2.5" />,
+        icon: <Search className="size-4" />,
         colors: {
           border: 'border-violet-200/60 dark:border-violet-500/30',
           bg: 'bg-violet-50/80 dark:bg-violet-500/10',
@@ -284,7 +293,7 @@ export function getToolBadgeConfig(toolName: string): ToolBadgeConfig {
       };
     case 'WebSearch':
       return {
-        icon: <Search className="size-2.5" />,
+        icon: <Search className="size-4" />,
         colors: {
           border: 'border-violet-200/60 dark:border-violet-500/30',
           bg: 'bg-violet-50/80 dark:bg-violet-500/10',
@@ -297,7 +306,7 @@ export function getToolBadgeConfig(toolName: string): ToolBadgeConfig {
     // Web operations - Blue/Cyan
     case 'WebFetch':
       return {
-        icon: <Globe className="size-2.5" />,
+        icon: <Globe className="size-4" />,
         colors: {
           border: 'border-cyan-200/60 dark:border-cyan-500/30',
           bg: 'bg-cyan-50/80 dark:bg-cyan-500/10',
@@ -311,7 +320,7 @@ export function getToolBadgeConfig(toolName: string): ToolBadgeConfig {
     case 'Task':
     case 'Agent':
       return {
-        icon: <Zap className="size-2.5" />,
+        icon: <Zap className="size-4" />,
         colors: {
           border: 'border-indigo-200/60 dark:border-indigo-500/30',
           bg: 'bg-indigo-50/80 dark:bg-indigo-500/10',
@@ -323,7 +332,7 @@ export function getToolBadgeConfig(toolName: string): ToolBadgeConfig {
       };
     case 'TodoWrite':
       return {
-        icon: <ListTodo className="size-2.5" />,
+        icon: <ListTodo className="size-4" />,
         colors: {
           border: 'border-indigo-200/60 dark:border-indigo-500/30',
           bg: 'bg-indigo-50/80 dark:bg-indigo-500/10',
@@ -336,7 +345,7 @@ export function getToolBadgeConfig(toolName: string): ToolBadgeConfig {
     // Skills - Sky blue (friendly, non-error)
     case 'Skill':
       return {
-        icon: <Sparkles className="size-2.5" />,
+        icon: <Sparkles className="size-4" />,
         colors: {
           border: 'border-sky-200/60 dark:border-sky-500/30',
           bg: 'bg-sky-50/80 dark:bg-sky-500/10',
@@ -349,7 +358,7 @@ export function getToolBadgeConfig(toolName: string): ToolBadgeConfig {
     // Notebook - Teal
     case 'NotebookEdit':
       return {
-        icon: <BookOpen className="size-2.5" />,
+        icon: <BookOpen className="size-4" />,
         colors: {
           border: 'border-teal-200/60 dark:border-teal-500/30',
           bg: 'bg-teal-50/80 dark:bg-teal-500/10',
@@ -364,7 +373,7 @@ export function getToolBadgeConfig(toolName: string): ToolBadgeConfig {
       // Gemini Image tools - Purple
       if (toolName.startsWith('mcp__gemini-image__')) {
         return {
-          icon: <Palette className="size-2.5" />,
+          icon: <Palette className="size-4" />,
           colors: {
             border: 'border-purple-200/60 dark:border-purple-500/30',
             bg: 'bg-purple-50/80 dark:bg-purple-500/10',
@@ -379,7 +388,7 @@ export function getToolBadgeConfig(toolName: string): ToolBadgeConfig {
       // Edge TTS tools - Rose/Pink
       if (toolName.startsWith('mcp__edge-tts__')) {
         return {
-          icon: <Volume2 className="size-2.5" />,
+          icon: <Volume2 className="size-4" />,
           colors: {
             border: 'border-rose-200/60 dark:border-rose-500/30',
             bg: 'bg-rose-50/80 dark:bg-rose-500/10',
@@ -394,7 +403,7 @@ export function getToolBadgeConfig(toolName: string): ToolBadgeConfig {
       // Cron/Scheduled task tools - Teal
       if (toolName.startsWith('mcp__im-cron__') || toolName.startsWith('mcp__cron-tools__')) {
         return {
-          icon: <Clock className="size-2.5" />,
+          icon: <Clock className="size-4" />,
           colors: {
             border: 'border-teal-200/60 dark:border-teal-500/30',
             bg: 'bg-teal-50/80 dark:bg-teal-500/10',
@@ -409,7 +418,7 @@ export function getToolBadgeConfig(toolName: string): ToolBadgeConfig {
       // IM Media tools - Indigo
       if (toolName.startsWith('mcp__im-media__')) {
         return {
-          icon: <ImageIcon className="size-2.5" />,
+          icon: <ImageIcon className="size-4" />,
           colors: {
             border: 'border-indigo-200/60 dark:border-indigo-500/30',
             bg: 'bg-indigo-50/80 dark:bg-indigo-500/10',
@@ -424,7 +433,7 @@ export function getToolBadgeConfig(toolName: string): ToolBadgeConfig {
       // IM Bridge (OpenClaw plugin) tools - Cyan
       if (toolName.startsWith('mcp__im-bridge-tools__')) {
         return {
-          icon: <Plug className="size-2.5" />,
+          icon: <Plug className="size-4" />,
           colors: {
             border: 'border-cyan-200/60 dark:border-cyan-500/30',
             bg: 'bg-cyan-50/80 dark:bg-cyan-500/10',
@@ -439,7 +448,7 @@ export function getToolBadgeConfig(toolName: string): ToolBadgeConfig {
       // Playwright browser tools - Sky blue
       if (toolName.startsWith('mcp__playwright__')) {
         return {
-          icon: <Globe className="size-2.5" />,
+          icon: <Globe className="size-4" />,
           colors: {
             border: 'border-sky-200/60 dark:border-sky-500/30',
             bg: 'bg-sky-50/80 dark:bg-sky-500/10',
@@ -454,7 +463,7 @@ export function getToolBadgeConfig(toolName: string): ToolBadgeConfig {
       // Search tools (DuckDuckGo, Tavily, etc.) - Emerald
       if (toolName.startsWith('mcp__ddg-search__') || toolName.startsWith('mcp__tavily-search__')) {
         return {
-          icon: <Search className="size-2.5" />,
+          icon: <Search className="size-4" />,
           colors: {
             border: 'border-emerald-200/60 dark:border-emerald-500/30',
             bg: 'bg-emerald-50/80 dark:bg-emerald-500/10',
@@ -468,7 +477,7 @@ export function getToolBadgeConfig(toolName: string): ToolBadgeConfig {
 
       // Default fallback for unknown MCP and other tools
       return {
-        icon: <Wrench className="size-2.5" />,
+        icon: <Wrench className="size-4" />,
         colors: {
           border: 'border-blue-200/60 dark:border-blue-500/30',
           bg: 'bg-blue-50/80 dark:bg-blue-500/10',
@@ -853,7 +862,7 @@ export function getToolSummaryNode(tool: ToolUseSimple): ReactNode | null {
 // Thinking badge configuration - single source of truth
 export function getThinkingBadgeConfig(): ToolBadgeConfig {
   return {
-    icon: <Brain className="size-2.5" />,
+    icon: <Brain className="size-4" />,
     colors: {
       border: 'border-purple-200/60 dark:border-purple-500/30',
       bg: 'bg-purple-50/80 dark:bg-purple-500/10',
