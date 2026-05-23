@@ -170,9 +170,18 @@ describe('SseConnection — listener cleanup invariants', () => {
         const conn = new SseConnection('test-tab');
         const connectPromise = conn.connect();
 
-        // Yield until start_sse_proxy is being awaited.
-        for (let i = 0; i < 100 && !resolveStart; i++) await Promise.resolve();
-        expect(resolveStart).not.toBeNull();
+        // Yield until start_sse_proxy is being awaited. connectTauri() must first
+        // `await listen()` for every entry in ALL_EVENTS plus the error listener
+        // before it reaches start_sse_proxy, and the mocked listen() adds an async
+        // boundary per call — so this spin budget MUST exceed
+        // (ALL_EVENTS.length + 1) × (microtasks per listen). A previously
+        // hardcoded `100` silently broke this test as new SSE event types were
+        // added (52 listeners → ~100+ microtasks); the loop timed out before
+        // start_sse_proxy, the body bailed at the assert below, and the still-
+        // running connect leaked its listeners into afterEach. Keep this bound
+        // generously above the listener count so adding events can't re-break it.
+        for (let i = 0; i < 2000 && !resolveStart; i++) await Promise.resolve();
+        expect(resolveStart, 'start_sse_proxy was not reached within the microtask budget — bump the bound if ALL_EVENTS grew').not.toBeNull();
 
         // Race: disconnect first, then let start_sse_proxy resolve.
         const disconnectPromise = conn.disconnect();
