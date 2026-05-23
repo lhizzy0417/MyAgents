@@ -1,28 +1,29 @@
 /**
- * PDF read-only viewer (pdf.js / pdfjs-dist).
+ * PDF read-only viewer (pdf.js / pdfjs-dist, LEGACY build — see vite alias).
  *
  * Renders pages to canvas with IntersectionObserver virtualization — only pages
  * scrolled near the viewport are rasterized (PRD 0.2.20 §5), so a 200-page
- * scanned contract doesn't pin memory. No text layer (read-only canvas; text
- * selection is an explicit non-goal, §9).
+ * scanned contract doesn't pin memory.
  *
- * Zoom is applied by scaling each page holder's dimensions NUMERICALLY (not via
- * CSS `zoom`): the canvas fills the holder via `width:100%`, so the holder's
- * pixel size sets the display size. This is load-bearing — CSS `zoom`/`transform`
- * on the observed content corrupts IntersectionObserver geometry, which made the
- * recycler clear visible pages → blank pages at non-100% zoom. With numeric
- * sizing the observer sees true geometry. Backing store stays at base×dpr, so
- * zoom-in is crisp up to ~2× (dpr≤2) and softens gracefully beyond.
+ * Each page also gets a pdf.js TEXT LAYER: a transparent, %-positioned overlay of
+ * the page's text so it's selectable / copyable / (browser-)searchable. Sizing is
+ * driven entirely by the `--scale-factor` CSS var (set on contentRef = baseScale ×
+ * zoom): the layer self-sizes via `calc(--total-scale-factor * pageWidth)`, spans
+ * position by percentage, font scales by the var — so zoom is just a var update
+ * (no re-render, vector-crisp text, aligned with the CSS-scaled canvas).
  *
- * The page DOM is built imperatively (an island React doesn't manage) because
- * pdf.js renders into raw canvas elements; cleanup tears it down and cancels
- * in-flight render tasks.
+ * Zoom scales each page holder's width NUMERICALLY (not CSS `zoom`/`transform` on
+ * the observed content — that corrupts IntersectionObserver geometry → blank pages).
+ *
+ * The page DOM is built imperatively (an island React doesn't manage); cleanup
+ * cancels in-flight render tasks + text layers and destroys the document.
  */
 import { useEffect, useRef, useState } from 'react';
 import { Loader2 } from 'lucide-react';
 import * as pdfjsLib from 'pdfjs-dist';
-import type { PDFDocumentProxy, RenderTask } from 'pdfjs-dist';
+import type { PDFDocumentProxy, RenderTask, TextLayer } from 'pdfjs-dist';
 import './pdfWorker';
+import './pdfTextLayer.css';
 import type { RichDocSubViewerProps } from './types';
 import { useZoom, ZoomControls } from './zoom';
 
@@ -32,27 +33,28 @@ export default function PdfViewer({ bytes, onError, onEmpty }: RichDocSubViewerP
   const [loading, setLoading] = useState(true);
   const { zoom, zoomIn, zoomOut, reset } = useZoom(scrollRef);
 
-  // Base (zoom=1) render width + page-1 aspect height, set during render and read
-  // by the zoom effect to resize holders without re-rendering.
+  // Base (zoom=1) render width, page-1 aspect height, and page-1 fit scale — set
+  // during render, read by the zoom effect to resize holders + rescale text.
   const zoomRef = useRef(zoom);
   const baseWidthRef = useRef(0);
   const estHeightRef = useRef(0);
+  const baseScaleRef = useRef(0);
 
-  // Resize existing holders when zoom changes — rendered canvases (width:100%)
-  // scale with the holder; placeholders keep proportional scroll height. Also
-  // mirrors zoom into the ref here (in an effect, not during render) for the
-  // render-effect's holder sizing / recycle path.
+  // Resize holders + rescale text layers when zoom changes. Canvas (width:100%)
+  // follows the holder; text layers follow the inherited `--scale-factor`.
   useEffect(() => {
     zoomRef.current = zoom;
     const content = contentRef.current;
     if (!content || !baseWidthRef.current) return;
     const w = baseWidthRef.current * zoom;
     const h = estHeightRef.current * zoom;
+    content.style.setProperty('--scale-factor', String(baseScaleRef.current * zoom));
     content.querySelectorAll<HTMLElement>('[data-page]').forEach((holder) => {
-      // Explicit width (not maxWidth+w-full) so zoom-in can exceed the container
-      // and scroll horizontally; mx-auto centers when narrower.
       holder.style.width = `${w}px`;
-      if (!holder.firstChild) holder.style.minHeight = `${h}px`;
+      if (!holder.querySelector('canvas')) holder.style.minHeight = `${h}px`;
+      // Rescale this page's text layer (per-page scale × zoom) if rendered.
+      const ps = Number(holder.dataset.pageScale);
+      if (ps) holder.style.setProperty('--scale-factor', String(ps * zoom));
     });
   }, [zoom]);
 
@@ -65,8 +67,17 @@ export default function PdfViewer({ bytes, onError, onEmpty }: RichDocSubViewerP
     let loadingTask: ReturnType<typeof pdfjsLib.getDocument> | null = null;
     let pdf: PDFDocumentProxy | null = null;
     const renderTasks = new Set<RenderTask>();
+    const textLayers = new Map<number, TextLayer>();
     let observer: IntersectionObserver | null = null;
     const rendered = new Set<number>();
+
+    const recycle = (pageNum: number, holder: HTMLElement, estHeight: number) => {
+      textLayers.get(pageNum)?.cancel();
+      textLayers.delete(pageNum);
+      holder.replaceChildren();
+      holder.style.minHeight = `${estHeight * zoomRef.current}px`;
+      rendered.delete(pageNum);
+    };
 
     const renderPage = async (pageNum: number, holder: HTMLElement, width: number, dpr: number) => {
       if (!Number.isFinite(pageNum) || rendered.has(pageNum) || cancelled || !pdf) return;
@@ -76,6 +87,10 @@ export default function PdfViewer({ bytes, onError, onEmpty }: RichDocSubViewerP
         if (cancelled) return;
         const scale = width / page.getViewport({ scale: 1 }).width;
         const viewport = page.getViewport({ scale });
+        // Per-page fit scale → drives THIS page's text-layer size/position/font
+        // (handles PDFs with mixed page sizes; the text layer inherits it).
+        holder.dataset.pageScale = String(scale);
+        holder.style.setProperty('--scale-factor', String(scale * zoomRef.current));
         const canvas = document.createElement('canvas');
         canvas.width = Math.floor(viewport.width * dpr);
         canvas.height = Math.floor(viewport.height * dpr);
@@ -83,19 +98,33 @@ export default function PdfViewer({ bytes, onError, onEmpty }: RichDocSubViewerP
         canvas.style.height = 'auto';
         holder.style.minHeight = '';
         holder.replaceChildren(canvas);
-        // pdf.js v5: pass `canvas` (preferred over the legacy `canvasContext`) and
-        // let pdf.js create the 2d context with its own options (alpha:false +
-        // willReadFrequently) — pre-creating it here would lock conflicting options.
+        // pdf.js v5: pass `canvas` (not the legacy `canvasContext`) and let pdf.js
+        // create the 2d context with its own options.
         const task = page.render({
           canvas,
           viewport,
-          // Read-only canvas preview — skip annotation operator parsing/drawing.
-          annotationMode: pdfjsLib.AnnotationMode.DISABLE,
+          annotationMode: pdfjsLib.AnnotationMode.DISABLE, // read-only canvas
           transform: dpr !== 1 ? [dpr, 0, 0, dpr, 0, 0] : undefined,
         });
         renderTasks.add(task);
         await task.promise;
         renderTasks.delete(task);
+        if (cancelled) {
+          page.cleanup();
+          return;
+        }
+        // Selectable/copyable text overlay. Sizing/position/font all derive from
+        // the inherited `--scale-factor` (set on contentRef), so it tracks zoom.
+        const textLayerDiv = document.createElement('div');
+        textLayerDiv.className = 'textLayer';
+        holder.appendChild(textLayerDiv);
+        const textLayer = new pdfjsLib.TextLayer({
+          textContentSource: page.streamTextContent(),
+          container: textLayerDiv,
+          viewport,
+        });
+        textLayers.set(pageNum, textLayer);
+        await textLayer.render();
         page.cleanup();
       } catch (e) {
         rendered.delete(pageNum); // allow retry when it re-enters the viewport
@@ -108,9 +137,6 @@ export default function PdfViewer({ bytes, onError, onEmpty }: RichDocSubViewerP
     (async () => {
       try {
         // slice(0): pdf.js transfers the buffer into the worker and detaches it.
-        // No `isEvalSupported` flag needed — the renderer CSP (`script-src 'self'`,
-        // no `'unsafe-eval'`) already blocks eval, and pdf.js feature-detects this
-        // and falls back automatically.
         loadingTask = pdfjsLib.getDocument({ data: bytes.slice(0) });
         pdf = await loadingTask.promise;
         if (cancelled) return; // cleanup will destroy the loading task
@@ -122,16 +148,20 @@ export default function PdfViewer({ bytes, onError, onEmpty }: RichDocSubViewerP
         const width = Math.max(scroller.clientWidth - 32, 320);
         const dpr = Math.min(window.devicePixelRatio || 1, 2);
 
-        // Estimate placeholder height from page 1's aspect (most PDFs are uniform);
-        // each page's actual render corrects its own height.
+        // Estimate placeholder height + base fit-scale from page 1 (most PDFs are
+        // uniform); each page's actual render corrects its own canvas height.
         const first = await pdf.getPage(1);
         const baseVp = first.getViewport({ scale: 1 });
         const estHeight = Math.round(width * (baseVp.height / baseVp.width));
+        const baseScale = width / baseVp.width;
         first.cleanup();
-        if (cancelled) return; // cleanup will destroy the loading task
+        if (cancelled) return;
 
         baseWidthRef.current = width;
         estHeightRef.current = estHeight;
+        baseScaleRef.current = baseScale;
+        // Drives every text layer's size/position/font (inherited by .textLayer).
+        content.style.setProperty('--scale-factor', String(baseScale * zoomRef.current));
 
         observer = new IntersectionObserver(
           (entries) => {
@@ -141,13 +171,9 @@ export default function PdfViewer({ bytes, onError, onEmpty }: RichDocSubViewerP
               if (entry.isIntersecting) {
                 void renderPage(pageNum, holder, width, dpr);
               } else if (rendered.has(pageNum) && holder.firstChild) {
-                // Recycle off-screen page canvases — otherwise `rendered` grows
+                // Recycle off-screen pages — `rendered` would otherwise grow
                 // unbounded and a long/scanned PDF leaks tens of MB per page.
-                // The 300px margin keeps this from thrashing on normal scrolling;
-                // re-entering the viewport re-renders (fast, cached).
-                holder.replaceChildren();
-                holder.style.minHeight = `${estHeight * zoomRef.current}px`;
-                rendered.delete(pageNum);
+                recycle(pageNum, holder, estHeight);
               }
             }
           },
@@ -161,18 +187,15 @@ export default function PdfViewer({ bytes, onError, onEmpty }: RichDocSubViewerP
           holder.dataset.page = String(n);
           holder.style.width = `${width * z}px`;
           holder.style.minHeight = `${estHeight * z}px`;
-          // `bg-white` is a deliberate design-token exemption: a PDF page is
-          // physical white paper, and tinting it with --paper-* would distort the
-          // rendered colors. Native viewers (Chrome/Preview) show white pages too.
-          holder.className = 'mx-auto mb-3 bg-white shadow-sm';
+          // `relative` positions the absolute text layer over the canvas.
+          // `bg-white`: a PDF page is physical white paper; tinting with --paper-*
+          // would distort rendered colors (Chrome/Preview also show white pages).
+          holder.className = 'relative mx-auto mb-3 bg-white shadow-sm';
           frag.appendChild(holder);
         }
-        // Attach holders to the DOM FIRST, then observe. With an explicit `root`,
-        // IntersectionObserver only reports a target that is a *descendant of the
-        // root* at observe() time; observing holders while still in the detached
-        // DocumentFragment meant WebKit never fired `isIntersecting`, so no page
-        // ever rendered (blank). (pptx works because its renderer observes
-        // already-attached slides.)
+        // Attach FIRST, then observe — with an explicit `root`, IntersectionObserver
+        // only reports a target that is a descendant of the root at observe() time;
+        // observing detached fragment nodes left WebKit never firing → blank pages.
         const io = observer;
         content.replaceChildren(frag);
         content.querySelectorAll<HTMLElement>('[data-page]').forEach((holder) => io.observe(holder));
@@ -185,9 +208,10 @@ export default function PdfViewer({ bytes, onError, onEmpty }: RichDocSubViewerP
     return () => {
       cancelled = true;
       observer?.disconnect();
+      textLayers.forEach((tl) => tl.cancel());
       // pdf.js warns against destroy() during an active render — cancel all
-      // in-flight render tasks, then destroy the loading task (which also
-      // destroys the document) once they've settled.
+      // in-flight render tasks, then destroy the loading task (which also destroys
+      // the document) once they've settled.
       const pending = [...renderTasks].map((t) => t.promise.catch(() => {}));
       renderTasks.forEach((t) => t.cancel());
       void Promise.allSettled(pending).then(() => loadingTask?.destroy());

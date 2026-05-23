@@ -1,6 +1,7 @@
 import {
   AtSign,
   ChevronUp,
+  Copy,
   Eye,
   FilePlus,
   Folder,
@@ -1745,6 +1746,16 @@ const DirectoryPanel = memo(
             onClick: () => handleOpenInFinder(node.path),
           },
           {
+            label: "复制文件夹路径",
+            icon: <Copy className="h-4 w-4" />,
+            onClick: () => {
+              navigator.clipboard
+                .writeText(node.path)
+                .then(() => toast.success("已复制文件夹路径"))
+                .catch(() => toast.error("复制失败"));
+            },
+          },
+          {
             label: "引用",
             icon: <AtSign className="h-4 w-4" />,
             onClick: () => onInsertReference?.([node.path]),
@@ -1800,6 +1811,16 @@ const DirectoryPanel = memo(
             label: "打开所在文件夹",
             icon: <FolderOpen className="h-4 w-4" />,
             onClick: () => handleOpenInFinder(node.path),
+          },
+          {
+            label: "复制文件路径",
+            icon: <Copy className="h-4 w-4" />,
+            onClick: () => {
+              navigator.clipboard
+                .writeText(node.path)
+                .then(() => toast.success("已复制文件路径"))
+                .catch(() => toast.error("复制失败"));
+            },
           },
           {
             label: "重命名",
