@@ -57,13 +57,6 @@ const Spinner = (
   </div>
 );
 
-function decodeBase64(data: string): ArrayBuffer {
-  const binary = atob(data);
-  const bytes = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-  return bytes.buffer;
-}
-
 export default function RichDocViewer({ kind, path, workspacePath }: RichDocViewerProps) {
   // `useWorkspaceFileService` returns a useMemo-stable object (per its own docs),
   // so it's safe to depend on directly in effects/callbacks without a ref mirror.
@@ -84,9 +77,11 @@ export default function RichDocViewer({ kind, path, workspacePath }: RichDocView
     let cancelled = false;
     void (async () => {
       try {
-        const { data } = await fileService.downloadFile({ path });
+        // Raw bytes (tauri::ipc::Response → ArrayBuffer): no base64 inflation, no
+        // main-thread atob — matters at the 50MB cap.
+        const buf = await fileService.downloadFileBytes({ path });
         if (cancelled) return;
-        setState({ phase: 'ready', bytes: decodeBase64(data) });
+        setState({ phase: 'ready', bytes: buf });
       } catch (e) {
         if (cancelled) return;
         const message = e instanceof Error ? e.message : String(e);

@@ -216,10 +216,15 @@ export interface WorkspaceFileService {
   dirTree(): Promise<DirectoryTreeResult>;
   /** [requires workspace] Lazy-expand a single directory marked `loaded:false` in the tree. */
   dirExpand(args: { path: string }): Promise<ExpandDirectoryResult>;
-  /** [requires workspace] Read a previewable text file for the preview modal (≤512KB). */
+  /** [requires workspace] Read a previewable text file for the preview modal (≤2MB). */
   readPreview(args: { path: string }): Promise<PreviewResult>;
   /** [requires workspace] Read a binary file (image, etc.) as base64 for blob reconstruction. */
   downloadFile(args: { path: string }): Promise<DownloadResult>;
+  /** [requires workspace] Read a binary file as RAW BYTES (ArrayBuffer) via
+   *  `tauri::ipc::Response` — no base64 inflation / main-thread `atob`. Used by the
+   *  rich-document viewers (pdf/docx/xlsx/pptx), where bytes go straight to the
+   *  parser. ≤50MB. */
+  downloadFileBytes(args: { path: string }): Promise<ArrayBuffer>;
   /** [requires workspace] */
   newFile(args: { parentDir: string; name: string }): Promise<CreatePathResult>;
   /** [requires workspace] */
@@ -419,6 +424,18 @@ export function useWorkspaceFileService(workspacePath: string | null): Workspace
     [requireWorkspace, invokeIfTauri],
   );
 
+  const downloadFileBytes: WorkspaceFileService['downloadFileBytes'] = useCallback(
+    async ({ path }) => {
+      const ws = requireWorkspace();
+      // Raw bytes via `tauri::ipc::Response` → invoke resolves to an ArrayBuffer.
+      return invokeIfTauri<ArrayBuffer>('cmd_workspace_download_bytes', {
+        workspace: ws,
+        path,
+      });
+    },
+    [requireWorkspace, invokeIfTauri],
+  );
+
   const newFile: WorkspaceFileService['newFile'] = useCallback(
     async ({ parentDir, name }) => {
       const ws = requireWorkspace();
@@ -610,6 +627,7 @@ export function useWorkspaceFileService(workspacePath: string | null): Workspace
       dirExpand,
       readPreview,
       downloadFile,
+      downloadFileBytes,
       newFile,
       newFolder,
       rename,
@@ -640,6 +658,7 @@ export function useWorkspaceFileService(workspacePath: string | null): Workspace
       dirExpand,
       readPreview,
       downloadFile,
+      downloadFileBytes,
       newFile,
       newFolder,
       rename,

@@ -90,6 +90,50 @@ pub async fn cmd_workspace_download_file(
     })
 }
 
+/// Like `cmd_workspace_download_file` but returns RAW BYTES via
+/// `tauri::ipc::Response` instead of base64. For the rich-document viewers
+/// (pdf/docx/xlsx/pptx), where bytes feed straight into the parser: avoids the
+/// ~33% base64 inflation over IPC AND the main-thread `atob` + byte-loop decode in
+/// the renderer — both of which bite at the 50MB cap. The base64 variant stays for
+/// the image-preview modal (which needs a `data:` URL). Same path-safety,
+/// size cap, bounded read, and error strings as `cmd_workspace_download_file` so
+/// the renderer's "too large" handling is identical.
+#[tauri::command]
+pub async fn cmd_workspace_download_bytes(
+    workspace: String,
+    path: String,
+) -> Result<tauri::ipc::Response, String> {
+    if path.trim().is_empty() {
+        return Err("Missing path".to_string());
+    }
+    let workspace_root = validate_workspace_root(&workspace)?;
+    let resolved = resolve_existing_inside_workspace(&workspace_root, &path)?;
+    let metadata = fs::metadata(&resolved).map_err(|_| "File not found".to_string())?;
+    if !metadata.is_file() {
+        return Err("Not a regular file".to_string());
+    }
+    if metadata.len() > MAX_DOWNLOAD_BYTES {
+        return Err(format!(
+            "File too large to preview (max {} MB)",
+            MAX_DOWNLOAD_BYTES / 1024 / 1024
+        ));
+    }
+    // Bounded read (TOCTOU): cap at MAX+1; if we hit it the size check raced.
+    let mut file = fs::File::open(&resolved).map_err(|e| format!("Open failed: {}", e))?;
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    file.by_ref()
+        .take(MAX_DOWNLOAD_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| format!("Read failed: {}", e))?;
+    if bytes.len() as u64 > MAX_DOWNLOAD_BYTES {
+        return Err(format!(
+            "File too large to preview (max {} MB)",
+            MAX_DOWNLOAD_BYTES / 1024 / 1024
+        ));
+    }
+    Ok(tauri::ipc::Response::new(bytes))
+}
+
 /// Tiny MIME sniffer covering image / common preview cases. Sidecar's
 /// `sniffMime` is similarly hand-rolled (`src/server/utils/file-response.ts`);
 /// for download-to-preview we only ever return images (DirectoryPanel preview
