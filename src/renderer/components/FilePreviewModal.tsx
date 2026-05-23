@@ -20,6 +20,7 @@ import { createPortal } from 'react-dom';
 
 import { useCloseLayer } from '@/hooks/useCloseLayer';
 import { useWorkspaceFileService } from '@/hooks/useWorkspaceFileService';
+import type { RichDocKind } from '../../shared/fileTypes';
 import { getMonacoLanguage, isMarkdownFile } from '@/utils/languageUtils';
 import { shortenPathForDisplay } from '@/utils/pathDetection';
 import { retainFocusOnMouseDown } from '@/utils/focusRetention';
@@ -30,6 +31,11 @@ import OverlayBackdrop from '@/components/OverlayBackdrop';
 
 // Lazy load Monaco Editor: the ~3MB bundle is only loaded when user first opens a file
 const MonacoEditor = lazy(() => import('./MonacoEditor'));
+
+// Lazy load the rich-document viewer (pdf.js / docx-preview / SheetJS / pptx-renderer).
+// Heavy parse/render libs stay out of the main bundle — loaded only when a user
+// opens a pdf/docx/xlsx/xls/pptx. PRD 0.2.20.
+const RichDocViewer = lazy(() => import('./richdoc/RichDocViewer'));
 
 // No-op change handler for read-only Monaco (stable reference avoids re-renders)
 const noop = () => {};
@@ -54,6 +60,11 @@ interface FilePreviewModalProps {
     size: number;
     /** Relative path from agent directory (for saving) */
     path: string;
+    /** When set, render the read-only rich-document viewer (pdf / docx / sheet /
+     *  pptx) instead of the text/markdown editor. The byte payload is fetched
+     *  inside RichDocViewer via the workspace file service, so `content` is
+     *  unused and the edit machinery (autosave / Monaco) is fully bypassed. */
+    richDocKind?: RichDocKind;
     /** Whether content is loading */
     isLoading?: boolean;
     /** Error message to display */
@@ -273,6 +284,7 @@ export default function FilePreviewModal({
     content,
     size,
     path,
+    richDocKind,
     isLoading = false,
     error = null,
     onClose,
@@ -319,7 +331,9 @@ export default function FilePreviewModal({
     // exclusively. Edit is enabled when `workspacePath` is provided
     // (fileService.saveFile path) OR an explicit `onSave` prop overrides
     // (Settings panels editing `~/.myagents/agents/...`).
-    const canEdit = !!(workspacePath || onSave);
+    // Rich documents are read-only — never engage the edit machinery (autosave,
+    // Monaco, the 预览/编辑 segment) even when a workspacePath is present.
+    const canEdit = !richDocKind && !!(workspacePath || onSave);
     // Reveal: explicit `onRevealFile` prop OR `workspacePath` (modal asks
     // fileService directly). Phase D.5 red-line: routes go through Rust
     // workspace_files, never sidecar HTTP. Either path is acceptable, so
@@ -719,6 +733,19 @@ export default function FilePreviewModal({
                     <X className="h-8 w-8" />
                     <span className="text-sm">{error}</span>
                 </div>
+            );
+        }
+
+        // Rich documents (pdf / docx / xlsx / xls / pptx): dedicated read-only
+        // viewer. Fetches its own bytes via the workspace file service; the
+        // text/markdown/Monaco paths below are bypassed entirely.
+        if (richDocKind) {
+            return (
+                <Suspense fallback={monacoLoading}>
+                    {/* key={path}: a split-view file switch reuses this modal — keying
+                        forces RichDocViewer to remount (clean state + viewer cleanup). */}
+                    <RichDocViewer key={path} kind={richDocKind} path={path} workspacePath={workspacePath} />
+                </Suspense>
             );
         }
 

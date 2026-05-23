@@ -51,7 +51,13 @@ import type {
   DirectoryTree,
   ExpandDirectoryResult,
 } from "../../shared/dir-types";
-import { isImageFile, isPreviewable } from "../../shared/fileTypes";
+import {
+  isImageFile,
+  isPreviewable,
+  isRichDocPreviewable,
+  getRichDocKind,
+  type RichDocKind,
+} from "../../shared/fileTypes";
 import type { CapabilityInitialSelect } from "../../shared/skillsTypes";
 import { getFileIcon } from "@/utils/fileIcons";
 
@@ -191,6 +197,9 @@ interface DirectoryPanelProps {
       content: string;
       size: number;
       path: string;
+      /** Set for rich documents (pdf/docx/sheet/pptx) — split-view mounts the
+       *  read-only RichDocViewer instead of the text editor. */
+      richDocKind?: RichDocKind;
     },
     options?: { initialEditMode?: boolean },
   ) => void;
@@ -207,6 +216,9 @@ type FilePreview = {
   content: string;
   size: number;
   path: string;
+  /** When set, the modal renders the read-only rich-document viewer
+   *  (pdf/docx/sheet/pptx) instead of the text/markdown editor. */
+  richDocKind?: RichDocKind;
   /** When set, FilePreviewModal opens in markdown edit mode directly.
    *  Wired by 「新建笔记」 so a fresh empty `note-…md` skips the rendered-
    *  preview empty-state and lands the cursor in Monaco. */
@@ -868,6 +880,36 @@ const DirectoryPanel = memo(
         // finalizers (a slow earlier request finishing after a newer one) skip
         // the setter so the UI keeps reflecting the fresh in-flight request.
         if (myReq === previewReqIdRef.current) setIsPreviewLoading(false);
+      }
+    };
+
+    /** Route a rich document (pdf/docx/xlsx/xls/pptx) to the read-only viewer.
+     *  Unlike handlePreview, this does NOT call readPreview (binary → UTF-8
+     *  fail) and does NOT fetch bytes here — RichDocViewer fetches them. The
+     *  reqId bump invalidates any in-flight text/image preview so its async
+     *  result can't stomp this one (and won't reset isPreviewLoading, so we
+     *  clear it ourselves). */
+    const handleRichDocPreview = (node: DirectoryTreeNode) => {
+      if (node.type !== "file") return;
+      const richDocKind = getRichDocKind(node.name);
+      if (!richDocKind) return;
+      previewReqIdRef.current++;
+      // Clear loading regardless of branch: the reqId bump above means a prior
+      // in-flight text/image preview's finally won't reset it, and the external
+      // (split-view) branch must leave the state machine consistent too.
+      setIsPreviewLoading(false);
+      const fileData = {
+        name: node.name,
+        content: "",
+        size: 0, // non-load-bearing for rich docs; RichDocViewer fetches bytes
+        path: node.path,
+        richDocKind,
+      };
+      if (onFilePreviewExternal) {
+        onFilePreviewExternal(fileData);
+      } else {
+        setPreview(fileData);
+        setPreviewError(null);
       }
     };
 
@@ -1667,7 +1709,10 @@ const DirectoryPanel = memo(
 
       const isDir = node.type === "dir";
       const canPreview =
-        !isDir && (isPreviewable(node.name) || isImageFile(node.name));
+        !isDir &&
+        (isPreviewable(node.name) ||
+          isImageFile(node.name) ||
+          isRichDocPreviewable(node.name));
 
       if (isDir) {
         return [
@@ -1734,6 +1779,8 @@ const DirectoryPanel = memo(
             onClick: () => {
               if (isImageFile(node.name)) {
                 void handleImagePreview(node);
+              } else if (isRichDocPreviewable(node.name)) {
+                handleRichDocPreview(node);
               } else if (isPreviewable(node.name)) {
                 void handlePreview(node);
               }
@@ -2113,6 +2160,8 @@ const DirectoryPanel = memo(
                                 setIsPreviewLoading(false);
                               }
                             }
+                          } else if (isRichDocPreviewable(data.name)) {
+                            handleRichDocPreview(data);
                           } else if (isPreviewable(data.name)) {
                             void handlePreview(data);
                           } else {
@@ -2319,6 +2368,7 @@ const DirectoryPanel = memo(
                 content={preview?.content ?? ""}
                 size={preview?.size ?? 0}
                 path={preview?.path ?? ""}
+                richDocKind={preview?.richDocKind}
                 isLoading={isPreviewLoading}
                 error={previewError}
                 // Phase D.5: thread the absolute workspace root so rendered

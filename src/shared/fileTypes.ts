@@ -93,3 +93,53 @@ export function isPreviewable(filename: string): boolean {
   if (!ext || ext === filename.toLowerCase()) return true;
   return !BINARY_EXTENSIONS.has(ext);
 }
+
+/**
+ * Rich document formats that get a dedicated binary previewer (pdf.js /
+ * docx-preview / SheetJS / pptx-renderer) — read-only, rendered in the
+ * renderer from bytes fetched via `cmd_workspace_download_file` (base64).
+ *
+ * Deliberately SEPARATE from `BINARY_EXTENSIONS`: these extensions remain
+ * "not text-previewable" (they stay in the binary blocklist), so the text
+ * preview channel still rejects them. The routing in DirectoryPanel checks
+ * `isRichDocPreviewable` BEFORE `isPreviewable`, diverting these to the rich
+ * viewer. Keeping this list TS-only avoids the TS↔Rust dual-sync burden that
+ * `BINARY_EXTENSIONS` carries — the download command does not gate on
+ * extension, so no Rust counterpart is needed.
+ *
+ * Out of scope (kept on "open with default app"): legacy binary `.doc` / `.ppt`
+ * (OLE, no pure-frontend parser) and `.csv` (already text-previewable).
+ */
+export const RICH_DOC_EXTENSIONS = new Set([
+  'pdf',
+  'docx',
+  'xlsx',
+  'xls',
+  'pptx',
+]);
+
+/** Discriminator for which rich-doc sub-viewer renders a file.
+ *  `xlsx` and `xls` collapse to `'sheet'` (SheetJS reads both). */
+export type RichDocKind = 'pdf' | 'docx' | 'sheet' | 'pptx';
+
+/** Whether a filename should open in the dedicated rich-document previewer. */
+export function isRichDocPreviewable(filename: string): boolean {
+  return RICH_DOC_EXTENSIONS.has(getFileExtension(filename));
+}
+
+/** Map a filename to its rich-doc sub-viewer kind, or `null` if unsupported. */
+export function getRichDocKind(filename: string): RichDocKind | null {
+  switch (getFileExtension(filename)) {
+    case 'pdf':
+      return 'pdf';
+    case 'docx':
+      return 'docx';
+    case 'xlsx':
+    case 'xls':
+      return 'sheet';
+    case 'pptx':
+      return 'pptx';
+    default:
+      return null;
+  }
+}

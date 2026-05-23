@@ -62,6 +62,7 @@ import type { RuntimeType, RuntimeDetections, RuntimeConfig } from '../../shared
 import type { InitialMessage } from '@/types/tab';
 // CronTaskConfig type is used via useCronTask hook
 
+import type { RichDocKind } from '../../shared/fileTypes';
 // Lazy load FilePreviewModal for split view panel
 const FilePreviewModal = lazy(() => import('@/components/FilePreviewModal'));
 // Lazy load TerminalPanel for embedded terminal
@@ -306,7 +307,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
   // FilePreviewModal opens directly in the editable Monaco view instead of the
   // markdown rendered preview.
   const isSplitViewEnabled = config.experimentalSplitView ?? true;
-  const [splitFile, setSplitFile] = useState<{ name: string; content: string; size: number; path: string; initialEditMode?: boolean } | null>(null);
+  const [splitFile, setSplitFile] = useState<{ name: string; content: string; size: number; path: string; richDocKind?: RichDocKind; initialEditMode?: boolean } | null>(null);
   // Clear split panel when feature is turned off (prevents stale split state)
   useEffect(() => { if (!isSplitViewEnabled) setSplitFile(null); }, [isSplitViewEnabled]);
   const [splitRatio, setSplitRatio] = useState(0.5); // 0-1, left panel fraction
@@ -406,9 +407,9 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
   }, 0);
 
   // Fullscreen preview triggered from split panel's "全屏预览" button
-  const [fullscreenPreviewFile, setFullscreenPreviewFile] = useState<{ name: string; content: string; size: number; path: string; initialEditMode?: boolean } | null>(null);
+  const [fullscreenPreviewFile, setFullscreenPreviewFile] = useState<{ name: string; content: string; size: number; path: string; richDocKind?: RichDocKind; initialEditMode?: boolean } | null>(null);
 
-  const handleSplitFilePreview = useCallback((file: { name: string; content: string; size: number; path: string }, options?: { initialEditMode?: boolean }) => {
+  const handleSplitFilePreview = useCallback((file: { name: string; content: string; size: number; path: string; richDocKind?: RichDocKind }, options?: { initialEditMode?: boolean }) => {
     const ext = file.name.toLowerCase().split('.').pop();
     if ((ext === 'html' || ext === 'htm') && isSplitViewEnabled) {
       // HTML files → open in embedded browser for live preview
@@ -3555,6 +3556,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
                     content={splitFile.content}
                     size={splitFile.size}
                     path={splitFile.path}
+                    richDocKind={splitFile.richDocKind}
                     workspacePath={agentDir}
                     initialEditMode={splitFile.initialEditMode}
                     onClose={() => {
@@ -3669,6 +3671,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
             content={fullscreenPreviewFile.content}
             size={fullscreenPreviewFile.size}
             path={fullscreenPreviewFile.path}
+            richDocKind={fullscreenPreviewFile.richDocKind}
             workspacePath={agentDir}
             initialEditMode={fullscreenPreviewFile.initialEditMode}
             onClose={() => setFullscreenPreviewFile(null)}

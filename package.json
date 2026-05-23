@@ -51,6 +51,7 @@
     "version": "node scripts/sync-version.js && git add src-tauri/tauri.conf.json src-tauri/Cargo.toml"
   },
   "dependencies": {
+    "@aiden0z/pptx-renderer": "^1.0.2",
     "@anthropic-ai/claude-agent-sdk": "^0.2.119",
     "@dnd-kit/core": "^6.3.1",
     "@dnd-kit/sortable": "^10.0.0",
@@ -71,11 +72,13 @@
     "adm-zip": "^0.5.16",
     "cron-parser": "^5.5.0",
     "cronstrue": "^3.13.0",
+    "docx-preview": "^0.3.7",
     "js-yaml": "^4.1.1",
     "katex": "^0.16.27",
     "lucide-react": "^0.554.0",
     "mermaid": "^11.12.2",
     "monaco-editor": "^0.55.1",
+    "pdfjs-dist": "^5.7.284",
     "qrcode": "^1.5.4",
     "react": "^19.2.0",
     "react-dom": "^19.2.0",
@@ -90,7 +93,8 @@
     "remark-math": "^6.0.0",
     "sharp": "0.34.5",
     "socks": "^2.8.7",
-    "undici": "^8.1.0"
+    "undici": "^8.1.0",
+    "xlsx": "https://cdn.sheetjs.com/xlsx-0.20.3/xlsx-0.20.3.tgz"
   },
   "optionalDependencies": {
     "@anthropic-ai/claude-agent-sdk-darwin-arm64": "0.2.119",
