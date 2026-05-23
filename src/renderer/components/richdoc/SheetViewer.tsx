@@ -13,6 +13,7 @@
  */
 import { useEffect, useMemo, useState } from 'react';
 import * as XLSX from 'xlsx';
+import { clampSheetRange } from './sheetMetrics';
 import type { RichDocSubViewerProps } from './types';
 
 // Caps keep the injected DOM bounded. Beyond these the user opens externally.
@@ -54,13 +55,9 @@ export default function SheetViewer({ bytes, onError, onEmpty }: RichDocSubViewe
         let truncated = false;
         const ref = ws['!ref'];
         if (ref) {
-          const range = XLSX.utils.decode_range(ref);
-          if (range.e.r - range.s.r >= MAX_ROWS || range.e.c - range.s.c >= MAX_COLS) {
-            truncated = true;
-            range.e.r = Math.min(range.e.r, range.s.r + MAX_ROWS - 1);
-            range.e.c = Math.min(range.e.c, range.s.c + MAX_COLS - 1);
-            ws['!ref'] = XLSX.utils.encode_range(range);
-          }
+          const clamped = clampSheetRange(XLSX.utils.decode_range(ref), MAX_ROWS, MAX_COLS);
+          truncated = clamped.truncated;
+          if (clamped.truncated) ws['!ref'] = XLSX.utils.encode_range(clamped.range);
         }
         return { name, html: XLSX.utils.sheet_to_html(ws, { editable: false }), truncated };
       });
