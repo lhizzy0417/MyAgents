@@ -13,8 +13,10 @@
  * configured regardless of which viewer loads first.
  */
 import { GlobalWorkerOptions } from 'pdfjs-dist';
-// Vite `?url` asset import — resolved to a hashed same-origin URL at build time.
-import pdfWorkerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
+// LEGACY worker to match the legacy main build (aliased in vite.config). The
+// worker thread is also JavaScriptCore and also lacks getOrInsertComputed, so it
+// must be the polyfilled legacy worker too. Vite `?url` → hashed same-origin URL.
+import pdfWorkerUrl from 'pdfjs-dist/legacy/build/pdf.worker.min.mjs?url';
 
 if (!GlobalWorkerOptions.workerSrc) {
   GlobalWorkerOptions.workerSrc = pdfWorkerUrl;

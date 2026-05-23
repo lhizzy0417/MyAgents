@@ -38,9 +38,17 @@ export default defineConfig({
   root: resolve(__dirname, 'src/renderer'),
   plugins: [react(), tailwindcss()],
   resolve: {
-    alias: {
-      '@': resolve(__dirname, 'src/renderer')
-    }
+    alias: [
+      { find: '@', replacement: resolve(__dirname, 'src/renderer') },
+      // Force pdf.js's LEGACY (polyfilled) build everywhere. The modern build
+      // calls `Map.prototype.getOrInsertComputed` (a 2024 TC39 proposal) which the
+      // macOS WKWebView (JavaScriptCore) doesn't implement, so every page.render()
+      // threw "getOrInsertComputed is not a function" → blank PDF. The legacy bundle
+      // ships the polyfill (pdf.js's documented path for older engines). Regex so
+      // ONLY the bare `pdfjs-dist` specifier is rewritten — subpath imports like
+      // `pdfjs-dist/legacy/build/pdf.worker.min.mjs?url` must pass through untouched.
+      { find: /^pdfjs-dist$/, replacement: resolve(__dirname, 'node_modules/pdfjs-dist/legacy/build/pdf.mjs') },
+    ]
   },
   // Define environment variables for client code
   define: {

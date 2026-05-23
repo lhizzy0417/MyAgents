@@ -77,14 +77,15 @@ export default function PdfViewer({ bytes, onError, onEmpty }: RichDocSubViewerP
         const scale = width / page.getViewport({ scale: 1 }).width;
         const viewport = page.getViewport({ scale });
         const canvas = document.createElement('canvas');
-        if (!canvas.getContext('2d')) return;
         canvas.width = Math.floor(viewport.width * dpr);
         canvas.height = Math.floor(viewport.height * dpr);
         canvas.style.width = '100%'; // display size set by holder (zoom-scaled)
         canvas.style.height = 'auto';
         holder.style.minHeight = '';
         holder.replaceChildren(canvas);
-        // pdf.js v5: pass `canvas` (preferred over the legacy `canvasContext`).
+        // pdf.js v5: pass `canvas` (preferred over the legacy `canvasContext`) and
+        // let pdf.js create the 2d context with its own options (alpha:false +
+        // willReadFrequently) — pre-creating it here would lock conflicting options.
         const task = page.render({
           canvas,
           viewport,
@@ -100,6 +101,7 @@ export default function PdfViewer({ bytes, onError, onEmpty }: RichDocSubViewerP
         rendered.delete(pageNum); // allow retry when it re-enters the viewport
         if (e instanceof Error && e.name === 'RenderingCancelledException') return;
         // Per-page failures are non-fatal — leave the placeholder, keep scrolling.
+        console.error(`[PdfViewer] render p${pageNum} FAILED:`, e); // surfaces silent failures
       }
     };
 
