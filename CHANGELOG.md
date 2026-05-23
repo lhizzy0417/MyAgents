@@ -11,6 +11,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.2.20] - 2026-05-23
+
+> 本版主打「富文档预览」——PDF、Word、Excel、PowerPoint 现在都能直接在应用内打开，不用切到外部软件；PDF 还能选中复制文字、触控板捏合缩放。另外修了一批任务可靠性问题：Mac 休眠 / App Nap 唤醒后长任务被误判超时而「突然自动中止」、关闭 Tab 会中断正在后台跑的任务、非 Claude 模型（Codex / Gemini）下生成的图表卡片空白等社区报告的问题。
+
+### Added
+
+- **富文档只读预览（PDF / Word / Excel / PowerPoint）**：在文件树或对话里点开 `.pdf` `.docx` `.xlsx` `.xls` `.pptx`，直接在右侧面板内预览，无需外部软件。PDF 支持选中复制文字、滚动翻页、缩放（`Ctrl/⌘+滚轮`、触控板捏合、右下角浮动按钮三种方式）；Excel 多工作表切换；超大文件（最大 50MB）与空文档都有对应提示。纯本地渲染、只读，文档内的外链资源不会向外发起网络请求。
+- **文件树展开状态记忆**：展开的文件夹在关闭目录面板再打开后保持原样，按 Tab 各自独立。
+- **流式输出更顺滑**：AI 回复改为逐字平滑吐出，长回复滚动跟随更自然。
+
+### Fixed
+
+- **长任务在系统休眠 / App Nap 后被「突然自动中止」**：响应超时计时器原本用墙钟计时，进程被系统挂起期间墙钟照走、醒来即被误判为「10 分钟无响应」而 kill。现在只统计进程实际活跃时间，挂起期间不计入；交互式 turn 等待你输入期间也不再误触发超时，并对其持有系统 wake-lock。
+- **关闭 Tab 会中断正在后台跑的任务**：之前关掉聊天 Tab 会被当成「取消任务」，导致后台完成 / 定时任务 / IM 派发的 turn 被中断，飞书等渠道收到 `turn_failed`。现在任务生命周期与前端连接解耦，关 Tab 不再影响后台执行。
+- **后台子任务通知丢失**（[#227](https://github.com/hAcKlyc/MyAgents/issues/227)）：后台子 Agent 完成通知约 23% 静默丢失，且富文本摘要会被丢弃只剩一行。现已确保通知必达、摘要完整保留。
+- **非 Claude 模型下图表卡片空白**（[#221](https://github.com/hAcKlyc/MyAgents/issues/221)）：Codex / Gemini 等模型生成的图表卡片因脚本竞态与解析问题渲染空白；正文中含字面量 `<` 开标签的卡片也会被截断。均已修正。
+- **切到 Codex runtime 模型名错配**（[#224](https://github.com/hAcKlyc/MyAgents/issues/224)）：Codex 会话的快照会错存成 Claude 模型名，导致读取时模型不符。改为按 runtime 存取并在读侧纠正。
+- **定时任务推送到 IM 缺少来源会话标识**（[#225](https://github.com/hAcKlyc/MyAgents/issues/225)）：cron 结果投递到飞书等渠道时缺 Source session id 行，可能落错会话，已补全。
+- **渠道停用未跨重启保持**（[#219](https://github.com/hAcKlyc/MyAgents/issues/219)）：手动停用的 IM 渠道在应用重启后会自己复活。现在停用状态会持久化，重启后保持停用。
+- **粘贴超长文本卡死输入框**（[#231](https://github.com/hAcKlyc/MyAgents/issues/231)）：往聊天输入框粘贴超长文本会导致界面冻结，已修。
+- **代理设置每敲一键就重连**（[#230](https://github.com/hAcKlyc/MyAgents/issues/230)）：设置页编辑代理端口 / 主机时每个字符都触发重载，现改为编辑完成后再生效。
+- **Windows 下 CLI 调用内置 Node 失败**（[#229](https://github.com/hAcKlyc/MyAgents/issues/229)）：`myagents.cmd` 拿到的内置 Node 路径带 `\\?\` 长路径前缀导致调用失败，已剥除。
+- **Fork 过期会话无限重试**：源会话的 SDK session UUID 过期后 Fork 会无限重试，已修为优雅处理。
+- **零碎体验**：右键「复制文件 / 文件夹路径」现在复制完整绝对路径而非工作区相对路径；工具卡片图标在 Windows 11 上错位已对齐；点击菜单 / 能力 / 输入区按钮时焦点不再被抢走（macOS 触控板 tap）；切换 Tab 更跟手。
+
+---
+
 ## [0.2.19] - 2026-05-20
 
 > 主修「长跑 cron 任务被系统休眠杀掉」这一类问题：cron 执行期间主动向系统申请「防 idle sleep」锁，三平台（macOS / Windows / Linux）全部支持；万一锁不住（用户合上盖子、Linux 无 systemd），AI 下次回到这个 session 时会自动续跑上次未完成的任务，不用手动 "继续"。另外修了 Chat Cmd+F 翻页被流式更新打断、SiliconFlow 上的 Kimi K2.5 模型一日挂死 43 次（[#216](https://github.com/hAcKlyc/MyAgents/issues/216)）等社区报告的问题。
