@@ -75,4 +75,14 @@ describe.skipIf(isWin)('validateExternalReadPathNode — symlink escape (real fs
     const res = validateExternalReadPathNode(path.join(evil, 'bin'));
     expect(res.ok).toBe(false);
   });
+
+  // Regression for the macOS /etc→/private/etc blacklist gap: realpath of a
+  // symlink-escape into /etc lands in /private/etc, which the bare /etc entry
+  // missed. The darwin blacklist now also lists /private/etc | /private/var.
+  it.runIf(process.platform === 'darwin')('rejects realpath-escape into /private/etc (macOS /etc symlink)', () => {
+    const evil = path.join(dir, 'etc_link');
+    symlinkSync('/etc', evil); // /etc → /private/etc on macOS
+    const res = validateExternalReadPathNode(path.join(evil, 'hosts'));
+    expect(res.ok).toBe(false); // realpath → /private/etc/hosts → blacklisted
+  });
 });

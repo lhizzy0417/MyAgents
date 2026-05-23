@@ -20,10 +20,18 @@ import path from 'node:path';
 
 const HOME = homedir() || '';
 
+const POSIX_SYSTEM_DIRS = ['/etc', '/var', '/usr', '/bin', '/sbin', '/boot', '/root', '/sys', '/proc', '/dev'];
 const SYSTEM_BLACKLIST: readonly string[] =
   platform() === 'win32'
     ? ['C:\\Windows', 'C:\\Program Files', 'C:\\Program Files (x86)', 'C:\\ProgramData', 'C:\\Recovery', 'C:\\$Recycle.Bin']
-    : ['/etc', '/var', '/usr', '/bin', '/sbin', '/boot', '/root', '/sys', '/proc', '/dev'];
+    : platform() === 'darwin'
+      // macOS symlinks /etc → /private/etc and /var → /private/var. With
+      // canonicalizeSymlinks the realpath of a symlink-escape lands in the
+      // canonical /private location, which the bare /etc|/var entries miss
+      // (a literal /private/etc path slips the lexical check too). Block both
+      // forms. Keep in sync with Rust commands::validate_file_path.
+      ? [...POSIX_SYSTEM_DIRS, '/private/etc', '/private/var']
+      : POSIX_SYSTEM_DIRS;
 
 const CREDENTIAL_SUBDIRS: readonly string[] = ['.ssh', '.gnupg', '.aws', '.kube', '.docker', '.config/op'];
 

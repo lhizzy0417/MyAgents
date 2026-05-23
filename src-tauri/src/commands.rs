@@ -1360,10 +1360,20 @@ pub(crate) fn validate_file_path(raw_path: &str) -> Result<PathBuf, String> {
         "C:\\ProgramData", "C:\\Recovery", "C:\\$Recycle.Bin",
     ].into_iter().map(PathBuf::from).collect();
 
-    #[cfg(not(windows))]
+    #[cfg(all(not(windows), not(target_os = "macos")))]
     let forbidden_system: Vec<PathBuf> = vec![
         "/etc", "/var", "/usr", "/bin", "/sbin",
         "/boot", "/root", "/sys", "/proc", "/dev",
+    ].into_iter().map(PathBuf::from).collect();
+
+    // macOS symlinks /etc → /private/etc and /var → /private/var; block the
+    // canonical /private targets too so a literal /private/etc path can't slip
+    // the lexical check. Keep in sync with Node path-safety.ts SYSTEM_BLACKLIST.
+    #[cfg(target_os = "macos")]
+    let forbidden_system: Vec<PathBuf> = vec![
+        "/etc", "/var", "/usr", "/bin", "/sbin",
+        "/boot", "/root", "/sys", "/proc", "/dev",
+        "/private/etc", "/private/var",
     ].into_iter().map(PathBuf::from).collect();
 
     for dir in &forbidden_system {
