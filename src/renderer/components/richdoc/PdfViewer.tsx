@@ -164,9 +164,16 @@ export default function PdfViewer({ bytes, onError, onEmpty }: RichDocSubViewerP
           // rendered colors. Native viewers (Chrome/Preview) show white pages too.
           holder.className = 'mx-auto mb-3 bg-white shadow-sm';
           frag.appendChild(holder);
-          observer.observe(holder);
         }
+        // Attach holders to the DOM FIRST, then observe. With an explicit `root`,
+        // IntersectionObserver only reports a target that is a *descendant of the
+        // root* at observe() time; observing holders while still in the detached
+        // DocumentFragment meant WebKit never fired `isIntersecting`, so no page
+        // ever rendered (blank). (pptx works because its renderer observes
+        // already-attached slides.)
+        const io = observer;
         content.replaceChildren(frag);
+        content.querySelectorAll<HTMLElement>('[data-page]').forEach((holder) => io.observe(holder));
         setLoading(false);
       } catch (e) {
         if (!cancelled) onError(e instanceof Error ? e.message : 'PDF 渲染失败');
