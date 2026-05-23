@@ -35,6 +35,10 @@ jobs:
       - run: npm run typecheck
       - run: npm run lint
       - run: npm run test:unit
+      # `dom` project (jsdom, no secrets) holds security-invariant tests —
+      # externalResourceGuard (zero-egress) + WidgetRenderer (about:srcdoc
+      # transport). Must gate too, else those regressions wouldn't block a merge.
+      - run: npm run test:dom
 
   # Rust gate: cargo test for the Tauri crate's unit tests (path_safety,
   # proxy_config, cron_task, wake_lock, workspace_files, …). `npm test` never
