@@ -143,13 +143,28 @@ export async function inspectPluginSource(
 }
 
 /**
+ * Two absolute paths point at the same directory. `resolve` normalizes
+ * `.`/`..`/trailing slashes; we lower-case on win32 because NTFS is
+ * case-insensitive (a `file://…/Test-Echo` source vs a `test-echo`
+ * install dir must still match). Exported for unit coverage of the #239
+ * register-in-place gate.
+ */
+export function pathsEqual(a: string, b: string): boolean {
+  const ra = resolve(a);
+  const rb = resolve(b);
+  return process.platform === 'win32'
+    ? ra.toLowerCase() === rb.toLowerCase()
+    : ra === rb;
+}
+
+/**
  * Pure orchestration:
  *   1. Resolve URL/path → ResolvedPluginSource
  *   2. Fetch → ExtractedTree
  *   3. Analyse → PluginAnalysis
  *   4. Check conflict (name already installed)
  *   5. Clear any broken symlink at install path (Pit of Success red-line)
- *   6. Write disk
+ *   6. Write disk (skipped when the source already IS the install dir)
  *   7. Update AppConfig (atomic, locked)
  *
  * Caller is responsible for SSE progress events around steps 1-3.
@@ -244,20 +259,38 @@ export async function installPlugin(
   const installPath = makeInstallPath(pluginsRoot, manifest.name);
   const stagingPath = join(pluginsRoot, `.tmp-${randomUUID()}`);
 
+  // #239: a local `file://` source can already BE the install target —
+  // the user dropped a valid plugin straight into
+  // ~/.myagents/plugins/<name> and ran `cc-plugin install file://…/<name>`.
+  // In that case source === dest, so the staging→rename dance below would
+  // (a) waste a copy and (b) 409 on `existsSync(installPath)` ("目录已存在")
+  // without ever registering the plugin — leaving a dir on disk that
+  // `cc-plugin list` can't see. Detect this and register in place instead.
+  // Guard on `rootPath` being the tree root: if the plugin lives in a
+  // subdir of the source, dest is a different path and the normal extract
+  // flow is correct.
+  const sameDirInstall =
+    source.kind === 'local' &&
+    (rootPath === '' || rootPath === '.') &&
+    pathsEqual(source.absolutePath, installPath);
+
   // 5 — write to STAGING (not final path) so concurrent same-name installs
   // can't overwrite each other's bytes between conflict-check and config
   // commit. The rename → final happens inside withConfigLock below.
+  // Skipped for the register-in-place case (nothing to copy).
   onProgress?.('writing');
   let staged = false;
   try {
-    writePluginToDisk(stagingPath, tree, rootPath);
-    staged = true;
-    if (!isPluginRootDir(stagingPath)) {
-      throw new PluginStoreError(
-        '写盘后未在目标目录找到 plugin.json',
-        'POST_WRITE_INVALID',
-        500,
-      );
+    if (!sameDirInstall) {
+      writePluginToDisk(stagingPath, tree, rootPath);
+      staged = true;
+      if (!isPluginRootDir(stagingPath)) {
+        throw new PluginStoreError(
+          '写盘后未在目标目录找到 plugin.json',
+          'POST_WRITE_INVALID',
+          500,
+        );
+      }
     }
 
     // 6 — atomic register: claim the name + flip rename inside the lock.
@@ -297,25 +330,40 @@ export async function installPlugin(
           409,
         );
       }
-      // installPath should not exist; if it does, someone left an orphan.
-      // We refuse rather than clobber — the user can manually clean up.
-      // clearBrokenSymlinkAt handles the dangling-symlink red-line case
-      // (Pit of Success — Node v24 cpSync C++ abort) before we ask
-      // existsSync.
-      clearBrokenSymlinkAt(installPath);
-      if (existsSync(installPath)) {
-        throw new PluginStoreError(
-          `目录已存在：${installPath}。请手动清理或选择其它来源`,
-          'TARGET_EXISTS',
-          409,
-        );
-      }
       installingNames.add(manifest.name);
       try {
-        renameSync(stagingPath, installPath);
-        staged = false; // staging dir is gone — don't double-GC
+        if (sameDirInstall) {
+          // Register the already-present directory in place. It IS the
+          // source (validated as a plugin root via fetch+analyse above), so
+          // there is nothing to move — do NOT 409 on "目录已存在". Re-verify
+          // the dir still holds plugin.json under the lock.
+          if (!isPluginRootDir(installPath)) {
+            throw new PluginStoreError(
+              '安装目录缺少 .claude-plugin/plugin.json',
+              'POST_WRITE_INVALID',
+              500,
+            );
+          }
+        } else {
+          // installPath should not exist; if it does, someone left an orphan.
+          // We refuse rather than clobber — the user can manually clean up.
+          // clearBrokenSymlinkAt handles the dangling-symlink red-line case
+          // (Pit of Success — Node v24 cpSync C++ abort) before we ask
+          // existsSync.
+          clearBrokenSymlinkAt(installPath);
+          if (existsSync(installPath)) {
+            throw new PluginStoreError(
+              `目录已存在：${installPath}。请手动清理或选择其它来源`,
+              'TARGET_EXISTS',
+              409,
+            );
+          }
+          renameSync(stagingPath, installPath);
+          staged = false; // staging dir is gone — don't double-GC
+        }
       } catch (err) {
         installingNames.delete(manifest.name);
+        if (err instanceof PluginStoreError) throw err;
         throw new PluginStoreError(
           `重命名安装目录失败：${(err as Error).message}`,
           'RENAME_FAILED',
