@@ -2609,6 +2609,81 @@ pub async fn monitor_turn_wake_lock(
     }
 }
 
+/// How many CONSECUTIVE HTTP-health failures the global sidecar must rack up
+/// (process still alive each time) before the monitor concludes it's truly
+/// stuck and replaces it. #236: a single 2s health-check miss is not enough —
+/// on Windows under Defender scanning / a momentary load spike / a brief OS
+/// suspend the global sidecar's event loop can stall past the 2s budget while
+/// being perfectly alive. Restarting on that single blip kills a healthy
+/// global (the reporter saw it killed 6× in 76 minutes) and takes every
+/// renderer consumer down with it. Requiring 2 consecutive failures (≈15s
+/// apart) tolerates the transient stall while still recovering a genuinely
+/// hung process within ~30s. A DEAD process is restarted immediately —
+/// liveness is unambiguous, only HTTP-readiness is blip-prone.
+const GLOBAL_HEALTH_FAIL_THRESHOLD: u32 = 2;
+
+/// Pure restart decision for the global sidecar health monitor. Extracted so
+/// the "don't kill on a single transient blip" rule (#236) is unit-testable
+/// without standing up a real sidecar. Returns
+/// `(needs_restart, next_consecutive_health_failures)`.
+fn global_restart_decision(
+    process_alive: bool,
+    http_healthy: bool,
+    prev_health_failures: u32,
+    threshold: u32,
+) -> (bool, u32) {
+    if !process_alive {
+        // Dead is unambiguous — restart now, reset the (HTTP-only) streak.
+        return (true, 0);
+    }
+    if http_healthy {
+        return (false, 0);
+    }
+    let failures = prev_health_failures.saturating_add(1);
+    (failures >= threshold, failures)
+}
+
+#[cfg(test)]
+mod global_restart_decision_tests {
+    use super::global_restart_decision;
+
+    const T: u32 = 2; // GLOBAL_HEALTH_FAIL_THRESHOLD in tests
+
+    #[test]
+    fn dead_process_restarts_immediately_and_resets_streak() {
+        // Even with a prior streak, a dead process restarts now.
+        assert_eq!(global_restart_decision(false, false, 1, T), (true, 0));
+        assert_eq!(global_restart_decision(false, true, 0, T), (true, 0));
+    }
+
+    #[test]
+    fn healthy_process_never_restarts_and_resets_streak() {
+        assert_eq!(global_restart_decision(true, true, 1, T), (false, 0));
+    }
+
+    #[test]
+    fn single_transient_blip_does_not_restart_a_live_sidecar() {
+        // #236 core: alive + first HTTP miss → defer, just record the failure.
+        assert_eq!(global_restart_decision(true, false, 0, T), (false, 1));
+    }
+
+    #[test]
+    fn restarts_after_threshold_consecutive_blips() {
+        // Second consecutive miss reaches the threshold → restart.
+        assert_eq!(global_restart_decision(true, false, 1, T), (true, 2));
+    }
+
+    #[test]
+    fn a_healthy_probe_between_blips_breaks_the_streak() {
+        let (_, after_first) = global_restart_decision(true, false, 0, T);
+        assert_eq!(after_first, 1);
+        let (restart, after_recover) = global_restart_decision(true, true, after_first, T);
+        assert_eq!((restart, after_recover), (false, 0));
+        // Next blip starts the count over, so one more blip alone won't restart.
+        assert_eq!(global_restart_decision(true, false, after_recover, T), (false, 1));
+    }
+}
+
 /// Background health monitor for the Global Sidecar.
 /// Periodically checks if the Global Sidecar is alive and auto-restarts it when it dies.
 /// Emits `global-sidecar:restarted` Tauri event with the new URL on successful restart.
@@ -2625,6 +2700,10 @@ pub async fn monitor_global_sidecar(
     const MAX_BACKOFF_SECS: u64 = 300; // 5 minutes
 
     let mut consecutive_restart_failures: u32 = 0;
+    // #236: consecutive HTTP-health misses while the process is still alive.
+    // Reset on a healthy probe or a dead process; a restart only fires once it
+    // reaches GLOBAL_HEALTH_FAIL_THRESHOLD.
+    let mut consecutive_health_failures: u32 = 0;
     let mut is_first_check = true;
 
     logger::info(&app_handle, "[sidecar] Global sidecar health monitor started".to_string());
@@ -2654,7 +2733,12 @@ pub async fn monitor_global_sidecar(
         // Check process status (cheap, no HTTP)
         let (port, process_alive, created_at) = match check_global_sidecar_status(&manager) {
             Some(status) => status,
-            None => continue, // Not started yet — skip
+            None => {
+                // No instance to watch — drop any stale health-failure streak so
+                // a future instance starts clean (Codex review hardening, #236).
+                consecutive_health_failures = 0;
+                continue;
+            }
         };
 
         // Startup grace period: skip health checks for recently-created instances.
@@ -2671,30 +2755,50 @@ pub async fn monitor_global_sidecar(
                 );
                 // Fall through to restart below
             } else {
-                continue; // Within grace period and process alive — skip check
+                // Within grace period and process alive — skip check. A freshly
+                // created instance hasn't earned any failures yet; clear the
+                // streak so grace doesn't carry one over (Codex review, #236).
+                consecutive_health_failures = 0;
+                continue;
             }
         }
 
-        let needs_restart = if process_alive {
+        let http_healthy = if process_alive {
             // Process alive → verify with HTTP health check (blocking)
-            let is_healthy = tokio::task::spawn_blocking(move || {
-                check_sidecar_http_health(port)
-            })
-            .await
-            .unwrap_or(false);
-            !is_healthy
+            tokio::task::spawn_blocking(move || check_sidecar_http_health(port))
+                .await
+                .unwrap_or(false)
         } else {
-            // Process already dead → definitely needs restart
-            true
+            false
         };
 
+        // #236: don't restart a still-alive global on a single transient HTTP
+        // blip — require GLOBAL_HEALTH_FAIL_THRESHOLD consecutive misses.
+        let (needs_restart, next_failures) = global_restart_decision(
+            process_alive,
+            http_healthy,
+            consecutive_health_failures,
+            GLOBAL_HEALTH_FAIL_THRESHOLD,
+        );
+        consecutive_health_failures = next_failures;
+
+        if process_alive && !http_healthy && !needs_restart {
+            ulog_warn!(
+                "[sidecar] Global sidecar on port {} HTTP health check failed ({}/{}) — alive, deferring restart (transient blip guard)",
+                port, consecutive_health_failures, GLOBAL_HEALTH_FAIL_THRESHOLD
+            );
+        }
+
         if !needs_restart || shutdown.load(Relaxed) {
-            // Healthy — reset failure counter
+            // Healthy (or under the blip threshold) — reset restart-failure counter.
             consecutive_restart_failures = 0;
             continue;
         }
 
-        ulog_warn!("[sidecar] Global sidecar on port {} is unhealthy, auto-restarting...", port);
+        ulog_warn!(
+            "[sidecar] Global sidecar on port {} is unhealthy (alive={}, health_failures={}), auto-restarting...",
+            port, process_alive, consecutive_health_failures
+        );
 
         // Mark the existing instance as unhealthy so start_global_sidecar() won't
         // short-circuit with "already running". Without this, a hung process (alive
@@ -2717,6 +2821,7 @@ pub async fn monitor_global_sidecar(
         {
             Ok(Ok(new_port)) => {
                 consecutive_restart_failures = 0;
+                consecutive_health_failures = 0; // fresh process — clear the blip streak
                 let new_url = format!("http://127.0.0.1:{}", new_port);
                 logger::info(
                     &app_handle,
