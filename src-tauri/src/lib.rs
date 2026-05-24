@@ -72,6 +72,74 @@ pub fn run_cli(args: &[String]) -> i32 {
     cli::run(args)
 }
 
+/// What the main-window `on_navigation` guard should do with a navigation.
+#[derive(Debug, PartialEq, Eq)]
+enum NavDecision {
+    /// Let the navigation proceed in the webview.
+    Allow,
+    /// Cancel it and hand the URL to the OS default browser.
+    OpenExternally,
+    /// Cancel it silently (disallowed scheme — potential attack vector).
+    BlockSilently,
+}
+
+/// Pure decision for `on_navigation` (Functional Core — unit-tested below;
+/// the imperative shell in `setup` does the logging + external-open side
+/// effects). Decides per URL scheme/host whether a navigation may proceed.
+fn classify_navigation(url: &Url) -> NavDecision {
+    let scheme = url.scheme();
+
+    // Tauri-internal schemes: always allow.
+    // - tauri / ipc: Tauri 2.x core IPC bridges
+    // - asset: tauri-plugin-fs asset serving
+    // - myagents / myagents-internal: app's custom protocols
+    if matches!(
+        scheme,
+        "tauri" | "ipc" | "asset" | "myagents" | "myagents-internal"
+    ) {
+        return NavDecision::Allow;
+    }
+
+    // `about:` (about:srcdoc / about:blank): the Generative-UI widget renders
+    // its sandbox in an `<iframe sandbox="allow-scripts" srcDoc=...>`, whose
+    // document URL is `about:srcdoc`. In the macOS WKWebView `on_navigation`
+    // fires for SUB-FRAME navigations too (not just the top frame, contrary to
+    // a long-standing assumption here) — so without this branch the widget
+    // iframe is blocked into an empty document and renders blank (the
+    // desktop-only widget-blank bug; `data:`/`blob:` srcdoc fallbacks hit the
+    // same wall). `about:` URLs are safe to allow: a top frame cannot be
+    // navigated to attacker-controlled `about:srcdoc` (it has no srcdoc source
+    // there) and `about:blank` carries no payload. `data:`/`blob:` deliberately
+    // stay blocked below — a top-frame `data:text/html,<script>…` WOULD run
+    // attacker HTML in the privileged app origin.
+    if scheme == "about" {
+        return NavDecision::Allow;
+    }
+
+    // http(s): allow only localhost / 127.0.0.1 / tauri.localhost /
+    // ipc.localhost. Dev loads from http://localhost:5173, Windows prod from
+    // http://tauri.localhost, IPC bridges from http://ipc.localhost. Anything
+    // else is external → hand to the OS browser and cancel.
+    if scheme == "http" || scheme == "https" {
+        let host = url.host_str().unwrap_or("");
+        if matches!(
+            host,
+            "localhost" | "127.0.0.1" | "tauri.localhost" | "ipc.localhost"
+        ) {
+            return NavDecision::Allow;
+        }
+        return NavDecision::OpenExternally;
+    }
+
+    // mailto / tel: route to OS default handler, cancel nav.
+    if matches!(scheme, "mailto" | "tel") {
+        return NavDecision::OpenExternally;
+    }
+
+    // Everything else (data:, blob:, javascript:, file:, unknown) — block.
+    NavDecision::BlockSilently
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // ── DIAGNOSTIC PANIC HOOK (April 2026 crash investigation) ─────────────
@@ -508,66 +576,32 @@ pub fn run() {
             // `transparent(false)` is the default in Tauri and the setter is
             // gated behind `macos-private-api` on macOS, so we omit it (the
             // original config field was effectively a no-op).
-            .on_navigation(|url: &Url| {
-                let scheme = url.scheme();
-                // Tauri-internal schemes: always allow.
-                // - tauri / ipc: Tauri 2.x core IPC bridges
-                // - asset: tauri-plugin-fs asset serving
-                // - myagents / myagents-internal: app's custom protocols
-                //
-                // SECURITY: `data:` / `blob:` / `about:` are intentionally NOT
-                // in the top-frame allowlist. A `data:text/html,<script>…` URL
-                // navigated at top-frame would replace the entire app with
-                // attacker-controlled HTML running in the privileged renderer
-                // origin (full access to Tauri IPC). These schemes are still
-                // usable inside iframes / <img> / <video> (where on_navigation
-                // doesn't fire) — only top-frame replacement is blocked here.
-                // Right-click "Open Link" from WebKit's native context menu on
-                // such an anchor would otherwise bypass `LinkContextMenuProvider`
-                // (which only intercepts http/https/mailto).
-                if matches!(
-                    scheme,
-                    "tauri"
-                        | "ipc"
-                        | "asset"
-                        | "myagents"
-                        | "myagents-internal"
-                ) {
-                    return true;
-                }
-                // http(s): allow only localhost / 127.0.0.1 / tauri.localhost /
-                // ipc.localhost. Dev mode loads from http://localhost:5173,
-                // Windows prod loads from http://tauri.localhost, IPC bridges
-                // use http://ipc.localhost. Anything else is an external URL —
-                // hand it to the OS default browser and cancel the navigation
-                // so the main webview stays on the app.
-                if scheme == "http" || scheme == "https" {
-                    let host = url.host_str().unwrap_or("");
-                    if matches!(
-                        host,
-                        "localhost" | "127.0.0.1" | "tauri.localhost" | "ipc.localhost"
-                    ) {
-                        return true;
-                    }
+            // `on_navigation` blocks external top-frame navigation. The native
+            // WKWebView context menu's "Open Link" entry triggers a direct
+            // top-frame navigation that bypasses React `onClick` handlers —
+            // without this gate the entire app gets replaced by the linked page
+            // with no way back (bug: right-click → 软件报废). NOTE: in this
+            // WKWebView the callback ALSO fires for sub-frame (iframe)
+            // navigations — so the Generative-UI widget's `about:srcdoc`
+            // sandbox iframe must be allowed here too (see classify_navigation).
+            .on_navigation(|url: &Url| match classify_navigation(url) {
+                NavDecision::Allow => true,
+                NavDecision::OpenExternally => {
                     ulog_info!(
                         "[main-window] BLOCKED external nav → system browser: {}",
                         url
                     );
                     browser::spawn_external_open(url.as_str());
-                    return false;
+                    false
                 }
-                // mailto / tel: route to OS default handler, cancel nav.
-                if matches!(scheme, "mailto" | "tel") {
-                    browser::spawn_external_open(url.as_str());
-                    return false;
+                NavDecision::BlockSilently => {
+                    ulog_warn!(
+                        "[main-window] BLOCKED nav with scheme {}: {}",
+                        url.scheme(),
+                        url
+                    );
+                    false
                 }
-                // Everything else (javascript:, file:, unknown schemes) — block.
-                ulog_warn!(
-                    "[main-window] BLOCKED nav with scheme {}: {}",
-                    scheme,
-                    url
-                );
-                false
             });
 
             // Platform-specific window chrome — macOS uses the Overlay title
@@ -1042,4 +1076,57 @@ pub fn run() {
             _ => {}
         }
     });
+}
+
+#[cfg(test)]
+mod nav_guard_tests {
+    use super::{classify_navigation, NavDecision};
+    use tauri::Url;
+
+    fn decide(s: &str) -> NavDecision {
+        classify_navigation(&Url::parse(s).expect("parse url"))
+    }
+
+    #[test]
+    fn allows_widget_srcdoc_iframe() {
+        // The desktop-only widget-blank bug: on_navigation fires for the
+        // sandbox iframe's about:srcdoc nav; it MUST be allowed or the widget
+        // renders blank.
+        assert_eq!(decide("about:srcdoc"), NavDecision::Allow);
+        assert_eq!(decide("about:blank"), NavDecision::Allow);
+    }
+
+    #[test]
+    fn allows_internal_and_local_schemes() {
+        assert_eq!(decide("tauri://localhost/"), NavDecision::Allow);
+        assert_eq!(decide("asset://localhost/x"), NavDecision::Allow);
+        assert_eq!(decide("ipc://localhost/"), NavDecision::Allow);
+        assert_eq!(decide("myagents://x/y"), NavDecision::Allow);
+        assert_eq!(decide("http://localhost:5173/"), NavDecision::Allow);
+        assert_eq!(decide("https://tauri.localhost/"), NavDecision::Allow);
+        assert_eq!(decide("http://127.0.0.1:1420/"), NavDecision::Allow);
+    }
+
+    #[test]
+    fn still_blocks_top_frame_attack_schemes() {
+        // These must STAY blocked — a top-frame data:/blob:/javascript: nav
+        // would run attacker HTML in the privileged app origin.
+        assert_eq!(
+            decide("data:text/html,<script>alert(1)</script>"),
+            NavDecision::BlockSilently
+        );
+        assert_eq!(
+            decide("blob:tauri://localhost/abc-123"),
+            NavDecision::BlockSilently
+        );
+        assert_eq!(decide("javascript:alert(1)"), NavDecision::BlockSilently);
+        assert_eq!(decide("file:///etc/passwd"), NavDecision::BlockSilently);
+    }
+
+    #[test]
+    fn routes_external_urls_to_os_browser() {
+        assert_eq!(decide("https://evil.example.com/"), NavDecision::OpenExternally);
+        assert_eq!(decide("mailto:a@b.com"), NavDecision::OpenExternally);
+        assert_eq!(decide("tel:+123"), NavDecision::OpenExternally);
+    }
 }

@@ -24,25 +24,9 @@
 import { useEffect, useRef, useState } from 'react';
 import { Loader2 } from 'lucide-react';
 import { renderAsync } from 'docx-preview';
+import { revokeBlobUrls } from './docxBlobUrls';
 import type { RichDocSubViewerProps } from './types';
 import { useZoom, ZoomControls } from './zoom';
-
-/** docx-preview creates blob: URLs for embedded images/fonts and never revokes
- *  them — revoke on unmount/file-switch to avoid leaking Blobs across previews. */
-function revokeBlobUrls(root: HTMLElement): void {
-  root.querySelectorAll('img[src^="blob:"]').forEach((el) => {
-    URL.revokeObjectURL((el as HTMLImageElement).src);
-  });
-  root.querySelectorAll('[href^="blob:"]').forEach((el) => {
-    const href = el.getAttribute('href');
-    if (href) URL.revokeObjectURL(href);
-  });
-  root.querySelectorAll('style').forEach((s) => {
-    for (const m of (s.textContent || '').matchAll(/url\((blob:[^)]+)\)/g)) {
-      URL.revokeObjectURL(m[1]);
-    }
-  });
-}
 
 export default function DocxViewer({ bytes, onError }: RichDocSubViewerProps) {
   const containerRef = useRef<HTMLDivElement>(null);

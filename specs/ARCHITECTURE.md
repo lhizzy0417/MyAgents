@@ -634,7 +634,7 @@ trusted root `~/.myagents/generated/tool-attachments/<sid>/<tid>/<file>`（base6
 - **Agent 目录验证：** 阻止访问系统敏感目录
 - **Tauri Capabilities：** 最小权限原则
 - **本地绑定：** Sidecar 仅监听 `127.0.0.1`
-- **CSP：** `img-src` 允许 `https:`（支持 AI Markdown 图片预览），`connect-src` 和 `fetch-src` 严格锁定
+- **CSP：** `img-src` 允许 `https:`（支持 AI Markdown 图片预览），`connect-src` 严格锁定（管 fetch/XHR/WS；非标准的 `fetch-src` 已移除，引擎本就忽略它）
 - **代理安全：** `local_http` 模块内置 `.no_proxy()` 防止系统代理拦截 localhost
 - **浏览器沙箱：** 内嵌浏览器 Webview 通过 Capability 隔离（`browser.json` 零权限），无法访问 Tauri IPC；URL scheme 限制为 http/https
 

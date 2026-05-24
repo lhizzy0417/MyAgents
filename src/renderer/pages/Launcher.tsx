@@ -34,6 +34,7 @@ import type { RuntimeType, RuntimeModelInfo, RuntimePermissionMode, RuntimeDetec
 import { CC_MODELS, CC_PERMISSION_MODES, CODEX_PERMISSION_MODES, GEMINI_PERMISSION_MODES, buildRuntimeChangePatch } from '../../shared/types/runtime';
 import { apiGetJson } from '@/api/apiFetch';
 import { isBrowserDevMode, pickFolderForDialog } from '@/utils/browserMock';
+import { resolveLauncherProvider } from '@/utils/optionResolve';
 import { useAgentStatuses } from '@/hooks/useAgentStatuses';
 import type { SessionMetadata } from '@/api/sessionClient';
 import type { InitialMessage } from '@/types/tab';
@@ -289,10 +290,28 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
         const lastUsed = config.launcherLastUsed;
         if (!lastUsed) return;
         if (lastUsed.permissionMode) setLauncherPermissionMode(lastUsed.permissionMode);
-        if (lastUsed.providerId) setLauncherProviderId(lastUsed.providerId);
-        if (lastUsed.model) setLauncherSelectedModel(lastUsed.model);
+        // #234: launcherLastUsed is a global, workspace-agnostic snapshot of the
+        // last provider/model the user picked from the launcher. Restoring it
+        // verbatim shadows the selected agent's CURRENT default (the launcherProvider
+        // memo prefers launcherProviderId), so after the user changes an Agent's
+        // provider in Settings (e.g. MiniMax → DeepSeek) the launcher kept opening
+        // sessions on the stale provider → request timeouts. Only restore the cached
+        // provider/model when it's still consistent with the agent default; otherwise
+        // the agent default wins (and the stale model is dropped with it).
+        const resolved = resolveLauncherProvider({
+            lastUsedProviderId: lastUsed.providerId,
+            lastUsedModel: lastUsed.model,
+            agentProviderId: selectedAgent?.providerId,
+            agentModel: selectedAgent?.model,
+            workspaceProviderId: selectedWorkspace?.providerId,
+            workspaceModel: selectedWorkspace?.model,
+            defaultProviderId: config.defaultProviderId,
+        });
+        if (resolved.providerId) setLauncherProviderId(resolved.providerId);
+        if (resolved.model) setLauncherSelectedModel(resolved.model);
         if (lastUsed.mcpEnabledServers) setLauncherWorkspaceMcpEnabled(lastUsed.mcpEnabledServers);
         if (lastUsed.enabledPluginIds) setLauncherEnabledPlugins(lastUsed.enabledPluginIds);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- one-time restore; selected agent/workspace read at apply time, intentionally not deps
     }, [isLoading, config.launcherLastUsed]);
 
     // Extract runtimeConfig primitives for stable useEffect deps (avoid object reference)
@@ -303,6 +322,12 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
     // Declared AFTER launcherLastUsed effect so project settings take priority on initial load.
     // Priority: project setting > global default (launcherLastUsed is global, not per-workspace)
     // Depends on individual fields (not just .id) so it re-runs when Chat's patchProject updates them.
+    // NOTE (#234): when a workspace is selected this effect is the primary author
+    // of launcherProviderId (always agent → project default), so it already keeps
+    // the launcher current after an agent-provider change. The consistency check
+    // in the launcherLastUsed restore effect above is load-bearing for the
+    // no-workspace / pre-this-effect window — both must agree; don't "simplify"
+    // by deleting one.
     useEffect(() => {
         if (isLoading || !selectedWorkspace) return;
         // For external runtimes, model and permission come from runtimeConfig.

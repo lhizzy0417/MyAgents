@@ -127,3 +127,29 @@ export function describeTerminalReason(reason: unknown): TerminalReasonInfo | nu
 export function shouldSurfaceTerminalReason(reason: unknown): boolean {
   return describeTerminalReason(reason) !== null;
 }
+
+/**
+ * Title-gen turn-acceptance gate (#245).
+ *
+ * Returns true iff the turn ended cleanly enough that its (user, assistant)
+ * text is safe to feed into auto title generation. Strictly `completed`:
+ *
+ * - `completed`              → use
+ * - undefined / null / ''    → use (external runtimes 不携带 terminal_reason，
+ *                              不能因为字段缺失就阻止它们自动起标题)
+ * - everything else          → DISCARD (aborted_*: 流被中断/用户停掉，content
+ *                              可能只是 OpenAI Bridge/SDK 把上游 4xx/5xx 当 text
+ *                              块吐回来；*_error / *_limit / max_turns: 截断或
+ *                              退化文本，喂给 title LLM 会得到无意义标题)
+ *
+ * #245 实战：SDK / openai-bridge 在上游 4xx/5xx 时把错误文本作为 assistant
+ * text_delta 推到 renderer，并以 terminal_reason='aborted_streaming' 终止本
+ * 轮。renderer 之前不看 reason，把这种"伪完成"轮当作正常 QA round 累积到
+ * 3 轮就触发 title-gen，结果会话被命名为 "API Error: 400 ..."。Title-gen
+ * 不是关键路径（前端会回退到"用户第一条消息截断"作为标题），保守拒绝即
+ * 可，不需要更复杂的内容启发式。
+ */
+export function shouldRecordTurnForTitle(reason: unknown): boolean {
+  if (typeof reason !== 'string' || reason.length === 0) return true;
+  return reason === 'completed';
+}

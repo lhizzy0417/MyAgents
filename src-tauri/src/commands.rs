@@ -1329,6 +1329,33 @@ fn merge_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+// Path-safety blacklist (single source for validate_file_path + the cross-check
+// test). cfg-gated so each platform compiles only its own list. MUST stay in
+// sync with Node path-safety.ts and the shared fixture
+// src/shared/path-safety-blacklist.json — see path_safety_crosscheck_tests.
+#[cfg(windows)]
+const FORBIDDEN_SYSTEM_DIRS: &[&str] = &[
+    "C:\\Windows", "C:\\Program Files", "C:\\Program Files (x86)",
+    "C:\\ProgramData", "C:\\Recovery", "C:\\$Recycle.Bin",
+];
+#[cfg(all(not(windows), not(target_os = "macos")))]
+const FORBIDDEN_SYSTEM_DIRS: &[&str] = &[
+    "/etc", "/var", "/usr", "/bin", "/sbin", "/boot", "/root", "/sys", "/proc", "/dev",
+];
+// macOS symlinks /etc → /private/etc and /var → /private/var; block the canonical
+// /private targets too so a literal /private/etc path can't slip the lexical check.
+#[cfg(target_os = "macos")]
+const FORBIDDEN_SYSTEM_DIRS: &[&str] = &[
+    "/etc", "/var", "/usr", "/bin", "/sbin", "/boot", "/root", "/sys", "/proc", "/dev",
+    "/private/etc", "/private/var",
+];
+const CREDENTIAL_SUBDIRS: &[&str] = &[".ssh", ".gnupg", ".aws", ".kube", ".docker", ".config/op"];
+#[cfg(target_os = "macos")]
+const MAC_SENSITIVE_SUBDIRS: &[&str] =
+    &["Library/Keychains", "Library/Cookies", "Library/Mail", "Library/Messages", "Library/Safari"];
+#[cfg(windows)]
+const WIN_SENSITIVE_SUBDIRS: &[&str] = &["AppData/Local/Microsoft"];
+
 /// Validate that a file path does not target sensitive system or credential directories.
 /// Resolves `..` components to prevent path traversal. Mirrors `isSafeReadPath()` in Bun.
 ///
@@ -1353,20 +1380,8 @@ pub(crate) fn validate_file_path(raw_path: &str) -> Result<PathBuf, String> {
 
     let home = dirs::home_dir().unwrap_or_default();
 
-    // System directories blacklist
-    #[cfg(windows)]
-    let forbidden_system: Vec<PathBuf> = vec![
-        "C:\\Windows", "C:\\Program Files", "C:\\Program Files (x86)",
-        "C:\\ProgramData", "C:\\Recovery", "C:\\$Recycle.Bin",
-    ].into_iter().map(PathBuf::from).collect();
-
-    #[cfg(not(windows))]
-    let forbidden_system: Vec<PathBuf> = vec![
-        "/etc", "/var", "/usr", "/bin", "/sbin",
-        "/boot", "/root", "/sys", "/proc", "/dev",
-    ].into_iter().map(PathBuf::from).collect();
-
-    for dir in &forbidden_system {
+    // System directories blacklist (FORBIDDEN_SYSTEM_DIRS is cfg-gated above).
+    for dir in FORBIDDEN_SYSTEM_DIRS {
         if resolved.starts_with(dir) {
             return Err("Access denied: protected system directory".to_string());
         }
@@ -1374,30 +1389,89 @@ pub(crate) fn validate_file_path(raw_path: &str) -> Result<PathBuf, String> {
 
     // Credential / key store directories
     if !home.as_os_str().is_empty() {
-        let credential_dirs = [".ssh", ".gnupg", ".aws", ".kube", ".docker", ".config/op"];
-        for name in &credential_dirs {
+        for name in CREDENTIAL_SUBDIRS {
             if resolved.starts_with(home.join(name)) {
                 return Err("Access denied: protected credential directory".to_string());
             }
         }
 
         #[cfg(target_os = "macos")]
-        {
-            let mac_sensitive = ["Library/Keychains", "Library/Cookies", "Library/Mail", "Library/Messages", "Library/Safari"];
-            for name in &mac_sensitive {
-                if resolved.starts_with(home.join(name)) {
-                    return Err("Access denied: protected system directory".to_string());
-                }
+        for name in MAC_SENSITIVE_SUBDIRS {
+            // `name` contains a "/"; PathBuf::join treats it as a separator.
+            if resolved.starts_with(home.join(name)) {
+                return Err("Access denied: protected system directory".to_string());
             }
         }
 
         #[cfg(windows)]
-        if resolved.starts_with(home.join("AppData").join("Local").join("Microsoft")) {
-            return Err("Access denied: protected system directory".to_string());
+        for name in WIN_SENSITIVE_SUBDIRS {
+            if resolved.starts_with(home.join(name)) {
+                return Err("Access denied: protected system directory".to_string());
+            }
         }
     }
 
     Ok(resolved)
+}
+
+#[cfg(test)]
+mod path_safety_crosscheck_tests {
+    use super::{CREDENTIAL_SUBDIRS, FORBIDDEN_SYSTEM_DIRS};
+    use serde_json::Value;
+
+    // Rust side of the Node↔Rust blacklist cross-check (PRD 0.2.15 §7.2). Asserts
+    // the lists THIS platform compiled equal the shared fixture; the Node test
+    // (path-safety-crosscheck.unit.test.ts) covers every platform's list. Change
+    // a list without the fixture → one of the two sides fails.
+    fn fixture() -> Value {
+        serde_json::from_str(include_str!("../../src/shared/path-safety-blacklist.json"))
+            .expect("path-safety-blacklist.json parses")
+    }
+    fn arr(v: &Value, key: &str) -> Vec<String> {
+        v[key]
+            .as_array()
+            .unwrap_or_else(|| panic!("fixture.{key} must be an array"))
+            .iter()
+            .map(|x| x.as_str().expect("fixture entry is a string").to_string())
+            .collect()
+    }
+
+    #[test]
+    fn credential_subdirs_match_fixture() {
+        let owned: Vec<String> = CREDENTIAL_SUBDIRS.iter().map(|s| s.to_string()).collect();
+        assert_eq!(owned, arr(&fixture(), "credentialSubdirs"));
+    }
+
+    #[test]
+    fn system_dirs_match_fixture_for_this_platform() {
+        let f = fixture();
+        #[cfg(windows)]
+        let expected = arr(&f, "systemDirsWindows");
+        #[cfg(all(not(windows), not(target_os = "macos")))]
+        let expected = arr(&f, "systemDirsPosix");
+        #[cfg(target_os = "macos")]
+        let expected = {
+            let mut v = arr(&f, "systemDirsPosix");
+            v.extend(arr(&f, "systemDirsMacosExtra"));
+            v
+        };
+        let owned: Vec<String> = FORBIDDEN_SYSTEM_DIRS.iter().map(|s| s.to_string()).collect();
+        assert_eq!(owned, expected);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn mac_sensitive_subdirs_match_fixture() {
+        let owned: Vec<String> = super::MAC_SENSITIVE_SUBDIRS.iter().map(|s| s.to_string()).collect();
+        assert_eq!(owned, arr(&fixture(), "macSensitiveSubdirs"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn win_sensitive_subdirs_match_fixture() {
+        let owned: Vec<String> = super::WIN_SENSITIVE_SUBDIRS.iter().map(|s| s.to_string()).collect();
+        assert_eq!(owned, arr(&fixture(), "winSensitiveSubdirs"));
+    }
 }
 
 /// Read a workspace text file. Returns content if exists, null if not.

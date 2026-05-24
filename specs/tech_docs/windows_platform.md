@@ -107,15 +107,17 @@ if let Some(pgrep) = crate::system_binary::find("pgrep") {
 
 **关键点**：
 - Windows Tauri v2 使用 `http://ipc.localhost` 协议
-- IPC 调用使用 **Fetch API**（不是 XHR/WebSocket）
-- 必须在 CSP 中同时配置 `default-src`、`connect-src` 和 `fetch-src`
+- IPC 调用使用 **Fetch API**
+- `default-src` 和 `connect-src` 都必须包含 `http://ipc.localhost`
+- `connect-src` 是管 fetch / XHR / WebSocket 的**标准** CSP 指令——IPC 的 Fetch 由它放行。
+  曾配过的 `fetch-src` 是**非标准**指令，WebKit 与 WebView2（Chromium）都不认、直接忽略（只在 console 报 `Unrecognized Content-Security-Policy directive 'fetch-src'`），已移除。
 
 **正确配置**：
 ```json
 {
   "app": {
     "security": {
-      "csp": "default-src 'self' ipc: tauri: asset: http://ipc.localhost; fetch-src 'self' ipc: tauri: asset: http://ipc.localhost https://download.myagents.io; ..."
+      "csp": "default-src 'self' ipc: tauri: asset: http://ipc.localhost; connect-src 'self' ipc: tauri: asset: http://ipc.localhost http://localhost:* http://127.0.0.1:* ws://localhost:* ws://127.0.0.1:* https://download.myagents.io; ..."
     }
   }
 }
@@ -123,9 +125,8 @@ if let Some(pgrep) = crate::system_binary::find("pgrep") {
 
 **常见错误**：
 ```
-❌ 缺少 fetch-src 指令
-❌ fetch-src 中缺少 http://ipc.localhost
-❌ 只配置了 connect-src（用于 XHR/WebSocket）
+❌ connect-src 缺少 http://ipc.localhost（IPC Fetch 被 CSP 拦截）
+❌ 误以为要用 fetch-src（非标准、引擎忽略；真正生效的是 connect-src）
 ```
 
 **详见**：[build_troubleshooting.md#CSP配置错误](./build_troubleshooting.md#csp-配置错误)

@@ -273,8 +273,10 @@ async function referenceExternalPath(sourcePath: string, ctx: SaveContext): Prom
  * (169.254.169.254 etc.) or localhost-bound services.
  *
  * Codex review Critical#3.
+ *
+ * Exported for unit testing — pure (URL) → result, no I/O.
  */
-function isUrlSchemeSafe(parsed: URL): { ok: true } | { ok: false; reason: string } {
+export function isUrlSchemeSafe(parsed: URL): { ok: true } | { ok: false; reason: string } {
   if (parsed.protocol !== 'https:') {
     return { ok: false, reason: `Unsupported URL scheme: ${parsed.protocol}` };
   }
@@ -293,6 +295,16 @@ function isUrlSchemeSafe(parsed: URL): { ok: true } | { ok: false; reason: strin
     /^172\.(1[6-9]|2\d|3[0-1])\./.test(host) ||
     /^\[?fc00:/i.test(host) || /^\[?fd[0-9a-f]{2}:/i.test(host) || /^\[?fe80:/i.test(host)
   ) {
+    return { ok: false, reason: `Blocked private/loopback host: ${host}` };
+  }
+  // IPv6 forms the lexical IPv4 checks above miss (cross-review W1). Node keeps
+  // the brackets in `hostname` for IPv6 literals — strip + lower-case first.
+  //  - `::` / unspecified routes to loopback on many stacks.
+  //  - `::ffff:<v4>` (IPv4-mapped IPv6, dotted `::ffff:127.0.0.1` OR hex
+  //    `::ffff:7f00:1`) is a classic SSRF bypass for loopback/private targets;
+  //    reject the literal form outright — legitimate image hosts don't use it.
+  const h6 = host.replace(/^\[|\]$/g, '').toLowerCase();
+  if (h6 === '::' || h6 === '::0' || /^(?:0:){7}0$/.test(h6) || h6.startsWith('::ffff:')) {
     return { ok: false, reason: `Blocked private/loopback host: ${host}` };
   }
   return { ok: true };

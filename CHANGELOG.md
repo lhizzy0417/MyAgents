@@ -11,6 +11,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.2.21] - 2026-05-24
+
+> 本版是一轮稳定性与社区 bug 修复：重点修了 Windows 上对话进行中频繁掉线、历史记录切换后界面卡死空白、新建 Tab 首条消息权限模式不对、改了 Agent 默认 Provider 后快捷启动栏仍走旧 Provider、本地插件装不上等社区报告的问题，并关闭了一个 macOS 路径安全黑名单缺口。
+
+### Fixed
+
+- **Windows 对话进行中频繁掉线、全局 Sidecar 反复重启**（[#236](https://github.com/hAcKlyc/MyAgents/issues/236)）：全局 Sidecar 的健康检查原本单次探测失败（进程其实还活着，只是被 Defender 扫描 / 瞬时高负载卡了一下）就重启，连带所有 Tab 一起掉线。现在要求连续两次探测失败才重启，进程真死仍立即重启，并在日志里标注存活状态便于排查。（注：日志里的 `SSE stream error / 10054` 是进程被回收的结果，不是原因。）
+- **历史记录切换后界面卡死 / 空白**（[#235](https://github.com/hAcKlyc/MyAgents/issues/235)）：网络抖动导致 SSE 连接一直连不上时，会话加载会无限等待、界面永久空白。现在加了超时兜底——超时后直接用 HTTP 加载会话内容让你先看到对话，SSE 恢复后继续流式。
+- **新建 Tab 首条消息没按工作区权限模式发送**（[#244](https://github.com/hAcKlyc/MyAgents/issues/244)）：新建 Tab 后立刻发的第一条消息会用默认的 `auto` 而不是工作区配置的权限（如 fullAgency），表现为「明明配了权限却说工具不可用」。现在首条消息也正确采用配置值。
+- **改 Agent 默认 Provider 后快捷启动栏仍用旧 Provider**（[#234](https://github.com/hAcKlyc/MyAgents/issues/234)）：在设置里把 Agent 默认 Provider 换掉后，快捷启动栏仍记着旧的，从启动栏开的新会话会走错 Provider 导致超时。现在启动栏会跟随 Agent 当前默认 Provider。
+- **本地插件 `cc-plugin install file://` 报「目录已存在」却装不上**（[#239](https://github.com/hAcKlyc/MyAgents/issues/239)）：当插件目录已经放在 `~/.myagents/plugins/<名字>` 下、再用 `file://` 指向它安装时会 409 失败、且 `cc-plugin list` 看不到。现在能原地正确注册。
+- **对话自动命名被 API 错误信息污染**（[#245](https://github.com/hAcKlyc/MyAgents/issues/245)）：上游返回 4xx/5xx 时错误文本会被当成正常回复，导致会话被自动命名成「API Error: 400 …」。现在带错误的轮次不再参与自动起标题。
+- **生成式 UI widget 在桌面端空白**：仅桌面端打开的生成式 UI widget 因导航守卫误拦内部 iframe 而显示空白，已修。
+- **安全加固**：关闭 macOS 路径安全黑名单缺口——`/etc`、`/var` 在 macOS 上是指向 `/private/*` 的符号链接，其规范化形式 `/private/etc`、`/private/var` 此前能绕过黑名单，现已一并拦截；同时加固了工具下载图片时对内网 / loopback 地址（含 IPv6 映射形式）的 SSRF 防护。
+
+---
+
 ## [0.2.20] - 2026-05-23
 
 > 本版主打「富文档预览」——PDF、Word、Excel、PowerPoint 现在都能直接在应用内打开，不用切到外部软件；PDF 还能选中复制文字、触控板捏合缩放。另外修了一批任务可靠性问题：Mac 休眠 / App Nap 唤醒后长任务被误判超时而「突然自动中止」、关闭 Tab 会中断正在后台跑的任务、非 Claude 模型（Codex / Gemini）下生成的图表卡片空白等社区报告的问题。

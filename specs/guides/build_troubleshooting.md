@@ -46,8 +46,7 @@ if (Test-Path $resourcesDir) {
 - `build_windows.ps1` 第 153 行强制覆盖 CSP 为旧版本
 - 覆盖的 CSP 缺少关键指令：
   - ❌ `asset:` 协议
-  - ❌ `http://ipc.localhost` （Windows Tauri IPC 必需）
-  - ❌ `fetch-src` 指令
+  - ❌ `http://ipc.localhost` （Windows Tauri IPC 必需，由 `connect-src` 放行）
   - ❌ `https://download.myagents.io`
 
 **修复**（commit a23cdf3）：
@@ -76,15 +75,18 @@ Remove-Item src-tauri\target\x86_64-pc-windows-msvc\release -Recurse -Force
 ### Windows Tauri IPC 需要特殊 CSP
 
 **背景**：
-- Windows Tauri v2 使用 `http://ipc.localhost` 进行 IPC 通信
-- 需要在 CSP 中同时配置 `default-src`、`connect-src` 和 `fetch-src`
+- Windows Tauri v2 使用 `http://ipc.localhost` 进行 IPC 通信（走 Fetch API）
+- CSP 中 `default-src` 和 `connect-src` 都必须包含 `http://ipc.localhost`。
+  注意：管 fetch/XHR/WebSocket 的标准指令是 `connect-src`；曾经配过的
+  `fetch-src` 是非标准指令，WebKit / WebView2 都忽略它（只在 console 报
+  "Unrecognized"），已移除——真正放行 IPC 的一直是 `connect-src`。
 
 **正确配置**（`tauri.conf.json`）：
 ```json
 {
   "app": {
     "security": {
-      "csp": "default-src 'self' ipc: tauri: asset: http://ipc.localhost; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; font-src 'self' data:; connect-src 'self' ipc: tauri: asset: http://ipc.localhost http://localhost:* http://127.0.0.1:* ws://localhost:* ws://127.0.0.1:* https://download.myagents.io; fetch-src 'self' ipc: tauri: asset: http://ipc.localhost https://download.myagents.io; img-src 'self' data: blob: asset: https://download.myagents.io;"
+      "csp": "default-src 'self' ipc: tauri: asset: http://ipc.localhost; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; font-src 'self' data:; connect-src 'self' ipc: tauri: asset: http://ipc.localhost http://localhost:* http://127.0.0.1:* ws://localhost:* ws://127.0.0.1:* https://download.myagents.io; img-src 'self' data: blob: asset: https://download.myagents.io;"
     }
   }
 }
@@ -92,8 +94,7 @@ Remove-Item src-tauri\target\x86_64-pc-windows-msvc\release -Recurse -Force
 
 **关键部分**：
 - `default-src`: 包含 `http://ipc.localhost`
-- `fetch-src`: **必须**包含 `http://ipc.localhost`（Windows Tauri IPC 使用 Fetch API）
-- `connect-src`: 包含 localhost 和 WebSocket 支持
+- `connect-src`: **必须**包含 `http://ipc.localhost`（Windows Tauri IPC 走 Fetch API，由 connect-src 放行），并含 localhost 和 WebSocket 支持
 - `img-src`: 支持 data URL 和 CDN 资源
 
 **验证 CSP 配置**：
@@ -104,7 +105,7 @@ $conf = Get-Content src-tauri/tauri.conf.json | ConvertFrom-Json
 $csp = $conf.app.security.csp
 
 # 验证关键部分
-$requiredParts = @("http://ipc.localhost", "asset:", "fetch-src", "https://download.myagents.io")
+$requiredParts = @("http://ipc.localhost", "asset:", "connect-src", "https://download.myagents.io")
 foreach ($part in $requiredParts) {
     if ($csp -notlike "*$part*") {
         Write-Host "缺少: $part" -ForegroundColor Red
@@ -174,7 +175,7 @@ let client = reqwest::Client::builder()
 
 - [ ] 版本号已同步（`package.json`, `tauri.conf.json`, `Cargo.toml`）
 - [ ] TypeScript 类型检查通过（`bun run typecheck`）
-- [ ] CSP 配置完整（包含 `http://ipc.localhost`, `fetch-src`）
+- [ ] CSP 配置完整（`connect-src` 包含 `http://ipc.localhost`）
 - [ ] 清理旧的 resources 缓存
 - [ ] 杀死残留进程（bun, MyAgents）
 

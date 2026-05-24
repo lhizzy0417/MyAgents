@@ -338,21 +338,25 @@ try {
         }
     }
 
-    # 特殊验证: fetch-src 指令必须包含 http://ipc.localhost (Windows Tauri IPC 关键)
-    if ($currentCsp -match "fetch-src\s+([^;]+)") {
-        $fetchSrcDirective = $matches[1]
-        if ($fetchSrcDirective -notlike "*http://ipc.localhost*") {
-            $missingParts += "fetch-src 缺少 http://ipc.localhost (Windows 必需)"
+    # 特殊验证: connect-src 指令必须包含 http://ipc.localhost (Windows Tauri IPC 关键)
+    # connect-src 是管 fetch/XHR/WebSocket 的标准 CSP 指令；Windows Tauri IPC 走
+    # Fetch API 打到 http://ipc.localhost，必须由 connect-src 放行。（旧版校验的
+    # 是非标准指令 fetch-src——WebKit/WebView2 都忽略它、只在 console 报
+    # "Unrecognized"，已从 CSP 移除；真正生效的一直是 connect-src。）
+    if ($currentCsp -match "connect-src\s+([^;]+)") {
+        $connectSrcDirective = $matches[1]
+        if ($connectSrcDirective -notlike "*http://ipc.localhost*") {
+            $missingParts += "connect-src 缺少 http://ipc.localhost (Windows 必需)"
         }
     } else {
-        $missingParts += "fetch-src 指令"
+        $missingParts += "connect-src 指令"
     }
 
     if ($missingParts.Count -gt 0) {
         Write-Host "  错误: CSP 配置不符合 Windows 要求:" -ForegroundColor Red
         $missingParts | ForEach-Object { Write-Host "    - $_" -ForegroundColor Red }
         Write-Host ""
-        Write-Host "  Windows Tauri IPC 需要 fetch-src 包含 http://ipc.localhost" -ForegroundColor Yellow
+        Write-Host "  Windows Tauri IPC 需要 connect-src 包含 http://ipc.localhost" -ForegroundColor Yellow
         Write-Host "  请检查 tauri.conf.json 中的 CSP 配置" -ForegroundColor Yellow
         Write-Host ""
         throw "CSP 配置不完整，无法在 Windows 上正常运行"

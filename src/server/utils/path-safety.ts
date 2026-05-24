@@ -8,8 +8,11 @@
  * - sidecar 进程内（Node）需要在 attachment 落盘 helper 同步路径上做黑名单
  *   过滤，调 Tauri invoke 不可用（Node 不在 Webview context）
  *
- * 维护契约：本文件的黑名单条目 MUST 与 Rust validate_file_path 同步。新增
- * 敏感目录时两处都要改；test/ 下有 cross-check 测试保证条目一致。
+ * 维护契约：本文件的黑名单条目 MUST 与 Rust validate_file_path 同步。三处同改：
+ * (1) 本文件、(2) Rust commands.rs::validate_file_path、(3) 共享 fixture
+ * `src/shared/path-safety-blacklist.json`。两侧各有一个测试断言「自己的条目 ==
+ * fixture」（Node: path-safety-crosscheck.unit.test.ts；Rust:
+ * commands.rs::path_safety_crosscheck_tests），任一处与 fixture 漂移即测试失败。
  *
  * 详见 PRD 0.2.15 §4.5 + §7.2。
  */
@@ -20,10 +23,19 @@ import path from 'node:path';
 
 const HOME = homedir() || '';
 
+const POSIX_SYSTEM_DIRS = ['/etc', '/var', '/usr', '/bin', '/sbin', '/boot', '/root', '/sys', '/proc', '/dev'];
+// macOS symlinks /etc → /private/etc and /var → /private/var. With
+// canonicalizeSymlinks the realpath of a symlink-escape lands in the canonical
+// /private location, which the bare /etc|/var entries miss (a literal
+// /private/etc path slips the lexical check too). Block both forms.
+const MACOS_PRIVATE_DIRS = ['/private/etc', '/private/var'];
+const WIN_SYSTEM_DIRS = ['C:\\Windows', 'C:\\Program Files', 'C:\\Program Files (x86)', 'C:\\ProgramData', 'C:\\Recovery', 'C:\\$Recycle.Bin'];
 const SYSTEM_BLACKLIST: readonly string[] =
   platform() === 'win32'
-    ? ['C:\\Windows', 'C:\\Program Files', 'C:\\Program Files (x86)', 'C:\\ProgramData', 'C:\\Recovery', 'C:\\$Recycle.Bin']
-    : ['/etc', '/var', '/usr', '/bin', '/sbin', '/boot', '/root', '/sys', '/proc', '/dev'];
+    ? WIN_SYSTEM_DIRS
+    : platform() === 'darwin'
+      ? [...POSIX_SYSTEM_DIRS, ...MACOS_PRIVATE_DIRS]
+      : POSIX_SYSTEM_DIRS;
 
 const CREDENTIAL_SUBDIRS: readonly string[] = ['.ssh', '.gnupg', '.aws', '.kube', '.docker', '.config/op'];
 
@@ -36,6 +48,21 @@ const MAC_SENSITIVE_SUBDIRS: readonly string[] = [
 ];
 
 const WIN_SENSITIVE_SUBDIRS: readonly string[] = ['AppData/Local/Microsoft'];
+
+/**
+ * The raw blacklist pieces, exposed for the Node↔Rust cross-check test ONLY
+ * (path-safety-crosscheck.unit.test.ts). Platform-independent so the test can
+ * compare every list against the shared fixture on any OS — unlike
+ * SYSTEM_BLACKLIST which composes per the runtime platform. Not for runtime use.
+ */
+export const __blacklistForCrossCheck = {
+  systemDirsPosix: POSIX_SYSTEM_DIRS,
+  systemDirsMacosExtra: MACOS_PRIVATE_DIRS,
+  systemDirsWindows: WIN_SYSTEM_DIRS,
+  credentialSubdirs: CREDENTIAL_SUBDIRS,
+  macSensitiveSubdirs: MAC_SENSITIVE_SUBDIRS,
+  winSensitiveSubdirs: WIN_SENSITIVE_SUBDIRS,
+} as const;
 
 /** Trusted root for MyAgents-owned tool attachments (relative to $HOME). */
 export const TOOL_ATTACHMENT_ROOT_REL = '.myagents/generated/tool-attachments';

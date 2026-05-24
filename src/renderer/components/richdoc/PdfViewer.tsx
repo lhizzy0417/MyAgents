@@ -24,6 +24,7 @@ import * as pdfjsLib from 'pdfjs-dist';
 import type { PDFDocumentProxy, RenderTask, TextLayer } from 'pdfjs-dist';
 import './pdfWorker';
 import './pdfTextLayer.css';
+import { clampDpr, deviceCanvasSize, estimatedPageHeight, fitScale, pageContainerWidth } from './pdfMetrics';
 import type { RichDocSubViewerProps } from './types';
 import { useZoom, ZoomControls } from './zoom';
 
@@ -85,15 +86,16 @@ export default function PdfViewer({ bytes, onError, onEmpty }: RichDocSubViewerP
       try {
         const page = await pdf.getPage(pageNum);
         if (cancelled) return;
-        const scale = width / page.getViewport({ scale: 1 }).width;
+        const scale = fitScale(width, page.getViewport({ scale: 1 }).width);
         const viewport = page.getViewport({ scale });
         // Per-page fit scale → drives THIS page's text-layer size/position/font
         // (handles PDFs with mixed page sizes; the text layer inherits it).
         holder.dataset.pageScale = String(scale);
         holder.style.setProperty('--scale-factor', String(scale * zoomRef.current));
         const canvas = document.createElement('canvas');
-        canvas.width = Math.floor(viewport.width * dpr);
-        canvas.height = Math.floor(viewport.height * dpr);
+        const backing = deviceCanvasSize(viewport.width, viewport.height, dpr);
+        canvas.width = backing.width;
+        canvas.height = backing.height;
         canvas.style.width = '100%'; // display size set by holder (zoom-scaled)
         canvas.style.height = 'auto';
         holder.style.minHeight = '';
@@ -145,15 +147,15 @@ export default function PdfViewer({ bytes, onError, onEmpty }: RichDocSubViewerP
           return;
         }
 
-        const width = Math.max(scroller.clientWidth - 32, 320);
-        const dpr = Math.min(window.devicePixelRatio || 1, 2);
+        const width = pageContainerWidth(scroller.clientWidth);
+        const dpr = clampDpr(window.devicePixelRatio);
 
         // Estimate placeholder height + base fit-scale from page 1 (most PDFs are
         // uniform); each page's actual render corrects its own canvas height.
         const first = await pdf.getPage(1);
         const baseVp = first.getViewport({ scale: 1 });
-        const estHeight = Math.round(width * (baseVp.height / baseVp.width));
-        const baseScale = width / baseVp.width;
+        const estHeight = estimatedPageHeight(width, baseVp.width, baseVp.height);
+        const baseScale = fitScale(width, baseVp.width);
         first.cleanup();
         if (cancelled) return;
 

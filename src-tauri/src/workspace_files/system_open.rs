@@ -256,9 +256,23 @@ fn validate_external_open_path(
     // `<workspace>/.ssh` — a credential dir placed inside the workspace
     // is NOT covered by this guard. That's consistent with the rest of
     // the app's blacklist surface.
-    let normalized = crate::sidecar::normalize_external_path(canonical.clone());
-    if let Some(s) = normalized.to_str() {
-        crate::commands::validate_file_path(s)?;
+    //
+    // Skip this lexical blacklist for tmp-trusted paths. On macOS the system
+    // temp dir canonicalizes under `/private/var/folders/...`, and
+    // `validate_file_path`'s (correctly stricter) `/private/var` entry would
+    // otherwise reject every `$TMPDIR` file — breaking reveal/open for
+    // SkillDetailPanel / CommandDetailPanel / GlobalPluginsPanel /
+    // useWorkspaceFileService (B1, cross-review). A path already proven under
+    // the canonical tmp root is trusted (symlink chains were resolved before
+    // the prefix match) and tmp never holds the credential dirs this blacklist
+    // guards. home paths still run it (they need the ~/.ssh etc. credential
+    // checks and never live under /private/var); workspace paths get the extra
+    // canonicalized re-check below.
+    if !in_tmp {
+        let normalized = crate::sidecar::normalize_external_path(canonical.clone());
+        if let Some(s) = normalized.to_str() {
+            crate::commands::validate_file_path(s)?;
+        }
     }
 
     // Defense-in-depth against the macOS `/etc → /private/etc` symlink
@@ -521,6 +535,11 @@ mod tests {
         let _ = fs::remove_dir_all(&ws);
     }
 
+    // Also the regression guard for B1: on macOS `temp_dir()` canonicalizes
+    // under `/private/var/folders/...`, so a `/private/var` system-blacklist
+    // entry must NOT reject tmp-trusted paths (it broke reveal/open for every
+    // $TMPDIR file). NB: only exercises the `/private/var` path on macOS — on
+    // Linux temp is `/tmp`, so a Linux-only CI won't catch a re-break here.
     #[test]
     fn validate_external_open_accepts_tmp_path() {
         let p = std::env::temp_dir()

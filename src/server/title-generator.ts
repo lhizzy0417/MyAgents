@@ -18,6 +18,7 @@ import { join } from 'path';
 import { query } from '@anthropic-ai/claude-agent-sdk';
 import { resolveClaudeCodeCli, buildClaudeSessionEnv, startOneShotBridge, type ProviderEnv } from './agent-session';
 import { applyContextWindowSuffix } from './utils/model-capabilities';
+import { isLikelyErrorTitle } from '../shared/titleFilters';
 import { ClaudeCodeRuntime } from './runtimes/claude-code';
 import { CodexRuntime } from './runtimes/codex';
 import { GeminiRuntime } from './runtimes/gemini';
@@ -77,6 +78,14 @@ function cleanTitle(raw: string): string {
   // today, but title is long-lived metadata and cheap to harden here.
   cleaned = cleaned.replace(/[<>]/g, '');
   cleaned = cleaned.trim();
+  // #245 backstop: if the title looks like an upstream-error string (SDK 4xx/5xx
+  // surface, openai-bridge [Error]: …) the title-gen LLM has either echoed
+  // garbage input verbatim or the title-gen call itself failed and surfaced the
+  // error. Reject so the caller treats it as "no title" and the frontend falls
+  // back to its truncated-first-message default. Primary gate is the renderer
+  // shouldRecordTurnForTitle; this catches paths it can't cover (loaded-history
+  // reconstruction, title-gen call hitting its own 4xx).
+  if (isLikelyErrorTitle(cleaned)) return '';
   if (cleaned.length > TITLE_MAX_LENGTH) {
     cleaned = cleaned.slice(0, TITLE_MAX_LENGTH);
   }

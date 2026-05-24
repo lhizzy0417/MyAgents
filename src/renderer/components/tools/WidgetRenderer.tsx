@@ -79,7 +79,16 @@ export default function WidgetRenderer({ widgetCode, isStreaming, title }: Widge
   const [height, setHeight] = useState(() => heightCache.get(cacheKey) ?? MIN_HEIGHT);
   const [firstResize, setFirstResize] = useState(true);
 
-  // Build srcdoc once (CSS vars captured at mount time)
+  // Build srcdoc once (CSS vars captured at mount time).
+  //
+  // The iframe's document URL is `about:srcdoc`. The macOS WKWebView fires the
+  // Rust `on_navigation` guard (src-tauri/src/lib.rs) for SUB-FRAME navigations
+  // too — not just the top frame — and that guard blocks any scheme outside its
+  // allow-list. `about:srcdoc` must therefore be explicitly allowed there, or
+  // the sandbox iframe is blocked into an empty document and the widget renders
+  // blank (the desktop-only widget-blank bug). about:srcdoc is iframe-only and
+  // safe to allow (a top frame can't navigate to attacker-controlled srcdoc).
+  // See that guard's comment for the full rationale.
   const srcdoc = useMemo(() => {
     const cssVars = buildWidgetCssVars();
     return buildSandboxHtml(cssVars);
