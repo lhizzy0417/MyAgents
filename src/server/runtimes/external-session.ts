@@ -1984,6 +1984,10 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
       // Text block ended — flush accumulated text into a content block
       console.log(`[external-session] text_stop: accumulated ${currentAssistantText.length} chars`);
       flushPendingText();
+      // Mirror builtin: tell the renderer the trailing text block closed so it clears
+      // `streamingTextActive` and the tail-fade stops (same bug class, sibling runtime
+      // path). type:'text' is the discriminator; index is unused for the text case.
+      broadcast('chat:content-block-stop', { index: -1, type: 'text' });
       fireImCallback('block-end', '');
       break;
 

@@ -9196,7 +9196,12 @@ async function startStreamingSession(preWarm = false): Promise<void> {
           } else {
             broadcast('chat:content-block-stop', {
               index: streamEvent.index,
-              toolId: toolId || undefined
+              toolId: toolId || undefined,
+              // Block type lets the renderer mark a *text* block complete on stop, so
+              // the streaming tail-fade (Markdown rehypeStreamTail) clears once the
+              // model finishes the text — even when the turn keeps running (next tool /
+              // thinking). Without this the fade lingers on the last chars indefinitely.
+              type: streamIndexToBlockType.get(streamEvent.index),
             });
             handleContentBlockStop(streamEvent.index, toolId || undefined);
             // IM stream: signal text block end via event bus (Pattern B)

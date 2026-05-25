@@ -414,7 +414,10 @@ const Message = memo(function Message({ message, isLoading = false, onRewind, on
       <div className="flex justify-start w-full px-4 py-2 select-none" data-role="assistant">
         <div className="w-full max-w-none">
           <div className="text-[var(--ink)] select-text">
-            <Markdown streaming={isLoading}>{message.content}</Markdown>
+            {/* Tail-fade only while text is the actively-streaming edge — `streamingTextActive`
+                clears on the text block's content-block-stop, so it doesn't linger during a
+                slow gap before the next block (string-content path). */}
+            <Markdown streaming={isLoading && !!message.streamingTextActive}>{message.content}</Markdown>
           </div>
           {actionsReady && !isLoading && <AssistantActions message={message} onRetry={onRetry} onFork={onFork} />}
         </div>
@@ -524,15 +527,19 @@ const Message = memo(function Message({ message, isLoading = false, onRewind, on
                       </div>
                     );
                   }
-                  // Plain text — no widget tags. The last block of a still-loading
-                  // message is the actively-streaming tail → soft fade + caret.
+                  // Plain text — no widget tags. The tail-fade applies only to the
+                  // actively-streaming edge: last block of a still-loading message AND
+                  // `streamingTextActive` (set on text deltas, cleared on the text block's
+                  // content-block-stop). The flag is the key guard — once the model finishes
+                  // this text (moved to next tool/thinking, or a slow gap), the fade clears
+                  // even though the turn is still loading. Without it the last chars linger faded.
                   return (
                     <div
                       key={index}
                       className="flex justify-start w-full px-1 py-1 select-none"
                     >
                       <div className="w-full max-w-none text-[var(--ink)] select-text">
-                        <Markdown streaming={isLoading && index === groupedBlocks.length - 1}>{item.text}</Markdown>
+                        <Markdown streaming={isLoading && index === groupedBlocks.length - 1 && !!message.streamingTextActive}>{item.text}</Markdown>
                       </div>
                     </div>
                   );

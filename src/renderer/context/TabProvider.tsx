@@ -1406,7 +1406,8 @@ export default function TabProvider({
                             id: Date.now().toString(),
                             role: 'assistant',
                             content: '',
-                            timestamp: new Date()
+                            timestamp: new Date(),
+                            streamingTextActive: true, // trailing text is the streaming edge → tail-fade on
                         });
                     });
                     // Set AFTER flushSync: if beginFreshStreamIfNeeded finalized a residual message,
@@ -1431,6 +1432,11 @@ export default function TabProvider({
                 // (restart it if it stopped after catching up). streamingMessage now grows on
                 // the reveal clock → autoscroll + Virtuoso measurement follow the same clock.
                 pendingTextRef.current += chunk;
+                // Re-arm the tail-fade if a prior text block was closed (text→tool→text):
+                // a real model delta just arrived, so the trailing text is streaming again.
+                // Only flips on the false→true edge (no churn mid-stream); never set in the
+                // reveal loop, so a post-stop drain won't re-activate it.
+                setStreamingMessage(prev => (prev && !prev.streamingTextActive ? { ...prev, streamingTextActive: true } : prev));
                 startRevealLoop();
                 break;
             }
@@ -1646,7 +1652,7 @@ export default function TabProvider({
             }
 
             case 'chat:content-block-stop': {
-                const { index, toolId } = data as { index: number; toolId?: string };
+                const { index, toolId, type: blockType } = data as { index: number; toolId?: string; type?: string };
                 // Pattern 3 §3.2.2 — drain RAF-batched tool-input deltas for this
                 // tool block before applying the final JSON.parse on the
                 // accumulated inputJson; otherwise the terminal parse races
@@ -1656,7 +1662,16 @@ export default function TabProvider({
                     pendingToolInputDeltasRef.current.delete(toolId);
                 }
                 setStreamingMessage(prev => {
-                    if (!prev || prev.role !== 'assistant' || typeof prev.content === 'string') return prev;
+                    if (!prev || prev.role !== 'assistant') return prev;
+                    // Trailing text closed → it's no longer the streaming edge: clear the
+                    // tail-fade flag. Done BEFORE the string-content bail below so pure-text
+                    // (string) streaming messages are covered too. The flag is SET on text
+                    // deltas (see chat:message-chunk), never in the reveal loop — so a
+                    // post-stop reveal drain can't wrongly re-activate the fade.
+                    if (blockType === 'text') {
+                        return prev.streamingTextActive ? { ...prev, streamingTextActive: false } : prev;
+                    }
+                    if (typeof prev.content === 'string') return prev;
                     const contentArray = prev.content;
 
                     // Check thinking block
