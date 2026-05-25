@@ -70,27 +70,35 @@ export function AskUserQuestionPrompt({ request, onSubmit, onCancel }: AskUserQu
 
     const isFirstQuestion = currentIndex === 0;
     const isLastQuestion = currentIndex === totalQuestions - 1;
+    const isCurrentRequired = currentQuestion?.required !== false;
 
     // Check if current question has an answer (either option or custom input)
     const currentAnswer = answers[currentIndex] || [];
     const currentCustomInput = customInputs[currentIndex] || '';
     const hasCustomInput = currentAnswer.includes(CUSTOM_INPUT_MARKER) && currentCustomInput.trim().length > 0;
-    const hasCurrentAnswer = currentAnswer.length > 0 && (
+    const currentAnswerFilled = currentAnswer.length > 0 && (
         !currentAnswer.includes(CUSTOM_INPUT_MARKER) || hasCustomInput
     );
+    const hasCurrentAnswer = !isCurrentRequired || currentAnswerFilled;
 
     // Check if all questions have answers
-    const allAnswered = useMemo(() => {
-        return request.questions.every((_, idx) => {
-            const ans = answers[idx];
-            if (!ans || ans.length === 0) return false;
-            // If custom input is selected, check it has content
-            if (ans.includes(CUSTOM_INPUT_MARKER)) {
-                return (customInputs[idx] || '').trim().length > 0;
-            }
-            return true;
-        });
+    const isQuestionAnswered = useCallback((idx: number) => {
+        const question = request.questions[idx];
+        if (!question) return false;
+        const ans = answers[idx];
+        if (!ans || ans.length === 0) return question.required === false;
+        // If custom input is selected, check it has content unless the question
+        // is optional; blank optional custom input is treated as skipped.
+        if (ans.includes(CUSTOM_INPUT_MARKER)) {
+            const filled = (customInputs[idx] || '').trim().length > 0;
+            return filled || question.required === false;
+        }
+        return true;
     }, [request.questions, answers, customInputs]);
+
+    const allAnswered = useMemo(() => {
+        return request.questions.every((_, idx) => isQuestionAnswered(idx));
+    }, [request.questions, isQuestionAnswered]);
 
     // Auto-advance to next question for single-select (not last question)
     const handleOptionSelect = useCallback((optionLabel: string) => {
@@ -160,15 +168,18 @@ export function AskUserQuestionPrompt({ request, onSubmit, onCancel }: AskUserQu
         if (!allAnswered || isSubmitting) return;
         setIsSubmitting(true);
 
-        // Convert answers to the format SDK expects: { "0": "label", "1": "label1,label2" }
+        // Convert answers to the runtime format. Builtin/CC questions omit
+        // `id` and keep the historical numeric keys; Codex app-server requires
+        // native question ids in ToolRequestUserInputResponse.answers.
         const formattedAnswers: Record<string, string> = {};
-        request.questions.forEach((_, idx) => {
+        request.questions.forEach((question, idx) => {
             const selectedOptions = answers[idx] || [];
             // Replace custom input marker with actual input value
             const finalOptions = selectedOptions.map(opt =>
                 opt === CUSTOM_INPUT_MARKER ? (customInputs[idx] || '').trim() : opt
             ).filter(Boolean);
-            formattedAnswers[String(idx)] = finalOptions.join(',');
+            if (finalOptions.length === 0 && question.required === false) return;
+            formattedAnswers[question.id ?? String(idx)] = finalOptions.join(',');
         });
 
         onSubmit(request.requestId, formattedAnswers);
@@ -183,11 +194,11 @@ export function AskUserQuestionPrompt({ request, onSubmit, onCancel }: AskUserQu
     // Navigate to specific question by clicking indicator
     const handleIndicatorClick = useCallback((idx: number) => {
         // Only allow navigation to answered questions or the next unanswered
-        const canNavigate = idx <= currentIndex || (answers[idx - 1]?.length ?? 0) > 0;
+        const canNavigate = idx <= currentIndex || isQuestionAnswered(idx - 1);
         if (canNavigate) {
             setCurrentIndex(idx);
         }
-    }, [currentIndex, answers]);
+    }, [currentIndex, isQuestionAnswered]);
 
     // Handle Enter key in custom input to advance
     const handleCustomInputKeyDown = useCallback((e: React.KeyboardEvent) => {
@@ -356,11 +367,12 @@ export function AskUserQuestionPrompt({ request, onSubmit, onCancel }: AskUserQu
                             </button>
                             <input
                                 ref={customInputRef}
-                                type="text"
+                                type={currentQuestion.isSecret ? 'password' : 'text'}
                                 value={currentCustomInput}
                                 onChange={(e) => handleCustomInputChange(e.target.value)}
                                 onKeyDown={handleCustomInputKeyDown}
                                 placeholder="说说你的想法"
+                                autoComplete={currentQuestion.isSecret ? 'off' : undefined}
                                 disabled={isSubmitting}
                                 className={`flex-1 min-w-0 bg-transparent text-sm outline-none
                                     placeholder:text-[var(--ink-muted)]

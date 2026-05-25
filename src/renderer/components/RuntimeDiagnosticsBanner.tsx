@@ -83,8 +83,21 @@ function assessBlocking(d: RuntimeDiagnostics): BlockingAssessment {
       allProblems.push(`MCP server 失败：${failed.map(s => s.name).slice(0, 3).join(', ')}`);
     }
   }
+  if (d.issues) {
+    for (const issue of d.issues) {
+      allProblems.push(`${issue.title}：${issue.message.slice(0, 100)}`);
+    }
+  }
 
   // ── Decide blocking ──
+  const blockingIssue = d.issues?.find(issue => issue.severity === 'error');
+  if (blockingIssue) {
+    return {
+      isBlocking: true,
+      headline: blockingIssue.title.slice(0, 60),
+      allProblems,
+    };
+  }
   // Rule A: explicitly needs login → cannot proceed
   if (d.auth?.requiresLogin) {
     return { isBlocking: true, headline: '需要登录 Codex 才能继续使用', allProblems };

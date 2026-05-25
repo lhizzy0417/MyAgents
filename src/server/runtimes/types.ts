@@ -5,6 +5,7 @@ import type { RuntimeType, RuntimeModelInfo, RuntimePermissionMode, RuntimeDetec
 import type { InteractionScenario } from '../system-prompt';
 import type { ModelUsageEntry } from '../types/session';
 import type { ToolAttachment } from '../../shared/types/tool-attachment';
+import type { LargeValueRef } from '../utils/large-value-store';
 
 /**
  * Image payload from frontend (base64-encoded)
@@ -93,6 +94,7 @@ export type UnifiedEvent =
       cwd?: string;
       processId?: string | null;
       status?: string;
+      largeValueRef?: LargeValueRef;
     };
   }
   /**
@@ -116,6 +118,10 @@ export type UnifiedEvent =
     input: Record<string, unknown>;
     /** CC's suggested permission rules for "always allow" (echoed back as updatedPermissions) */
     suggestions?: unknown[];
+  }
+  | {
+    kind: 'interactive_request_resolved';
+    requestId: string;
   }
 
   // === Session lifecycle ===

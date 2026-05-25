@@ -8,6 +8,7 @@ function makeMocks() {
     patchAgentConfig: vi.fn().mockResolvedValue(undefined),
     patchSnapshot: vi.fn().mockResolvedValue(undefined),
     pushMcpToSidecar: vi.fn().mockResolvedValue(undefined),
+    pushRuntimeConfigToSidecar: vi.fn().mockResolvedValue(undefined),
     getAllMcpServers: vi.fn().mockResolvedValue([]),
     getGlobalMcpEnabled: vi.fn().mockResolvedValue([]),
   };
@@ -237,5 +238,36 @@ describe('persistInputOptionChange — disk write fanout', () => {
       // no sidecar push trio
     });
     expect(m.pushMcpToSidecar).not.toHaveBeenCalled();
+  });
+
+  it('pushes external runtime model and permission changes to sidecar when wired', async () => {
+    const m = makeMocks();
+    await persistInputOptionChange({
+      workspaceId: 'ws-1',
+      agentId: 'agent-1',
+      isExternalRuntime: true,
+      fields: { runtimeModel: 'gpt-5.2-codex', permissionMode: 'no-restrictions' },
+      patchProject: m.patchProject,
+      patchAgentConfig: m.patchAgentConfig,
+      pushRuntimeConfigToSidecar: m.pushRuntimeConfigToSidecar,
+    });
+    expect(m.pushRuntimeConfigToSidecar).toHaveBeenCalledWith({
+      model: 'gpt-5.2-codex',
+      permissionMode: 'no-restrictions',
+    });
+  });
+
+  it('does not push runtime config for builtin changes', async () => {
+    const m = makeMocks();
+    await persistInputOptionChange({
+      workspaceId: 'ws-1',
+      agentId: 'agent-1',
+      isExternalRuntime: false,
+      fields: { builtinModel: 'claude-sonnet-4-6', permissionMode: 'auto' },
+      patchProject: m.patchProject,
+      patchAgentConfig: m.patchAgentConfig,
+      pushRuntimeConfigToSidecar: m.pushRuntimeConfigToSidecar,
+    });
+    expect(m.pushRuntimeConfigToSidecar).not.toHaveBeenCalled();
   });
 });

@@ -1628,13 +1628,19 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
       pushPluginsToSidecar: async (enabledIds) => {
         await apiPost('/api/cc-plugin/session-enable', { enabledIds });
       },
+      pushRuntimeConfigToSidecar: async (runtimeConfig) => {
+        await apiPost('/api/runtime/config', {
+          runtime: currentRuntime,
+          runtimeConfig,
+        });
+      },
     });
     if (!result.ok) {
       console.error('[chat] tab config dual-write failed:', result.errors);
       toastRef.current.warning('配置未能完全保存，重启后可能恢复旧值');
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps -- narrowed deps; persistInputOptionChange is a pure import, runtimeConfig accessed via currentAgent ref, apiPost is stable from TabContext
-  }, [isOwnedSession, currentProject?.id, currentProject?.agentId, isExternalRuntime, currentAgent?.runtimeConfig, patchSnapshot, patchProject]);
+  }, [isOwnedSession, currentProject?.id, currentProject?.agentId, isExternalRuntime, currentRuntime, currentAgent?.runtimeConfig, patchSnapshot, patchProject]);
 
   // Handle workspace MCP toggle — Tab UI edits dual-write:
   // (1) session snapshot so THIS session uses the new tool set immediately (owned sessions only
@@ -2137,9 +2143,13 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     // instead of re-deriving from config — even if the one-time project-sync
     // effect hasn't fired yet (user toggled before config finished loading).
     projectSyncedRef.current = true;
-    setPermissionMode(mode);
+    if (isExternalRuntime) {
+      setRuntimePermissionMode(mode);
+    } else {
+      setPermissionMode(mode);
+    }
     void persistTabConfigChange({ permissionMode: mode });
-  }, [persistTabConfigChange]);
+  }, [isExternalRuntime, persistTabConfigChange]);
 
   // Cross-runtime SDK protection: only fires when the multiAgentRuntime feature
   // gate is OFF but the session was created by an external runtime (Codex/CC/
@@ -3361,9 +3371,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
             onModelChange={isExternalRuntime ? handleRuntimeModelChange : handleModelChange}
             sessionUnlocked={isSessionUnlocked}
             permissionMode={effectivePermissionMode}
-            onPermissionModeChange={isExternalRuntime
-              ? ((mode: PermissionMode) => setRuntimePermissionMode(mode))
-              : handlePermissionModeChange}
+            onPermissionModeChange={handlePermissionModeChange}
             apiKeys={apiKeys}
             providerVerifyStatus={providerVerifyStatus}
             inputRef={inputRef}
