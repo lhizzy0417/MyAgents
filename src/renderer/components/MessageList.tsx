@@ -249,11 +249,16 @@ const MessageList = memo(function MessageList({
   // subsequent content changes without the safety timer.
   const lastScrolledSessionRef = useRef<string | null>(null);
   useLayoutEffect(() => {
+    // Never drive Virtuoso while hidden (content-visibility:hidden → stale geometry,
+    // same cache-poisoning class as the data freeze below). If the session changed
+    // while inactive, defer the pin: leaving lastScrolledSessionRef unset means this
+    // effect re-fires and pins once isActive flips true.
+    if (!isActive) return;
     if (!sessionId || sessionId === lastScrolledSessionRef.current) return;
     if (allMessages.length === 0) return;
     lastScrolledSessionRef.current = sessionId;
     scrollToBottom('auto');
-  }, [sessionId, allMessages.length, scrollToBottom]);
+  }, [isActive, sessionId, allMessages.length, scrollToBottom]);
 
   // Tab inactive ↔ active follow-state preservation.
   //
@@ -277,17 +282,28 @@ const MessageList = memo(function MessageList({
   // state; restoring it would re-enter `force` with no scrollToBottom call to
   // back it up, defeating the auto-degrade timer.
   const inactiveSnapshotRef = useRef<boolean | 'force' | null>(null);
+  // Session the snapshot belongs to. A session switch while hidden invalidates the
+  // snapshot: the old session's follow intent must not carry into the new session.
+  const inactiveSnapshotSessionRef = useRef<string | null | undefined>(null);
   useLayoutEffect(() => {
     if (!isActive) {
       if (inactiveSnapshotRef.current === null) {
         const cur = followEnabledRef.current;
         inactiveSnapshotRef.current = cur === 'force' ? true : cur;
+        inactiveSnapshotSessionRef.current = sessionId;
       }
       return;
     }
     const snap = inactiveSnapshotRef.current;
+    const snapSession = inactiveSnapshotSessionRef.current;
     if (snap === null) return; // initial mount or no inactive transition recorded
     inactiveSnapshotRef.current = null;
+    // Session changed while hidden → the old snapshot is stale. Drop it and let the
+    // session-switch pin effect own scroll + follow for the new session (it defaults
+    // a fresh session to bottom, and scrollToBottom's 'force' degrades to follow=true).
+    // Without this, restoring a stale `snap === false` here would leave the freshly
+    // switched-to session pinned at bottom but with auto-follow silently disabled.
+    if (snapSession !== sessionId) return;
     // Restore from snapshot regardless of branch — both directions need to overwrite
     // whatever the live ref currently says. If `snap === false` we restore `false`
     // explicitly: a stale atBottom(true) callback during the hidden window could
@@ -301,7 +317,7 @@ const MessageList = memo(function MessageList({
     if (allMessages.length > 0) {
       scrollToBottom('auto');
     }
-  }, [isActive, allMessages.length, scrollToBottom, followEnabledRef]);
+  }, [isActive, allMessages.length, scrollToBottom, followEnabledRef, sessionId]);
 
   // Gate Virtuoso's atBottomStateChange while the tab is hidden.
   // content-visibility: hidden lets WebKit deliver ResizeObserver callbacks
@@ -407,16 +423,33 @@ const MessageList = memo(function MessageList({
   onRetryRef.current = onRetry;
   const onForkRef = useRef(onFork);
   onForkRef.current = onFork;
-
+  // followOutput / startReached capture `isActive` DIRECTLY (not via a ref). Under
+  // React 19's child-before-parent layout-effect ordering, a ref updated in our parent
+  // layout effect could still read a stale value when Virtuoso's child effects fire
+  // these callbacks first on the active→hidden commit. Capturing the prop means the
+  // callback Virtuoso holds always matches the committed render. These recreate only on
+  // a tab active⇄inactive flip (rare — no per-stream churn) and are not itemContent, so
+  // a new identity never remounts rows.
   const handleFollowOutput = useMemo(
     () => (isAtBottom: boolean) => {
+      // Hidden tab (content-visibility:hidden): never drive follow-scroll against
+      // skipped/stale geometry (same cache-poisoning class as the data freeze below).
+      if (!isActive) return false;
       const mode = followEnabledRef.current;
       if (!mode) return false;
       if (mode === 'force') return 'smooth' as const;
       return isAtBottom ? 'smooth' as const : false;
     },
-    [followEnabledRef]
+    [followEnabledRef, isActive]
   );
+
+  // Pagination guard: don't load an older page off stale range math while hidden —
+  // Virtuoso can fire startReached from corrupted offsets when our subtree's layout
+  // was skipped (content-visibility:hidden), and a prepend in that state compounds the desync.
+  const guardedLoadOlder = useCallback(() => {
+    if (!isActive) return;
+    onLoadOlder?.();
+  }, [onLoadOlder, isActive]);
 
   // ── Stable itemContent — reads ALL dynamic values from refs, never recreated ──
   // eslint-disable-next-line react/display-name
@@ -473,6 +506,41 @@ const MessageList = memo(function MessageList({
   // ── Stable components object ──
   const components = useMemo(() => ({ Footer: FooterComponent }), [FooterComponent]);
 
+  // ── Freeze the data fed to Virtuoso while the tab is inactive ──────────────
+  // When isActive=false the host (App.tsx) wraps this subtree in
+  // `content-visibility: hidden`, so WebKit skips its layout. Any data/height change
+  // Virtuoso processes in that state is measured against skipped / zero / stale
+  // geometry, which poisons its internal offset+range cache → PHANTOM REPEATED ROWS,
+  // then a BLANK viewport once the user scrolls back — recoverable only by remount
+  // (close+reopen rebuilds the cache).
+  //
+  // The trigger is streaming-while-hidden: TabProvider's per-character reveal rAF
+  // loop (and the tool-delta rAF flushes) keep growing the last row's height even
+  // while we're hidden. Rather than chase every producer that can mutate the live
+  // array, we pin the `data` / `firstItemIndex` handed to Virtuoso to the last
+  // snapshot taken while active. With a referentially-stable data prop, Virtuoso
+  // does no measurement work while hidden no matter how much the live array churns.
+  // On re-activation we swap back to the live array (Virtuoso reconciles by
+  // computeItemKey=m.id and re-measures the grown last row with real geometry); the
+  // inactive→active re-pin effect above restores scroll position.
+  //
+  // The snapshot advances in a post-commit layout effect, NOT during render: a
+  // render-phase write could persist a speculative (interrupted/discarded) active
+  // snapshot under React 19 concurrency, which a later hidden render could then hand
+  // to Virtuoso — exactly the post-hide measurement we're preventing. A committed
+  // layout effect guarantees the snapshot is always a real, measured-while-visible state.
+  const frozenDataRef = useRef<{ data: MessageType[]; firstItemIndex: number | undefined }>({
+    data: allMessages,
+    firstItemIndex,
+  });
+  useLayoutEffect(() => {
+    if (isActive) {
+      frozenDataRef.current = { data: allMessages, firstItemIndex };
+    }
+  }, [isActive, allMessages, firstItemIndex]);
+  const virtuosoData = isActive ? allMessages : frozenDataRef.current.data;
+  const virtuosoFirstItemIndex = isActive ? firstItemIndex : frozenDataRef.current.firstItemIndex;
+
   return (
     <div
       className="relative flex-1"
@@ -514,10 +582,10 @@ const MessageList = memo(function MessageList({
       <Virtuoso
         ref={virtuosoRef}
         scrollerRef={onScrollerRef}
-        data={allMessages}
+        data={virtuosoData}
         computeItemKey={computeItemKey}
-        firstItemIndex={firstItemIndex}
-        startReached={onLoadOlder}
+        firstItemIndex={virtuosoFirstItemIndex}
+        startReached={onLoadOlder ? guardedLoadOlder : undefined}
         followOutput={handleFollowOutput}
         atBottomStateChange={guardedAtBottomChange}
         atBottomThreshold={50}
