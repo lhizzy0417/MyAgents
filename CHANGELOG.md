@@ -11,6 +11,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.2.22] - 2026-05-26
+
+> 本版继续收紧外部 Runtime 和长对话体验：Codex Runtime 的工具/权限/协议适配更稳，聊天列表在隐藏窗口后不再容易错位，AI 回复尾部淡出、用户消息气泡、Markdown 文件链接和 SessionID 复制这些高频细节也做了补齐。另外修复了 MyAgents 自己的 npm 安装隔离变量泄漏到用户 shell、触发 nvm 警告的问题。
+
+### Added
+
+- **Markdown 里的工作区文件链接可直接预览**：AI 回复中出现当前工作区内的文件路径链接时，点击会在 MyAgents 的文件预览 / 分屏预览中打开，支持 `:42` / `#L42` 这类行号定位；不可预览的文件会交给系统默认应用打开，网页链接仍按原来的浏览器逻辑处理。
+- **对话菜单可复制 SessionID**：会话右上角菜单顶部现在显示当前 SessionID，并提供一键复制，方便在 issue、排查日志或跨会话协作时准确引用。
+
+### Fixed
+
+- **Codex Runtime 协议适配更完整**：修复 Codex app-server 协议下权限响应、工具结果、会话恢复、运行时配置同步等多条路径的兼容问题，减少切到 Codex 后出现工具结果丢失、权限模式回退或会话恢复异常的情况。
+- **Chat 长会话切到后台再回来不再容易错位**：Tab / 窗口不可见时暂停把流式增长持续喂给虚拟列表，回到前台后再恢复，避免长对话在后台期间出现空白、错位或滚动位置异常。
+- **AI 回复尾部淡出不再残留**：文本块结束但后续工具 / 思考还在跑时，最后几个字不再一直保持流式淡出效果。
+- **用户消息气泡 padding 更一致**：短消息、长消息和多行消息的内边距统一，减少文本贴边或气泡视觉不平衡。
+- **IM / OpenClaw Bridge 派发更稳**：修复部分 IM fallback、history 渲染和 Bridge pending dispatch 失败路径，避免非 @ 群消息或插件回调失败时把渠道卡到长时间等待。
+- **nvm 用户不再看到 MyAgents 注入的 npm prefix 警告**（[#247](https://github.com/hAcKlyc/MyAgents/issues/247)）：MyAgents 不再把 `npm_config_prefix=~/.myagents/npm-global` 泄漏到整个 AI shell 环境；需要安装 CLI 时改为命令级隔离安装，既不污染用户 nvm 环境，也保留 AI 自装工具的可用性。
+- **Task / AskUserQuestion 输入展示细节修复**：选择题和相关输入区域的布局、滚动同步在 resize 后更稳定，减少内容错位。
+
+---
+
 ## [0.2.21] - 2026-05-24
 
 > 本版是一轮稳定性与社区 bug 修复：重点修了 Windows 上对话进行中频繁掉线、历史记录切换后界面卡死空白、新建 Tab 首条消息权限模式不对、改了 Agent 默认 Provider 后快捷启动栏仍走旧 Provider、本地插件装不上等社区报告的问题，并关闭了一个 macOS 路径安全黑名单缺口。

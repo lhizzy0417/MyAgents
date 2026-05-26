@@ -1,7 +1,7 @@
 ---
 name: agent-browser
 description: Browser automation CLI for AI agents. Use when the user needs to interact with websites, including navigating pages, filling forms, clicking buttons, taking screenshots, extracting data, testing web apps, or automating any browser task. Triggers include requests to "open a website", "fill out a form", "click a button", "take a screenshot", "scrape data from a page", "test this web app", "login to a site", "automate browser actions", or any task requiring programmatic web interaction.
-allowed-tools: Bash(agent-browser:*), Bash(npm install*), Bash(npx -y agent-browser*)
+allowed-tools: Bash(agent-browser:*), Bash(npm_config_prefix=* npm install*), Bash(npm install*), Bash(npx -y agent-browser*)
 ---
 
 # Browser Automation with agent-browser
@@ -18,10 +18,10 @@ The CLI is **not pre-installed** with the app — install it on first use, then 
 # ~/.myagents/bin/agent-browser, satisfies `command -v`, but execs a deleted
 # bundle path → fails with "cannot find file". `--version` exercises the real
 # code path and triggers the install fallback when broken.
-agent-browser --version >/dev/null 2>&1 || npm install -g agent-browser@0.15.1
+agent-browser --version >/dev/null 2>&1 || npm_config_prefix="${MYAGENTS_NPM_GLOBAL_PREFIX:-$HOME/.myagents/npm-global}" npm install -g agent-browser@0.15.1
 ```
 
-The install lands in `~/.myagents/npm-global/bin/agent-browser` (MyAgents pins `npm_config_prefix` for the AI subprocess), which sits earlier in PATH than any legacy wrapper. Subsequent `agent-browser …` calls find the new binary automatically.
+The install lands in `~/.myagents/npm-global/bin/agent-browser`, which sits earlier in PATH than any legacy wrapper. MyAgents exposes `MYAGENTS_NPM_GLOBAL_PREFIX` for this command-local install instead of setting `npm_config_prefix` on the whole shell, so nvm-based user shells stay quiet. Subsequent `agent-browser …` calls find the new binary automatically.
 
 Tell the user **once** that you're installing the browser tool (~few seconds the first time, instant afterward), then proceed.
 
@@ -311,7 +311,7 @@ agent-browser -p ios screenshot mobile.png
 agent-browser -p ios close
 ```
 
-**Requirements:** macOS with Xcode, Appium (`npm install -g appium && appium driver install xcuitest`)
+**Requirements:** macOS with Xcode, Appium (`npm_config_prefix="${MYAGENTS_NPM_GLOBAL_PREFIX:-$HOME/.myagents/npm-global}" npm install -g appium && appium driver install xcuitest`)
 
 **Real devices:** Works with physical iOS devices if pre-configured. Use `--device "<UDID>"` where UDID is from `xcrun xctrace list devices`.
 

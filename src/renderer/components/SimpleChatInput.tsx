@@ -254,6 +254,9 @@ interface SimpleChatInputProps {
   // slot unconditionally is safe — `:empty` collapses the row when both kids
   // render null.
   agentStatusSlot?: React.ReactNode;
+  /** Reports the actual floating input stack height so MessageList can reserve
+   *  just enough bottom clearance instead of a fixed oversized tail spacer. */
+  onOverlayHeightChange?: (height: number) => void;
 }
 
 // Used when the slash command service is unavailable (browser dev mode) or
@@ -381,6 +384,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
   onCancelQueued,
   onForceExecuteQueued,
   agentStatusSlot,
+  onOverlayHeightChange,
   workspacePath = null,
 }, ref) {
   const isLauncherMode = mode === 'launcher';
@@ -390,6 +394,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
   // without the three-site scan the prior duplicated ternary required.
   const effectiveMinLines = isLauncherMode ? LAUNCHER_MIN_LINES : 2;
   const isExternalRuntime = runtime !== 'builtin';
+  const overlayRootRef = useRef<HTMLDivElement>(null);
 
   // Compute display modes and model name based on runtime
   const displayPermissionModes = isExternalRuntime && runtimePermissionModes
@@ -397,6 +402,30 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
     : PERMISSION_MODES;
   const currentModeDisplay = displayPermissionModes.find(m => m.value === permissionMode)
     ?? displayPermissionModes[0];
+
+  useEffect(() => {
+    if (isLauncherMode || !onOverlayHeightChange) return;
+    const root = overlayRootRef.current;
+    if (!root) return;
+
+    let rafId = 0;
+    const emitHeight = () => {
+      rafId = 0;
+      onOverlayHeightChange(root.getBoundingClientRect().height);
+    };
+    const schedule = () => {
+      if (rafId) cancelAnimationFrame(rafId);
+      rafId = requestAnimationFrame(emitHeight);
+    };
+
+    schedule();
+    const observer = new ResizeObserver(schedule);
+    observer.observe(root);
+    return () => {
+      observer.disconnect();
+      if (rafId) cancelAnimationFrame(rafId);
+    };
+  }, [isLauncherMode, onOverlayHeightChange]);
 
   // PERFORMANCE FIX: Use internal state to avoid parent re-renders on every keystroke
   // This prevents MessageList from re-rendering when typing in long conversations
@@ -1619,7 +1648,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
 
   return (
     <>
-    <div className={isLauncherMode
+    <div ref={overlayRootRef} className={isLauncherMode
       ? 'relative flex w-full justify-center'
       : 'pointer-events-none absolute inset-x-0 bottom-0 z-20 flex flex-col items-center px-4 pb-4'
     }>

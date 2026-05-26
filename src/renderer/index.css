@@ -864,7 +864,17 @@ pre code {
 .user-message {
   background: var(--paper-inset);
   border-radius: var(--radius-lg);
-  padding: var(--space-3) var(--space-4);
+  padding: var(--space-4);
+}
+
+/* User bubbles still render Markdown, but document paragraph margins should not
+   add extra outer spacing inside the compact chat bubble. */
+.user-message-content p {
+  margin: 0;
+}
+
+.user-message-content p + p {
+  margin-top: var(--space-3);
 }
 
 /* Tool call card */

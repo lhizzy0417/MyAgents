@@ -5,8 +5,8 @@ Generate .docx files with JavaScript/TypeScript.
 **Important: Read this entire document before starting.** Critical formatting rules and common pitfalls are covered throughout - skipping sections may result in corrupted files or rendering issues.
 
 ## Setup
-Assumes docx is already installed globally
-If not installed: `npm install -g docx`
+Assumes docx is already installed globally.
+If not installed: `npm_config_prefix="${MYAGENTS_NPM_GLOBAL_PREFIX:-$HOME/.myagents/npm-global}" npm install -g docx`
 
 ```javascript
 const { Document, Packer, Paragraph, TextRun, Table, TableRow, TableCell, ImageRun, Media, 

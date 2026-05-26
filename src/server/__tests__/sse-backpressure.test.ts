@@ -238,5 +238,6 @@ describe('SSE event priority registration', () => {
 
   it('classifies logs/telemetry as droppable', () => {
     expect(SSE_EVENT_PRIORITIES['chat:log']).toBe('droppable');
+    expect(SSE_EVENT_PRIORITIES['chat:runtime-diagnostics']).toBe('droppable');
   });
 });

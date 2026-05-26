@@ -60,6 +60,9 @@ function areMessagesEqual(prev: MessageProps, next: MessageProps): boolean {
   // sdkUuid change -> must re-render (fork button depends on sdkUuid presence)
   if (prevMsg.sdkUuid !== nextMsg.sdkUuid) return false;
 
+  // Tail-fade gating depends on this flag even when content/id are unchanged.
+  if (prevMsg.streamingTextActive !== nextMsg.streamingTextActive) return false;
+
   // For streaming messages, check content changes
   if (typeof prevMsg.content === 'string' && typeof nextMsg.content === 'string') {
     return prevMsg.content === nextMsg.content;
@@ -329,7 +332,7 @@ const Message = memo(function Message({ message, isLoading = false, onRewind, on
               <span>via {SOURCE_LABELS[imSource as MessageSource] ?? imSource}</span>
             </div>
           )}
-          <article className="relative w-fit max-w-[85%] rounded-2xl border border-[var(--line)] bg-[var(--paper-elevated)] px-4 py-3 text-base leading-relaxed text-[var(--ink)] shadow-md select-text">
+          <article className="relative w-fit max-w-[85%] rounded-2xl border border-[var(--line)] bg-[var(--paper-elevated)] p-4 text-base leading-relaxed text-[var(--ink)] shadow-md select-text">
             {/* System injection tag badge */}
             {systemTag && (
               <div className="mb-2 -mt-0.5">
@@ -354,14 +357,14 @@ const Message = memo(function Message({ message, isLoading = false, onRewind, on
                 </div>
               )}
               {hasText && (
-                <div className="text-[var(--ink)]">
+                <div className="user-message-content text-[var(--ink)]">
                   <Markdown preserveNewlines>{userContent}</Markdown>
                 </div>
               )}
             </div>
             {/* Expand button with gradient fade — gradient overlaps bottom of content */}
             {!userExpanded && userOverflows && (
-              <div className="relative z-10 -mx-4 -mb-3 -mt-14">
+              <div className="relative z-10 -mx-4 -mb-4 -mt-14">
                 <div className="pointer-events-none h-14 bg-gradient-to-t from-[var(--paper-elevated)] to-transparent" />
                 <button
                   type="button"
@@ -414,7 +417,10 @@ const Message = memo(function Message({ message, isLoading = false, onRewind, on
       <div className="flex justify-start w-full px-4 py-2 select-none" data-role="assistant">
         <div className="w-full max-w-none">
           <div className="text-[var(--ink)] select-text">
-            <Markdown streaming={isLoading}>{message.content}</Markdown>
+            {/* Tail-fade only while text is the actively-streaming edge — `streamingTextActive`
+                clears on the text block's content-block-stop, so it doesn't linger during a
+                slow gap before the next block (string-content path). */}
+            <Markdown streaming={isLoading && !!message.streamingTextActive}>{message.content}</Markdown>
           </div>
           {actionsReady && !isLoading && <AssistantActions message={message} onRetry={onRetry} onFork={onFork} />}
         </div>
@@ -524,15 +530,19 @@ const Message = memo(function Message({ message, isLoading = false, onRewind, on
                       </div>
                     );
                   }
-                  // Plain text — no widget tags. The last block of a still-loading
-                  // message is the actively-streaming tail → soft fade + caret.
+                  // Plain text — no widget tags. The tail-fade applies only to the
+                  // actively-streaming edge: last block of a still-loading message AND
+                  // `streamingTextActive` (set on text deltas, cleared on the text block's
+                  // content-block-stop). The flag is the key guard — once the model finishes
+                  // this text (moved to next tool/thinking, or a slow gap), the fade clears
+                  // even though the turn is still loading. Without it the last chars linger faded.
                   return (
                     <div
                       key={index}
                       className="flex justify-start w-full px-1 py-1 select-none"
                     >
                       <div className="w-full max-w-none text-[var(--ink)] select-text">
-                        <Markdown streaming={isLoading && index === groupedBlocks.length - 1}>{item.text}</Markdown>
+                        <Markdown streaming={isLoading && index === groupedBlocks.length - 1 && !!message.streamingTextActive}>{item.text}</Markdown>
                       </div>
                     </div>
                   );

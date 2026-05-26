@@ -543,6 +543,7 @@ import {
 import { decodeProviderEnvSnapshot, findAgentByWorkspacePath, findProvider, getAllMcpServers, getEffectiveMcpServers, isProviderDisabled, resolveImProviderEnv, resolveProviderEnv } from './utils/admin-config';
 import { snapshotForOwnedSession } from './utils/session-snapshot';
 import { resolveSessionConfig } from './utils/resolve-session-config';
+import { shrinkSessionMessageForClient, shrinkSessionMessagesForClient } from './utils/session-message-preview';
 import type { AgentConfig } from '../shared/types/agent';
 import type { SessionMetadata } from './types/session';
 import { initLogger, getLoggerDiagnostics, withLogContext, setStdioBrokenProbe } from './logger';
@@ -930,8 +931,8 @@ const SYSTEM_SKILLS: readonly string[] = [
   // v10: ultra-research removed — not generic enough.
   'download-anything',
   // v8: see commands.rs::SYSTEM_SKILLS — agent-browser promoted to system
-  // skill so existing users get the updated self-install SKILL.md after
-  // the bundled CLI is removed.
+  // skill so existing users get the updated command-local npm self-install
+  // SKILL.md after the bundled CLI is removed.
   'agent-browser',
   // v9: myagents-cli — global skill that exposes the entire `myagents`
   // CLI surface (cron / task / mcp / model / agent / runtime / skill /
@@ -3634,7 +3635,7 @@ async function main() {
           return jsonResponse({ success: true, fromIndex: -1, messages: [] });
         }
 
-        const tail = session.messages.slice(idx + 1);
+        const tail = shrinkSessionMessagesForClient(session.messages.slice(idx + 1));
         // Same metadata-only shape as GET /sessions/:id (P0) — previews are
         // resolved via the myagents:// custom protocol on the client.
         return jsonResponse({ success: true, fromIndex: idx, messages: tail });
@@ -3815,11 +3816,17 @@ async function main() {
         if (shouldUseExternalRuntime() && sessionId === getExternalSessionId()) {
           const liveMessage = getExternalLiveAssistantMessage();
           if (liveMessage) {
-            liveStreamingMessage = {
+            const shrunkLive = shrinkSessionMessageForClient({
               id: liveMessage.id,
               role: 'assistant',
               content: liveMessage.content,
               timestamp: liveMessage.timestamp,
+            });
+            liveStreamingMessage = {
+              id: shrunkLive.id,
+              role: 'assistant',
+              content: shrunkLive.content,
+              timestamp: shrunkLive.timestamp,
             };
           }
         } else if (sessionId === getSessionId()) {
@@ -3884,7 +3891,7 @@ async function main() {
           liveSessionState: shouldUseExternalRuntime() && sessionId === getExternalSessionId()
             ? getExternalSessionState()
             : undefined,
-          messages: paginatedMessages,
+          messages: shrinkSessionMessagesForClient(paginatedMessages),
           totalCount,
           hasMoreBefore,
         };

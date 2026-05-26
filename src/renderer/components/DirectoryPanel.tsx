@@ -201,6 +201,8 @@ interface DirectoryPanelProps {
       /** Set for rich documents (pdf/docx/sheet/pptx) — split-view mounts the
        *  read-only RichDocViewer instead of the text editor. */
       richDocKind?: RichDocKind;
+      /** Optional initial line for text/code previews (from search or Markdown file links). */
+      initialLineNumber?: number;
     },
     options?: { initialEditMode?: boolean },
   ) => void;
@@ -220,6 +222,8 @@ type FilePreview = {
   /** When set, the modal renders the read-only rich-document viewer
    *  (pdf/docx/sheet/pptx) instead of the text/markdown editor. */
   richDocKind?: RichDocKind;
+  /** Optional initial line for text/code previews (from search or Markdown file links). */
+  initialLineNumber?: number;
   /** When set, FilePreviewModal opens in markdown edit mode directly.
    *  Wired by 「新建笔记」 so a fresh empty `note-…md` skips the rendered-
    *  preview empty-state and lands the cursor in Monaco. */
@@ -2403,6 +2407,7 @@ const DirectoryPanel = memo(
                 // markdown previews can load relative-path images.
                 workspacePath={agentDir}
                 initialEditMode={preview?.initialEditMode}
+                initialLineNumber={preview?.initialLineNumber}
                 onClose={() => {
                   setPreview(null);
                   setPreviewError(null);

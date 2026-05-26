@@ -18,10 +18,12 @@
  * tooltip wording as SessionHistoryDropdown).
  */
 
-import { forwardRef, useCallback, useRef, useState } from 'react';
+import { forwardRef, useCallback, useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import {
     BarChart2,
+    Check,
+    Copy,
     Download,
     Gauge,
     Loader2,
@@ -117,6 +119,14 @@ export default function SessionMenuButton({
     const [exporting, setExporting] = useState(false);
     const [favoriteInFlight, setFavoriteInFlight] = useState(false);
     const [handoverPendingChannelId, setHandoverPendingChannelId] = useState<string | null>(null);
+    const [sessionIdCopied, setSessionIdCopied] = useState(false);
+    const copyResetTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+    useEffect(() => {
+        return () => {
+            if (copyResetTimerRef.current) clearTimeout(copyResetTimerRef.current);
+        };
+    }, []);
 
     const closeAll = useCallback(() => {
         setOpen(false);
@@ -132,6 +142,20 @@ export default function SessionMenuButton({
         // popover's outside-click cleanup races with the input's auto-select.
         setTimeout(onOpenRename, 0);
     }, [closeAll, onOpenRename]);
+
+    const handleCopySessionId = useCallback(async () => {
+        const text = `SessionID: ${sessionId}`;
+        try {
+            await navigator.clipboard.writeText(text);
+            setSessionIdCopied(true);
+            if (copyResetTimerRef.current) clearTimeout(copyResetTimerRef.current);
+            copyResetTimerRef.current = setTimeout(() => setSessionIdCopied(false), 1600);
+            toast.success('已复制 SessionID');
+        } catch (err) {
+            console.error('[SessionMenuButton] copy session id failed:', err);
+            toast.error('复制失败');
+        }
+    }, [sessionId, toast]);
 
     const handleToggleFavorite = useCallback(async () => {
         if (favoriteInFlight) return;
@@ -273,6 +297,26 @@ export default function SessionMenuButton({
                 offset={6}
                 className="w-56 py-1"
             >
+                <div className="border-b border-[var(--line-subtle)] px-3 py-2">
+                    <div className="flex min-w-0 items-center gap-2 text-[11px]">
+                        <span className="shrink-0 text-[var(--ink-muted)]">SessionID:</span>
+                        <span
+                            className="min-w-0 flex-1 truncate font-mono text-[var(--ink)]"
+                            title={sessionId}
+                        >
+                            {sessionId}
+                        </span>
+                        <button
+                            type="button"
+                            onClick={() => { void handleCopySessionId(); }}
+                            className="inline-flex shrink-0 items-center gap-1 rounded px-1.5 py-0.5 text-[11px] text-[var(--accent)] transition-colors hover:bg-[var(--accent-warm-subtle)]"
+                            aria-label="复制 SessionID"
+                        >
+                            {sessionIdCopied ? <Check className="h-3 w-3" /> : <Copy className="h-3 w-3" />}
+                            <span>{sessionIdCopied ? '已复制' : '复制'}</span>
+                        </button>
+                    </div>
+                </div>
                 <MenuItem
                     icon={<Pencil className="h-3.5 w-3.5" />}
                     label="重命名"

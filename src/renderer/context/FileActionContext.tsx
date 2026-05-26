@@ -24,7 +24,8 @@ import ContextMenu from '@/components/ContextMenu';
 import type { ContextMenuItem } from '@/components/ContextMenu';
 import { useImagePreview } from '@/context/ImagePreviewContext';
 import { useWorkspaceFileService } from '@/hooks/useWorkspaceFileService';
-import { isImageFile, isPreviewable } from '../../shared/fileTypes';
+import { getRichDocKind, isImageFile, isPreviewable, type RichDocKind } from '../../shared/fileTypes';
+import { resolveWorkspaceFileLinkTarget } from '@/utils/workspaceFileLinks';
 
 // Lazy load FilePreviewModal (heavy: includes SyntaxHighlighter + Monaco)
 const FilePreviewModal = lazy(() => import('@/components/FilePreviewModal'));
@@ -45,6 +46,11 @@ export interface FileActionContextValue {
   openFileMenu: (x: number, y: number, path: string, pathType: 'file' | 'dir') => void;
 }
 
+export interface FileLinkActionContextValue {
+  /** Claims and previews a Markdown link when it targets a file in the active workspace. */
+  openFileLink: (href: string) => boolean;
+}
+
 interface FileActionProviderProps {
   children: ReactNode;
   /** Workspace path for resolving relative paths (Phase D.5: was previously
@@ -56,7 +62,14 @@ interface FileActionProviderProps {
   /** When this value changes, the path cache is cleared (e.g. toolCompleteCount). */
   refreshTrigger?: number;
   /** When provided, "预览" routes to this callback (split-view) instead of fullscreen modal. */
-  onFilePreviewExternal?: (file: { name: string; content: string; size: number; path: string }) => void;
+  onFilePreviewExternal?: (file: {
+    name: string;
+    content: string;
+    size: number;
+    path: string;
+    richDocKind?: RichDocKind;
+    initialLineNumber?: number;
+  }) => void;
   /** Append `@<path> ` to chat input — wired to FilePreviewModal's「引用文件」button.
    *  Distinct from `onInsertReference` (cursor-insert, no trailing space) — the toolbar
    *  button always appends to end with trailing space, matching the「丢进对话框继续聊」 UX. */
@@ -69,9 +82,14 @@ interface FileActionProviderProps {
 // ---------- Context ----------
 
 const FileActionContext = createContext<FileActionContextValue | null>(null);
+const FileLinkActionContext = createContext<FileLinkActionContextValue | null>(null);
 
 export function useFileAction(): FileActionContextValue | null {
   return useContext(FileActionContext);
+}
+
+export function useFileLinkAction(): FileLinkActionContextValue | null {
+  return useContext(FileLinkActionContext);
 }
 
 // ---------- Provider ----------
@@ -187,14 +205,34 @@ export function FileActionProvider({ children, workspacePath, onInsertReference,
     content: string;
     size: number;
     path: string;
+    richDocKind?: RichDocKind;
+    initialLineNumber?: number;
     isLoading: boolean;
     error: string | null;
   } | null>(null);
 
-  const handlePreview = useCallback((path: string) => {
-    const fileName = path.split('/').pop() ?? path;
+  const handlePreview = useCallback((path: string, options?: { initialLineNumber?: number }): boolean => {
+    const fileName = path.split(/[/\\]/).pop() ?? path;
     const svc = fileServiceRef.current;
-    if (!svc.isAvailable) return;
+    if (!svc.isAvailable) return false;
+
+    const richDocKind = getRichDocKind(fileName);
+    if (richDocKind) {
+      const fileData = {
+        name: fileName,
+        content: '',
+        size: 0,
+        path,
+        richDocKind,
+        initialLineNumber: options?.initialLineNumber,
+      };
+      if (onFilePreviewExternalRef.current) {
+        onFilePreviewExternalRef.current(fileData);
+      } else {
+        setPreviewFile({ ...fileData, isLoading: false, error: null });
+      }
+      return true;
+    }
 
     if (isImageFile(fileName)) {
       void (async () => {
@@ -224,10 +262,10 @@ export function FileActionProvider({ children, workspacePath, onInsertReference,
           if (handle) handle.revoke();
         }
       })();
-      return;
+      return true;
     }
 
-    if (!isPreviewable(fileName)) return;
+    if (!isPreviewable(fileName)) return false;
 
     // Route to split-view if external handler provided
     if (onFilePreviewExternalRef.current) {
@@ -235,14 +273,40 @@ export function FileActionProvider({ children, workspacePath, onInsertReference,
         try {
           const resp = await svc.readPreview({ path });
           if (!isMountedRef.current) return;
-          onFilePreviewExternalRef.current?.({ name: resp.name, content: resp.content, size: resp.size, path });
-        } catch { /* split-view fetch errors handled by DirectoryPanel toast */ }
+          onFilePreviewExternalRef.current?.({
+            name: resp.name,
+            content: resp.content,
+            size: resp.size,
+            path,
+            initialLineNumber: options?.initialLineNumber,
+          });
+        } catch (err) {
+          if (!isMountedRef.current) return;
+          console.error('[FileAction] Failed to load preview:', err);
+          setPreviewFile({
+            name: fileName,
+            content: '',
+            size: 0,
+            path,
+            initialLineNumber: options?.initialLineNumber,
+            isLoading: false,
+            error: err instanceof Error ? err.message : 'Failed to load file',
+          });
+        }
       })();
-      return;
+      return true;
     }
 
     // Fallback: show fullscreen modal immediately in loading state
-    setPreviewFile({ name: fileName, content: '', size: 0, path, isLoading: true, error: null });
+    setPreviewFile({
+      name: fileName,
+      content: '',
+      size: 0,
+      path,
+      initialLineNumber: options?.initialLineNumber,
+      isLoading: true,
+      error: null,
+    });
 
     void (async () => {
       try {
@@ -254,7 +318,21 @@ export function FileActionProvider({ children, workspacePath, onInsertReference,
         setPreviewFile(prev => prev ? { ...prev, isLoading: false, error: err instanceof Error ? err.message : 'Failed to load file' } : null);
       }
     })();
+    return true;
   }, [openImagePreview]);
+
+  const openFileLink = useCallback((href: string): boolean => {
+    if (!fileServiceRef.current.isAvailable) return false;
+    const target = resolveWorkspaceFileLinkTarget(href, workspacePath);
+    if (!target) return false;
+    if (handlePreview(target.path, { initialLineNumber: target.initialLineNumber })) {
+      return true;
+    }
+    void fileServiceRef.current.openWithDefault({ path: target.path }).catch((err) => {
+      console.error('[FileAction] Failed to open file link with default app:', err);
+    });
+    return true;
+  }, [handlePreview, workspacePath]);
 
   const handleReference = useCallback((path: string) => {
     onInsertReferenceRef.current?.([path]);
@@ -276,7 +354,7 @@ export function FileActionProvider({ children, workspacePath, onInsertReference,
     const items: ContextMenuItem[] = [];
 
     if (pathType === 'file') {
-      const canPreview = isPreviewable(fileName) || isImageFile(fileName);
+      const canPreview = isPreviewable(fileName) || isImageFile(fileName) || !!getRichDocKind(fileName);
       items.push({
         label: '预览',
         icon: <Eye className="h-4 w-4" />,
@@ -313,54 +391,62 @@ export function FileActionProvider({ children, workspacePath, onInsertReference,
     openFileMenu,
   }), [checkPath, cacheVersion, openFileMenu]);
 
+  const linkActionValue = useMemo<FileLinkActionContextValue>(() => ({
+    openFileLink,
+  }), [openFileLink]);
+
   return (
     <FileActionContext.Provider value={contextValue}>
-      {children}
+      <FileLinkActionContext.Provider value={linkActionValue}>
+        {children}
 
-      {/* Context menu */}
-      {menuState && (
-        <ContextMenu
-          x={menuState.x}
-          y={menuState.y}
-          items={menuItems}
-          onClose={closeMenu}
-        />
-      )}
-
-      {/* File preview modal (lazy loaded) */}
-      {previewFile && (
-        <Suspense fallback={null}>
-          <FilePreviewModal
-            name={previewFile.name}
-            content={previewFile.content}
-            size={previewFile.size}
-            path={previewFile.path}
-            isLoading={previewFile.isLoading}
-            error={previewFile.error}
-            // Phase D.5: thread the absolute workspace root so rendered
-            // markdown can load relative-path images via fileService.
-            // Without this, MarkdownImage's hook gets `null` and silently
-            // skips the fetch (preview text/code still works).
-            workspacePath={workspacePath}
-            onClose={() => setPreviewFile(null)}
-            onRenamed={(newPath, newName) => {
-              // Update local preview state so subsequent saves target the new
-              // location. The fs watcher refreshes the directory tree.
-              setPreviewFile((prev) =>
-                prev ? { ...prev, path: newPath, name: newName } : prev,
-              );
-            }}
-            // Phase D.5: route reveal-in-finder through fileService rather
-            // than letting the modal fall back to sidecar `/agent/open-in-finder`.
-            onRevealFile={async () => {
-              const p = previewFile.path;
-              await fileServiceRef.current.openInFinder({ path: p });
-            }}
-            onQuoteFile={onQuoteFile}
-            onQuoteSelection={onQuoteSelection}
+        {/* Context menu */}
+        {menuState && (
+          <ContextMenu
+            x={menuState.x}
+            y={menuState.y}
+            items={menuItems}
+            onClose={closeMenu}
           />
-        </Suspense>
-      )}
+        )}
+
+        {/* File preview modal (lazy loaded) */}
+        {previewFile && (
+          <Suspense fallback={null}>
+            <FilePreviewModal
+              name={previewFile.name}
+              content={previewFile.content}
+              size={previewFile.size}
+              path={previewFile.path}
+              richDocKind={previewFile.richDocKind}
+              isLoading={previewFile.isLoading}
+              error={previewFile.error}
+              // Phase D.5: thread the absolute workspace root so rendered
+              // markdown can load relative-path images via fileService.
+              // Without this, MarkdownImage's hook gets `null` and silently
+              // skips the fetch (preview text/code still works).
+              workspacePath={workspacePath}
+              initialLineNumber={previewFile.initialLineNumber}
+              onClose={() => setPreviewFile(null)}
+              onRenamed={(newPath, newName) => {
+                // Update local preview state so subsequent saves target the new
+                // location. The fs watcher refreshes the directory tree.
+                setPreviewFile((prev) =>
+                  prev ? { ...prev, path: newPath, name: newName } : prev,
+                );
+              }}
+              // Phase D.5: route reveal-in-finder through fileService rather
+              // than letting the modal fall back to sidecar `/agent/open-in-finder`.
+              onRevealFile={async () => {
+                const p = previewFile.path;
+                await fileServiceRef.current.openInFinder({ path: p });
+              }}
+              onQuoteFile={onQuoteFile}
+              onQuoteSelection={onQuoteSelection}
+            />
+          </Suspense>
+        )}
+      </FileLinkActionContext.Provider>
     </FileActionContext.Provider>
   );
 }

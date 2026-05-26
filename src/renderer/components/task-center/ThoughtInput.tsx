@@ -130,6 +130,33 @@ const MIRROR_TEXTAREA_SHARED_STYLE = {
   overflowWrap: 'break-word',
 } as const;
 
+type MirrorScrollTarget = Pick<HTMLDivElement, 'style'> | null;
+type TextareaScrollSource = Pick<HTMLTextAreaElement, 'scrollTop'> | null;
+type TextareaResizeSource = Pick<HTMLTextAreaElement, 'scrollHeight' | 'scrollTop' | 'style'>;
+
+export function syncThoughtInputMirrorScroll(
+  textarea: TextareaScrollSource,
+  inner: MirrorScrollTarget,
+): void {
+  if (!textarea || !inner) return;
+  inner.style.transform = `translateY(${-textarea.scrollTop}px)`;
+}
+
+export function resizeThoughtInputTextareaAndSyncMirror(
+  textarea: TextareaResizeSource,
+  inner: MirrorScrollTarget,
+  minHeightPx: number,
+  maxHeightPx: number,
+): void {
+  // Use `auto`, not `0px`: collapsing a scrolled textarea can make WebKit
+  // clamp or adjust scrollTop before restoring height, which desynchronizes
+  // the transparent native textarea from the highlighted mirror layer.
+  textarea.style.height = 'auto';
+  const next = Math.min(textarea.scrollHeight, maxHeightPx);
+  textarea.style.height = `${Math.max(next, minHeightPx)}px`;
+  syncThoughtInputMirrorScroll(textarea, inner);
+}
+
 interface Props {
   onCreated?: (t: Thought) => void;
   placeholder?: string;
@@ -255,37 +282,38 @@ export const ThoughtInput = forwardRef<ThoughtInputHandle, Props>(function Thoug
   // the inner content upward by the textarea's scrollTop — produces the
   // same visual scroll without needing a scrollable overlay container.
   const syncScroll = useCallback(() => {
-    const ta = textareaRef.current;
-    const inner = overlayInnerRef.current;
-    if (!ta || !inner) return;
-    inner.style.transform = `translateY(${-ta.scrollTop}px)`;
+    syncThoughtInputMirrorScroll(textareaRef.current, overlayInnerRef.current);
   }, []);
-
-  useLayoutEffect(() => {
-    syncScroll();
-  }, [value, syncScroll]);
 
   // Auto-grow the textarea with content. Floor = `minLines`; ceiling =
   // `maxLines` (compact: 8, launcher: 9). Past the ceiling the textarea
-  // scrolls internally and the mirror overlay tracks via `syncScroll`.
+  // scrolls internally. Resize and mirror-scroll sync must happen in one
+  // layout pass: native textarea geometry changes can adjust scrollTop, and
+  // the highlighted mirror has to read that final value (#246).
   useLayoutEffect(() => {
     const ta = textareaRef.current;
     if (!ta) return;
     // Bug #123 — same IME guard SimpleChatInput uses. The post-
     // compositionend handler bumps `resizeBump` so we catch up after commit.
-    if (isComposingRef.current) return;
+    if (isComposingRef.current) {
+      syncScroll();
+      return;
+    }
     // Skip when the textarea is in a `display:none` subtree (Launcher hides
     // the inactive 对话/想法 mode this way). `scrollHeight` reads as 0 there
-    // and the reset-to-0 below would lock the height to `minLines` until
+    // and the height reset below would lock the height to `minLines` until
     // the user types again. Preserve the last visible height instead.
-    if (ta.offsetParent === null) return;
-    // Reset to 0 before reading scrollHeight so a shrinking value also
-    // triggers a recompute (otherwise the textarea is stuck at its tallest
-    // historical height).
-    ta.style.height = '0px';
-    const next = Math.min(ta.scrollHeight, textareaMaxHeightPx);
-    ta.style.height = `${Math.max(next, textareaMinHeightPx)}px`;
-  }, [value, textareaMinHeightPx, textareaMaxHeightPx, resizeBump]);
+    if (ta.offsetParent === null) {
+      syncScroll();
+      return;
+    }
+    resizeThoughtInputTextareaAndSyncMirror(
+      ta,
+      overlayInnerRef.current,
+      textareaMinHeightPx,
+      textareaMaxHeightPx,
+    );
+  }, [value, textareaMinHeightPx, textareaMaxHeightPx, resizeBump, syncScroll]);
 
   const handleCompositionStart = useCallback(() => {
     isComposingRef.current = true;

@@ -517,6 +517,14 @@ export interface RuntimeDiagnosticsStatus {
   apps?: RuntimeDiagnosticsCallStatus;
 }
 
+export interface RuntimeDiagnosticIssue {
+  code: string;
+  severity: 'info' | 'warn' | 'error';
+  title: string;
+  message: string;
+  hint?: string;
+}
+
 /**
  * Effective env snapshot for the runtime subprocess. Sanitised for display:
  *  - `proxy.http/https/all` are URLs without embedded credentials.
@@ -539,6 +547,16 @@ export interface RuntimeEffectiveEnv {
   pathHead?: string[];
   /** True when MYAGENTS_PROXY_INJECTED=1 reached the runtime. */
   myagentsProxyInjected?: boolean;
+  /** Codex-only sandbox probe used to diagnose loopback proxy/network blocks. */
+  codexSandbox?: {
+    detected?: boolean;
+    networkDisabled?: boolean;
+    proxyProbe?: {
+      url: string;
+      reachable: boolean;
+      error?: string;
+    };
+  };
   /** Presence-only flags for sensitive env vars. */
   hasOpenaiApiKey?: boolean;
   hasAnthropicApiKey?: boolean;
@@ -559,6 +577,7 @@ export interface RuntimeDiagnostics {
   mcpServers?: RuntimeMcpServerInfo[];
   apps?: RuntimeAppInfo[];
   status: RuntimeDiagnosticsStatus;
+  issues?: RuntimeDiagnosticIssue[];
   /** ISO-8601 UTC string. */
   timestamp: string;
 }

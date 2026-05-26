@@ -35,7 +35,7 @@ export interface InputOptionFields {
   runtimeModel?: string | null;
   /** Permission mode — split between `agent.permissionMode` (builtin) and
    *  `agent.runtimeConfig.permissionMode` (external) at the storage layer. */
-  permissionMode?: PermissionMode;
+  permissionMode?: PermissionMode | string;
   /** MCP server ids enabled at the workspace level. */
   mcpEnabledServers?: string[];
   /** PRD 0.2.17 — Claude plugin ids enabled at the workspace level. Mirrors
@@ -86,6 +86,12 @@ export interface PersistInputOptionParams {
    *  is set, the helper POSTs /api/cc-plugin/session-enable so the running
    *  session restart picks up the new plugin selection immediately. */
   pushPluginsToSidecar?: (enabledIds: string[]) => Promise<unknown>;
+
+  /** Live sidecar push for external runtime model / permission-mode changes.
+   *  Chat-tab only. Launcher has no active Sidecar; the next session reads disk. */
+  pushRuntimeConfigToSidecar?: (
+    runtimeConfig: Pick<RuntimeConfig, 'model' | 'permissionMode'>,
+  ) => Promise<unknown>;
 }
 
 /** Subset of the session snapshot fields we touch. Defined here (not imported
@@ -93,7 +99,7 @@ export interface PersistInputOptionParams {
 export interface SessionSnapshotPatch {
   providerId?: string | null;
   model?: string | null;
-  permissionMode?: PermissionMode;
+  permissionMode?: string;
   mcpEnabledServers?: string[];
   enabledPluginIds?: string[];
 }
@@ -179,6 +185,25 @@ export async function persistInputOptionChange(
     }
   }
 
+  if (
+    params.isExternalRuntime &&
+    params.pushRuntimeConfigToSidecar &&
+    (params.fields.runtimeModel !== undefined || params.fields.permissionMode !== undefined)
+  ) {
+    try {
+      const runtimeConfig: Pick<RuntimeConfig, 'model' | 'permissionMode'> = {};
+      if (params.fields.runtimeModel !== undefined) {
+        runtimeConfig.model = params.fields.runtimeModel ?? undefined;
+      }
+      if (params.fields.permissionMode !== undefined) {
+        runtimeConfig.permissionMode = params.fields.permissionMode;
+      }
+      await params.pushRuntimeConfigToSidecar(runtimeConfig);
+    } catch (e) {
+      errors.push(`sidecar runtime config push: ${describe(e)}`);
+    }
+  }
+
   return { ok: errors.length === 0, errors };
 }
 
@@ -201,7 +226,7 @@ function buildProjectPatch(
     patch.model = fields.builtinModel ?? null;
   }
   if (fields.permissionMode !== undefined && !isExternalRuntime) {
-    patch.permissionMode = fields.permissionMode;
+    patch.permissionMode = fields.permissionMode as PermissionMode;
   }
   if (fields.mcpEnabledServers !== undefined) {
     patch.mcpEnabledServers = fields.mcpEnabledServers;
@@ -229,7 +254,7 @@ function buildSnapshotPatch(params: PersistInputOptionParams): SessionSnapshotPa
   } else if (fields.builtinModel !== undefined) {
     patch.model = fields.builtinModel;
   }
-  if (fields.permissionMode !== undefined && !isExternalRuntime) {
+  if (fields.permissionMode !== undefined) {
     patch.permissionMode = fields.permissionMode;
   }
   if (fields.mcpEnabledServers !== undefined) {
@@ -278,7 +303,7 @@ function buildAgentPatch(
     }
   } else {
     if (fields.permissionMode !== undefined) {
-      patch.permissionMode = fields.permissionMode;
+      patch.permissionMode = fields.permissionMode as PermissionMode;
     }
     if (fields.builtinModel !== undefined) {
       patch.model = fields.builtinModel ?? undefined;

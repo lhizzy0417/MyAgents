@@ -156,4 +156,11 @@ export interface Message {
   attachments?: MessageAttachment[];
   /** Message source metadata (IM integration) */
   metadata?: MessageMetadata;
+  /**
+   * Transient streaming flag: true while the trailing text is the actively-streaming
+   * edge (drives the Markdown tail-fade). Set when text deltas arrive, cleared on the
+   * text block's content-block-stop — so the fade stops the moment the model finishes
+   * the text even if the turn keeps running. Not persisted; meaningless for history.
+   */
+  streamingTextActive?: boolean;
 }

@@ -300,6 +300,10 @@ async function callApi(route: string, body: Record<string, unknown> = {}): Promi
     const msg = err instanceof Error ? err.message : String(err);
     if (msg.includes('ECONNREFUSED') || msg.includes('fetch failed')) {
       console.error('Error: Cannot connect to MyAgents. Is the app running?');
+      if (process.env.CODEX_SANDBOX || process.env.CODEX_SANDBOX_NETWORK_DISABLED === '1') {
+        console.error('  This command appears to be running inside the Codex sandbox.');
+        console.error('  If MyAgents is running on localhost, switch Codex to no-restrictions or run the command from your normal terminal.');
+      }
       process.exit(3);
     }
     throw err;
@@ -739,6 +743,7 @@ function printRuntimeDiagnose(data: Record<string, unknown>): void {
 
   const diag = (data.diagnostics ?? {}) as Record<string, unknown>;
   const status = (diag.status ?? {}) as Record<string, unknown>;
+  const issues = (diag.issues as Array<Record<string, unknown>>) ?? [];
 
   const renderStatus = (s: unknown): string => {
     if (s === 'ok') return 'ok';
@@ -819,6 +824,17 @@ function printRuntimeDiagnose(data: Record<string, unknown>): void {
   console.log(`  NO_PROXY:    ${proxy.no ?? '(unset)'}`);
   console.log(`  proxyPolicy: ${env.proxyPolicy ?? 'myagents'}`);
   console.log(`  MYAGENTS_PROXY_INJECTED: ${env.myagentsProxyInjected ? 'yes' : 'no'}`);
+  const sandbox = env.codexSandbox as Record<string, unknown> | undefined;
+  if (sandbox) {
+    console.log(`  Codex sandbox detected: ${sandbox.detected ? 'yes' : 'no'}`);
+    if ('networkDisabled' in sandbox) {
+      console.log(`  Codex sandbox network disabled: ${sandbox.networkDisabled ? 'yes' : 'no'}`);
+    }
+    const probe = sandbox.proxyProbe as Record<string, unknown> | undefined;
+    if (probe) {
+      console.log(`  Loopback proxy probe: ${probe.reachable ? 'reachable' : 'blocked'} (${probe.url ?? 'unknown'})${probe.error ? ` — ${probe.error}` : ''}`);
+    }
+  }
   const pathHead = (env.pathHead as string[]) ?? [];
   if (pathHead.length > 0) {
     console.log(`  PATH (first ${pathHead.length}): ${pathHead.join(' : ')}`);
@@ -827,6 +843,17 @@ function printRuntimeDiagnose(data: Record<string, unknown>): void {
   console.log(`  has ANTHROPIC_API_KEY:  ${env.hasAnthropicApiKey ? 'yes' : 'no'}`);
   console.log(`  has CODEX_HOME:         ${env.hasCodexHome ? 'yes' : 'no'}`);
   console.log(`  has XDG_CONFIG_HOME:    ${env.hasXdgConfigHome ? 'yes' : 'no'}`);
+
+  if (issues.length > 0) {
+    console.log('');
+    console.log('Issues:');
+    for (const issue of issues) {
+      const sev = String(issue.severity ?? 'warn').toUpperCase();
+      console.log(`  [${sev}] ${issue.code ?? 'runtime_issue'}: ${issue.title ?? issue.message ?? ''}`);
+      if (issue.message) console.log(`        ${issue.message}`);
+      if (issue.hint) console.log(`        Hint: ${issue.hint}`);
+    }
+  }
 
   console.log('');
   console.log(`Collected at: ${diag.timestamp ?? '(unknown)'}`);

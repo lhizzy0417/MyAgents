@@ -700,7 +700,7 @@ transition: opacity var(--duration-slow),
 背景: var(--paper-inset)
 文字: var(--ink)
 圆角: var(--radius-lg)
-内边距: var(--space-3) var(--space-4)
+内边距: var(--space-4)
 字号: var(--text-base)
 对齐: 右侧（或左侧皆可，但需与 AI 区分）
 ```

@@ -26,6 +26,7 @@ import InlineCode from './markdown/InlineCode';
 import MermaidDiagram from './markdown/MermaidDiagram';
 import { openExternal, isExternalUrl } from '@/utils/openExternal';
 import { BrowserPanelContext } from '@/context/BrowserPanelContext';
+import { useFileLinkAction } from '@/context/FileActionContext';
 import { useWorkspaceFileService } from '@/hooks/useWorkspaceFileService';
 import { preprocessMarkdownContent } from '@/utils/markdownPreprocess';
 
@@ -123,6 +124,7 @@ const MarkdownLink = memo(function MarkdownLink({
   ...props
 }: React.ComponentProps<'a'> & { node?: unknown }) {
   const browserPanel = useContext(BrowserPanelContext);
+  const fileLinkAction = useFileLinkAction();
 
   const handleClick = (e: React.MouseEvent<HTMLAnchorElement>) => {
     e.preventDefault();
@@ -135,6 +137,9 @@ const MarkdownLink = memo(function MarkdownLink({
       // Cmd (macOS) / Ctrl (Win/Linux) + click bypasses the embedded browser
       // panel and opens directly in the system default browser.
       const forceExternal = e.metaKey || e.ctrlKey;
+      if (!forceExternal && fileLinkAction?.openFileLink(href)) {
+        return;
+      }
       if (!forceExternal && browserPanel && isExternalUrl(href) && !href.toLowerCase().startsWith('mailto:')) {
         // Route to embedded browser panel (exclude mailto: — those go to system email client)
         browserPanel.openUrl(href);

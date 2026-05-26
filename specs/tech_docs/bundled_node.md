@@ -56,8 +56,9 @@ MyAgents.app/
         └── cli/myagents.js            # myagents CLI（esbuild bundle）
 
 注：v0.2.0+ 起 `agent-browser` 不再 bundle —— 改由 bundled-skills/agent-browser/SKILL.md
-教 AI 在首次使用时通过 `npm install -g agent-browser@<pinned>` 自装到
-`~/.myagents/npm-global/bin/`（buildClaudeSessionEnv 注入的 npm prefix）。
+教 AI 在首次使用时通过命令级 `npm_config_prefix="$MYAGENTS_NPM_GLOBAL_PREFIX" npm install -g agent-browser@<pinned>`
+自装到 `~/.myagents/npm-global/bin/`。`buildClaudeSessionEnv` 只暴露
+`MYAGENTS_NPM_GLOBAL_PREFIX`，不把 `npm_config_prefix` 泄漏到整个 SDK shell env。
 ```
 
 ## 运行时路径工具 (`src/server/utils/runtime.ts`)
@@ -86,10 +87,15 @@ getSystemNodeDirs(): string[]
 SDK 子进程（AI Bash 工具）看到的 PATH 优先级：
 1. 用户系统安装的 Node.js 目录（`getSystemNodeDirs()`）—— 用户自己维护，npm 更可靠
 2. bundled Node.js 目录（`resources/nodejs/bin`）—— fallback
-3. `~/.myagents/bin`（`myagents` CLI 所在）
-4. 系统 PATH
+3. `~/.myagents/npm-global/bin`（MyAgents-localized npm installs / legacy AI-installed CLIs）
+4. `~/.myagents/bin`（`myagents` CLI 所在）
+5. 系统 PATH
 
 规则：**系统优先，bundled 兜底**。这让用户既能享受零依赖分发，又不会让 bundled Node 干扰其专业环境。
+
+注意：SDK shell env **不设置** `npm_config_prefix` / `NPM_CONFIG_PREFIX` / `PREFIX`。
+nvm 会在 shell 初始化时检测这些变量并输出兼容性警告。需要固定 npm 全局安装落点的
+skill 必须用命令级 env（例如 `npm_config_prefix="$MYAGENTS_NPM_GLOBAL_PREFIX" npm install -g ...`）。
 
 ## MCP / 社区 npm 包的执行
 

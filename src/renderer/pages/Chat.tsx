@@ -308,7 +308,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
   // FilePreviewModal opens directly in the editable Monaco view instead of the
   // markdown rendered preview.
   const isSplitViewEnabled = config.experimentalSplitView ?? true;
-  const [splitFile, setSplitFile] = useState<{ name: string; content: string; size: number; path: string; richDocKind?: RichDocKind; initialEditMode?: boolean } | null>(null);
+  const [splitFile, setSplitFile] = useState<{ name: string; content: string; size: number; path: string; richDocKind?: RichDocKind; initialEditMode?: boolean; initialLineNumber?: number } | null>(null);
   // Clear split panel when feature is turned off (prevents stale split state)
   useEffect(() => { if (!isSplitViewEnabled) setSplitFile(null); }, [isSplitViewEnabled]);
   const [splitRatio, setSplitRatio] = useState(0.5); // 0-1, left panel fraction
@@ -408,9 +408,9 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
   }, 0);
 
   // Fullscreen preview triggered from split panel's "全屏预览" button
-  const [fullscreenPreviewFile, setFullscreenPreviewFile] = useState<{ name: string; content: string; size: number; path: string; richDocKind?: RichDocKind; initialEditMode?: boolean } | null>(null);
+  const [fullscreenPreviewFile, setFullscreenPreviewFile] = useState<{ name: string; content: string; size: number; path: string; richDocKind?: RichDocKind; initialEditMode?: boolean; initialLineNumber?: number } | null>(null);
 
-  const handleSplitFilePreview = useCallback((file: { name: string; content: string; size: number; path: string; richDocKind?: RichDocKind }, options?: { initialEditMode?: boolean }) => {
+  const handleSplitFilePreview = useCallback((file: { name: string; content: string; size: number; path: string; richDocKind?: RichDocKind; initialLineNumber?: number }, options?: { initialEditMode?: boolean }) => {
     const ext = file.name.toLowerCase().split('.').pop();
     if ((ext === 'html' || ext === 'htm') && isSplitViewEnabled) {
       // HTML files → open in embedded browser for live preview
@@ -674,6 +674,10 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
 
   // Ref for chat content area (for Tauri drop zone)
   const chatContentRef = useRef<HTMLDivElement>(null);
+  const [inputOverlayHeight, setInputOverlayHeight] = useState(176);
+  const handleInputOverlayHeightChange = useCallback((height: number) => {
+    setInputOverlayHeight(prev => Math.abs(prev - height) < 1 ? prev : Math.ceil(height));
+  }, []);
 
   // Ref for directory panel container (for Tauri drop zone)
   const directoryPanelContainerRef = useRef<HTMLDivElement>(null);
@@ -1624,13 +1628,19 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
       pushPluginsToSidecar: async (enabledIds) => {
         await apiPost('/api/cc-plugin/session-enable', { enabledIds });
       },
+      pushRuntimeConfigToSidecar: async (runtimeConfig) => {
+        await apiPost('/api/runtime/config', {
+          runtime: currentRuntime,
+          runtimeConfig,
+        });
+      },
     });
     if (!result.ok) {
       console.error('[chat] tab config dual-write failed:', result.errors);
       toastRef.current.warning('配置未能完全保存，重启后可能恢复旧值');
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps -- narrowed deps; persistInputOptionChange is a pure import, runtimeConfig accessed via currentAgent ref, apiPost is stable from TabContext
-  }, [isOwnedSession, currentProject?.id, currentProject?.agentId, isExternalRuntime, currentAgent?.runtimeConfig, patchSnapshot, patchProject]);
+  }, [isOwnedSession, currentProject?.id, currentProject?.agentId, isExternalRuntime, currentRuntime, currentAgent?.runtimeConfig, patchSnapshot, patchProject]);
 
   // Handle workspace MCP toggle — Tab UI edits dual-write:
   // (1) session snapshot so THIS session uses the new tool set immediately (owned sessions only
@@ -1724,12 +1734,30 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     if (adoptedSessionRef.current && adoptedSessionRef.current === sessionMeta.id) return;
     // Field-by-field merge: `session ?? agent` (Option C). Missing snapshot fields
     // re-derive from the agent — this is the write-read symmetry of IM live-follow.
-    const model = sessionMeta.model ?? currentAgent?.model;
-    const mode = sessionMeta.permissionMode ?? (currentAgent?.permissionMode as string | undefined);
+    const snapshotRuntime = (sessionMeta.runtime as RuntimeType | undefined) ?? agentRuntime;
+    const snapshotIsExternal = snapshotRuntime !== 'builtin';
+    const model = sessionMeta.model ?? (snapshotIsExternal
+      ? (currentAgent?.runtimeConfig as RuntimeConfig | undefined)?.model
+      : currentAgent?.model);
+    const mode = sessionMeta.permissionMode ?? (snapshotIsExternal
+      ? (currentAgent?.runtimeConfig as RuntimeConfig | undefined)?.permissionMode
+      : (currentAgent?.permissionMode as string | undefined));
     const providerId = sessionMeta.providerId ?? currentAgent?.providerId;
     const mcp = sessionMeta.mcpEnabledServers ?? currentAgent?.mcpEnabledServers;
-    if (model) setSelectedModel(model);
-    if (mode) setPermissionMode(mode as PermissionMode);
+    if (model) {
+      if (snapshotIsExternal) {
+        setRuntimeModel(model);
+      } else {
+        setSelectedModel(model);
+      }
+    }
+    if (mode) {
+      if (snapshotIsExternal) {
+        setRuntimePermissionMode(mode);
+      } else {
+        setPermissionMode(mode as PermissionMode);
+      }
+    }
     if (providerId) setSelectedProviderId(providerId);
     if (mcp) setWorkspaceMcpEnabled(mcp);
   // eslint-disable-next-line react-hooks/exhaustive-deps -- currentAgent derived from config, listening to its identity would re-fire on unrelated agent changes
@@ -2133,9 +2161,13 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     // instead of re-deriving from config — even if the one-time project-sync
     // effect hasn't fired yet (user toggled before config finished loading).
     projectSyncedRef.current = true;
-    setPermissionMode(mode);
+    if (isExternalRuntime) {
+      setRuntimePermissionMode(mode);
+    } else {
+      setPermissionMode(mode);
+    }
     void persistTabConfigChange({ permissionMode: mode });
-  }, [persistTabConfigChange]);
+  }, [isExternalRuntime, persistTabConfigChange]);
 
   // Cross-runtime SDK protection: only fires when the multiAgentRuntime feature
   // gate is OFF but the session was created by an external runtime (Codex/CC/
@@ -3300,6 +3332,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
               onRewind={isExternalRuntime ? undefined : handleRewind}
               onRetry={handleRetry}
               onFork={isExternalRuntime ? undefined : handleFork}
+              bottomSpacerPx={inputOverlayHeight}
             />
 
             {/* Introduction overlay — shown in empty sessions when INTRODUCTION.md exists */}
@@ -3356,9 +3389,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
             onModelChange={isExternalRuntime ? handleRuntimeModelChange : handleModelChange}
             sessionUnlocked={isSessionUnlocked}
             permissionMode={effectivePermissionMode}
-            onPermissionModeChange={isExternalRuntime
-              ? ((mode: PermissionMode) => setRuntimePermissionMode(mode))
-              : handlePermissionModeChange}
+            onPermissionModeChange={handlePermissionModeChange}
             apiKeys={apiKeys}
             providerVerifyStatus={providerVerifyStatus}
             inputRef={inputRef}
@@ -3403,6 +3434,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
             onCancelQueued={handleCancelQueuedVoid}
             onForceExecuteQueued={handleForceExecuteQueuedVoid}
             agentStatusSlot={agentStatusSlot}
+            onOverlayHeightChange={handleInputOverlayHeightChange}
           />
         </div>
       </div>
@@ -3604,6 +3636,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
                     richDocKind={splitFile.richDocKind}
                     workspacePath={agentDir}
                     initialEditMode={splitFile.initialEditMode}
+                    initialLineNumber={splitFile.initialLineNumber}
                     onClose={() => {
                       setSplitFile(null);
                       if (browserUrl) setSplitActiveView('browser');
@@ -3719,6 +3752,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
             richDocKind={fullscreenPreviewFile.richDocKind}
             workspacePath={agentDir}
             initialEditMode={fullscreenPreviewFile.initialEditMode}
+            initialLineNumber={fullscreenPreviewFile.initialLineNumber}
             onClose={() => setFullscreenPreviewFile(null)}
             onSaved={() => setWorkspaceRefreshTrigger(prev => prev + 1)}
             onRenamed={(newPath, newName) => {

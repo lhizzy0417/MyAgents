@@ -993,7 +993,7 @@ pub fn cmd_sync_admin_agent<R: Runtime>(
 
 // ============= CLI Sync =============
 
-const CLI_VERSION: &str = "17";
+const CLI_VERSION: &str = "18";
 
 /// Sync the CLI script from bundled resources to ~/.myagents/bin/.
 /// Version-gated: only runs when CLI_VERSION changes.
@@ -1154,7 +1154,7 @@ pub fn cmd_sync_cli<R: Runtime>(
 // matching exclusion list in src/server/index.ts::seedBundledSkills
 // MUST be kept in sync (comment there points back here).
 
-const SYSTEM_SKILLS_VERSION: &str = "15";
+const SYSTEM_SKILLS_VERSION: &str = "16";
 
 /// Skills that ship with the app and MUST stay at the bundled version —
 /// the app's flows depend on them, users are not meant to customise.
@@ -1168,9 +1168,11 @@ const SYSTEM_SKILLS: &[&str] = &[
     "download-anything",
     // v8: agent-browser promoted from utility → system skill. The CLI is
     // no longer bundled with the app; the SKILL.md teaches AI to self-install
-    // on first use (`npm install -g agent-browser@<pinned>`). Existing users
+    // on first use with a command-local npm prefix. Existing users
     // need the updated SKILL.md to land or their AI will hit `command not
-    // found` after upgrading. System-skill status forces the overwrite.
+    // found` after upgrading. The install uses command-local npm_config_prefix
+    // so it lands under ~/.myagents/npm-global without leaking prefix env to
+    // every shell. System-skill status forces the overwrite.
     "agent-browser",
     // v9: myagents-cli promoted from helper-bundled skill (was at
     // bundled-agents/myagents_helper/.claude/skills/self-config/) to a

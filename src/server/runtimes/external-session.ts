@@ -13,7 +13,8 @@ import type { InteractionScenario } from '../system-prompt';
 import type { AgentRuntime, RuntimeProcess, UnifiedEvent, ImagePayload } from './types';
 import type { ToolAttachment } from '../../shared/types/tool-attachment';
 import { StaleRuntimeSessionError } from './types';
-import { awaitInFlightSaves, rebuildAttachmentRegistryFromBlocks } from './tool-attachments';
+import { awaitInFlightSaves, rebuildAttachmentRegistryFromBlocks, trackInFlightSave } from './tool-attachments';
+import { maybeSpill, type LargeValueRef } from '../utils/large-value-store';
 import type { AskUserQuestionInput } from '../../shared/types/askUserQuestion';
 import { getExternalRuntime, getCurrentRuntimeType, isExternalRuntime } from './factory';
 import { resolveCodexWorkspaceInstructions } from './workspace-instructions';
@@ -90,6 +91,7 @@ interface PersistContentBlock {
       cwd?: string;
       processId?: string | null;
       status?: string;
+      largeValueRef?: LargeValueRef;
     };
     streamIndex: number;
     // PRD 0.2.15 — rich-media attachments. Persisted with the tool block so
@@ -519,8 +521,10 @@ function isAskUserQuestionInput(input: unknown): input is AskUserQuestionInput {
       typeof question.question === 'string' &&
       typeof question.header === 'string' &&
       Array.isArray(question.options) &&
-      question.options.length >= 2 &&
-      typeof question.multiSelect === 'boolean'
+      typeof question.multiSelect === 'boolean' &&
+      (question.id === undefined || typeof question.id === 'string') &&
+      (question.required === undefined || typeof question.required === 'boolean') &&
+      (question.isSecret === undefined || typeof question.isSecret === 'boolean')
     );
   });
 }
@@ -1970,6 +1974,83 @@ async function persistTurnResult(): Promise<void> {
 
 // ─── Private: UnifiedEvent → SSE broadcast ───
 
+async function normalizeExternalToolResultForSse(
+  event: Extract<UnifiedEvent, { kind: 'tool_result' }>,
+): Promise<Extract<UnifiedEvent, { kind: 'tool_result' }>> {
+  const spilled = await maybeSpill(event.content, {
+    mimetype: 'text/plain; charset=utf-8',
+    sessionId: lastSessionId || undefined,
+  });
+  if ('inline' in spilled) {
+    return event;
+  }
+  return {
+    ...event,
+    content: spilled.preview,
+    metadata: {
+      ...(event.metadata ?? {}),
+      largeValueRef: spilled,
+    },
+  };
+}
+
+function applyExternalToolResult(event: Extract<UnifiedEvent, { kind: 'tool_result' }>): void {
+  // Update the matching tool_use block's result + attachments (PRD 0.2.15)
+  for (let i = currentContentBlocks.length - 1; i >= 0; i--) {
+    if (currentContentBlocks[i].type === 'tool_use' && currentContentBlocks[i].tool?.id === event.toolUseId) {
+      currentContentBlocks[i].tool!.result = event.content;
+      currentContentBlocks[i].tool!.isError = event.isError ?? false;
+      currentContentBlocks[i].tool!.resultMeta = event.metadata;
+      if (event.attachments && event.attachments.length > 0) {
+        currentContentBlocks[i].tool!.attachments = event.attachments;
+      }
+      break;
+    }
+  }
+  broadcast('chat:tool-result-start', {
+    toolUseId: event.toolUseId,
+    content: event.content,
+    isError: event.isError ?? false,
+    metadata: event.metadata,
+    attachments: event.attachments,
+  });
+  // Emit complete immediately — external runtimes deliver tool results as a single event
+  // (no streaming delta). Frontend needs this to clear tool loading spinner + trigger file refresh.
+  broadcast('chat:tool-result-complete', {
+    toolUseId: event.toolUseId,
+    content: event.content,
+    isError: event.isError ?? false,
+    metadata: event.metadata,
+    attachments: event.attachments,
+  });
+  // PRD 0.2.18 — accumulate attachment hints for inbox reply pushback
+  // (only when this turn has inbox binding to avoid memory accumulation
+  // for non-inbox turns).
+  if (currentTurnInboxMeta && event.attachments && event.attachments.length > 0) {
+    for (const a of event.attachments) {
+      const hint = (a as { name?: string; path?: string; pendingId?: string }).name
+        ?? (a as { path?: string }).path
+        ?? '<attachment>';
+      currentTurnAttachmentHints.push(hint);
+    }
+  }
+  resetWatchdog();
+}
+
+function autoDenyNonInteractiveRequest(event: Extract<UnifiedEvent, { kind: 'permission_request' }>): boolean {
+  if (lastScenario.type === 'desktop') return false;
+  const reason = `External runtime interactive request "${event.toolName}" was denied because ${lastScenario.type} sessions cannot render approval UI.`;
+  console.warn(`[external-session] ${reason} requestId=${event.requestId}`);
+  fireImCallback('error', reason);
+  const runtime = activeRuntime;
+  const proc = activeProcess;
+  if (runtime && proc) {
+    void runtime.respondPermission(proc, event.requestId, 'deny', reason, undefined, undefined, true)
+      .catch((err) => console.error(`[external-session] auto-deny failed for requestId=${event.requestId}:`, err));
+  }
+  return true;
+}
+
 function handleUnifiedEvent(event: UnifiedEvent): void {
   switch (event.kind) {
     case 'text_delta':
@@ -1984,6 +2065,10 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
       // Text block ended — flush accumulated text into a content block
       console.log(`[external-session] text_stop: accumulated ${currentAssistantText.length} chars`);
       flushPendingText();
+      // Mirror builtin: tell the renderer the trailing text block closed so it clears
+      // `streamingTextActive` and the tail-fade stops (same bug class, sibling runtime
+      // path). type:'text' is the discriminator; index is unused for the text case.
+      broadcast('chat:content-block-stop', { index: -1, type: 'text' });
       fireImCallback('block-end', '');
       break;
 
@@ -2081,46 +2166,22 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
       break;
 
     case 'tool_result':
-      // Update the matching tool_use block's result + attachments (PRD 0.2.15)
-      for (let i = currentContentBlocks.length - 1; i >= 0; i--) {
-        if (currentContentBlocks[i].type === 'tool_use' && currentContentBlocks[i].tool?.id === event.toolUseId) {
-          currentContentBlocks[i].tool!.result = event.content;
-          currentContentBlocks[i].tool!.isError = event.isError ?? false;
-          currentContentBlocks[i].tool!.resultMeta = event.metadata;
-          if (event.attachments && event.attachments.length > 0) {
-            currentContentBlocks[i].tool!.attachments = event.attachments;
-          }
-          break;
-        }
+      {
+        const normalized = normalizeExternalToolResultForSse(event)
+          .then(applyExternalToolResult)
+          .catch((err) => {
+            console.error('[external-session] tool_result spill failed:', err);
+            applyExternalToolResult({
+              ...event,
+              content: event.content.slice(0, 8 * 1024),
+              metadata: {
+                ...(event.metadata ?? {}),
+                status: event.metadata?.status ?? 'large-result-spill-failed',
+              },
+            });
+          });
+        trackInFlightSave(normalized);
       }
-      broadcast('chat:tool-result-start', {
-        toolUseId: event.toolUseId,
-        content: event.content,
-        isError: event.isError ?? false,
-        metadata: event.metadata,
-        attachments: event.attachments,
-      });
-      // Emit complete immediately — external runtimes deliver tool results as a single event
-      // (no streaming delta). Frontend needs this to clear tool loading spinner + trigger file refresh.
-      broadcast('chat:tool-result-complete', {
-        toolUseId: event.toolUseId,
-        content: event.content,
-        isError: event.isError ?? false,
-        metadata: event.metadata,
-        attachments: event.attachments,
-      });
-      // PRD 0.2.18 — accumulate attachment hints for inbox reply pushback
-      // (only when this turn has inbox binding to avoid memory accumulation
-      // for non-inbox turns).
-      if (currentTurnInboxMeta && event.attachments && event.attachments.length > 0) {
-        for (const a of event.attachments) {
-          const hint = (a as { name?: string; path?: string; pendingId?: string }).name
-            ?? (a as { path?: string }).path
-            ?? '<attachment>';
-          currentTurnAttachmentHints.push(hint);
-        }
-      }
-      resetWatchdog();
       break;
 
     case 'tool_attachment_update': {
@@ -2147,6 +2208,7 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
     }
 
     case 'permission_request':
+      if (autoDenyNonInteractiveRequest(event)) break;
       // AskUserQuestion carries a structured payload (questions/options/previews) and
       // needs the dedicated wizard UI, not the generic allow/deny card. Route it through
       // the ask-user-question:request channel so the frontend mounts AskUserQuestionPrompt
@@ -2192,6 +2254,18 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
         input: event.input,
       }));
       break;
+
+    case 'interactive_request_resolved': {
+      const pending = pendingExternalInteractiveRequests.get(event.requestId);
+      if (pending?.type === 'ask-user-question:request') {
+        broadcast('ask-user-question:expired', { requestId: event.requestId, reason: 'resolved' });
+      }
+      pendingExternalAskUserQuestions.delete(event.requestId);
+      pendingExternalInteractiveRequests.delete(event.requestId);
+      pendingPermissionSuggestions.delete(event.requestId);
+      resetWatchdog();
+      break;
+    }
 
     case 'session_init': {
       // Capture runtime's session ID for multi-turn resume
@@ -2318,6 +2392,14 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
           emitDiagnosticLog(
             'warn',
             `[codex-diag] MCP server(s) in failed state: ${failed.map(s => s.name).join(', ')}`,
+          );
+        }
+      }
+      if (d.issues) {
+        for (const issue of d.issues) {
+          emitDiagnosticLog(
+            issue.severity === 'error' ? 'error' : 'warn',
+            `[codex-diag] ${issue.code}: ${issue.message}`,
           );
         }
       }

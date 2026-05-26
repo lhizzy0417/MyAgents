@@ -760,6 +760,19 @@ const server = honoServe({
       const body = await req.json() as { chatId: string; text: string };
       const { chatId, text } = body;
 
+      const pending = getPendingDispatch(chatId);
+      if (pending?.resolveViaSendText) {
+        try {
+          await pending.callbacks.sendFinalReply({ text });
+          resolvePendingDispatch(chatId, { queuedFinal: text.trim() ? 1 : 0, counts: text.trim() ? { final: 1 } : {} });
+          return Response.json({ ok: true, pendingDispatch: true });
+        } catch (err) {
+          console.error(`[plugin-bridge] /send-text pending dispatch error for chatId=${chatId}:`, err);
+          rejectPendingDispatch(chatId, err instanceof Error ? err : new Error(String(err)));
+          return Response.json({ ok: false, error: String(err) }, { status: 500 });
+        }
+      }
+
       if (!capturedPlugin?.sendText) {
         return Response.json({ ok: false, error: 'Plugin has no sendText handler' }, { status: 501 });
       }
@@ -932,13 +945,16 @@ const server = honoServe({
       if (pending) {
         try {
           if (body.isThinking) {
-            pending.callbacks.onReasoningStream?.({ text: body.content || '' });
+            await pending.callbacks.onReasoningStream?.({ text: body.content || '' });
           } else {
-            pending.callbacks.onPartialReply?.({ text: body.content });
+            await pending.callbacks.onPartialReply?.({ text: body.content });
           }
           return Response.json({ ok: true });
         } catch (err) {
           console.error(`[plugin-bridge] /stream-chunk protocol callback error for chatId=${body.chatId}:`, err);
+          if (body.chatId) {
+            rejectPendingDispatch(body.chatId, err instanceof Error ? err : new Error(String(err)));
+          }
           return Response.json({ ok: false, error: String(err) }, { status: 500 });
         }
       }
@@ -972,7 +988,7 @@ const server = honoServe({
         try {
           const finalText = body.finalContent || '';
           // Always call sendFinalReply — it signals the plugin to close the streaming card
-          pending.callbacks.sendFinalReply({ text: finalText });
+          await pending.callbacks.sendFinalReply({ text: finalText });
           // Resolve the pending dispatch — dispatchReplyFromConfig will return,
           // then withReplyDispatcher's finally block calls markComplete + waitForIdle
           resolvePendingDispatch(body.chatId!, { queuedFinal: 1, counts: { final: 1 } });

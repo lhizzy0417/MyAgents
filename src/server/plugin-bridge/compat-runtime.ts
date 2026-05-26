@@ -44,6 +44,29 @@ type BridgeAttachment = {
   attachmentType: 'image' | 'file';
 };
 
+type OpenClawDeliverPayload = {
+  text?: string;
+  mediaUrls?: string[];
+  mediaUrl?: string;
+  isReasoning?: boolean;
+  isCompactionNotice?: boolean;
+};
+
+type OpenClawDeliverInfo = { kind: 'block' | 'tool' | 'final' | 'reasoning' };
+type OpenClawDeliver = (
+  payload: OpenClawDeliverPayload,
+  info: OpenClawDeliverInfo,
+) => unknown | Promise<unknown>;
+
+function getOpenClawDeliver(dispatcherOptions: Record<string, unknown> | undefined): OpenClawDeliver | undefined {
+  const deliver = dispatcherOptions?.deliver;
+  return typeof deliver === 'function' ? deliver as OpenClawDeliver : undefined;
+}
+
+async function deliverTextBlock(deliver: OpenClawDeliver, text: string): Promise<void> {
+  await deliver({ text }, { kind: 'block' });
+}
+
 /**
  * Extract media from OpenClaw inbound context and convert to bridge attachments.
  *
@@ -186,6 +209,16 @@ function defaultIsMentionForGroup(pluginId: string): boolean {
   // WeCom: platform only delivers group callbacks on @-mention.
   if (pluginId === 'wecom') return true;
   return false;
+}
+
+function booleanFromContext(value: unknown): boolean | undefined {
+  if (typeof value === 'boolean') return value;
+  if (typeof value === 'string') {
+    const normalized = value.trim().toLowerCase();
+    if (normalized === 'true') return true;
+    if (normalized === 'false') return false;
+  }
+  return undefined;
 }
 
 /**
@@ -460,7 +493,7 @@ export function createCompatRuntime(rustPort: number, botId: string, pluginId: s
           const chatType = String(ctx.ChatType || ctx.chatType || 'direct');
           const messageId = String(ctx.MessageSid || ctx.messageSid || ctx.MessageId || '');
           const groupId = String(ctx.QQGroupOpenid || ctx.GroupId || ctx.groupId || '');
-          const isMention = ctx.IsMention ?? ctx.WasMentioned ?? ctx.isMention
+          const isMention = booleanFromContext(ctx.IsMention ?? ctx.WasMentioned ?? ctx.isMention)
             ?? (chatType === 'group' ? defaultIsMentionForGroup(currentPluginId) : true);
           const groupName = String(ctx.GroupSubject || ctx.GroupName || ctx.groupName || '') || undefined;
           const threadId = String(ctx.MessageThreadId || ctx.threadId || '') || undefined;
@@ -492,7 +525,14 @@ export function createCompatRuntime(rustPort: number, botId: string, pluginId: s
           // path → orphaned stream / mismatched output. Tradeoff: a POST
           // failure now leaves a transient pending dispatch, which we
           // explicitly reject below.
-          const completionPromise = registerPendingDispatch(chatId, callbacks);
+          // In group mention-gated channels, explicit non-mention messages are
+          // accepted by Rust then buffered into group history without producing
+          // a reply. Do not create a pending protocol dispatch for those, or the
+          // plugin bridge waits until the 10-minute safety timeout.
+          const expectsReply = !(chatType === 'group' && isMention === false);
+          const completionPromise = expectsReply
+            ? registerPendingDispatch(chatId, callbacks)
+            : undefined;
           try {
             const resp = await cancellableFetch(`${rustBaseUrl}/api/im-bridge/message`, {
               method: 'POST',
@@ -530,6 +570,9 @@ export function createCompatRuntime(rustPort: number, botId: string, pluginId: s
           }
 
           // Block until AI response completes (resolved by /finalize-stream or /abort-stream)
+          if (!completionPromise) {
+            return { queuedFinal: 0, counts: {}, dispatcher: { waitForIdle: async () => {} } };
+          }
           try {
             const result = await completionPromise;
             console.log(`[compat-timing] dispatchReplyFromConfig EXIT (protocol) (+${Date.now() - t0}ms)`);
@@ -583,7 +626,7 @@ export function createCompatRuntime(rustPort: number, botId: string, pluginId: s
           cfg?: Record<string, unknown>;
           dispatcherOptions?: Record<string, unknown>;
         }) {
-          const { ctx } = params;
+          const { ctx, dispatcherOptions } = params;
 
           const text = String(ctx.BodyForAgent || ctx.Body || ctx.body || ctx.RawBody || '');
           const senderId = String(ctx.SenderId || ctx.senderId || '');
@@ -601,7 +644,7 @@ export function createCompatRuntime(rustPort: number, botId: string, pluginId: s
           // group=plugin-specific (see defaultIsMentionForGroup — wecom group
           // callbacks are mention-only by platform invariant; other plugins
           // default to false unless they set WasMentioned explicitly).
-          const isMention = ctx.IsMention ?? ctx.WasMentioned ?? ctx.isMention
+          const isMention = booleanFromContext(ctx.IsMention ?? ctx.WasMentioned ?? ctx.isMention)
             ?? (chatType === 'group' ? defaultIsMentionForGroup(currentPluginId) : true);
 
           // Group metadata from OpenClaw plugin dispatch context
@@ -623,6 +666,20 @@ export function createCompatRuntime(rustPort: number, botId: string, pluginId: s
 
           const t0 = Date.now();
           console.log(`[compat-timing] dispatchReplyWithBufferedBlockDispatcher ENTER: sender=${senderId} chat=${chatId} len=${text.length} attachments=${mediaAttachments.length}`);
+          const deliver = getOpenClawDeliver(dispatcherOptions);
+          const expectsReply = !(chatType === 'group' && isMention === false);
+          const completionPromise = deliver && chatId && expectsReply
+            ? registerPendingDispatch(chatId, {
+                sendBlockReply: async (payload) => {
+                  await deliverTextBlock(deliver, payload.text || '');
+                  return true;
+                },
+                sendFinalReply: async (payload) => {
+                  await deliverTextBlock(deliver, payload.text || '');
+                  return true;
+                },
+              }, { resolveViaSendText: true })
+            : undefined;
 
           try {
             // Pattern 1: 5s cap on the local management API call. Plugin
@@ -659,7 +716,7 @@ export function createCompatRuntime(rustPort: number, botId: string, pluginId: s
             console.log(`[compat-timing] Rust POST completed (+${Date.now() - t0}ms) status=${resp.status}`);
             if (!resp.ok) {
               const body = await resp.text();
-              console.error(`[compat-runtime] Rust returned ${resp.status}: ${body}`);
+              throw new Error(`Rust returned ${resp.status}: ${body}`);
             } else {
               // Pattern 4: record a successful forward for /health/functional.
               (globalThis as { __pluginBridgeLastForwardAt?: number }).__pluginBridgeLastForwardAt = Date.now();
@@ -668,9 +725,33 @@ export function createCompatRuntime(rustPort: number, botId: string, pluginId: s
             const isTimeout = err instanceof Error && (err.name === 'AbortError' || err.name === 'TimeoutError');
             const reason = isTimeout ? 'timeout' : 'error';
             console.warn(`[compat-runtime] Rust POST FAILED (reason=${reason}, +${Date.now() - t0}ms): ${err instanceof Error ? err.message : String(err)}`);
+            if (completionPromise) {
+              rejectPendingDispatch(chatId, err instanceof Error ? err : new Error(String(err)));
+              try {
+                await completionPromise;
+              } catch {
+                /* consume the rejection we just triggered */
+              }
+              const onError = dispatcherOptions?.onError;
+              if (typeof onError === 'function') {
+                try {
+                  await onError(err, { kind: 'final' });
+                } catch {
+                  /* plugin error callback is best-effort */
+                }
+              }
+              throw err;
+            }
           }
 
-          // Do NOT call the deliver callback — AI reply comes back via /send-text
+          if (completionPromise) {
+            const result = await completionPromise;
+            console.log(`[compat-timing] dispatchReplyWithBufferedBlockDispatcher EXIT (synthetic deliver) (+${Date.now() - t0}ms)`);
+            return result;
+          }
+
+          // No OpenClaw deliver callback was supplied. Preserve the legacy
+          // bypass path: AI reply comes back through Bridge /send-text.
           return { queuedFinal: 0, counts: {}, dispatcher: { waitForIdle: async () => {} } };
         },
       },

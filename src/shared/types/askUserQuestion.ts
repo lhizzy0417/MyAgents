@@ -11,10 +11,16 @@ export interface AskUserQuestionOption {
 }
 
 export interface AskUserQuestion {
+  /** Runtime-native question id. Omitted by older builtin callers, present for Codex app-server. */
+  id?: string;
   question: string;
   header: string;
   options: AskUserQuestionOption[];
   multiSelect: boolean;
+  /** Optional fields can be skipped by the user. Omitted means required for legacy callers. */
+  required?: boolean;
+  /** Render custom text input as password/secret input. */
+  isSecret?: boolean;
 }
 
 export interface AskUserQuestionInput {

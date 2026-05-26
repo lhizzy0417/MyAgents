@@ -13,7 +13,7 @@ import type {
   RuntimeDetection, RuntimeModelInfo, RuntimePermissionMode, RuntimeType,
   RuntimeAuthStatus, RuntimeFeatureFlag, RuntimeMcpServerInfo, RuntimeAppInfo,
   RuntimeDiagnostics, RuntimeDiagnosticsStatus, RuntimeEffectiveEnv,
-  RuntimeProxyPolicy,
+  RuntimeProxyPolicy, RuntimeDiagnosticIssue,
 } from '../../shared/types/runtime';
 import { CODEX_PERMISSION_MODES } from '../../shared/types/runtime';
 import type { AgentRuntime, RuntimeProcess, SessionStartOptions, UnifiedEvent, UnifiedEventCallback, ImagePayload } from './types';
@@ -31,6 +31,84 @@ import {
   type SaveContext,
 } from './tool-attachments';
 import type { ToolAttachment } from '../../shared/types/tool-attachment';
+
+type CodexDecision = 'deny' | 'allow_once' | 'always_allow';
+type CodexSandboxMode = 'read-only' | 'workspace-write' | 'danger-full-access';
+type CodexApprovalPolicy =
+  | 'untrusted'
+  | 'on-failure'
+  | 'on-request'
+  | 'never'
+  | { granular: Record<string, boolean> };
+type CodexSandboxPolicy =
+  | { type: 'dangerFullAccess' }
+  | { type: 'readOnly'; networkAccess: boolean }
+  | {
+    type: 'workspaceWrite';
+    writableRoots: string[];
+    networkAccess: boolean;
+    excludeTmpdirEnvVar: boolean;
+    excludeSlashTmp: boolean;
+  };
+
+export const CODEX_INITIALIZE_CAPABILITIES = Object.freeze({
+  experimentalApi: false,
+  requestAttestation: false,
+  optOutNotificationMethods: [
+    'remoteControl/status/changed',
+    'thread/goal/cleared',
+  ],
+});
+
+export function buildCodexInitializeParams(): Record<string, unknown> {
+  return {
+    clientInfo: { name: 'MyAgents', title: null, version: process.env.MYAGENTS_VERSION || '0.1.60' },
+    capabilities: CODEX_INITIALIZE_CAPABILITIES,
+  };
+}
+
+export const KNOWN_CODEX_SERVER_REQUEST_METHODS = Object.freeze([
+  'item/commandExecution/requestApproval',
+  'item/fileChange/requestApproval',
+  'item/tool/requestUserInput',
+  'mcpServer/elicitation/request',
+  'item/permissions/requestApproval',
+  'item/tool/call',
+  'account/chatgptAuthTokens/refresh',
+  'attestation/generate',
+  'applyPatchApproval',
+  'execCommandApproval',
+] as const);
+
+type KnownCodexServerRequestMethod = (typeof KNOWN_CODEX_SERVER_REQUEST_METHODS)[number];
+type JsonRpcRequestId = number | string;
+
+export type PendingCodexRequest =
+  | { kind: 'command_approval'; rpcId: JsonRpcRequestId; method: KnownCodexServerRequestMethod; params: Record<string, unknown> }
+  | { kind: 'file_approval'; rpcId: JsonRpcRequestId; method: KnownCodexServerRequestMethod; params: Record<string, unknown> }
+  | { kind: 'tool_user_input'; rpcId: JsonRpcRequestId; method: KnownCodexServerRequestMethod; params: Record<string, unknown> }
+  | { kind: 'mcp_elicitation'; rpcId: JsonRpcRequestId; method: KnownCodexServerRequestMethod; params: Record<string, unknown> }
+  | { kind: 'permissions_approval'; rpcId: JsonRpcRequestId; method: KnownCodexServerRequestMethod; params: Record<string, unknown> };
+
+type CodexResponseAction =
+  | { type: 'result'; result: unknown }
+  | { type: 'error'; code: number; message: string };
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === 'object' && !Array.isArray(value);
+}
+
+function stringValue(value: unknown): string | undefined {
+  return typeof value === 'string' ? value : undefined;
+}
+
+function arrayValue(value: unknown): unknown[] {
+  return Array.isArray(value) ? value : [];
+}
+
+function objectValue(value: unknown): Record<string, unknown> {
+  return isRecord(value) ? value : {};
+}
 
 // ─── Temp image directory for Codex (which requires file paths, not base64) ───
 const TEMP_IMG_DIR = join(
@@ -89,6 +167,380 @@ function buildCodexInput(text: string, images?: ImagePayload[]): unknown[] {
   return input;
 }
 
+export async function initializeCodexRpc(
+  rpc: Pick<JsonRpcClient, 'call' | 'notify'>,
+  timeoutMs = 10_000,
+): Promise<void> {
+  await rpc.call('initialize', buildCodexInitializeParams(), timeoutMs);
+  rpc.notify('initialized');
+}
+
+export function buildCodexSandboxPolicy(
+  sandbox: CodexSandboxMode,
+  workspacePath: string,
+): CodexSandboxPolicy {
+  switch (sandbox) {
+    case 'read-only':
+      return { type: 'readOnly', networkAccess: false };
+    case 'workspace-write':
+      return {
+        type: 'workspaceWrite',
+        writableRoots: [workspacePath],
+        networkAccess: false,
+        excludeTmpdirEnvVar: false,
+        excludeSlashTmp: false,
+      };
+    case 'danger-full-access':
+      return { type: 'dangerFullAccess' };
+  }
+}
+
+export function buildCodexTurnStartParams(args: {
+  threadId: string;
+  input: unknown[];
+  cwd: string;
+  approvalPolicy: CodexApprovalPolicy;
+  sandbox: CodexSandboxMode;
+  model?: string | null;
+}): Record<string, unknown> {
+  return {
+    threadId: args.threadId,
+    input: args.input,
+    cwd: args.cwd,
+    approvalPolicy: args.approvalPolicy,
+    sandboxPolicy: buildCodexSandboxPolicy(args.sandbox, args.cwd),
+    model: args.model || null,
+    summary: 'concise',
+  };
+}
+
+function isKnownCodexServerRequestMethod(method: string): method is KnownCodexServerRequestMethod {
+  return (KNOWN_CODEX_SERVER_REQUEST_METHODS as readonly string[]).includes(method);
+}
+
+function splitAnswerString(value: unknown): string[] {
+  if (Array.isArray(value)) return value.map(String).map(s => s.trim()).filter(Boolean);
+  if (typeof value !== 'string') return [];
+  return value.split(',').map(s => s.trim()).filter(Boolean);
+}
+
+function answerList(value: unknown, opts: { splitComma: boolean }): string[] {
+  if (Array.isArray(value)) return value.map(String).map(s => s.trim()).filter(Boolean);
+  if (typeof value !== 'string') return [];
+  if (opts.splitComma) return splitAnswerString(value);
+  const trimmed = value.trim();
+  return trimmed ? [trimmed] : [];
+}
+
+function hasAnswerValue(value: unknown): boolean {
+  if (Array.isArray(value)) return value.some((entry) => String(entry).trim().length > 0);
+  if (typeof value === 'string') return value.trim().length > 0;
+  return value != null;
+}
+
+function pickAnswer(
+  answers: Record<string, unknown>,
+  key: string,
+  idx: number,
+): { value: unknown; provided: boolean } {
+  if (Object.prototype.hasOwnProperty.call(answers, key)) {
+    return { value: answers[key], provided: hasAnswerValue(answers[key]) };
+  }
+  const legacyKey = String(idx);
+  if (Object.prototype.hasOwnProperty.call(answers, legacyKey)) {
+    return { value: answers[legacyKey], provided: hasAnswerValue(answers[legacyKey]) };
+  }
+  return { value: undefined, provided: false };
+}
+
+function getAnswersFromUpdatedInput(updatedInput?: Record<string, unknown>): Record<string, unknown> {
+  return objectValue(updatedInput?.answers);
+}
+
+function commandDecisionForMethod(
+  method: KnownCodexServerRequestMethod,
+  decision: CodexDecision,
+  interrupt = false,
+): string {
+  if (method === 'execCommandApproval' || method === 'applyPatchApproval') {
+    if (decision === 'deny') return interrupt ? 'abort' : 'denied';
+    return decision === 'always_allow' ? 'approved_for_session' : 'approved';
+  }
+  if (decision === 'deny') return interrupt ? 'cancel' : 'decline';
+  return decision === 'always_allow' ? 'acceptForSession' : 'accept';
+}
+
+function buildToolUserInputResponse(
+  pending: Extract<PendingCodexRequest, { kind: 'tool_user_input' }>,
+  updatedInput?: Record<string, unknown>,
+): Record<string, unknown> {
+  const answers = getAnswersFromUpdatedInput(updatedInput);
+  const questions = arrayValue(pending.params.questions);
+  const answerMap: Record<string, { answers: string[] }> = {};
+  questions.forEach((q, idx) => {
+    const question = objectValue(q);
+    const id = stringValue(question.id) || String(idx);
+    answerMap[id] = {
+      answers: answerList(answers[id] ?? answers[String(idx)], { splitComma: false }),
+    };
+  });
+  return { answers: answerMap };
+}
+
+function enumOptions(schema: Record<string, unknown>): Array<{ value: string; label: string }> {
+  if (Array.isArray(schema.enum)) {
+    const names = Array.isArray(schema.enumNames) ? schema.enumNames : [];
+    return schema.enum.map((v, idx) => ({
+      value: String(v),
+      label: String(names[idx] ?? v),
+    }));
+  }
+  if (Array.isArray(schema.oneOf)) {
+    return schema.oneOf
+      .map((entry) => objectValue(entry))
+      .filter((entry) => typeof entry.const === 'string')
+      .map((entry) => ({
+        value: String(entry.const),
+        label: String(entry.title ?? entry.const),
+      }));
+  }
+  const items = objectValue(schema.items);
+  if (Array.isArray(items.enum)) {
+    return items.enum.map((v) => ({ value: String(v), label: String(v) }));
+  }
+  if (Array.isArray(items.anyOf)) {
+    return items.anyOf
+      .map((entry) => objectValue(entry))
+      .filter((entry) => typeof entry.const === 'string')
+      .map((entry) => ({
+        value: String(entry.const),
+        label: String(entry.title ?? entry.const),
+      }));
+  }
+  return [];
+}
+
+function answerLabelToEnumValue(schema: Record<string, unknown>, answer: string): string {
+  const match = enumOptions(schema).find((opt) => opt.label === answer || opt.value === answer);
+  return match?.value ?? answer;
+}
+
+function defaultForSchema(schema: Record<string, unknown>): unknown {
+  if ('default' in schema) return schema.default;
+  return undefined;
+}
+
+function coerceMcpAnswer(
+  schema: Record<string, unknown>,
+  answer: unknown,
+): unknown {
+  const schemaOptions = enumOptions(schema);
+  const selected = schema.type === 'array'
+    ? answerList(answer, { splitComma: true })
+    : answerList(answer, { splitComma: false });
+  if (selected.length === 0) return defaultForSchema(schema);
+  switch (schema.type) {
+    case 'boolean': {
+      const v = selected[0]?.toLowerCase();
+      return v === 'true' || v === 'yes' || v === '1' || v === '是';
+    }
+    case 'integer':
+    case 'number': {
+      const n = Number(selected[0]);
+      return Number.isFinite(n) ? n : defaultForSchema(schema);
+    }
+    case 'array':
+      return selected.map((v) => answerLabelToEnumValue(schema, v));
+    default:
+      return schemaOptions.length > 0
+        ? answerLabelToEnumValue(schema, selected[0] ?? '')
+        : selected[0] ?? defaultForSchema(schema);
+  }
+}
+
+function buildMcpElicitationContent(
+  params: Record<string, unknown>,
+  updatedInput?: Record<string, unknown>,
+): Record<string, unknown> | null {
+  if (params.mode !== 'form') return null;
+  const requestedSchema = objectValue(params.requestedSchema);
+  const properties = objectValue(requestedSchema.properties);
+  const required = new Set(arrayValue(requestedSchema.required).filter((v): v is string => typeof v === 'string'));
+  const answers = getAnswersFromUpdatedInput(updatedInput);
+  const content: Record<string, unknown> = {};
+  Object.entries(properties).forEach(([key, schemaValue], idx) => {
+    const schema = objectValue(schemaValue);
+    const picked = pickAnswer(answers, key, idx);
+    if (!picked.provided) {
+      if ('default' in schema) {
+        content[key] = schema.default;
+      }
+      return;
+    }
+    const value = coerceMcpAnswer(schema, picked.value);
+    if (value !== undefined) {
+      content[key] = value;
+    }
+  });
+  for (const key of required) {
+    if (!Object.prototype.hasOwnProperty.call(content, key)) return null;
+  }
+  return content;
+}
+
+function buildGrantedPermissionProfile(params: Record<string, unknown>): Record<string, unknown> {
+  const requested = objectValue(params.permissions);
+  const granted: Record<string, unknown> = {};
+  if (requested.network != null) granted.network = requested.network;
+  if (requested.fileSystem != null) granted.fileSystem = requested.fileSystem;
+  return granted;
+}
+
+export function serializeCodexPermissionResponse(
+  pending: PendingCodexRequest,
+  decision: CodexDecision,
+  updatedInput?: Record<string, unknown>,
+  interrupt = false,
+): CodexResponseAction {
+  switch (pending.kind) {
+    case 'command_approval':
+    case 'file_approval':
+      return {
+        type: 'result',
+        result: {
+          decision: commandDecisionForMethod(pending.method, decision, interrupt),
+        },
+      };
+    case 'tool_user_input':
+      if (decision === 'deny') {
+        return { type: 'result', result: { answers: {} } };
+      }
+      return {
+        type: 'result',
+        result: buildToolUserInputResponse(pending, updatedInput),
+      };
+    case 'mcp_elicitation': {
+      if (decision === 'deny') {
+        return {
+          type: 'result',
+          result: {
+            action: interrupt ? 'cancel' : 'decline',
+            content: null,
+            _meta: null,
+          },
+        };
+      }
+      const content = buildMcpElicitationContent(pending.params, updatedInput);
+      if (pending.params.mode === 'form' && content === null) {
+        return {
+          type: 'error',
+          code: -32000,
+          message: 'Missing required MCP elicitation answers',
+        };
+      }
+      return {
+        type: 'result',
+        result: {
+          action: 'accept',
+          content,
+          _meta: null,
+        },
+      };
+    }
+    case 'permissions_approval':
+      if (decision === 'deny') {
+        return {
+          type: 'error',
+          code: -32000,
+          message: 'User denied Codex permission request',
+        };
+      }
+      return {
+        type: 'result',
+        result: {
+          permissions: buildGrantedPermissionProfile(pending.params),
+          scope: decision === 'always_allow' ? 'session' : 'turn',
+        },
+      };
+  }
+}
+
+function toolRequestUserInputToAskUserQuestion(params: Record<string, unknown>): Record<string, unknown> {
+  const questions = arrayValue(params.questions).map((raw, idx) => {
+    const q = objectValue(raw);
+    const options = arrayValue(q.options).map((rawOpt) => {
+      if (typeof rawOpt === 'string') {
+        return { label: rawOpt, description: '' };
+      }
+      const opt = objectValue(rawOpt);
+      return {
+        label: String(opt.label ?? ''),
+        description: String(opt.description ?? ''),
+      };
+    }).filter((opt) => opt.label || opt.description);
+    return {
+      id: stringValue(q.id) || String(idx),
+      header: stringValue(q.header) || `Question ${idx + 1}`,
+      question: stringValue(q.question) || '',
+      options,
+      multiSelect: q.multiSelect === true,
+      required: true,
+      isSecret: q.isSecret === true,
+    };
+  });
+  return { questions, metadata: { source: 'codex_tool_request_user_input' } };
+}
+
+function mcpElicitationToAskUserQuestion(params: Record<string, unknown>): Record<string, unknown> {
+  const schema = objectValue(params.requestedSchema);
+  const properties = objectValue(schema.properties);
+  const required = new Set(arrayValue(schema.required).filter((v): v is string => typeof v === 'string'));
+  const questions = Object.entries(properties).map(([key, schemaValue]) => {
+    const prop = objectValue(schemaValue);
+    const options = prop.type === 'boolean'
+      ? [
+          { label: 'true', description: '是' },
+          { label: 'false', description: '否' },
+        ]
+      : enumOptions(prop).map((opt) => ({ label: opt.label, description: opt.value }));
+    return {
+      id: key,
+      header: stringValue(prop.title) || key,
+      question: stringValue(prop.description) || stringValue(params.message) || key,
+      options,
+      multiSelect: prop.type === 'array',
+      required: required.has(key),
+      isSecret: prop.format === 'password' || prop.writeOnly === true,
+    };
+  });
+  return {
+    questions,
+    metadata: { source: 'codex_mcp_elicitation', serverName: params.serverName },
+  };
+}
+
+function isCodexMcpApprovalElicitation(params: Record<string, unknown>): boolean {
+  const meta = objectValue(params._meta);
+  return meta.codex_approval_kind === 'mcp_tool_call'
+    || meta.codexApprovalKind === 'mcp_tool_call';
+}
+
+function resolvedServerRequestId(params: Record<string, unknown>): string | null {
+  const candidates = [
+    params.requestId,
+    params.serverRequestId,
+    params.rpcId,
+    params.id,
+    objectValue(params.request).id,
+  ];
+  for (const candidate of candidates) {
+    if (typeof candidate === 'string' || typeof candidate === 'number') {
+      return String(candidate);
+    }
+  }
+  return null;
+}
+
 // ─── Model cache ───
 
 let modelCache: { models: RuntimeModelInfo[]; timestamp: number } | null = null;
@@ -104,11 +556,11 @@ const MODEL_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
  * - Server → Client Notifications (no id): dispatched via onNotification callback
  * - Server → Client Requests (with id): dispatched via onServerRequest, client must respond
  */
-class JsonRpcClient {
+export class JsonRpcClient {
   private nextId = 1;
   private pending = new Map<number, { resolve: (r: unknown) => void; reject: (e: Error) => void }>();
   private onNotification: ((method: string, params: unknown) => void) | null = null;
-  private onServerRequest: ((id: number, method: string, params: unknown) => void) | null = null;
+  private onServerRequest: ((id: JsonRpcRequestId, method: string, params: unknown) => void) | null = null;
   private encoder = new TextEncoder();
   private sink: SubprocessStdin;
   private reading = false;
@@ -127,7 +579,7 @@ class JsonRpcClient {
   }
 
   /** Register server-request handler (server → client, with id, expects response) */
-  setServerRequestHandler(handler: (id: number, method: string, params: unknown) => void): void {
+  setServerRequestHandler(handler: (id: JsonRpcRequestId, method: string, params: unknown) => void): void {
     this.onServerRequest = handler;
   }
 
@@ -154,13 +606,21 @@ class JsonRpcClient {
     });
   }
 
+  /** Send a JSON-RPC notification (client → server, no id) */
+  notify(method: string, params?: unknown): void {
+    const msg = params === undefined
+      ? { jsonrpc: '2.0', method }
+      : { jsonrpc: '2.0', method, params };
+    this.write(msg);
+  }
+
   /** Send a JSON-RPC response (for server-initiated requests) */
-  respond(id: number, result: unknown): void {
+  respond(id: JsonRpcRequestId, result: unknown): void {
     this.write({ jsonrpc: '2.0', id, result });
   }
 
   /** Send a JSON-RPC error response */
-  respondError(id: number, code: number, message: string): void {
+  respondError(id: JsonRpcRequestId, code: number, message: string): void {
     this.write({ jsonrpc: '2.0', id, error: { code, message } });
   }
 
@@ -239,7 +699,7 @@ class JsonRpcClient {
 
     // Server-initiated request (has method AND id)
     if ('method' in msg && 'id' in msg) {
-      this.onServerRequest?.(msg.id as number, msg.method as string, msg.params);
+      this.onServerRequest?.(msg.id as JsonRpcRequestId, msg.method as string, msg.params);
       return;
     }
   }
@@ -272,6 +732,12 @@ class CodexProcess implements RuntimeProcess {
   threadId = '';
   currentTurnId = '';
   agentMessageTextById = new Map<string, string>();
+  pendingRequests = new Map<string, PendingCodexRequest>();
+  workspacePath = '';
+  model = '';
+  approvalPolicy: CodexApprovalPolicy = 'on-request';
+  sandbox: CodexSandboxMode = 'workspace-write';
+  permissionMode = '';
 
   /** MyAgents sessionId (from SessionStartOptions). Used as the attachment scope key
    *  so refPath /api/attachment/tool/<sessionId>/<turnId>/<file> stays consistent
@@ -320,7 +786,7 @@ class CodexProcess implements RuntimeProcess {
 
 // ─── Permission mode mapping ───
 
-function mapPermissionMode(mode: string): { approval: string; sandbox: string } {
+function mapPermissionMode(mode: string): { approval: CodexApprovalPolicy; sandbox: CodexSandboxMode } {
   switch (mode) {
     case 'suggest':
       return { approval: 'untrusted', sandbox: 'read-only' };
@@ -364,6 +830,7 @@ const CODEX_STDERR_PATTERNS: StderrPattern[] = [
   { re: /not (signed in|logged in|authenticated)|authentication required|please sign in/i, level: 'error', prefix: 'Codex authentication required' },
   { re: /(401|403)\b.*?(unauthor|forbid)/i, level: 'error', prefix: 'Codex authorization rejected' },
   // Network / proxy diagnostics.
+  { re: /proxyconnect tcp: dial tcp 127\.[0-9.]+:\d+: connect: operation not permitted/i, level: 'error', prefix: 'Codex sandbox blocks MyAgents proxy' },
   { re: /(connection (refused|reset)|tls handshake|dns (failure|resolve))/i, level: 'error', prefix: 'Codex network error' },
 ];
 
@@ -446,6 +913,91 @@ function buildEffectiveEnvSnapshot(
   };
 }
 
+function parseLoopbackProxyTarget(env: Record<string, string | undefined>): { displayUrl: string; host: string; port: number } | null {
+  const raw = env.HTTPS_PROXY || env.https_proxy || env.HTTP_PROXY || env.http_proxy || env.ALL_PROXY || env.all_proxy;
+  if (!raw) return null;
+  try {
+    const u = new URL(raw);
+    const host = u.hostname.replace(/^\[|\]$/g, '');
+    const isLoopback = host === 'localhost'
+      || host === '127.0.0.1'
+      || host === '::1'
+      || host.startsWith('127.');
+    if (!isLoopback) return null;
+    const port = Number(u.port || (u.protocol === 'https:' ? 443 : 80));
+    if (!Number.isFinite(port) || port <= 0) return null;
+    return {
+      displayUrl: sanitizeProxyUrl(raw) ?? raw,
+      host,
+      port,
+    };
+  } catch {
+    return null;
+  }
+}
+
+async function probeCodexLoopbackProxy(
+  rpc: JsonRpcClient,
+  env: Record<string, string | undefined>,
+  cwd: string,
+  sandboxPolicy?: CodexSandboxPolicy,
+): Promise<RuntimeEffectiveEnv['codexSandbox'] | undefined> {
+  const target = parseLoopbackProxyTarget(env);
+  if (!target) return undefined;
+  const script = `
+const net = require('node:net');
+const host = process.argv[1];
+const port = Number(process.argv[2]);
+const result = {
+  detected: !!process.env.CODEX_SANDBOX,
+  networkDisabled: process.env.CODEX_SANDBOX_NETWORK_DISABLED === '1',
+  proxyProbe: { url: process.argv[3], reachable: false }
+};
+const sock = net.connect({ host, port, timeout: 800 }, () => {
+  result.proxyProbe.reachable = true;
+  console.log(JSON.stringify(result));
+  sock.destroy();
+});
+sock.on('timeout', () => {
+  result.proxyProbe.error = 'timeout';
+  console.log(JSON.stringify(result));
+  sock.destroy();
+});
+sock.on('error', (err) => {
+  result.proxyProbe.error = err && err.message ? err.message : String(err);
+  console.log(JSON.stringify(result));
+});
+`;
+  try {
+    const result = await rpc.call('command/exec', {
+      command: [process.execPath, '-e', script, target.host, String(target.port), target.displayUrl],
+      cwd,
+      timeoutMs: 3_000,
+      outputBytesCap: 4_096,
+      ...(sandboxPolicy ? { sandboxPolicy } : {}),
+    }, 5_000) as { exitCode?: number; stdout?: string; stderr?: string };
+    const lines = String(result.stdout ?? '').trim().split('\n').filter(Boolean);
+    const parsed = lines.length > 0 ? JSON.parse(lines[lines.length - 1]!) as RuntimeEffectiveEnv['codexSandbox'] : undefined;
+    return parsed ?? {
+      detected: false,
+      proxyProbe: {
+        url: target.displayUrl,
+        reachable: false,
+        error: result.stderr || `probe exited ${result.exitCode ?? 'unknown'}`,
+      },
+    };
+  } catch (err) {
+    return {
+      detected: false,
+      proxyProbe: {
+        url: target.displayUrl,
+        reachable: false,
+        error: err instanceof Error ? err.message : String(err),
+      },
+    };
+  }
+}
+
 /**
  * Best-effort RPC fan-out: collect Codex's view of auth / features / MCP
  * servers / apps. Each call has its own 5s timeout and is captured as either
@@ -466,8 +1018,10 @@ async function collectCodexDiagnostics(
    */
   threadId: string | null,
   proxyPolicy: RuntimeProxyPolicy = 'myagents',
+  sandboxPolicy?: CodexSandboxPolicy,
 ): Promise<RuntimeDiagnostics> {
   const status: RuntimeDiagnosticsStatus = {};
+  const issues: RuntimeDiagnosticIssue[] = [];
 
   // Helper: returns ['ok', value] | ['unsupported'] | ['error', reason]
   type CallResult<T> = ['ok', T] | ['unsupported'] | ['error', string];
@@ -521,10 +1075,25 @@ async function collectCodexDiagnostics(
       // (Defensive — Codex could ship a build mode where neither is required.)
       requiresLogin: !hasAuth && authR[1].requiresOpenaiAuth === true,
     };
+    if (auth.requiresLogin) {
+      issues.push({
+        code: 'codex_auth_required',
+        severity: 'error',
+        title: 'Codex requires login',
+        message: 'Codex reported no active auth method for this runtime session.',
+        hint: 'Run `codex login` in a terminal, then retry from MyAgents.',
+      });
+    }
   } else if (authR[0] === 'unsupported') {
     status.auth = 'unsupported';
   } else {
     status.auth = { error: authR[1] };
+    issues.push({
+      code: 'codex_auth_status_failed',
+      severity: 'warn',
+      title: 'Codex auth status failed',
+      message: authR[1],
+    });
   }
 
   // Process features — keep only enabled OR user-toggled (defaultEnabled !== enabled).
@@ -545,6 +1114,12 @@ async function collectCodexDiagnostics(
     status.features = 'unsupported';
   } else {
     status.features = { error: featuresR[1] };
+    issues.push({
+      code: 'codex_feature_status_failed',
+      severity: 'warn',
+      title: 'Codex feature status failed',
+      message: featuresR[1],
+    });
   }
 
   // Process MCP servers
@@ -587,6 +1162,12 @@ async function collectCodexDiagnostics(
     status.mcpServers = 'unsupported';
   } else {
     status.mcpServers = { error: mcpR[1] };
+    issues.push({
+      code: 'codex_mcp_status_failed',
+      severity: 'warn',
+      title: 'Codex MCP status failed',
+      message: mcpR[1],
+    });
   }
 
   // Process apps — this is the artifact-tool diagnostic signal.
@@ -605,16 +1186,63 @@ async function collectCodexDiagnostics(
     status.apps = 'unsupported';
   } else {
     status.apps = { error: appsR[1] };
+    issues.push({
+      code: 'codex_app_status_failed',
+      severity: 'warn',
+      title: 'Codex app discovery failed',
+      message: appsR[1],
+    });
+  }
+
+  if (mcpServers) {
+    const failed = mcpServers.filter((s) => s.state === 'failed');
+    if (failed.length > 0) {
+      issues.push({
+        code: 'codex_mcp_server_failed',
+        severity: 'warn',
+        title: 'Codex MCP server failed',
+        message: `Failed MCP server(s): ${failed.map((s) => s.name).join(', ')}`,
+      });
+    }
+  }
+
+  if (apps) {
+    const inaccessible = apps.filter((app) => app.isEnabled && !app.isAccessible);
+    if (inaccessible.length > 0) {
+      issues.push({
+        code: 'codex_app_not_accessible',
+        severity: 'warn',
+        title: 'Codex app inaccessible',
+        message: `Enabled but inaccessible app(s): ${inaccessible.map((app) => app.id).join(', ')}`,
+      });
+    }
+  }
+
+  const effectiveEnv = buildEffectiveEnvSnapshot(env, cwd, proxyPolicy);
+  const sandboxProbe = await probeCodexLoopbackProxy(rpc, env, cwd, sandboxPolicy);
+  if (sandboxProbe) {
+    effectiveEnv.codexSandbox = sandboxProbe;
+    const proxyProbe = sandboxProbe.proxyProbe;
+    if (proxyProbe && !proxyProbe.reachable && (sandboxProbe.detected || sandboxProbe.networkDisabled)) {
+      issues.push({
+        code: 'codex_sandbox_blocks_myagents_proxy',
+        severity: 'error',
+        title: 'Codex sandbox blocks the MyAgents proxy',
+        message: `Codex could not connect to loopback proxy ${proxyProbe.url}: ${proxyProbe.error ?? 'unreachable'}`,
+        hint: 'Use Codex no-restrictions mode, switch runtime proxy policy to terminal shell behavior, or use a proxy reachable from the Codex sandbox.',
+      });
+    }
   }
 
   return {
     runtime: 'codex',
-    effectiveEnv: buildEffectiveEnvSnapshot(env, cwd, proxyPolicy),
+    effectiveEnv,
     auth,
     features,
     mcpServers,
     apps,
     status,
+    issues: issues.length > 0 ? issues : undefined,
     timestamp: new Date().toISOString(),
   };
 }
@@ -676,11 +1304,7 @@ export class CodexRuntime implements AgentRuntime {
     const readerDone = rpc.startReading();
 
     try {
-      // Initialize handshake
-      await rpc.call('initialize', {
-        clientInfo: { name: 'MyAgents', title: null, version: process.env.MYAGENTS_VERSION || '0.1.60' },
-        capabilities: null,
-      }, 10_000);
+      await initializeCodexRpc(rpc, 10_000);
 
       // Query model list
       const result = await rpc.call('model/list', {}, 10_000) as {
@@ -763,10 +1387,7 @@ export class CodexRuntime implements AgentRuntime {
     const readerDone = rpc.startReading();
 
     try {
-      await rpc.call('initialize', {
-        clientInfo: { name: 'MyAgents', title: null, version: process.env.MYAGENTS_VERSION || '0.1.60' },
-        capabilities: null,
-      }, 10_000);
+      await initializeCodexRpc(rpc, 10_000);
 
       // No thread for the standalone path. `app/list` accepts `threadId: null`
       // per Codex's TS schema (AppsListParams.threadId is optional/nullable).
@@ -780,6 +1401,7 @@ export class CodexRuntime implements AgentRuntime {
         cwd,
         null,
         envPolicy?.proxy ?? 'myagents',
+        buildCodexSandboxPolicy('workspace-write', cwd),
       );
     } finally {
       rpc.destroy();
@@ -832,6 +1454,7 @@ export class CodexRuntime implements AgentRuntime {
 
     const codexProc = new CodexProcess(proc);
     codexProc.sessionId = options.sessionId;
+    codexProc.workspacePath = options.workspacePath;
 
     // Dedup guard: prevent double session_complete from notification + process exit
     let sessionCompleteEmitted = false;
@@ -950,21 +1573,23 @@ export class CodexRuntime implements AgentRuntime {
 
     try {
       // 1. Initialize handshake
-      await codexProc.rpc.call('initialize', {
-        clientInfo: { name: 'MyAgents', title: null, version: process.env.MYAGENTS_VERSION || '0.1.60' },
-        capabilities: null,
-      }, 15_000);
+      await initializeCodexRpc(codexProc.rpc, 15_000);
 
       // 2. Determine permission mode
       const isImOrCron = options.scenario.type === 'im' || options.scenario.type === 'agent-channel' || options.scenario.type === 'cron';
       const permMode = options.permissionMode || (isImOrCron ? 'no-restrictions' : 'full-auto');
       const { approval, sandbox } = mapPermissionMode(permMode);
+      codexProc.permissionMode = permMode;
+      codexProc.approvalPolicy = approval;
+      codexProc.sandbox = sandbox;
+      codexProc.model = options.model || '';
 
       // 3. Start or resume thread
       if (options.resumeSessionId) {
         // Resume existing thread
         const resumeParams = {
           threadId: options.resumeSessionId,
+          cwd: options.workspacePath,
           model: options.model || null,
           approvalPolicy: approval,
           sandbox,
@@ -1009,11 +1634,14 @@ export class CodexRuntime implements AgentRuntime {
       // 4. Send initial message if provided
       if (options.initialMessage) {
         const input = buildCodexInput(options.initialMessage, options.initialImages);
-        const turnResult = await codexProc.rpc.call('turn/start', {
+        const turnResult = await codexProc.rpc.call('turn/start', buildCodexTurnStartParams({
           threadId: codexProc.threadId,
           input,
-          summary: 'concise', // Enable reasoning summary streaming for thinking UI
-        }, 15_000) as { turn: { id: string } };
+          cwd: options.workspacePath,
+          approvalPolicy: approval,
+          sandbox,
+          model: options.model || null,
+        }), 15_000) as { turn: { id: string } };
         codexProc.currentTurnId = turnResult.turn.id;
       }
 
@@ -1029,6 +1657,7 @@ export class CodexRuntime implements AgentRuntime {
             options.workspacePath,
             codexProc.threadId,
             options.envPolicy?.proxy ?? 'myagents',
+            buildCodexSandboxPolicy(sandbox, options.workspacePath),
           );
           // Session-life gate: tab close / runtime teardown can race against
           // the 5–10s diagnostic fan-out. Without this guard, a diagnostic
@@ -1073,11 +1702,14 @@ export class CodexRuntime implements AgentRuntime {
     if (codexProc.exited) throw new Error('Codex process has exited');
 
     const input = buildCodexInput(message, images);
-    const turnResult = await codexProc.rpc.call('turn/start', {
+    const turnResult = await codexProc.rpc.call('turn/start', buildCodexTurnStartParams({
       threadId: codexProc.threadId,
       input,
-      summary: 'concise',
-    }, 15_000) as { turn: { id: string } };
+      cwd: codexProc.workspacePath,
+      approvalPolicy: codexProc.approvalPolicy,
+      sandbox: codexProc.sandbox,
+      model: codexProc.model || null,
+    }), 15_000) as { turn: { id: string } };
     codexProc.currentTurnId = turnResult.turn.id;
   }
 
@@ -1085,28 +1717,27 @@ export class CodexRuntime implements AgentRuntime {
     process: RuntimeProcess,
     requestId: string,
     decision: 'deny' | 'allow_once' | 'always_allow',
-    /* PRD #131 — interface-uniformity params; Codex's protocol has no
-       suggestions / updatedInput / interrupt knobs, so they're accepted
-       and ignored. Keeping the signature in lockstep with claude-code.ts
-       lets the call site pass arguments unconditionally. */
     _reason?: string,
     _suggestions?: unknown[],
-    _updatedInput?: Record<string, unknown>,
-    _interrupt?: boolean,
+    updatedInput?: Record<string, unknown>,
+    interrupt?: boolean,
   ): Promise<void> {
     const codexProc = process as CodexProcess;
     if (codexProc.exited) return;
 
-    // requestId for Codex is the JSON-RPC request id (number stored as string)
-    const rpcId = parseInt(requestId, 10);
-    if (isNaN(rpcId)) {
-      console.error('[codex] Invalid approval requestId:', requestId);
+    const pending = codexProc.pendingRequests.get(requestId);
+    if (!pending) {
+      console.error('[codex] Unknown approval requestId:', requestId);
       return;
     }
+    codexProc.pendingRequests.delete(requestId);
 
-    codexProc.rpc.respond(rpcId, {
-      decision: decision === 'deny' ? 'decline' : 'accept',
-    });
+    const action = serializeCodexPermissionResponse(pending, decision, updatedInput, interrupt);
+    if (action.type === 'error') {
+      codexProc.rpc.respondError(pending.rpcId, action.code, action.message);
+      return;
+    }
+    codexProc.rpc.respond(pending.rpcId, action.result);
   }
 
   async stopSession(process: RuntimeProcess): Promise<void> {
@@ -1137,6 +1768,7 @@ export class CodexRuntime implements AgentRuntime {
         },
       });
     } catch { /* ignore */ } finally {
+      codexProc.pendingRequests.clear();
       codexProc.rpc.destroy();
     }
   }
@@ -1730,10 +2362,13 @@ export class CodexRuntime implements AgentRuntime {
       case 'thread/name/updated':
       case 'turn/diff/updated':
       case 'turn/plan/updated':
+      case 'remoteControl/status/changed':
+      case 'thread/goal/cleared':
+      case 'item/reasoning/summaryPartAdded':
+      case 'item/commandExecution/terminalInteraction':
       case 'deprecationNotice':
       case 'configWarning':
       case 'skills/changed':
-      case 'serverRequest/resolved':
       case 'account/updated':
       case 'account/rateLimits/updated':
       case 'account/login/completed':
@@ -1744,6 +2379,15 @@ export class CodexRuntime implements AgentRuntime {
       case 'thread/unarchived':
         // Not relevant to our event stream — ignore
         return null;
+
+      case 'serverRequest/resolved': {
+        const requestId = resolvedServerRequestId(p);
+        if (!requestId) return null;
+        const pending = codexProc.pendingRequests.get(requestId);
+        if (!pending) return null;
+        codexProc.pendingRequests.delete(requestId);
+        return { kind: 'interactive_request_resolved', requestId };
+      }
 
       default: {
         // Legacy codex/event/* notifications — ignore (we use v2 typed notifications)
@@ -1762,19 +2406,28 @@ export class CodexRuntime implements AgentRuntime {
 
   private handleServerRequest(
     codexProc: CodexProcess,
-    rpcId: number,
+    rpcId: JsonRpcRequestId,
     method: string,
     params: unknown,
     onEvent: UnifiedEventCallback,
   ): void {
     const p = params as Record<string, unknown>;
+    if (!isKnownCodexServerRequestMethod(method)) {
+      console.warn(`[codex] Unhandled future server request: ${method}`);
+      codexProc.rpc.respondError(rpcId, -32601, `Method not supported: ${method}`);
+      return;
+    }
+    const requestId = String(rpcId);
+    const track = (pending: PendingCodexRequest): void => {
+      codexProc.pendingRequests.set(requestId, pending);
+    };
 
     switch (method) {
       case 'item/commandExecution/requestApproval': {
-        // Emit permission_request — use rpcId as requestId so respondPermission can reply
+        track({ kind: 'command_approval', rpcId, method, params: p });
         onEvent({
           kind: 'permission_request',
-          requestId: String(rpcId),
+          requestId,
           toolName: 'Shell',
           toolUseId: (p.itemId as string) || '',
           input: {
@@ -1787,9 +2440,10 @@ export class CodexRuntime implements AgentRuntime {
       }
 
       case 'item/fileChange/requestApproval': {
+        track({ kind: 'file_approval', rpcId, method, params: p });
         onEvent({
           kind: 'permission_request',
-          requestId: String(rpcId),
+          requestId,
           toolName: 'FileEdit',
           toolUseId: (p.itemId as string) || '',
           input: {
@@ -1801,29 +2455,91 @@ export class CodexRuntime implements AgentRuntime {
       }
 
       case 'item/tool/requestUserInput': {
-        // Map to permission_request for user input
+        track({ kind: 'tool_user_input', rpcId, method, params: p });
         onEvent({
           kind: 'permission_request',
-          requestId: String(rpcId),
-          toolName: 'UserInput',
+          requestId,
+          toolName: 'AskUserQuestion',
           toolUseId: (p.itemId as string) || '',
-          input: { questions: p.questions || [] },
+          input: toolRequestUserInputToAskUserQuestion(p),
+        });
+        break;
+      }
+
+      case 'mcpServer/elicitation/request': {
+        track({ kind: 'mcp_elicitation', rpcId, method, params: p });
+        const requestedSchema = objectValue(p.requestedSchema);
+        const hasFormFields = Object.keys(objectValue(requestedSchema.properties)).length > 0;
+        if (p.mode === 'form' && hasFormFields) {
+          onEvent({
+            kind: 'permission_request',
+            requestId,
+            toolName: 'AskUserQuestion',
+            toolUseId: stringValue(p.turnId) || requestId,
+            input: mcpElicitationToAskUserQuestion(p),
+          });
+          break;
+        }
+        const isToolApproval = isCodexMcpApprovalElicitation(p);
+        onEvent({
+          kind: 'permission_request',
+          requestId,
+          toolName: p.mode === 'url' ? 'MCP URL Approval' : isToolApproval ? 'MCP Tool Approval' : 'MCP Elicitation',
+          toolUseId: stringValue(p.turnId) || requestId,
+          input: {
+            serverName: p.serverName,
+            message: p.message,
+            mode: p.mode,
+            ...(p.mode === 'url' ? { url: p.url, elicitationId: p.elicitationId } : {}),
+          },
+        });
+        break;
+      }
+
+      case 'item/permissions/requestApproval': {
+        track({ kind: 'permissions_approval', rpcId, method, params: p });
+        onEvent({
+          kind: 'permission_request',
+          requestId,
+          toolName: 'Codex Permissions',
+          toolUseId: stringValue(p.itemId) || requestId,
+          input: {
+            reason: p.reason,
+            cwd: p.cwd,
+            permissions: p.permissions,
+          },
         });
         break;
       }
 
       case 'execCommandApproval':
       case 'applyPatchApproval': {
-        // Legacy approval methods — auto-approve in non-interactive contexts
-        // The v2 methods above are preferred
-        codexProc.rpc.respond(rpcId, { decision: 'accept' });
+        track({ kind: method === 'execCommandApproval' ? 'command_approval' : 'file_approval', rpcId, method, params: p });
+        onEvent({
+          kind: 'permission_request',
+          requestId,
+          toolName: method === 'execCommandApproval' ? 'Shell' : 'FileEdit',
+          toolUseId: stringValue(p.itemId) || stringValue(p.callId) || requestId,
+          input: p,
+        });
         break;
       }
 
+      case 'item/tool/call':
+        codexProc.rpc.respondError(rpcId, -32000, 'Codex dynamic tool host is not supported by MyAgents yet');
+        break;
+
+      case 'account/chatgptAuthTokens/refresh':
+        codexProc.rpc.respondError(rpcId, -32000, 'MyAgents does not refresh Codex ChatGPT tokens; run `codex login` in a terminal');
+        break;
+
+      case 'attestation/generate':
+        codexProc.rpc.respondError(rpcId, -32000, 'MyAgents did not request Codex attestation');
+        break;
+
       default: {
-        // Unknown server request — respond with error
-        console.warn(`[codex] Unhandled server request: ${method}`);
-        codexProc.rpc.respondError(rpcId, -32601, `Method not supported: ${method}`);
+        const _exhaustive: never = method;
+        codexProc.rpc.respondError(rpcId, -32601, `Method not supported: ${_exhaustive}`);
         break;
       }
     }

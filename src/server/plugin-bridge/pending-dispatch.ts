@@ -8,16 +8,19 @@
  * callbacks instead of our fallback FeishuStreamingSession.
  */
 
+type MaybePromise<T> = T | Promise<T>;
+
 export interface PendingDispatchCallbacks {
-  onPartialReply?: (payload: { text?: string }) => void;
-  onReasoningStream?: (payload: { text?: string }) => void;
-  sendBlockReply?: (payload: { text?: string }) => boolean;
-  sendFinalReply: (payload: { text?: string; isError?: boolean }) => boolean;
+  onPartialReply?: (payload: { text?: string }) => MaybePromise<void>;
+  onReasoningStream?: (payload: { text?: string }) => MaybePromise<void>;
+  sendBlockReply?: (payload: { text?: string }) => MaybePromise<boolean | void>;
+  sendFinalReply: (payload: { text?: string; isError?: boolean }) => MaybePromise<boolean | void>;
 }
 
 export interface PendingDispatch {
   chatId: string;
   callbacks: PendingDispatchCallbacks;
+  resolveViaSendText: boolean;
   resolve: (result: { queuedFinal: number; counts: Record<string, number> }) => void;
   reject: (error: Error) => void;
   resolved: boolean;
@@ -32,6 +35,7 @@ const TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes safety timeout
 export function registerPendingDispatch(
   chatId: string,
   callbacks: PendingDispatchCallbacks,
+  options?: { resolveViaSendText?: boolean },
 ): Promise<{ queuedFinal: number; counts: Record<string, number> }> {
   // If existing dispatch for this chatId, reject it (superseded)
   const existing = pendingDispatches.get(chatId);
@@ -56,6 +60,7 @@ export function registerPendingDispatch(
     pendingDispatches.set(chatId, {
       chatId,
       callbacks,
+      resolveViaSendText: options?.resolveViaSendText === true,
       resolve,
       reject,
       resolved: false,

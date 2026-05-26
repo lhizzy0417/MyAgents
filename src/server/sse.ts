@@ -76,6 +76,7 @@ export const SSE_EVENT_PRIORITIES: Readonly<Record<string, SseEventPriority>> = 
   'chat:log': 'droppable',
   'chat:logs': 'droppable',
   'chat:debug-message': 'droppable',
+  'chat:runtime-diagnostics': 'droppable',
   // Critical — never drop or coalesce. Includes block-boundary / start
   // markers, completion / error events, status updates, queue lifecycle,
   // and renderer-driven request/response gates. The SDK emits these in

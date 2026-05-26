@@ -42,11 +42,12 @@ install_pip() {
 
 install_npm() {
     for pkg in "$@"; do
-        if npm list -g "$pkg" &>/dev/null 2>&1; then
+        local npm_prefix="${MYAGENTS_NPM_GLOBAL_PREFIX:-$HOME/.myagents/npm-global}"
+        if npm_config_prefix="$npm_prefix" npm list -g "$pkg" &>/dev/null 2>&1; then
             echo "✓ $pkg (already installed)"
         else
             echo "→ Installing $pkg..."
-            npm install -g "$pkg"
+            npm_config_prefix="$npm_prefix" npm install -g "$pkg"
         fi
     done
 }
