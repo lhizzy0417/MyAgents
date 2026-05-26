@@ -116,11 +116,49 @@ export function shouldDegradedLoad(args: {
    * invariant in one place rather than relying on that server-side mercy.
    */
   sessionActiveOrStreaming: boolean;
+  /**
+   * Explicit history switches are allowed to load even when the previous
+   * session left a stale "active" ref behind. Without this, the fallback can
+   * preserve the same split-brain as the primary load gate: the tab points at
+   * the target session but visible/server state still belongs to the old one.
+   */
+  allowWhileActive?: boolean;
 }): boolean {
   if (!args.mounted) return false;
   if (args.currentSessionId !== args.target) return false; // session switched away
   if (args.connectedSseSessionId === args.target) return false; // SSE attached after all
   if (args.alreadyLoaded && args.prevSessionId === args.target) return false; // already loaded
-  if (args.sessionActiveOrStreaming) return false; // don't reload mid-turn
+  if (args.sessionActiveOrStreaming && !args.allowWhileActive) return false; // don't reload mid-turn
   return true;
+}
+
+/**
+ * True only for the backend-minted session that belongs to an explicit "new
+ * chat" reset/adoption. This remains true even after sendMessage clears
+ * `isNewSessionRef` before the backend emits system-init, so the first live
+ * turn after reset is still treated as a birth rather than a history switch.
+ */
+export function isResetSessionBirth(args: {
+  resetBirthSessionId: string | null;
+  sessionId: string | null | undefined;
+}): boolean {
+  return Boolean(args.sessionId && args.resetBirthSessionId === args.sessionId);
+}
+
+/**
+ * A real persisted-session switch must run loadSession, even if the renderer
+ * still thinks the previous session is active. Pending->real and reset-birth
+ * transitions are the live sidecar becoming durable; persisted real->real is a
+ * user/history switch and needs /sessions/switch to rebind the sidecar state.
+ */
+export function isExistingSessionSwitch(args: {
+  sessionChanged: boolean;
+  wasPendingSession: boolean;
+  isPendingSession: boolean;
+  isResetSessionBirth: boolean;
+}): boolean {
+  return args.sessionChanged
+    && !args.wasPendingSession
+    && !args.isPendingSession
+    && !args.isResetSessionBirth;
 }

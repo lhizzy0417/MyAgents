@@ -5,8 +5,7 @@
 
 import type { SessionMetadata } from '@/api/sessionClient';
 import { findPromotedPlugin } from '@/components/ImSettings/promotedPlugins';
-
-const PREVIEW_MAX_LENGTH = 35;
+export { getSessionDisplayText } from '@/utils/sessionDisplay';
 
 /**
  * Extract folder name from path (cross-platform)
@@ -46,22 +45,6 @@ export function isImSource(source: SessionMetadata['source']): boolean {
     if (!source) return false;
     // Built-in IM platforms + OpenClaw channels all use "<platform>_private" / "<platform>_group"
     return (source.endsWith('_private') || source.endsWith('_group')) && source !== 'desktop';
-}
-
-/**
- * Get truncated display text for a session (35 chars max).
- * AI-generated or user-set titles take priority over message previews.
- */
-export function getSessionDisplayText(session: SessionMetadata): string {
-    // AI/user titles are semantic — prefer them
-    if (session.titleSource === 'auto' || session.titleSource === 'user') {
-        const raw = session.title || '';
-        return raw.length <= PREVIEW_MAX_LENGTH ? raw : raw.slice(0, PREVIEW_MAX_LENGTH) + '...';
-    }
-    // Fallback: message preview > default title
-    const raw = session.lastMessagePreview || session.title;
-    if (raw.length <= PREVIEW_MAX_LENGTH) return raw;
-    return raw.slice(0, PREVIEW_MAX_LENGTH) + '...';
 }
 
 /**

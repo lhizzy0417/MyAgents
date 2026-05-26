@@ -11,6 +11,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.2.23] - 2026-05-27
+
+> 本版是历史对话热修：修复 0.2.22 引入的「点击历史对话却打开到另一个会话」问题，并统一历史列表、全部面板和 Chat 顶部的会话标题显示策略。
+
+### Fixed
+
+- **点击历史对话现在会稳定打开被点击的那一条**（[#255](https://github.com/hAcKlyc/MyAgents/issues/255)）：历史切换时不再被上一条会话遗留的运行状态拦住，界面、Sidecar 和消息历史会一起切到目标会话。
+- **历史对话标题显示口径统一**：右上历史下拉、启动页 / 全部历史面板、打开后的 Chat 顶部现在使用同一套规则：优先显示会话标题，标题为空时 fallback 到最后一条真实用户消息；Codex / Claude Code 等外部 Runtime 不再把 AI 回复片段当作历史列表标题。
+
+---
+
 ## [0.2.22] - 2026-05-26
 
 > 本版继续收紧外部 Runtime 和长对话体验：Codex Runtime 的工具/权限/协议适配更稳，聊天列表在隐藏窗口后不再容易错位，AI 回复尾部淡出、用户消息气泡、Markdown 文件链接和 SessionID 复制这些高频细节也做了补齐。另外修复了 MyAgents 自己的 npm 安装隔离变量泄漏到用户 shell、触发 nvm 警告的问题。

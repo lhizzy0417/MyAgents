@@ -39,7 +39,8 @@ import { parsePartialJson } from '@/utils/parsePartialJson';
 import { subscribeFrontendLogs, setCurrentTabId } from '@/utils/frontendLogger';
 import { getTabServerUrl, proxyFetch, isTauri, getSessionActivation, getSessionPort, ensureSessionSidecar, resetTabServerUrlCache, setActiveCorrelation } from '@/api/tauriClient';
 import { resolveAttachmentUrl } from '@/utils/attachmentUrl';
-import { shouldDegradedLoad } from '@/utils/optionResolve';
+import { isExistingSessionSwitch, isResetSessionBirth, shouldDegradedLoad } from '@/utils/optionResolve';
+import { getSessionDisplayText } from '@/utils/sessionDisplay';
 import { refreshWorkspaceFileIndex } from '@/api/searchClient';
 import { listenWithCleanup } from '@/utils/tauriListen';
 import type { PermissionMode } from '@/config/types';
@@ -497,6 +498,11 @@ export default function TabProvider({
     const seenIdsRef = useRef<Set<string>>(new Set());
     // Flag to skip message-replay after user clicks "new session"
     const isNewSessionRef = useRef(false);
+    // resetSession's real id may arrive after sendMessage clears isNewSessionRef.
+    // Keep the birth identity separately so that live reset turns are not
+    // misclassified as user history switches.
+    const resetBirthPendingRef = useRef(false);
+    const resetBirthSessionIdRef = useRef<string | null>(null);
     // Flag to skip SSE replays while loadSession REST API is in-flight.
     // Without this, SSE replays race with loadSession and create intermediate
     // render states (3→46→249) causing visible scroll jumps on session entry.
@@ -561,6 +567,8 @@ export default function TabProvider({
         setStreamingMessage(null);
         seenIdsRef.current.clear();
         isNewSessionRef.current = true;
+        resetBirthPendingRef.current = true;
+        resetBirthSessionIdRef.current = null;
         clearSessionActive();
         toolNameMapRef.current.clear();
         // Pattern 3 §3.2.2 — reset delta buffers; stale fragments from a prior
@@ -660,6 +668,8 @@ export default function TabProvider({
         // even though it came from Rust, to keep the same race-free guard
         // resetSession uses.
         isNewSessionRef.current = true;
+        resetBirthPendingRef.current = false;
+        resetBirthSessionIdRef.current = newSessionId;
 
         // Mirror resetSession's local clear (kept in lockstep to avoid drift).
         setHistoryMessages([]);
@@ -2045,6 +2055,10 @@ export default function TabProvider({
                     // Use our sessionId (for SessionStore matching) not SDK's session_id
                     const newSessionId = payload.sessionId;
                     if (newSessionId && currentSessionIdRef.current !== newSessionId) {
+                        if (isNewSessionRef.current || resetBirthPendingRef.current) {
+                            resetBirthSessionIdRef.current = newSessionId;
+                            resetBirthPendingRef.current = false;
+                        }
                         // PRD 0.2.19 cross-review fix (B1, B4): unified session_new tracking
                         // happens here for ALL three paths (after we have the real id):
                         //
@@ -3197,7 +3211,7 @@ export default function TabProvider({
             // startReached handler pulls older history lazily via `?before=<id>`
             // as the user scrolls up. Keeps first-paint JSON body tiny on 600+
             // message sessions.
-            const response = await apiGetJson<{ success: boolean; session?: { title?: string; titleSource?: string; runtime?: string; liveSessionState?: SessionState; liveStreamingMessage?: { id: string; role: 'assistant'; content: string; timestamp: string; sdkUuid?: string }; messages: Array<{ id: string; role: 'user' | 'assistant'; content: string; timestamp: string; sdkUuid?: string; attachments?: Array<{ id: string; name: string; mimeType: string; path: string; previewUrl?: string }>; metadata?: Message['metadata'] }>; totalCount?: number; hasMoreBefore?: boolean } }>(`/sessions/${targetSessionId}?limit=${INITIAL_PAGE_SIZE}`);
+            const response = await apiGetJson<{ success: boolean; session?: SessionMetadata & { liveSessionState?: SessionState; liveStreamingMessage?: { id: string; role: 'assistant'; content: string; timestamp: string; sdkUuid?: string }; messages: Array<{ id: string; role: 'user' | 'assistant'; content: string; timestamp: string; sdkUuid?: string; attachments?: Array<{ id: string; name: string; mimeType: string; path: string; previewUrl?: string }>; metadata?: Message['metadata'] }>; totalCount?: number; hasMoreBefore?: boolean } }>(`/sessions/${targetSessionId}?limit=${INITIAL_PAGE_SIZE}`);
 
             if (!response.success || !response.session) {
                 // Session not found is not necessarily an error - it may have been deleted
@@ -3359,6 +3373,8 @@ export default function TabProvider({
             // Clear current state and load new messages
             seenIdsRef.current.clear();
             isNewSessionRef.current = false; // Allow SSE replays again
+            resetBirthPendingRef.current = false;
+            resetBirthSessionIdRef.current = null;
             clearSessionActive();  // Stop any streaming/active state
             isLoadingSessionRef.current = false;
             setIsSessionLoading(false);
@@ -3424,10 +3440,9 @@ export default function TabProvider({
             currentSessionIdRef.current = targetSessionId;
             setCurrentSessionId(targetSessionId);
 
-            // Update tab title from session metadata (fixes title not showing after session switch)
-            if (response.session.title) {
-                onTitleChangeRef.current?.(response.session.title);
-            }
+            // Keep Chat header and all session-list surfaces on the same
+            // title/query fallback policy.
+            onTitleChangeRef.current?.(getSessionDisplayText(response.session));
 
             console.log(`[TabProvider ${tabId}] Loaded ${loadedMessages.length} messages from session`);
             return true;
@@ -3669,7 +3684,11 @@ export default function TabProvider({
             sseAttachFallbackRef.current = null;
         }
     }, []);
-    const armSseAttachFallback = useCallback((target: string, prevSessionId: string | null | undefined) => {
+    const armSseAttachFallback = useCallback((
+        target: string,
+        prevSessionId: string | null | undefined,
+        options?: { allowWhileActive?: boolean },
+    ) => {
         // Already armed for this exact session — don't restart the countdown.
         if (sseAttachFallbackRef.current?.sessionId === target) return;
         clearSseAttachFallback();
@@ -3683,6 +3702,7 @@ export default function TabProvider({
                 alreadyLoaded: initialSessionLoadedRef.current,
                 prevSessionId: prevSessionIdRef.current,
                 sessionActiveOrStreaming: isSessionActiveRef.current || isStreamingRef.current,
+                allowWhileActive: options?.allowWhileActive,
             })) return;
             console.warn(`[TabProvider ${tabId}] SSE attach timed out for ${target} after ${SSE_ATTACH_FALLBACK_MS}ms — loading session over HTTP (degraded)`);
             initialSessionLoadedRef.current = true;
@@ -3699,6 +3719,16 @@ export default function TabProvider({
         const isPendingSession = isPendingSessionId(sessionId);
         const wasPendingSession = isPendingSessionId(prevSessionId);
         const sessionChanged = prevSessionId !== sessionId;
+        const resetSessionBirth = isResetSessionBirth({
+            resetBirthSessionId: resetBirthSessionIdRef.current,
+            sessionId,
+        });
+        const existingSessionSwitch = isExistingSessionSwitch({
+            sessionChanged,
+            wasPendingSession,
+            isPendingSession,
+            isResetSessionBirth: resetSessionBirth,
+        });
         prevSessionIdRef.current = sessionId;
 
         // #235: re-arm the degraded-load fallback fresh each run. During a real
@@ -3723,7 +3753,9 @@ export default function TabProvider({
         // Not connected yet - wait. For a real (non-pending) session, arm the
         // degraded-load fallback so a never-connecting SSE doesn't hang the tab.
         if (!isConnected) {
-            if (!isPendingSession) armSseAttachFallback(sessionId, prevSessionId);
+            if (!isPendingSession) {
+                armSseAttachFallback(sessionId, prevSessionId, { allowWhileActive: existingSessionSwitch });
+            }
             return;
         }
 
@@ -3768,7 +3800,7 @@ export default function TabProvider({
 
         if (connectedSseSessionIdRef.current !== sessionId) {
             console.log(`[TabProvider ${tabId}] Waiting for SSE to attach to session ${sessionId} before loadSession`);
-            armSseAttachFallback(sessionId, prevSessionId);
+            armSseAttachFallback(sessionId, prevSessionId, { allowWhileActive: existingSessionSwitch });
             return;
         }
 
@@ -3781,17 +3813,23 @@ export default function TabProvider({
         // Exception 1: if resetSession was just called (isNewSessionRef=true), the session
         // upgrade (old→new) arrives via system:init. Messages are already streaming via SSE,
         // so calling loadSession would flash isLoading=false. Skip and let SSE handle it.
-        if (isNewSessionRef.current) {
+        if (isNewSessionRef.current && resetSessionBirth) {
             console.log(`[TabProvider ${tabId}] SessionId upgraded to ${sessionId} after resetSession, skipping loadSession (messages arriving via SSE)`);
             initialSessionLoadedRef.current = true;
             return;
+        }
+        if (isNewSessionRef.current) {
+            console.log(`[TabProvider ${tabId}] Clearing stale new-session flag before loading existing session ${sessionId}`);
+            isNewSessionRef.current = false;
+            resetBirthPendingRef.current = false;
+            resetBirthSessionIdRef.current = null;
         }
         // Exception 2: session is actively processing (session ID upgrade during first message).
         // This happens when: resetSession → sendMessage (clears isNewSessionRef) → chat:system-init
         // assigns real sessionId → parent re-renders with new prop → useEffect fires.
         // At this point isNewSessionRef is false but the session is actively processing.
         // loadSession would reset isLoading/sessionState, causing stop button to briefly disappear.
-        if (isSessionActiveRef.current || isStreamingRef.current) {
+        if ((isSessionActiveRef.current || isStreamingRef.current) && !existingSessionSwitch) {
             console.log(`[TabProvider ${tabId}] SessionId changed to ${sessionId} while session active, skipping loadSession`);
             initialSessionLoadedRef.current = true;
             return;

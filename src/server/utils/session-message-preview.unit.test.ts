@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
   CLIENT_MESSAGE_INLINE_MAX_BYTES,
+  resolveLastRealUserMessagePreview,
   shrinkSessionMessageForClient,
 } from './session-message-preview';
 import type { SessionMessage } from '../types/session';
@@ -117,5 +118,34 @@ describe('session-message-preview', () => {
     expect(output.content.startsWith('This history message is too large')).toBe(true);
     expect(output.content).toContain('--- Beginning ---');
     expect(() => JSON.parse(output.content)).toThrow();
+  });
+
+  it('extracts last real user preview instead of the trailing assistant response', () => {
+    const result = resolveLastRealUserMessagePreview([
+      { role: 'user', content: '用户真正的问题', id: 'u1', timestamp: 't1' } as SessionMessage,
+      { role: 'assistant', content: '我会先处理这个问题', id: 'a1', timestamp: 't2' } as SessionMessage,
+    ]);
+
+    expect(result).toEqual({ found: true, preview: '用户真正的问题' });
+  });
+
+  it('skips pure system reminders but keeps mixed user-visible text', () => {
+    const result = resolveLastRealUserMessagePreview([
+      {
+        role: 'user',
+        content: '<system-reminder><CRON_TASK>执行任务</CRON_TASK></system-reminder>',
+        id: 'system',
+        timestamp: 't1',
+      } as SessionMessage,
+      {
+        role: 'user',
+        content: '<system-reminder>context</system-reminder>用户群聊消息',
+        id: 'mixed',
+        timestamp: 't2',
+      } as SessionMessage,
+      { role: 'assistant', content: 'assistant', id: 'a1', timestamp: 't3' } as SessionMessage,
+    ]);
+
+    expect(result).toEqual({ found: true, preview: '用户群聊消息' });
   });
 });
