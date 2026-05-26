@@ -27,6 +27,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **AI 回复尾部淡出不再残留**：文本块结束但后续工具 / 思考还在跑时，最后几个字不再一直保持流式淡出效果。
 - **用户消息气泡 padding 更一致**：短消息、长消息和多行消息的内边距统一，减少文本贴边或气泡视觉不平衡。
 - **IM / OpenClaw Bridge 派发更稳**：修复部分 IM fallback、history 渲染和 Bridge pending dispatch 失败路径，避免非 @ 群消息或插件回调失败时把渠道卡到长时间等待。
+- **Agent Channel 会话交接更可靠**：桌面会话交接到 IM 频道、频道间切换或新建频道会话后，不再容易把回复路由到旧会话或旧频道。
+- **TodoWrite 待办状态显示跟随实际结果**：TodoWrite 完成后，工具卡片、紧凑标签和 Agent 状态面板会显示最新待办状态，不再停留在调用输入里的旧进度。
 - **nvm 用户不再看到 MyAgents 注入的 npm prefix 警告**（[#247](https://github.com/hAcKlyc/MyAgents/issues/247)）：MyAgents 不再把 `npm_config_prefix=~/.myagents/npm-global` 泄漏到整个 AI shell 环境；需要安装 CLI 时改为命令级隔离安装，既不污染用户 nvm 环境，也保留 AI 自装工具的可用性。
 - **Task / AskUserQuestion 输入展示细节修复**：选择题和相关输入区域的布局、滚动同步在 resize 后更稳定，减少内容错位。
 
