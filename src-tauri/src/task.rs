@@ -2465,17 +2465,17 @@ fn validate_task_provider_routing(
 /// `provider_id` is set with `runtime: None`. This closes the cross-talk
 /// hole flagged by Codex review (P1 #5):
 ///
-///     - User saves task with `runtime: None, provider_id: 'openai-...'`
-///       (relying on Agent runtime = builtin).
-///     - Later: user changes Agent runtime to codex.
-///     - Without pinning, the task survives validation but its provider
-///       fields are silently ignored at execute time (codex branch reads
-///       only runtimeConfig.model).
-///     - Pinning `runtime: 'builtin'` makes the task fail validation at
-///       next save (provider_id + external runtime is invariant 2),
-///       AND keeps execution honoring the chosen provider regardless of
-///       Agent's later runtime switch — providerId IS the user's pinned
-///       intent for THIS task.
+/// - User saves task with `runtime: None, provider_id: 'openai-...'`
+///   (relying on Agent runtime = builtin).
+/// - Later: user changes Agent runtime to codex.
+/// - Without pinning, the task survives validation but its provider
+///   fields are silently ignored at execute time (codex branch reads
+///   only runtimeConfig.model).
+/// - Pinning `runtime: 'builtin'` makes the task fail validation at
+///   next save (provider_id + external runtime is invariant 2),
+///   AND keeps execution honoring the chosen provider regardless of
+///   Agent's later runtime switch — providerId IS the user's pinned
+///   intent for THIS task.
 ///
 /// Idempotent: if `runtime` is already `Some(_)`, do nothing. Validator
 /// runs after this materialization, so any non-None+external case still

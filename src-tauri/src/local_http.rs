@@ -8,7 +8,8 @@
 //! ## Usage
 //!
 //! ```rust
-//! use crate::local_http;
+//! use app_lib::local_http;
+//! use std::time::Duration;
 //!
 //! // Simple client with custom timeout
 //! let client = local_http::builder()
