@@ -37,6 +37,7 @@ import {
 } from './usage-utils';
 import { imEventBus, type ImEventType } from '../utils/im-event-bus';
 import { imRequestRegistry } from '../utils/im-request-registry';
+import { resolveLastRealUserMessagePreview } from '../utils/session-message-preview';
 
 // ─── Module state ───
 
@@ -435,21 +436,6 @@ function buildPersistedTurnUsage(): MessageUsage | undefined {
 /** Check if content looks like JSON ContentBlock[] (matches frontend heuristic in TabProvider.tsx:1969) */
 function isContentBlockJson(content: string): boolean {
   return content.startsWith('[') && content.includes('"type"');
-}
-
-/** Extract plain text preview from content (handles both JSON ContentBlock[] and plain text) */
-function extractTextPreview(content: string, maxLen = 100): string {
-  if (isContentBlockJson(content)) {
-    try {
-      const blocks = JSON.parse(content) as PersistContentBlock[];
-      const text = blocks
-        .filter((b) => b.type === 'text' && b.text)
-        .map((b) => b.text)
-        .join('');
-      return text.slice(0, maxLen);
-    } catch { /* fall through */ }
-  }
-  return content.slice(0, maxLen);
 }
 
 // Pattern B — IM Pipeline v2: ImEventBus replaces the legacy single-callback model.
@@ -1893,10 +1879,11 @@ async function persistTurnResult(): Promise<void> {
     if (allSessionMessages.length > 0 && lastSessionId) {
       try {
         await saveSessionMessages(lastSessionId, allSessionMessages);
-        const lastMsg = allSessionMessages[allSessionMessages.length - 1];
+        const { found: foundRealUserMessage, preview: lastMessagePreview } =
+          resolveLastRealUserMessagePreview(allSessionMessages);
         await updateSessionMetadata(lastSessionId, {
-          lastActiveAt: new Date().toISOString(),
-          lastMessagePreview: extractTextPreview(lastMsg?.content ?? ''),
+          ...(foundRealUserMessage ? { lastActiveAt: new Date().toISOString() } : {}),
+          lastMessagePreview,
           runtimeUsageTotals: lastPersistedRuntimeUsageTotals ?? undefined,
         });
       } catch (err) {

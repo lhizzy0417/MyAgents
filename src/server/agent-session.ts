@@ -58,6 +58,7 @@ import type { CancelReason } from './utils/cancellation';
 import { localTimestamp } from '../shared/logTime';
 import { trackServer } from './analytics';
 import { getCurrentRuntimeType, isExternalRuntime } from './runtimes/factory';
+import { resolveLastRealUserMessagePreview } from './utils/session-message-preview';
 import type { ImagePayload } from './runtimes/types';
 import { imEventBus, type ImEventType } from './utils/im-event-bus';
 import { imRequestRegistry } from './utils/im-request-registry';
@@ -3700,41 +3701,8 @@ async function doPersistMessagesToStorage(
     persistedSessionMessageCache.push(m);
   }
   lastPersistedIndex = messages.length;
-  // Compute lastMessagePreview from last real user message
-  // (skip system-injected messages like HEARTBEAT, MEMORY_UPDATE).
-  // Also track whether we found a real user message to decide lastActiveAt update.
-  let lastMessagePreview: string | undefined;
-  let foundRealUserMessage = false;
-  for (let i = sessionMessages.length - 1; i >= 0; i--) {
-    if (sessionMessages[i].role === 'user') {
-      const content = sessionMessages[i].content;
-      const text = typeof content === 'string' ? content : '';
-      if (text.includes('<HEARTBEAT>') || text.includes('<MEMORY_UPDATE>')) {
-        continue;
-      }
-      // Skip pure system-reminder messages (heartbeat/cron injections where the
-      // ENTIRE message is <system-reminder>...</system-reminder> with no user content).
-      // Mixed messages (group chat: system-reminder prefix + actual user text) are
-      // real user messages and MUST update lastMessagePreview/lastActiveAt.
-      if (text.startsWith('<system-reminder>')) {
-        const closeTag = '</system-reminder>';
-        const closeIdx = text.indexOf(closeTag);
-        // Pure: no content after closing tag → skip. Mixed: has content → keep.
-        if (closeIdx >= 0 && text.slice(closeIdx + closeTag.length).trim() === '') continue;
-        if (closeIdx < 0) continue; // malformed, treat as system
-      }
-      // For group messages with <system-reminder> prefix, extract the user-visible part for preview
-      let previewText = text;
-      if (previewText.startsWith('<system-reminder>')) {
-        const closeTag = '</system-reminder>';
-        const closeIdx = previewText.indexOf(closeTag);
-        if (closeIdx >= 0) previewText = previewText.slice(closeIdx + closeTag.length).trim();
-      }
-      lastMessagePreview = previewText.slice(0, 60) || undefined;
-      foundRealUserMessage = true;
-      break;
-    }
-  }
+  const { found: foundRealUserMessage, preview: lastMessagePreview } =
+    resolveLastRealUserMessagePreview(sessionMessages);
   // Only update lastActiveAt if a real user message exists (not just system injections).
   // This prevents heartbeat/memory-update from making stale sessions appear "active".
   await updateSessionMetadata(sessionId, {

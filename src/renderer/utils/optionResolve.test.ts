@@ -1,6 +1,12 @@
 import { describe, expect, it } from 'vitest';
 
-import { resolveBuiltinPermissionMode, resolveLauncherProvider, shouldDegradedLoad } from './optionResolve';
+import {
+  isExistingSessionSwitch,
+  isResetSessionBirth,
+  resolveBuiltinPermissionMode,
+  resolveLauncherProvider,
+  shouldDegradedLoad,
+} from './optionResolve';
 
 describe('resolveBuiltinPermissionMode (#244)', () => {
   it('falls back to the agent config before the project sync runs (the bug)', () => {
@@ -122,6 +128,14 @@ describe('shouldDegradedLoad (#235)', () => {
     expect(shouldDegradedLoad({ ...base, sessionActiveOrStreaming: true })).toBe(false);
   });
 
+  it('can fire during an explicit history switch even if the previous session looked active', () => {
+    expect(shouldDegradedLoad({
+      ...base,
+      sessionActiveOrStreaming: true,
+      allowWhileActive: true,
+    })).toBe(true);
+  });
+
   it('does not fire after unmount', () => {
     expect(shouldDegradedLoad({ ...base, mounted: false })).toBe(false);
   });
@@ -140,5 +154,60 @@ describe('shouldDegradedLoad (#235)', () => {
 
   it('still fires if alreadyLoaded but for a different prior session', () => {
     expect(shouldDegradedLoad({ ...base, alreadyLoaded: true, prevSessionId: 's0' })).toBe(true);
+  });
+});
+
+describe('session-load transition classification (#255)', () => {
+  it('recognizes only the exact backend-minted reset session as reset birth', () => {
+    expect(isResetSessionBirth({
+      resetBirthSessionId: 'new-session',
+      sessionId: 'new-session',
+    })).toBe(true);
+
+    // Regression: a stale new-session flag must not make a history click look
+    // like resetSession's own id upgrade.
+    expect(isResetSessionBirth({
+      resetBirthSessionId: 'new-session',
+      sessionId: 'history-session',
+    })).toBe(false);
+  });
+
+  it('preserves reset birth after sendMessage clears the stale-event guard', () => {
+    const resetBirth = isResetSessionBirth({
+      resetBirthSessionId: 'new-session',
+      sessionId: 'new-session',
+    });
+    expect(resetBirth).toBe(true);
+    expect(isExistingSessionSwitch({
+      sessionChanged: true,
+      wasPendingSession: false,
+      isPendingSession: false,
+      isResetSessionBirth: resetBirth,
+    })).toBe(false);
+  });
+
+  it('treats persisted real-to-real transitions as existing-session switches', () => {
+    expect(isExistingSessionSwitch({
+      sessionChanged: true,
+      wasPendingSession: false,
+      isPendingSession: false,
+      isResetSessionBirth: false,
+    })).toBe(true);
+  });
+
+  it('does not treat pending upgrades or reset births as history switches', () => {
+    expect(isExistingSessionSwitch({
+      sessionChanged: true,
+      wasPendingSession: true,
+      isPendingSession: false,
+      isResetSessionBirth: false,
+    })).toBe(false);
+
+    expect(isExistingSessionSwitch({
+      sessionChanged: true,
+      wasPendingSession: false,
+      isPendingSession: false,
+      isResetSessionBirth: true,
+    })).toBe(false);
   });
 });

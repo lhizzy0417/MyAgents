@@ -13,6 +13,7 @@ import { isTauriEnvironment } from '@/utils/browserMock';
 import { listenWithCleanup } from '@/utils/tauriListen';
 import type { AgentStatusMap } from '@/hooks/useAgentStatuses';
 import { extractPlatformDisplay } from '@/utils/taskCenterUtils';
+import { getSessionDisplayText } from '@/utils/sessionDisplay';
 import type { SessionTag } from '@/hooks/useTaskCenterData';
 
 import ConfirmDialog from './ConfirmDialog';
@@ -250,7 +251,7 @@ export default function SessionHistoryDropdown({
         // Routing through ConfirmDialog (modal portal, no parent
         // `pointer-events-none`) sidesteps the class-collision and lines this
         // surface up with the launcher's session-delete confirm.
-        setPendingDelete({ id: session.id, title: session.title || '此对话' });
+        setPendingDelete({ id: session.id, title: getSessionDisplayText(session) });
     };
 
     const handleConfirmDelete = async () => {
@@ -290,7 +291,7 @@ export default function SessionHistoryDropdown({
 
     const handleShowStats = (e: React.MouseEvent, session: SessionMetadata) => {
         e.stopPropagation();
-        setStatsSession({ id: session.id, title: session.title });
+        setStatsSession({ id: session.id, title: getSessionDisplayText(session) });
     };
 
     // Per-session in-flight guard — rapid double-click on the same star
@@ -398,6 +399,7 @@ export default function SessionHistoryDropdown({
                             const isCurrent = session.id === currentSessionId;
                             const tags = sessionTagsMap.get(session.id) ?? [];
                             const stats = session.stats;
+                            const displayText = getSessionDisplayText(session);
                             const hasStats = stats && (stats.messageCount > 0 || stats.totalInputTokens > 0);
                             const totalTokens = (stats?.totalInputTokens ?? 0) + (stats?.totalOutputTokens ?? 0);
 
@@ -432,7 +434,7 @@ export default function SessionHistoryDropdown({
                                                     <SessionTagBadge key={i} tag={tag} />
                                                 ))}
                                                 <span className={`truncate text-sm ${isCurrent ? 'font-medium text-[var(--accent)]' : 'text-[var(--ink)]'}`}>
-                                                    {session.title}
+                                                    {displayText}
                                                 </span>
                                             </div>
                                             <div className="mt-1 flex items-center gap-2 text-xs text-[var(--ink-muted)]">

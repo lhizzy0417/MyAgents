@@ -119,6 +119,52 @@ function parseStructuredBlocks(content: string): Record<string, unknown>[] | nul
   }
 }
 
+function extractTextPreview(content: string, maxLen: number): string {
+  const blocks = parseStructuredBlocks(content);
+  if (blocks) {
+    return blocks
+      .filter((block) => block.type === 'text' && typeof block.text === 'string')
+      .map((block) => block.text as string)
+      .join('')
+      .slice(0, maxLen);
+  }
+  return content.slice(0, maxLen);
+}
+
+function stripSystemReminderPrefix(text: string): string | null {
+  if (text.includes('<HEARTBEAT>') || text.includes('<MEMORY_UPDATE>')) {
+    return null;
+  }
+  if (!text.startsWith('<system-reminder>')) {
+    return text;
+  }
+
+  const closeTag = '</system-reminder>';
+  const closeIdx = text.indexOf(closeTag);
+  if (closeIdx < 0) return null;
+
+  const tail = text.slice(closeIdx + closeTag.length).trim();
+  return tail || null;
+}
+
+export function resolveLastRealUserMessagePreview(
+  messages: Pick<SessionMessage, 'role' | 'content'>[],
+  maxLen = 60,
+): { found: boolean; preview?: string } {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const msg = messages[i];
+    if (msg.role !== 'user') continue;
+    const visibleText = stripSystemReminderPrefix(msg.content);
+    if (visibleText === null) continue;
+    return {
+      found: true,
+      preview: extractTextPreview(visibleText, maxLen) || undefined,
+    };
+  }
+
+  return { found: false };
+}
+
 function shrinkJsonValueForHistory(value: unknown, maxStringBytes: number, maxArrayItems: number, depth = 0): unknown {
   if (typeof value === 'string') {
     return truncateStringForHistory(value, maxStringBytes);

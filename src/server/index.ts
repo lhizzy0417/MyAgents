@@ -544,7 +544,7 @@ import {
 import { decodeProviderEnvSnapshot, findAgentByWorkspacePath, findProvider, getAllMcpServers, getEffectiveMcpServers, isProviderDisabled, resolveImProviderEnv, resolveProviderEnv } from './utils/admin-config';
 import { snapshotForOwnedSession } from './utils/session-snapshot';
 import { resolveSessionConfig } from './utils/resolve-session-config';
-import { shrinkSessionMessageForClient, shrinkSessionMessagesForClient } from './utils/session-message-preview';
+import { resolveLastRealUserMessagePreview, shrinkSessionMessageForClient, shrinkSessionMessagesForClient } from './utils/session-message-preview';
 import type { AgentConfig } from '../shared/types/agent';
 import type { SessionMetadata } from './types/session';
 import { initLogger, getLoggerDiagnostics, withLogContext, setStdioBrokenProbe } from './logger';
@@ -1216,6 +1216,33 @@ function jsonResponse(body: unknown, status = 200): Response {
 function redactSessionMetadata<T extends { providerEnvJson?: string }>(meta: T): T {
   if (meta.providerEnvJson === undefined) return meta;
   return { ...meta, providerEnvJson: '[redacted]' };
+}
+
+function isGenericSessionTitle(title: string | undefined): boolean {
+  const trimmed = (title ?? '').trim();
+  return trimmed === '' || trimmed === 'New Chat' || trimmed === 'New Tab';
+}
+
+function normalizeSessionListPreview(meta: SessionMetadata): SessionMetadata {
+  if (!isGenericSessionTitle(meta.title)) return meta;
+  if (!meta.runtime || meta.runtime === 'builtin') return meta;
+
+  const data = getSessionData(meta.id);
+  const resolved = data
+    ? resolveLastRealUserMessagePreview(data.messages)
+    : { found: false as const };
+  if (resolved.found) {
+    return { ...meta, lastMessagePreview: resolved.preview };
+  }
+
+  // v0.2.22 external runtimes stored assistant text in lastMessagePreview.
+  // For generic-title rows that have no real user preview, prefer "New Chat"
+  // over carrying that stale assistant snippet into every list surface.
+  if (meta.lastMessagePreview) {
+    return { ...meta, lastMessagePreview: undefined };
+  }
+
+  return meta;
 }
 
 /**
@@ -3567,7 +3594,9 @@ async function main() {
             : getAllSessionMetadata();
           // Zero-trust: strip providerEnvJson before handing to clients.
           // Matches PATCH response behavior (see PATCH /sessions/:id).
-          const safeSessions = sessions.map(redactSessionMetadata);
+          const safeSessions = sessions
+            .map(normalizeSessionListPreview)
+            .map(redactSessionMetadata);
           return jsonResponse({ success: true, sessions: safeSessions });
         } catch (error) {
           console.error('[sessions] Error in GET /sessions:', error);
