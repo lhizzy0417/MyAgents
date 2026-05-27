@@ -133,7 +133,7 @@ describe('session-message-preview', () => {
     const result = resolveLastRealUserMessagePreview([
       {
         role: 'user',
-        content: '<system-reminder><CRON_TASK>执行任务</CRON_TASK></system-reminder>',
+        content: '<system-reminder><HEARTBEAT>A schedule fired</HEARTBEAT></system-reminder>',
         id: 'system',
         timestamp: 't1',
       } as SessionMessage,
@@ -147,5 +147,39 @@ describe('session-message-preview', () => {
     ]);
 
     expect(result).toEqual({ found: true, preview: '用户群聊消息' });
+  });
+
+  it('extracts the first non-empty cron task line from system reminders', () => {
+    const result = resolveLastRealUserMessagePreview([
+      {
+        role: 'user',
+        content: '<system-reminder>\n<CRON_TASK>\n\n执行任务：# GitHub Issue 自动化处理\n\n每 6 小时自动 triage\n</CRON_TASK>\n</system-reminder>',
+        id: 'cron',
+        timestamp: 't1',
+      } as SessionMessage,
+      { role: 'assistant', content: 'assistant', id: 'a1', timestamp: 't2' } as SessionMessage,
+    ]);
+
+    expect(result).toEqual({ found: true, preview: '执行任务：# GitHub Issue 自动化处理' });
+  });
+
+  it('keeps heartbeat and memory-update system reminders out of previews', () => {
+    const result = resolveLastRealUserMessagePreview([
+      {
+        role: 'user',
+        content: '<system-reminder><HEARTBEAT>A schedule fired</HEARTBEAT></system-reminder>',
+        id: 'heartbeat',
+        timestamp: 't1',
+      } as SessionMessage,
+      {
+        role: 'user',
+        content: '<system-reminder><MEMORY_UPDATE>remember this</MEMORY_UPDATE></system-reminder>',
+        id: 'memory',
+        timestamp: 't2',
+      } as SessionMessage,
+      { role: 'assistant', content: 'assistant', id: 'a1', timestamp: 't3' } as SessionMessage,
+    ]);
+
+    expect(result).toEqual({ found: false });
   });
 });

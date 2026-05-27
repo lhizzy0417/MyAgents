@@ -144,7 +144,17 @@ function stripSystemReminderPrefix(text: string): string | null {
   if (closeIdx < 0) return null;
 
   const tail = text.slice(closeIdx + closeTag.length).trim();
-  return tail || null;
+  if (tail) return tail;
+
+  const inner = text.slice('<system-reminder>'.length, closeIdx).trim();
+  if (!inner.includes('<CRON_TASK>')) return null;
+
+  const withoutCronTags = inner.replace(/<\/?CRON_TASK>/g, ' ');
+  return withoutCronTags
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .find(Boolean)
+    ?? null;
 }
 
 export function resolveLastRealUserMessagePreview(

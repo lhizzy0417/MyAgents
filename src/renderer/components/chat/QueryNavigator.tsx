@@ -38,6 +38,17 @@ function isSystemInjection(text: string): boolean {
   );
 }
 
+/** Match Message.tsx's non-bubble system render paths. */
+function isNonUserQueryMessage(msg: Message, text: string): boolean {
+  const trimmed = text.trim();
+  return (
+    msg.id.startsWith('task-notification-') ||
+    trimmed.startsWith('<task-notification>') ||
+    trimmed.startsWith('<local-command-stdout>') ||
+    isSystemInjection(trimmed)
+  );
+}
+
 export default function QueryNavigator({
   historyMessages,
   streamingMessage,
@@ -57,15 +68,12 @@ export default function QueryNavigator({
       : historyMessages;
 
     return allMessages
-      .filter((msg) => {
-        if (msg.role !== 'user') return false;
+      .flatMap((msg) => {
+        if (msg.role !== 'user') return [];
         const text = getQueryText(msg);
-        return text.trim() !== '' && !isSystemInjection(text);
-      })
-      .map((msg) => ({
-        id: msg.id,
-        text: getQueryText(msg),
-      }));
+        if (text.trim() === '' || isNonUserQueryMessage(msg, text)) return [];
+        return [{ id: msg.id, text }];
+      });
   }, [historyMessages, streamingMessage]);
 
   // Clamp activeIndex to valid range (handles session switch, query list shrink)

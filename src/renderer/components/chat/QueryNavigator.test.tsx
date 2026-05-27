@@ -51,4 +51,53 @@ describe('QueryNavigator', () => {
     expect(container.firstElementChild).toHaveClass('right-4');
     expect(container.firstElementChild).not.toHaveClass('right-0');
   });
+
+  it('does not count task notifications toward the navigator threshold', () => {
+    const scrollContainerRef = { current: document.createElement('div') };
+
+    const { container } = render(
+      <QueryNavigator
+        historyMessages={[
+          userMessage('u1', 'First question'),
+          userMessage(
+            'task-notification-bg-1',
+            '<task-notification>{"taskId":"bg-1","status":"completed"}</task-notification>',
+          ),
+          userMessage('u2', 'Second question'),
+        ]}
+        streamingMessage={null}
+        scrollContainerRef={scrollContainerRef}
+        pauseAutoScroll={vi.fn()}
+      />,
+    );
+
+    expect(container.firstElementChild).toBeNull();
+  });
+
+  it('hides task notifications when real user queries are present', () => {
+    const scrollContainerRef = { current: document.createElement('div') };
+
+    const { container } = render(
+      <QueryNavigator
+        historyMessages={[
+          userMessage('u1', 'First question'),
+          userMessage(
+            'task-notification-bg-1',
+            '<task-notification>{"taskId":"bg-1","status":"completed"}</task-notification>',
+          ),
+          userMessage('u2', 'Second question'),
+          userMessage('u3', 'Third question'),
+        ]}
+        streamingMessage={null}
+        scrollContainerRef={scrollContainerRef}
+        pauseAutoScroll={vi.fn()}
+      />,
+    );
+
+    expect(container).toHaveTextContent('First question');
+    expect(container).toHaveTextContent('Second question');
+    expect(container).toHaveTextContent('Third question');
+    expect(container).not.toHaveTextContent('task-notification');
+    expect(container).not.toHaveTextContent('bg-1');
+  });
 });
