@@ -11,10 +11,10 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use crate::{ulog_info, ulog_warn};
 use reqwest::Client;
 use serde_json::json;
 use tauri::{AppHandle, Runtime};
-use crate::{ulog_info, ulog_warn};
 
 use crate::sidecar::{
     ensure_session_sidecar, release_session_sidecar, ManagedSidecarManager, SidecarOwner,
@@ -133,9 +133,47 @@ impl SessionRouter {
                 ImSourceType::Private => "private",
                 ImSourceType::Group => "group",
             };
-            format!("agent:{}:{}:{}:{}", agent_id, msg.platform, source, msg.chat_id)
+            format!(
+                "agent:{}:{}:{}:{}",
+                agent_id, msg.platform, source, msg.chat_id
+            )
         } else {
             msg.session_key()
+        }
+    }
+
+    fn display_name_from_message(msg: &ImMessage) -> Option<String> {
+        match msg.source_type {
+            ImSourceType::Private => msg
+                .sender_name
+                .as_ref()
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string())
+                .or_else(|| Some(msg.sender_id.clone())),
+            ImSourceType::Group => msg
+                .hint_group_name
+                .as_ref()
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string())
+                .or_else(|| Some(msg.chat_id.clone())),
+        }
+    }
+
+    /// Update human-readable peer metadata from the latest inbound message.
+    /// Routing remains keyed by `session_key`; these fields only make status
+    /// snapshots explicit enough for desktop handover UI to target a specific
+    /// private/group chat instead of the whole channel.
+    pub fn update_peer_metadata_from_message(&mut self, session_key: &str, msg: &ImMessage) {
+        if let Some(ps) = self.peer_sessions.get_mut(session_key) {
+            ps.source_display_name = Self::display_name_from_message(msg);
+            ps.last_sender_name = msg
+                .sender_name
+                .as_ref()
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string());
         }
     }
 
@@ -275,6 +313,8 @@ impl SessionRouter {
                 workspace_path: info.workspace.clone(),
                 source_type,
                 source_id,
+                source_display_name: None,
+                last_sender_name: None,
                 message_count: info.prev_count,
                 last_active: Instant::now(),
             },
@@ -317,7 +357,9 @@ impl SessionRouter {
             ps.session_id = new_session_id.to_string();
             ulog_info!(
                 "[im-router] Upgraded peer session_id: {} -> {} (session_key={})",
-                old_id, new_session_id, session_key,
+                old_id,
+                new_session_id,
+                session_key,
             );
             true
         } else {
@@ -459,10 +501,7 @@ impl SessionRouter {
 
             if resp.status().is_success() {
                 let body: serde_json::Value = resp.json().await.unwrap_or_default();
-                let new_session_id = body["sessionId"]
-                    .as_str()
-                    .unwrap_or("unknown")
-                    .to_string();
+                let new_session_id = body["sessionId"].as_str().unwrap_or("unknown").to_string();
 
                 // Upgrade Sidecar Manager key: old_session_id → new_session_id
                 // So ensure_sidecar can find the running Sidecar by the new key
@@ -540,7 +579,11 @@ impl SessionRouter {
             .filter(|ps| ps.sidecar_port > 0)
             .max_by_key(|ps| ps.last_active)
             .map(|ps| {
-                (ps.sidecar_port, session_key_to_source_str(&ps.session_key), ps.source_id.clone())
+                (
+                    ps.sidecar_port,
+                    session_key_to_source_str(&ps.session_key),
+                    ps.source_id.clone(),
+                )
             })
     }
 
@@ -554,7 +597,11 @@ impl SessionRouter {
             .filter(|ps| ps.source_type == ImSourceType::Private) // Skip groups for heartbeat
             .max_by_key(|ps| ps.last_active)
             .map(|ps| {
-                (ps.session_key.clone(), session_key_to_source_str(&ps.session_key), ps.source_id.clone())
+                (
+                    ps.session_key.clone(),
+                    session_key_to_source_str(&ps.session_key),
+                    ps.source_id.clone(),
+                )
             })
     }
 
@@ -641,17 +688,31 @@ impl SessionRouter {
 
     /// Get active peer session info (for health state)
     pub fn active_sessions(&self) -> Vec<super::types::ImActiveSession> {
-        self.peer_sessions
+        let now_instant = Instant::now();
+        let now_utc = chrono::Utc::now();
+        let mut sessions: Vec<_> = self
+            .peer_sessions
             .values()
             .map(|ps| super::types::ImActiveSession {
                 session_key: ps.session_key.clone(),
                 session_id: ps.session_id.clone(),
                 source_type: ps.source_type.clone(),
+                source_id: Some(ps.source_id.clone()),
+                source_display_name: ps.source_display_name.clone(),
+                last_sender_name: ps.last_sender_name.clone(),
                 workspace_path: ps.workspace_path.display().to_string(),
                 message_count: ps.message_count,
-                last_active: chrono::Utc::now().to_rfc3339(), // Approximate
+                last_active: chrono::Duration::from_std(
+                    now_instant.saturating_duration_since(ps.last_active),
+                )
+                .ok()
+                .and_then(|age| now_utc.checked_sub_signed(age))
+                .unwrap_or(now_utc)
+                .to_rfc3339(),
             })
-            .collect()
+            .collect();
+        sessions.sort_by(|a, b| b.last_active.cmp(&a.last_active));
+        sessions
     }
 
     /// Restore peer sessions from persisted health state (startup recovery).
@@ -673,7 +734,8 @@ impl SessionRouter {
                     let migrated = format!("agent:{}:{}", agent_id, rest);
                     ulog_info!(
                         "[im-router] Migrated session key: {} → {}",
-                        s.session_key, migrated
+                        s.session_key,
+                        migrated
                     );
                     migrated
                 } else {
@@ -692,6 +754,8 @@ impl SessionRouter {
                     workspace_path: self.default_workspace.clone(),
                     source_type,
                     source_id,
+                    source_display_name: s.source_display_name.clone(),
+                    last_sender_name: s.last_sender_name.clone(),
                     message_count: s.message_count,
                     last_active: Instant::now(),
                 },
@@ -756,16 +820,32 @@ impl SessionRouter {
         // 1. Provider env (sync BEFORE model so pre-warm uses the correct provider)
         if let Some(penv) = provider_env {
             let url = format!("http://127.0.0.1:{}/api/provider/set", port);
-            match self.http_client.post(&url).json(&json!({ "providerEnv": penv })).send().await {
+            match self
+                .http_client
+                .post(&url)
+                .json(&json!({ "providerEnv": penv }))
+                .send()
+                .await
+            {
                 Ok(_) => ulog_info!("[im-router] Synced provider env to port {}", port),
-                Err(e) => ulog_warn!("[im-router] Failed to sync provider env to port {}: {}", port, e),
+                Err(e) => ulog_warn!(
+                    "[im-router] Failed to sync provider env to port {}: {}",
+                    port,
+                    e
+                ),
             }
         }
 
         // 2. Model
         if let Some(model_id) = model {
             let url = format!("http://127.0.0.1:{}/api/model/set", port);
-            match self.http_client.post(&url).json(&json!({ "model": model_id })).send().await {
+            match self
+                .http_client
+                .post(&url)
+                .json(&json!({ "model": model_id }))
+                .send()
+                .await
+            {
                 Ok(_) => ulog_info!("[im-router] Synced model {} to port {}", model_id, port),
                 Err(e) => ulog_warn!("[im-router] Failed to sync model to port {}: {}", port, e),
             }
@@ -775,8 +855,18 @@ impl SessionRouter {
         if let Some(mcp_json) = mcp_servers_json {
             if let Ok(servers) = serde_json::from_str::<Vec<serde_json::Value>>(mcp_json) {
                 let url = format!("http://127.0.0.1:{}/api/mcp/set", port);
-                match self.http_client.post(&url).json(&json!({ "servers": servers })).send().await {
-                    Ok(_) => ulog_info!("[im-router] Synced {} MCP server(s) to port {}", servers.len(), port),
+                match self
+                    .http_client
+                    .post(&url)
+                    .json(&json!({ "servers": servers }))
+                    .send()
+                    .await
+                {
+                    Ok(_) => ulog_info!(
+                        "[im-router] Synced {} MCP server(s) to port {}",
+                        servers.len(),
+                        port
+                    ),
                     Err(e) => ulog_warn!("[im-router] Failed to sync MCP to port {}: {}", port, e),
                 }
             }
@@ -816,14 +906,28 @@ impl SessionRouter {
 
         if let Some(penv) = provider_env {
             let url = format!("http://127.0.0.1:{}/api/provider/set", port);
-            match client.post(&url).json(&json!({ "providerEnv": penv })).send().await {
+            match client
+                .post(&url)
+                .json(&json!({ "providerEnv": penv }))
+                .send()
+                .await
+            {
                 Ok(_) => ulog_info!("[im-router] Synced provider env to port {}", port),
-                Err(e) => ulog_warn!("[im-router] Failed to sync provider env to port {}: {}", port, e),
+                Err(e) => ulog_warn!(
+                    "[im-router] Failed to sync provider env to port {}: {}",
+                    port,
+                    e
+                ),
             }
         }
         if let Some(model_id) = model {
             let url = format!("http://127.0.0.1:{}/api/model/set", port);
-            match client.post(&url).json(&json!({ "model": model_id })).send().await {
+            match client
+                .post(&url)
+                .json(&json!({ "model": model_id }))
+                .send()
+                .await
+            {
                 Ok(_) => ulog_info!("[im-router] Synced model {} to port {}", model_id, port),
                 Err(e) => ulog_warn!("[im-router] Failed to sync model to port {}: {}", port, e),
             }
@@ -831,8 +935,17 @@ impl SessionRouter {
         if let Some(mcp_json) = mcp_servers_json {
             if let Ok(servers) = serde_json::from_str::<Vec<serde_json::Value>>(mcp_json) {
                 let url = format!("http://127.0.0.1:{}/api/mcp/set", port);
-                match client.post(&url).json(&json!({ "servers": servers })).send().await {
-                    Ok(_) => ulog_info!("[im-router] Synced {} MCP server(s) to port {}", servers.len(), port),
+                match client
+                    .post(&url)
+                    .json(&json!({ "servers": servers }))
+                    .send()
+                    .await
+                {
+                    Ok(_) => ulog_info!(
+                        "[im-router] Synced {} MCP server(s) to port {}",
+                        servers.len(),
+                        port
+                    ),
                     Err(e) => ulog_warn!("[im-router] Failed to sync MCP to port {}: {}", port, e),
                 }
             }
@@ -842,9 +955,23 @@ impl SessionRouter {
     /// Sync permission mode to a Sidecar.
     pub async fn sync_permission_mode(&self, port: u16, mode: &str) {
         let url = format!("http://127.0.0.1:{}/api/session/permission-mode", port);
-        match self.http_client.post(&url).json(&json!({ "permissionMode": mode })).send().await {
-            Ok(_) => ulog_info!("[im-router] Synced permission mode '{}' to port {}", mode, port),
-            Err(e) => ulog_warn!("[im-router] Failed to sync permission mode to port {}: {}", port, e),
+        match self
+            .http_client
+            .post(&url)
+            .json(&json!({ "permissionMode": mode }))
+            .send()
+            .await
+        {
+            Ok(_) => ulog_info!(
+                "[im-router] Synced permission mode '{}' to port {}",
+                mode,
+                port
+            ),
+            Err(e) => ulog_warn!(
+                "[im-router] Failed to sync permission mode to port {}: {}",
+                port,
+                e
+            ),
         }
     }
 
@@ -943,7 +1070,10 @@ pub fn parse_session_key(session_key: &str) -> (ImSourceType, String) {
 
     // Find the FIRST "private" or "group" after the prefix — this is the source_type marker.
     // Platform names (telegram, feishu, dingtalk, openclaw:xxx) don't contain these words.
-    if let Some(rel_pos) = parts[search_start..].iter().position(|p| *p == "private" || *p == "group") {
+    if let Some(rel_pos) = parts[search_start..]
+        .iter()
+        .position(|p| *p == "private" || *p == "group")
+    {
         let abs_pos = search_start + rel_pos;
         let source_type = match parts[abs_pos] {
             "group" => ImSourceType::Group,
@@ -973,6 +1103,8 @@ mod tests {
             workspace_path: PathBuf::from("/tmp/workspace"),
             source_type,
             source_id,
+            source_display_name: None,
+            last_sender_name: None,
             message_count: 0,
             last_active: Instant::now(),
         }
@@ -991,7 +1123,10 @@ mod tests {
         );
 
         assert_eq!(removed.len(), 1);
-        assert_eq!(removed[0].session_key, "agent:a:openclaw:feishu:private:source");
+        assert_eq!(
+            removed[0].session_key,
+            "agent:a:openclaw:feishu:private:source"
+        );
         assert!(router
             .peer_session_snapshot("agent:a:openclaw:feishu:private:target")
             .is_some());

@@ -22,7 +22,7 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 use serde::Serialize;
-use tauri::{AppHandle, Manager, Runtime};
+use tauri::{AppHandle, Emitter, Manager, Runtime};
 
 use super::health::HealthManager;
 use super::router::{parse_session_key, SessionRouter};
@@ -202,6 +202,7 @@ pub async fn cmd_handover_session_to_channel<R: Runtime>(
     agentId: String,
     channelId: String,
     workspacePath: String,
+    sessionKey: Option<String>,
 ) -> Result<HandoverResult, String> {
     ulog_info!(
         "[handover] start session={} → agent={} channel={}",
@@ -210,21 +211,24 @@ pub async fn cmd_handover_session_to_channel<R: Runtime>(
         channelId,
     );
 
-    let agent_state: tauri::State<'_, ManagedAgents> = app
-        .try_state()
-        .ok_or_else(|| {
-            ulog_warn!("[handover] step1 ManagedAgents state unavailable");
-            "Agent state unavailable".to_string()
-        })?;
-    let manager: tauri::State<'_, ManagedSidecarManager> = app
-        .try_state()
-        .ok_or_else(|| {
-            ulog_warn!("[handover] step1 ManagedSidecarManager state unavailable");
-            "Sidecar manager unavailable".to_string()
-        })?;
+    let agent_state: tauri::State<'_, ManagedAgents> = app.try_state().ok_or_else(|| {
+        ulog_warn!("[handover] step1 ManagedAgents state unavailable");
+        "Agent state unavailable".to_string()
+    })?;
+    let manager: tauri::State<'_, ManagedSidecarManager> = app.try_state().ok_or_else(|| {
+        ulog_warn!("[handover] step1 ManagedSidecarManager state unavailable");
+        "Sidecar manager unavailable".to_string()
+    })?;
 
     // ----- 1. Resolve target channel + workspace constraint
-    let (router_arc, adapter, agent_workspace, last_active_channel, channel_runtimes) = {
+    let (
+        router_arc,
+        adapter,
+        target_health,
+        agent_workspace,
+        last_active_channel,
+        channel_runtimes,
+    ) = {
         let agents = agent_state.lock().await;
         let agent = agents.get(&agentId).ok_or_else(|| {
             ulog_warn!(
@@ -254,6 +258,7 @@ pub async fn cmd_handover_session_to_channel<R: Runtime>(
         (
             channel.bot_instance.router.clone(),
             channel.bot_instance.adapter.clone(),
+            channel.bot_instance.health.clone(),
             agent.config.workspace_path.clone(),
             agent.last_active_channel.clone(),
             channel_runtimes,
@@ -275,15 +280,39 @@ pub async fn cmd_handover_session_to_channel<R: Runtime>(
         ));
     }
 
-    // ----- 2. Pick the chat to take over (most-recently-active peer_session
-    // in this channel). v1 requires at least one prior chat exists so we
-    // know which chat_id to bind to.
+    // ----- 2. Pick the chat to take over. The desktop UI now passes an
+    // explicit peer `sessionKey`, so a Feishu bot with both private and group
+    // chats never falls back to "whatever was most recent". The legacy
+    // fallback remains only for older callers and logs loudly.
     let target_session_key = {
         let router = router_arc.lock().await;
-        router.most_recent_peer_session_key().ok_or_else(|| {
-            ulog_warn!("[handover] no prior peer_session for channel {}", channelId);
-            "Channel 没有最近活跃的对话；请先在 IM 端发一条消息建立会话".to_string()
-        })?
+        match sessionKey
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            Some(explicit_key) => {
+                if !router.has_peer_session(explicit_key) {
+                    ulog_warn!(
+                        "[handover] explicit sessionKey not found in channel router: channel={} key={}",
+                        channelId,
+                        explicit_key
+                    );
+                    return Err(format!("目标聊天不存在或已离线：{}", explicit_key));
+                }
+                explicit_key.to_string()
+            }
+            None => {
+                ulog_warn!(
+                    "[handover] missing explicit sessionKey; falling back to most recent peer_session for channel {}",
+                    channelId
+                );
+                router.most_recent_peer_session_key().ok_or_else(|| {
+                    ulog_warn!("[handover] no prior peer_session for channel {}", channelId);
+                    "Channel 没有最近活跃的对话；请先在 IM 端发一条消息建立会话".to_string()
+                })?
+            }
+        }
     };
     ulog_info!("[handover] step2 target_session_key={}", target_session_key);
 
@@ -372,11 +401,16 @@ pub async fn cmd_handover_session_to_channel<R: Runtime>(
     // `is_new=true` means the old sidecar was dead and a fresh one was minted
     // on a different port; binding the IM channel to the stale port would
     // route subsequent messages into a closed socket.
-    let (chat_id, prior_session_id) = {
+    let (chat_id, prior_session_id, active_sessions_after_upsert) = {
         let mut router = router_arc.lock().await;
         let prior = router.peer_session_snapshot(&target_session_key);
         let prior_session_id = prior.as_ref().map(|p| p.session_id.clone());
         let (source_type, source_id) = parse_session_key(&target_session_key);
+        let source_display_name = prior
+            .as_ref()
+            .and_then(|p| p.source_display_name.clone())
+            .or_else(|| Some(source_id.clone()));
+        let last_sender_name = prior.as_ref().and_then(|p| p.last_sender_name.clone());
 
         router.upsert_peer_session(PeerSession {
             session_key: target_session_key.clone(),
@@ -385,17 +419,31 @@ pub async fn cmd_handover_session_to_channel<R: Runtime>(
             workspace_path: req_workspace.clone(),
             source_type,
             source_id: source_id.clone(),
+            source_display_name,
+            last_sender_name,
             message_count: 0,
             last_active: Instant::now(),
         });
 
-        (source_id, prior_session_id)
+        (source_id, prior_session_id, router.active_sessions())
     };
     ulog_info!(
         "[handover] step5 peer_session upserted: chat_id={} prior_session={}",
         chat_id,
-        prior_session_id.as_deref().map(short_id).unwrap_or_else(|| "none".into()),
+        prior_session_id
+            .as_deref()
+            .map(short_id)
+            .unwrap_or_else(|| "none".into()),
     );
+    target_health
+        .set_active_sessions(active_sessions_after_upsert)
+        .await;
+    if let Err(e) = target_health.persist().await {
+        ulog_warn!(
+            "[handover] step5 persist target channel health after upsert failed: {}",
+            e
+        );
+    }
 
     // ----- 5b. Enforce one channel binding per session.
     //
@@ -414,8 +462,8 @@ pub async fn cmd_handover_session_to_channel<R: Runtime>(
             } else {
                 None
             };
-            let removed = router_guard
-                .remove_peer_sessions_for_session_except(&sessionId, keep_session_key);
+            let removed =
+                router_guard.remove_peer_sessions_for_session_except(&sessionId, keep_session_key);
             let active_sessions = if removed.is_empty() {
                 None
             } else {
@@ -478,6 +526,14 @@ pub async fn cmd_handover_session_to_channel<R: Runtime>(
         agentId,
         channelId,
         target_session_key,
+    );
+    let _ = app.emit(
+        "agent:status-changed",
+        serde_json::json!({
+            "agentId": agentId,
+            "channelId": channelId,
+            "event": "handover",
+        }),
     );
 
     // ----- 6. Release the prior session's Agent owner (best-effort).

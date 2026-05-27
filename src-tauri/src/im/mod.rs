@@ -24,12 +24,12 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use crate::config_io::with_config_lock;
+use crate::utils::bom::strip_bom;
+use crate::{ulog_debug, ulog_error, ulog_info, ulog_warn};
 use reqwest::Client;
 use serde_json::json;
 use tauri::{AppHandle, Emitter, Runtime};
-use crate::{ulog_info, ulog_warn, ulog_error, ulog_debug};
-use crate::config_io::with_config_lock;
-use crate::utils::bom::strip_bom;
 use tokio::sync::{watch, Mutex, RwLock, Semaphore};
 use tokio::task::JoinSet;
 
@@ -40,7 +40,7 @@ use crate::sidecar::ManagedSidecarManager;
 /// Approval callback from IM platform (button click or text command)
 pub struct ApprovalCallback {
     pub request_id: String,
-    pub decision: String,  // "allow_once" | "always_allow" | "deny"
+    pub decision: String, // "allow_once" | "always_allow" | "deny"
     #[allow(dead_code)]
     pub user_id: String,
 }
@@ -94,13 +94,17 @@ use bridge::BridgeAdapter;
 use buffer::MessageBuffer;
 use dingtalk::DingtalkAdapter;
 use feishu::FeishuAdapter;
+use group_history::{GroupHistoryBuffer, GroupHistoryEntry};
 use health::HealthManager;
 use router::{
     create_sidecar_stream_client, EnsureSidecarPrep, RouteError, SessionRouter, GLOBAL_CONCURRENCY,
 };
 use telegram::TelegramAdapter;
-use group_history::{GroupHistoryBuffer, GroupHistoryEntry};
-use types::{BotConfigPatch, GroupActivation, GroupEvent, GroupPermission, GroupPermissionStatus, ImAttachmentType, ImBotStatus, ImConfig, ImConversation, ImMessage, ImPlatform, ImSourceType, ImStatus};
+use types::{
+    BotConfigPatch, GroupActivation, GroupEvent, GroupPermission, GroupPermissionStatus,
+    ImAttachmentType, ImBotStatus, ImConfig, ImConversation, ImMessage, ImPlatform, ImSourceType,
+    ImStatus,
+};
 
 fn normalize_runtime_type(runtime: Option<&str>) -> String {
     match runtime {
@@ -168,10 +172,26 @@ struct RuntimePermissionChoice {
 fn fallback_runtime_models(runtime: &str) -> Vec<RuntimeModelChoice> {
     match runtime {
         "claude-code" => vec![
-            RuntimeModelChoice { value: String::new(), display_name: "默认".to_string(), is_default: true },
-            RuntimeModelChoice { value: "sonnet".to_string(), display_name: "Sonnet".to_string(), is_default: false },
-            RuntimeModelChoice { value: "opus".to_string(), display_name: "Opus".to_string(), is_default: false },
-            RuntimeModelChoice { value: "haiku".to_string(), display_name: "Haiku".to_string(), is_default: false },
+            RuntimeModelChoice {
+                value: String::new(),
+                display_name: "默认".to_string(),
+                is_default: true,
+            },
+            RuntimeModelChoice {
+                value: "sonnet".to_string(),
+                display_name: "Sonnet".to_string(),
+                is_default: false,
+            },
+            RuntimeModelChoice {
+                value: "opus".to_string(),
+                display_name: "Opus".to_string(),
+                is_default: false,
+            },
+            RuntimeModelChoice {
+                value: "haiku".to_string(),
+                display_name: "Haiku".to_string(),
+                is_default: false,
+            },
         ],
         _ => Vec::new(),
     }
@@ -180,22 +200,70 @@ fn fallback_runtime_models(runtime: &str) -> Vec<RuntimeModelChoice> {
 fn runtime_permission_choices(runtime: &str) -> Vec<RuntimePermissionChoice> {
     match runtime {
         "codex" => vec![
-            RuntimePermissionChoice { value: "suggest".to_string(), label: "Suggest".to_string(), description: "仅信任的命令自动执行，其他需确认".to_string() },
-            RuntimePermissionChoice { value: "auto-edit".to_string(), label: "Auto-Edit".to_string(), description: "自动编辑文件，沙箱内执行命令".to_string() },
-            RuntimePermissionChoice { value: "full-auto".to_string(), label: "Full Auto".to_string(), description: "沙箱内自主执行，按需询问".to_string() },
-            RuntimePermissionChoice { value: "no-restrictions".to_string(), label: "No Restrictions".to_string(), description: "跳过所有审批和沙箱限制".to_string() },
+            RuntimePermissionChoice {
+                value: "suggest".to_string(),
+                label: "Suggest".to_string(),
+                description: "仅信任的命令自动执行，其他需确认".to_string(),
+            },
+            RuntimePermissionChoice {
+                value: "auto-edit".to_string(),
+                label: "Auto-Edit".to_string(),
+                description: "自动编辑文件，沙箱内执行命令".to_string(),
+            },
+            RuntimePermissionChoice {
+                value: "full-auto".to_string(),
+                label: "Full Auto".to_string(),
+                description: "沙箱内自主执行，按需询问".to_string(),
+            },
+            RuntimePermissionChoice {
+                value: "no-restrictions".to_string(),
+                label: "No Restrictions".to_string(),
+                description: "跳过所有审批和沙箱限制".to_string(),
+            },
         ],
         "claude-code" => vec![
-            RuntimePermissionChoice { value: "default".to_string(), label: "Default".to_string(), description: "每次工具调用都需要确认".to_string() },
-            RuntimePermissionChoice { value: "plan".to_string(), label: "Plan".to_string(), description: "规划模式，只读不执行".to_string() },
-            RuntimePermissionChoice { value: "acceptEdits".to_string(), label: "Accept Edits".to_string(), description: "自动接受文件编辑，其他需确认".to_string() },
-            RuntimePermissionChoice { value: "bypassPermissions".to_string(), label: "Bypass Permissions".to_string(), description: "跳过所有权限确认".to_string() },
+            RuntimePermissionChoice {
+                value: "default".to_string(),
+                label: "Default".to_string(),
+                description: "每次工具调用都需要确认".to_string(),
+            },
+            RuntimePermissionChoice {
+                value: "plan".to_string(),
+                label: "Plan".to_string(),
+                description: "规划模式，只读不执行".to_string(),
+            },
+            RuntimePermissionChoice {
+                value: "acceptEdits".to_string(),
+                label: "Accept Edits".to_string(),
+                description: "自动接受文件编辑，其他需确认".to_string(),
+            },
+            RuntimePermissionChoice {
+                value: "bypassPermissions".to_string(),
+                label: "Bypass Permissions".to_string(),
+                description: "跳过所有权限确认".to_string(),
+            },
         ],
         "gemini" => vec![
-            RuntimePermissionChoice { value: "default".to_string(), label: "Default".to_string(), description: "每次工具调用都需要确认".to_string() },
-            RuntimePermissionChoice { value: "autoEdit".to_string(), label: "Auto Edit".to_string(), description: "自动接受文件编辑,其他需确认".to_string() },
-            RuntimePermissionChoice { value: "yolo".to_string(), label: "YOLO".to_string(), description: "跳过所有工具确认".to_string() },
-            RuntimePermissionChoice { value: "plan".to_string(), label: "Plan".to_string(), description: "规划模式,只读不执行".to_string() },
+            RuntimePermissionChoice {
+                value: "default".to_string(),
+                label: "Default".to_string(),
+                description: "每次工具调用都需要确认".to_string(),
+            },
+            RuntimePermissionChoice {
+                value: "autoEdit".to_string(),
+                label: "Auto Edit".to_string(),
+                description: "自动接受文件编辑,其他需确认".to_string(),
+            },
+            RuntimePermissionChoice {
+                value: "yolo".to_string(),
+                label: "YOLO".to_string(),
+                description: "跳过所有工具确认".to_string(),
+            },
+            RuntimePermissionChoice {
+                value: "plan".to_string(),
+                label: "Plan".to_string(),
+                description: "规划模式,只读不执行".to_string(),
+            },
         ],
         _ => Vec::new(),
     }
@@ -215,11 +283,8 @@ async fn ensure_sidecar_port_for_command<R: Runtime>(
     match prep {
         EnsureSidecarPrep::Healthy(port) => Ok(port),
         EnsureSidecarPrep::NeedCreate(info) => {
-            let port = SessionRouter::create_sidecar_blocking(
-                info.clone(),
-                app_handle,
-                manager,
-            ).await?;
+            let port =
+                SessionRouter::create_sidecar_blocking(info.clone(), app_handle, manager).await?;
             let mut router_guard = router.lock().await;
             router_guard.commit_ensure_sidecar(session_key, &info, port);
             Ok(port)
@@ -234,8 +299,7 @@ async fn query_runtime_models_from_sidecar(
 ) -> Result<Vec<RuntimeModelChoice>, String> {
     let url = format!(
         "http://127.0.0.1:{}/api/runtime/models?type={}",
-        port,
-        runtime,
+        port, runtime,
     );
     let resp = client
         .get(&url)
@@ -261,7 +325,10 @@ async fn query_runtime_models_from_sidecar(
                         .get("displayName")
                         .and_then(|v| v.as_str())
                         .unwrap_or(value);
-                    let is_default = m.get("isDefault").and_then(|v| v.as_bool()).unwrap_or(false);
+                    let is_default = m
+                        .get("isDefault")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false);
                     Some(RuntimeModelChoice {
                         value: value.to_string(),
                         display_name: display_name.to_string(),
@@ -298,10 +365,18 @@ async fn sync_runtime_config_to_sidecars(
             .await
         {
             Ok(resp) if resp.status().is_success() => {
-                ulog_info!("[im] Synced runtime config for {} to port {}", runtime, port);
+                ulog_info!(
+                    "[im] Synced runtime config for {} to port {}",
+                    runtime,
+                    port
+                );
             }
             Ok(resp) => {
-                ulog_warn!("[im] Failed to sync runtime config to port {}: HTTP {}", port, resp.status());
+                ulog_warn!(
+                    "[im] Failed to sync runtime config to port {}: HTTP {}",
+                    port,
+                    resp.status()
+                );
             }
             Err(e) => {
                 ulog_warn!("[im] Failed to sync runtime config to port {}: {}", port, e);
@@ -353,25 +428,45 @@ impl adapter::ImAdapter for AnyAdapter {
     }
     async fn ack_received(&self, chat_id: &str, message_id: &str) {
         match self {
-            Self::Telegram(a) => adapter::ImAdapter::ack_received(a.as_ref(), chat_id, message_id).await,
-            Self::Feishu(a) => adapter::ImAdapter::ack_received(a.as_ref(), chat_id, message_id).await,
-            Self::Dingtalk(a) => adapter::ImAdapter::ack_received(a.as_ref(), chat_id, message_id).await,
-            Self::Bridge(a) => adapter::ImAdapter::ack_received(a.as_ref(), chat_id, message_id).await,
+            Self::Telegram(a) => {
+                adapter::ImAdapter::ack_received(a.as_ref(), chat_id, message_id).await
+            }
+            Self::Feishu(a) => {
+                adapter::ImAdapter::ack_received(a.as_ref(), chat_id, message_id).await
+            }
+            Self::Dingtalk(a) => {
+                adapter::ImAdapter::ack_received(a.as_ref(), chat_id, message_id).await
+            }
+            Self::Bridge(a) => {
+                adapter::ImAdapter::ack_received(a.as_ref(), chat_id, message_id).await
+            }
         }
     }
     async fn ack_processing(&self, chat_id: &str, message_id: &str) {
         match self {
-            Self::Telegram(a) => adapter::ImAdapter::ack_processing(a.as_ref(), chat_id, message_id).await,
-            Self::Feishu(a) => adapter::ImAdapter::ack_processing(a.as_ref(), chat_id, message_id).await,
-            Self::Dingtalk(a) => adapter::ImAdapter::ack_processing(a.as_ref(), chat_id, message_id).await,
-            Self::Bridge(a) => adapter::ImAdapter::ack_processing(a.as_ref(), chat_id, message_id).await,
+            Self::Telegram(a) => {
+                adapter::ImAdapter::ack_processing(a.as_ref(), chat_id, message_id).await
+            }
+            Self::Feishu(a) => {
+                adapter::ImAdapter::ack_processing(a.as_ref(), chat_id, message_id).await
+            }
+            Self::Dingtalk(a) => {
+                adapter::ImAdapter::ack_processing(a.as_ref(), chat_id, message_id).await
+            }
+            Self::Bridge(a) => {
+                adapter::ImAdapter::ack_processing(a.as_ref(), chat_id, message_id).await
+            }
         }
     }
     async fn ack_clear(&self, chat_id: &str, message_id: &str) {
         match self {
-            Self::Telegram(a) => adapter::ImAdapter::ack_clear(a.as_ref(), chat_id, message_id).await,
+            Self::Telegram(a) => {
+                adapter::ImAdapter::ack_clear(a.as_ref(), chat_id, message_id).await
+            }
             Self::Feishu(a) => adapter::ImAdapter::ack_clear(a.as_ref(), chat_id, message_id).await,
-            Self::Dingtalk(a) => adapter::ImAdapter::ack_clear(a.as_ref(), chat_id, message_id).await,
+            Self::Dingtalk(a) => {
+                adapter::ImAdapter::ack_clear(a.as_ref(), chat_id, message_id).await
+            }
             Self::Bridge(a) => adapter::ImAdapter::ack_clear(a.as_ref(), chat_id, message_id).await,
         }
     }
@@ -386,7 +481,11 @@ impl adapter::ImAdapter for AnyAdapter {
 }
 
 impl adapter::ImStreamAdapter for AnyAdapter {
-    async fn send_message_returning_id(&self, chat_id: &str, text: &str) -> adapter::AdapterResult<Option<String>> {
+    async fn send_message_returning_id(
+        &self,
+        chat_id: &str,
+        text: &str,
+    ) -> adapter::AdapterResult<Option<String>> {
         match self {
             Self::Telegram(a) => a.send_message_returning_id(chat_id, text).await,
             Self::Feishu(a) => a.send_message_returning_id(chat_id, text).await,
@@ -394,20 +493,41 @@ impl adapter::ImStreamAdapter for AnyAdapter {
             Self::Bridge(a) => a.send_message_returning_id(chat_id, text).await,
         }
     }
-    async fn edit_message(&self, chat_id: &str, message_id: &str, text: &str) -> adapter::AdapterResult<()> {
+    async fn edit_message(
+        &self,
+        chat_id: &str,
+        message_id: &str,
+        text: &str,
+    ) -> adapter::AdapterResult<()> {
         match self {
-            Self::Telegram(a) => adapter::ImStreamAdapter::edit_message(a.as_ref(), chat_id, message_id, text).await,
-            Self::Feishu(a) => adapter::ImStreamAdapter::edit_message(a.as_ref(), chat_id, message_id, text).await,
-            Self::Dingtalk(a) => adapter::ImStreamAdapter::edit_message(a.as_ref(), chat_id, message_id, text).await,
-            Self::Bridge(a) => adapter::ImStreamAdapter::edit_message(a.as_ref(), chat_id, message_id, text).await,
+            Self::Telegram(a) => {
+                adapter::ImStreamAdapter::edit_message(a.as_ref(), chat_id, message_id, text).await
+            }
+            Self::Feishu(a) => {
+                adapter::ImStreamAdapter::edit_message(a.as_ref(), chat_id, message_id, text).await
+            }
+            Self::Dingtalk(a) => {
+                adapter::ImStreamAdapter::edit_message(a.as_ref(), chat_id, message_id, text).await
+            }
+            Self::Bridge(a) => {
+                adapter::ImStreamAdapter::edit_message(a.as_ref(), chat_id, message_id, text).await
+            }
         }
     }
     async fn delete_message(&self, chat_id: &str, message_id: &str) -> adapter::AdapterResult<()> {
         match self {
-            Self::Telegram(a) => adapter::ImStreamAdapter::delete_message(a.as_ref(), chat_id, message_id).await,
-            Self::Feishu(a) => adapter::ImStreamAdapter::delete_message(a.as_ref(), chat_id, message_id).await,
-            Self::Dingtalk(a) => adapter::ImStreamAdapter::delete_message(a.as_ref(), chat_id, message_id).await,
-            Self::Bridge(a) => adapter::ImStreamAdapter::delete_message(a.as_ref(), chat_id, message_id).await,
+            Self::Telegram(a) => {
+                adapter::ImStreamAdapter::delete_message(a.as_ref(), chat_id, message_id).await
+            }
+            Self::Feishu(a) => {
+                adapter::ImStreamAdapter::delete_message(a.as_ref(), chat_id, message_id).await
+            }
+            Self::Dingtalk(a) => {
+                adapter::ImStreamAdapter::delete_message(a.as_ref(), chat_id, message_id).await
+            }
+            Self::Bridge(a) => {
+                adapter::ImStreamAdapter::delete_message(a.as_ref(), chat_id, message_id).await
+            }
         }
     }
     fn max_message_length(&self) -> usize {
@@ -426,10 +546,28 @@ impl adapter::ImStreamAdapter for AnyAdapter {
         tool_input: &str,
     ) -> adapter::AdapterResult<Option<String>> {
         match self {
-            Self::Telegram(a) => a.send_approval_card(chat_id, request_id, tool_name, tool_input).await.map_err(|e| e.to_string()),
-            Self::Feishu(a) => a.send_approval_card(chat_id, request_id, tool_name, tool_input).await,
-            Self::Dingtalk(a) => adapter::ImStreamAdapter::send_approval_card(a.as_ref(), chat_id, request_id, tool_name, tool_input).await,
-            Self::Bridge(a) => a.send_approval_card(chat_id, request_id, tool_name, tool_input).await,
+            Self::Telegram(a) => a
+                .send_approval_card(chat_id, request_id, tool_name, tool_input)
+                .await
+                .map_err(|e| e.to_string()),
+            Self::Feishu(a) => {
+                a.send_approval_card(chat_id, request_id, tool_name, tool_input)
+                    .await
+            }
+            Self::Dingtalk(a) => {
+                adapter::ImStreamAdapter::send_approval_card(
+                    a.as_ref(),
+                    chat_id,
+                    request_id,
+                    tool_name,
+                    tool_input,
+                )
+                .await
+            }
+            Self::Bridge(a) => {
+                a.send_approval_card(chat_id, request_id, tool_name, tool_input)
+                    .await
+            }
         }
     }
     async fn update_approval_status(
@@ -439,10 +577,29 @@ impl adapter::ImStreamAdapter for AnyAdapter {
         status: &str,
     ) -> adapter::AdapterResult<()> {
         match self {
-            Self::Telegram(a) => a.update_approval_status(chat_id, message_id, status).await.map_err(|e| e.to_string()),
+            Self::Telegram(a) => a
+                .update_approval_status(chat_id, message_id, status)
+                .await
+                .map_err(|e| e.to_string()),
             Self::Feishu(a) => a.update_approval_status(message_id, status).await,
-            Self::Dingtalk(a) => adapter::ImStreamAdapter::update_approval_status(a.as_ref(), chat_id, message_id, status).await,
-            Self::Bridge(a) => adapter::ImStreamAdapter::update_approval_status(a.as_ref(), chat_id, message_id, status).await,
+            Self::Dingtalk(a) => {
+                adapter::ImStreamAdapter::update_approval_status(
+                    a.as_ref(),
+                    chat_id,
+                    message_id,
+                    status,
+                )
+                .await
+            }
+            Self::Bridge(a) => {
+                adapter::ImStreamAdapter::update_approval_status(
+                    a.as_ref(),
+                    chat_id,
+                    message_id,
+                    status,
+                )
+                .await
+            }
         }
     }
     async fn send_photo(
@@ -468,13 +625,30 @@ impl adapter::ImStreamAdapter for AnyAdapter {
         caption: Option<&str>,
     ) -> adapter::AdapterResult<Option<String>> {
         match self {
-            Self::Telegram(a) => a.send_file(chat_id, data, filename, mime_type, caption).await,
-            Self::Feishu(a) => a.send_file(chat_id, data, filename, mime_type, caption).await,
-            Self::Dingtalk(a) => a.send_file(chat_id, data, filename, mime_type, caption).await,
-            Self::Bridge(a) => a.send_file(chat_id, data, filename, mime_type, caption).await,
+            Self::Telegram(a) => {
+                a.send_file(chat_id, data, filename, mime_type, caption)
+                    .await
+            }
+            Self::Feishu(a) => {
+                a.send_file(chat_id, data, filename, mime_type, caption)
+                    .await
+            }
+            Self::Dingtalk(a) => {
+                a.send_file(chat_id, data, filename, mime_type, caption)
+                    .await
+            }
+            Self::Bridge(a) => {
+                a.send_file(chat_id, data, filename, mime_type, caption)
+                    .await
+            }
         }
     }
-    async fn finalize_message(&self, chat_id: &str, message_id: &str, text: &str) -> adapter::AdapterResult<()> {
+    async fn finalize_message(
+        &self,
+        chat_id: &str,
+        message_id: &str,
+        text: &str,
+    ) -> adapter::AdapterResult<()> {
         match self {
             Self::Telegram(a) => a.finalize_message(chat_id, message_id, text).await,
             Self::Feishu(a) => a.finalize_message(chat_id, message_id, text).await,
@@ -522,7 +696,11 @@ impl adapter::ImStreamAdapter for AnyAdapter {
             Self::Bridge(a) => a.supports_streaming(),
         }
     }
-    async fn start_stream(&self, chat_id: &str, initial_text: &str) -> adapter::AdapterResult<String> {
+    async fn start_stream(
+        &self,
+        chat_id: &str,
+        initial_text: &str,
+    ) -> adapter::AdapterResult<String> {
         match self {
             Self::Telegram(a) => a.start_stream(chat_id, initial_text).await,
             Self::Feishu(a) => a.start_stream(chat_id, initial_text).await,
@@ -539,10 +717,22 @@ impl adapter::ImStreamAdapter for AnyAdapter {
         is_thinking: bool,
     ) -> adapter::AdapterResult<()> {
         match self {
-            Self::Telegram(a) => a.stream_chunk(chat_id, stream_id, text, sequence, is_thinking).await,
-            Self::Feishu(a) => a.stream_chunk(chat_id, stream_id, text, sequence, is_thinking).await,
-            Self::Dingtalk(a) => a.stream_chunk(chat_id, stream_id, text, sequence, is_thinking).await,
-            Self::Bridge(a) => a.stream_chunk(chat_id, stream_id, text, sequence, is_thinking).await,
+            Self::Telegram(a) => {
+                a.stream_chunk(chat_id, stream_id, text, sequence, is_thinking)
+                    .await
+            }
+            Self::Feishu(a) => {
+                a.stream_chunk(chat_id, stream_id, text, sequence, is_thinking)
+                    .await
+            }
+            Self::Dingtalk(a) => {
+                a.stream_chunk(chat_id, stream_id, text, sequence, is_thinking)
+                    .await
+            }
+            Self::Bridge(a) => {
+                a.stream_chunk(chat_id, stream_id, text, sequence, is_thinking)
+                    .await
+            }
         }
     }
     async fn finalize_stream(
@@ -558,11 +748,7 @@ impl adapter::ImStreamAdapter for AnyAdapter {
             Self::Bridge(a) => a.finalize_stream(chat_id, stream_id, final_text).await,
         }
     }
-    async fn abort_stream(
-        &self,
-        chat_id: &str,
-        stream_id: &str,
-    ) -> adapter::AdapterResult<()> {
+    async fn abort_stream(&self, chat_id: &str, stream_id: &str) -> adapter::AdapterResult<()> {
         match self {
             Self::Telegram(a) => a.abort_stream(chat_id, stream_id).await,
             Self::Feishu(a) => a.abort_stream(chat_id, stream_id).await,
@@ -573,7 +759,9 @@ impl adapter::ImStreamAdapter for AnyAdapter {
     async fn post_stream_cleanup(&self, chat_id: &str) {
         match self {
             Self::Telegram(_) | Self::Feishu(_) | Self::Bridge(_) => { /* no-op */ }
-            Self::Dingtalk(a) => adapter::ImStreamAdapter::post_stream_cleanup(a.as_ref(), chat_id).await,
+            Self::Dingtalk(a) => {
+                adapter::ImStreamAdapter::post_stream_cleanup(a.as_ref(), chat_id).await
+            }
         }
     }
 }
@@ -651,7 +839,10 @@ pub struct ImBotInstance {
 
 // ===== Agent Architecture (v0.1.41) =====
 
-use types::{AgentConfigRust, AgentConfigPatch, AgentStatus, ChannelConfigRust, ChannelStatus, LastActiveChannel};
+use types::{
+    AgentConfigPatch, AgentConfigRust, AgentStatus, ChannelConfigRust, ChannelStatus,
+    LastActiveChannel,
+};
 
 /// Info linking an ImBotInstance back to its parent Agent (set after moving into AgentInstance).
 /// The processing loop holds a clone of this Arc; writing to it after spawn is visible to the task.
@@ -694,7 +885,8 @@ pub struct AgentInstance {
     pub runtime: Arc<tokio::sync::RwLock<String>>,
     pub runtime_config: Arc<tokio::sync::RwLock<Option<serde_json::Value>>>,
     // Memory auto-update (v0.1.43)
-    pub memory_update_config: Option<Arc<tokio::sync::RwLock<Option<types::MemoryAutoUpdateConfig>>>>,
+    pub memory_update_config:
+        Option<Arc<tokio::sync::RwLock<Option<types::MemoryAutoUpdateConfig>>>>,
     pub memory_update_running: Option<Arc<std::sync::atomic::AtomicBool>>,
 }
 
@@ -712,7 +904,11 @@ pub fn signal_all_agents_shutdown(agent_state: &ManagedAgents) {
         for (agent_id, instance) in agents.iter() {
             ulog_info!("[agent] Signaling shutdown for agent {}", agent_id);
             for (channel_id, ch) in &instance.channels {
-                ulog_info!("[agent] Shutting down channel {} of agent {}", channel_id, agent_id);
+                ulog_info!(
+                    "[agent] Shutting down channel {} of agent {}",
+                    channel_id,
+                    agent_id
+                );
                 let _ = ch.bot_instance.shutdown_tx.send(true);
                 ch.bot_instance.poll_handle.abort();
                 ch.bot_instance.process_handle.abort();
@@ -772,14 +968,11 @@ async fn shutdown_bot_instance(
     instance.poll_handle.abort();
 
     // Wait for in-flight messages to finish (graceful: up to 10s)
-    match tokio::time::timeout(
-        std::time::Duration::from_secs(10),
-        instance.process_handle,
-    )
-    .await
-    {
+    match tokio::time::timeout(std::time::Duration::from_secs(10), instance.process_handle).await {
         Ok(_) => ulog_info!("[im] Processing loop exited gracefully"),
-        Err(_) => ulog_warn!("[im] Processing loop did not exit within 10s, proceeding with shutdown"),
+        Err(_) => {
+            ulog_warn!("[im] Processing loop did not exit within 10s, proceeding with shutdown")
+        }
     }
 
     // Wait for auxiliary tasks
@@ -799,7 +992,11 @@ async fn shutdown_bot_instance(
     // immediately under load). Tokio JoinHandle drop does NOT cancel the
     // task — without abort() a hung subscriber would outlive the bot.
     instance.sidecar_stop_handle.abort();
-    let _ = tokio::time::timeout(std::time::Duration::from_secs(2), instance.sidecar_stop_handle).await;
+    let _ = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        instance.sidecar_stop_handle,
+    )
+    .await;
 
     // Persist remaining buffered messages to disk
     if let Err(e) = instance.buffer.lock().await.save_to_disk() {
@@ -825,11 +1022,7 @@ async fn shutdown_bot_instance(
         .await;
 
     // Release all Sidecar sessions
-    instance
-        .router
-        .lock()
-        .await
-        .release_all(sidecar_manager);
+    instance.router.lock().await.release_all(sidecar_manager);
 
     // Final health state: mark as Stopped and persist
     instance.health.set_status(ImStatus::Stopped).await;
@@ -877,9 +1070,7 @@ async fn create_bot_instance<R: Runtime>(
             dirs::home_dir()
                 .map(|h| h.join(".myagents").join("projects").join("mino"))
                 .filter(|p| p.exists())
-                .unwrap_or_else(|| {
-                    dirs::home_dir().unwrap_or_else(|| PathBuf::from("."))
-                })
+                .unwrap_or_else(|| dirs::home_dir().unwrap_or_else(|| PathBuf::from(".")))
         });
 
     ulog_info!("[im] Resolved workspace: {}", default_workspace.display());
@@ -934,18 +1125,14 @@ async fn create_bot_instance<R: Runtime>(
         Some("always") => GroupActivation::Always,
         _ => GroupActivation::Mention,
     };
-    let group_permissions: Arc<tokio::sync::RwLock<Vec<GroupPermission>>> = Arc::new(
-        tokio::sync::RwLock::new(config.group_permissions.clone()),
-    );
-    let group_activation: Arc<tokio::sync::RwLock<GroupActivation>> = Arc::new(
-        tokio::sync::RwLock::new(initial_activation),
-    );
-    let group_tools_deny: Arc<tokio::sync::RwLock<Vec<String>>> = Arc::new(
-        tokio::sync::RwLock::new(config.group_tools_deny.clone()),
-    );
-    let group_history: Arc<Mutex<GroupHistoryBuffer>> = Arc::new(
-        Mutex::new(GroupHistoryBuffer::new()),
-    );
+    let group_permissions: Arc<tokio::sync::RwLock<Vec<GroupPermission>>> =
+        Arc::new(tokio::sync::RwLock::new(config.group_permissions.clone()));
+    let group_activation: Arc<tokio::sync::RwLock<GroupActivation>> =
+        Arc::new(tokio::sync::RwLock::new(initial_activation));
+    let group_tools_deny: Arc<tokio::sync::RwLock<Vec<String>>> =
+        Arc::new(tokio::sync::RwLock::new(config.group_tools_deny.clone()));
+    let group_history: Arc<Mutex<GroupHistoryBuffer>> =
+        Arc::new(Mutex::new(GroupHistoryBuffer::new()));
 
     // Create platform adapter (implements ImAdapter + ImStreamAdapter traits)
     let (msg_tx, mut msg_rx) = tokio::sync::mpsc::channel(256);
@@ -995,8 +1182,7 @@ async fn create_bot_instance<R: Runtime>(
             };
 
             let rust_port = crate::management_api::get_management_port();
-            let plugin_id = config.openclaw_plugin_id.as_deref()
-                .unwrap_or(channel_id);
+            let plugin_id = config.openclaw_plugin_id.as_deref().unwrap_or(channel_id);
 
             let plugin_dir = dirs::home_dir()
                 .unwrap_or_else(|| PathBuf::from("."))
@@ -1017,10 +1203,7 @@ async fn create_bot_instance<R: Runtime>(
             // Register bridge sender for inbound message routing
             bridge::register_bridge_sender(&bot_id, &channel_id, msg_tx.clone()).await;
 
-            let mut bridge_adapter = BridgeAdapter::new(
-                channel_id.clone(),
-                bp.port,
-            );
+            let mut bridge_adapter = BridgeAdapter::new(channel_id.clone(), bp.port);
             bridge_adapter.sync_capabilities().await;
             // Override with user-configured tool groups (if set in channel config).
             // Auto-merge: any new groups from the plugin that aren't in the user's
@@ -1038,7 +1221,10 @@ async fn create_bot_instance<R: Runtime>(
                         }
                     }
                     if new_count > 0 {
-                        ulog_info!("[im] Auto-merged {} new tool group(s) from plugin into enabled list", new_count);
+                        ulog_info!(
+                            "[im] Auto-merged {} new tool group(s) from plugin into enabled list",
+                            new_count
+                        );
                     }
                     bridge_adapter.set_enabled_tool_groups(merged);
                 }
@@ -1065,9 +1251,17 @@ async fn create_bot_instance<R: Runtime>(
             let username = if display_name.is_empty() {
                 None
             } else {
-                Some(display_name.strip_prefix('@').map(String::from).unwrap_or(display_name))
+                Some(
+                    display_name
+                        .strip_prefix('@')
+                        .map(String::from)
+                        .unwrap_or(display_name),
+                )
             };
-            ulog_info!("[im] Bot verified: {}", username.as_deref().unwrap_or("<no display name>"));
+            ulog_info!(
+                "[im] Bot verified: {}",
+                username.as_deref().unwrap_or("<no display name>")
+            );
             health.set_bot_username(username).await;
             health.set_status(ImStatus::Online).await;
             health.set_error(None).await;
@@ -1165,10 +1359,16 @@ async fn create_bot_instance<R: Runtime>(
                 }
             };
 
-            let pending = pending_approvals_for_handler.lock().await.remove(&cb.request_id);
+            let pending = pending_approvals_for_handler
+                .lock()
+                .await
+                .remove(&cb.request_id);
             if let Some(p) = pending {
                 // POST decision to Sidecar
-                let url = format!("http://127.0.0.1:{}/api/im/permission-response", p.sidecar_port);
+                let url = format!(
+                    "http://127.0.0.1:{}/api/im/permission-response",
+                    p.sidecar_port
+                );
                 let result = approval_client
                     .post(&url)
                     .json(&json!({
@@ -1179,7 +1379,11 @@ async fn create_bot_instance<R: Runtime>(
                     .await;
                 match result {
                     Ok(resp) if resp.status().is_success() => {
-                        ulog_info!("[im] Approval forwarded: rid={}, decision={}", &cb.request_id[..cb.request_id.len().min(16)], cb.decision);
+                        ulog_info!(
+                            "[im] Approval forwarded: rid={}, decision={}",
+                            &cb.request_id[..cb.request_id.len().min(16)],
+                            cb.decision
+                        );
                     }
                     Ok(resp) => {
                         ulog_error!("[im] Approval forward failed: HTTP {}", resp.status());
@@ -1190,15 +1394,20 @@ async fn create_bot_instance<R: Runtime>(
                 }
                 // Update card to show result (skip if card send had failed)
                 if !p.card_message_id.is_empty() {
-                    let status_text = if cb.decision == "deny" { "denied" } else { "approved" };
-                    let _ = adapter_for_approval.update_approval_status(
-                        &p.chat_id,
-                        &p.card_message_id,
-                        status_text,
-                    ).await;
+                    let status_text = if cb.decision == "deny" {
+                        "denied"
+                    } else {
+                        "approved"
+                    };
+                    let _ = adapter_for_approval
+                        .update_approval_status(&p.chat_id, &p.card_message_id, status_text)
+                        .await;
                 }
             } else {
-                ulog_warn!("[im] Approval callback for unknown request_id: {}", &cb.request_id[..cb.request_id.len().min(16)]);
+                ulog_warn!(
+                    "[im] Approval callback for unknown request_id: {}",
+                    &cb.request_id[..cb.request_id.len().min(16)]
+                );
             }
         }
         ulog_info!("[im] Approval handler exited");
@@ -1234,7 +1443,9 @@ async fn create_bot_instance<R: Runtime>(
     let app_clone = app_handle.clone();
     let manager_clone = Arc::clone(sidecar_manager);
     let permission_mode = Arc::new(tokio::sync::RwLock::new(config.permission_mode.clone()));
-    let runtime = Arc::new(tokio::sync::RwLock::new(normalize_runtime_type(config.runtime.as_deref())));
+    let runtime = Arc::new(tokio::sync::RwLock::new(normalize_runtime_type(
+        config.runtime.as_deref(),
+    )));
     let runtime_config = Arc::new(tokio::sync::RwLock::new(config.runtime_config.clone()));
     // Parse provider env from config (for per-message forwarding to Sidecar)
     // Wrapped in RwLock so /provider command can update it at runtime
@@ -2589,6 +2800,10 @@ async fn create_bot_instance<R: Runtime>(
                                 return;
                             }
                         };
+                        task_router
+                            .lock()
+                            .await
+                            .update_peer_metadata_from_message(&session_key, &msg);
 
                         // 4b. Sync AI config to newly created Sidecar
                         if is_new_sidecar {
@@ -3178,23 +3393,26 @@ async fn create_bot_instance<R: Runtime>(
     // ===== Heartbeat Runner (v0.1.21) =====
     let (heartbeat_handle, heartbeat_wake_tx, heartbeat_config_arc) = {
         let hb_config = config.heartbeat_config.clone().unwrap_or_default();
-        let hb_bot_label = bot_username_for_url.clone().unwrap_or_else(|| bot_id.to_string());
+        let hb_bot_label = bot_username_for_url
+            .clone()
+            .unwrap_or_else(|| bot_id.to_string());
         // Build the wake channel BEFORE the runner so we can hand the runner a
         // clone of the sender (used for self-cascade when more cron events
         // remain after a single-event run_once cycle).
         let (wake_tx, wake_rx) = mpsc::channel::<types::WakeReason>(64);
-        let (runner, config_arc, _mau_config_arc, _mau_running_arc) = heartbeat::HeartbeatRunner::new(
-            hb_config,
-            hb_bot_label,
-            Arc::clone(&current_model),
-            Arc::clone(&current_provider_env),
-            Arc::clone(&mcp_servers_json),
-            Arc::clone(&runtime),
-            Arc::clone(&runtime_config),
-            None, // Memory auto-update: not used for per-channel heartbeat (Agent-level only)
-            Arc::clone(&pending_cron_events),
-            wake_tx.clone(),
-        );
+        let (runner, config_arc, _mau_config_arc, _mau_running_arc) =
+            heartbeat::HeartbeatRunner::new(
+                hb_config,
+                hb_bot_label,
+                Arc::clone(&current_model),
+                Arc::clone(&current_provider_env),
+                Arc::clone(&mcp_servers_json),
+                Arc::clone(&runtime),
+                Arc::clone(&runtime_config),
+                None, // Memory auto-update: not used for per-channel heartbeat (Agent-level only)
+                Arc::clone(&pending_cron_events),
+                wake_tx.clone(),
+            );
 
         let hb_shutdown_rx = shutdown_rx.clone();
         let hb_router = Arc::clone(&router);
@@ -3205,17 +3423,19 @@ async fn create_bot_instance<R: Runtime>(
         let hb_agent_id = agent_id.clone().unwrap_or_else(|| bot_id.to_string());
         let hb_workspace = default_workspace_str.clone();
         let handle = tauri::async_runtime::spawn(async move {
-            runner.run_loop(
-                hb_shutdown_rx,
-                wake_rx,
-                hb_router,
-                hb_sidecar,
-                hb_adapter,
-                hb_app,
-                hb_peer_locks,
-                hb_agent_id,
-                hb_workspace,
-            ).await;
+            runner
+                .run_loop(
+                    hb_shutdown_rx,
+                    wake_rx,
+                    hb_router,
+                    hb_sidecar,
+                    hb_adapter,
+                    hb_app,
+                    hb_peer_locks,
+                    hb_agent_id,
+                    hb_workspace,
+                )
+                .await;
         });
 
         ulog_info!("[im] Heartbeat runner spawned for bot {}", bot_id);
@@ -3287,7 +3507,8 @@ pub async fn start_im_bot<R: Runtime>(
         let _ = shutdown_bot_instance(instance, sidecar_manager, &bot_id).await;
     }
 
-    let (instance, status) = create_bot_instance(app_handle, sidecar_manager, bot_id.clone(), config, None).await?;
+    let (instance, status) =
+        create_bot_instance(app_handle, sidecar_manager, bot_id.clone(), config, None).await?;
 
     let mut im_guard = im_state.lock().await;
     im_guard.insert(bot_id, instance);
@@ -3326,7 +3547,9 @@ pub async fn get_im_bot_status(im_state: &ManagedImBots, bot_id: &str) -> ImBotS
 
         let (bind_url, bind_code_opt) = match instance.platform {
             ImPlatform::Telegram => {
-                let url = status.bot_username.as_ref()
+                let url = status
+                    .bot_username
+                    .as_ref()
                     .map(|u| format!("https://t.me/{}?start={}", u, instance.bind_code));
                 (url, None)
             }
@@ -3365,7 +3588,9 @@ pub async fn get_all_bots_status(im_state: &ManagedImBots) -> HashMap<String, Im
 
         let (bind_url, bind_code_opt) = match instance.platform {
             ImPlatform::Telegram => {
-                let url = status.bot_username.as_ref()
+                let url = status
+                    .bot_username
+                    .as_ref()
                     .map(|u| format!("https://t.me/{}?start={}", u, instance.bind_code));
                 (url, None)
             }
@@ -3374,18 +3599,21 @@ pub async fn get_all_bots_status(im_state: &ManagedImBots) -> HashMap<String, Im
             ImPlatform::OpenClaw(_) => (None, Some(instance.bind_code.clone())),
         };
 
-        result.insert(bot_id.clone(), ImBotStatus {
-            bot_username: status.bot_username,
-            status: status.status,
-            uptime_seconds: status.uptime_seconds,
-            last_message_at: status.last_message_at,
-            active_sessions: status.active_sessions,
-            error_message: status.error_message,
-            restart_count: status.restart_count,
-            buffered_messages: status.buffered_messages,
-            bind_url,
-            bind_code: bind_code_opt,
-        });
+        result.insert(
+            bot_id.clone(),
+            ImBotStatus {
+                bot_username: status.bot_username,
+                status: status.status,
+                uptime_seconds: status.uptime_seconds,
+                last_message_at: status.last_message_at,
+                active_sessions: status.active_sessions,
+                error_message: status.error_message,
+                restart_count: status.restart_count,
+                buffered_messages: status.buffered_messages,
+                bind_url,
+                bind_code: bind_code_opt,
+            },
+        );
     }
 
     result
@@ -3405,7 +3633,8 @@ pub async fn get_all_bots_status(im_state: &ManagedImBots) -> HashMap<String, Im
 /// installing an orphan consumer that hammers a dead port until the next
 /// idle collector tick. The caller's next message will retry through a
 /// fresh `ensure_sidecar` and re-enter this function with a new generation.
-#[allow(clippy::too_many_arguments)] // Single call site; refactoring into a
+#[allow(clippy::too_many_arguments)]
+// Single call site; refactoring into a
 // struct would not improve readability and would obscure the lifetime
 // relationships between borrowed parameters.
 /// Returns `Some(router)` when a consumer is bound and ready (either
@@ -3464,7 +3693,9 @@ where
         // respawn. Falling through still hits the post-cancel final-check
         // below, which will return None if no live sidecar matches the
         // captured identity at all.
-        existing.cancel.store(true, std::sync::atomic::Ordering::SeqCst);
+        existing
+            .cancel
+            .store(true, std::sync::atomic::Ordering::SeqCst);
         guard.remove(session_key);
     }
 
@@ -3519,7 +3750,9 @@ where
 async fn drop_im_consumer(consumers: &ImConsumers, session_key: &str) {
     let mut guard = consumers.lock().await;
     if let Some(handle) = guard.remove(session_key) {
-        handle.cancel.store(true, std::sync::atomic::Ordering::SeqCst);
+        handle
+            .cancel
+            .store(true, std::sync::atomic::Ordering::SeqCst);
     }
 }
 
@@ -3652,7 +3885,9 @@ async fn enqueue_to_sidecar(
     }
 
     // Parse response: { success, requestId, accepted, sessionId }
-    let resp_body: serde_json::Value = response.json().await
+    let resp_body: serde_json::Value = response
+        .json()
+        .await
         .map_err(|e| RouteError::Unavailable(format!("enqueue parse: {}", e)))?;
     Ok(resp_body["sessionId"].as_str().map(String::from))
 }
@@ -3676,7 +3911,6 @@ pub(crate) struct GroupStreamContext {
 /// Gives users immediate feedback that the AI is processing their message.
 pub(crate) const THINKING_PLACEHOLDER: &str = "思考中…";
 
-
 /// Finalize a text block's draft message.
 /// Uses adapter.max_message_length() to determine the platform's limit.
 /// Detects draft mode from the draft_id string (`draft:xxx` prefix) rather than the adapter
@@ -3691,7 +3925,9 @@ pub(crate) async fn finalize_block<A: adapter::ImStreamAdapter>(
     if text.is_empty() {
         return;
     }
-    let is_draft_id = draft_id.as_ref().map_or(false, |id| id.starts_with("draft:"));
+    let is_draft_id = draft_id
+        .as_ref()
+        .map_or(false, |id| id.starts_with("draft:"));
     if is_draft_id {
         // Draft mode: delete draft (no-op for draft: IDs) + send permanent message.
         // `sendMessageDraft` cannot be "committed" — only `sendMessage` creates a real message.
@@ -3711,7 +3947,10 @@ pub(crate) async fn finalize_block<A: adapter::ImStreamAdapter>(
                 if let Err(e) = adapter.finalize_message(chat_id, did, text).await {
                     ulog_warn!("[im] Finalize edit failed: {}, sending as new message", e);
                     if let Err(e2) = adapter.send_message(chat_id, text).await {
-                        ulog_warn!("[im-stream] send_message (finalize fallback) failed: {}", e2);
+                        ulog_warn!(
+                            "[im-stream] send_message (finalize fallback) failed: {}",
+                            e2
+                        );
                     }
                 }
             } else {
@@ -3783,7 +4022,11 @@ fn translate_plugin_command_desc(name: &str, desc: &str) -> String {
         "feishu_auth" | "feishu auth" => "批量授权飞书用户权限".to_string(),
         "feishu" => "飞书插件命令（子命令：auth, doctor, start）".to_string(),
         _ => {
-            if desc.is_empty() { "无描述".to_string() } else { desc.to_string() }
+            if desc.is_empty() {
+                "无描述".to_string()
+            } else {
+                desc.to_string()
+            }
         }
     }
 }
@@ -3863,20 +4106,46 @@ pub fn schedule_auto_start<R: Runtime>(app_handle: AppHandle<R>) {
             let has_credentials = match config.platform {
                 ImPlatform::Telegram => !config.bot_token.is_empty(),
                 ImPlatform::Feishu => {
-                    config.feishu_app_id.as_ref().map(|s| !s.is_empty()).unwrap_or(false)
-                        && config.feishu_app_secret.as_ref().map(|s| !s.is_empty()).unwrap_or(false)
+                    config
+                        .feishu_app_id
+                        .as_ref()
+                        .map(|s| !s.is_empty())
+                        .unwrap_or(false)
+                        && config
+                            .feishu_app_secret
+                            .as_ref()
+                            .map(|s| !s.is_empty())
+                            .unwrap_or(false)
                 }
                 ImPlatform::Dingtalk => {
-                    config.dingtalk_client_id.as_ref().map(|s| !s.is_empty()).unwrap_or(false)
-                        && config.dingtalk_client_secret.as_ref().map(|s| !s.is_empty()).unwrap_or(false)
+                    config
+                        .dingtalk_client_id
+                        .as_ref()
+                        .map(|s| !s.is_empty())
+                        .unwrap_or(false)
+                        && config
+                            .dingtalk_client_secret
+                            .as_ref()
+                            .map(|s| !s.is_empty())
+                            .unwrap_or(false)
                 }
-                ImPlatform::OpenClaw(_) => {
-                    config.openclaw_plugin_id.as_ref().map(|s| !s.is_empty()).unwrap_or(false)
-                }
+                ImPlatform::OpenClaw(_) => config
+                    .openclaw_plugin_id
+                    .as_ref()
+                    .map(|s| !s.is_empty())
+                    .unwrap_or(false),
             };
             if config.enabled && has_credentials {
                 ulog_info!("[im] Auto-starting bot: {}", bot_id);
-                match start_im_bot(&app_handle, &im_state, &sidecar_manager, bot_id.clone(), config).await {
+                match start_im_bot(
+                    &app_handle,
+                    &im_state,
+                    &sidecar_manager,
+                    bot_id.clone(),
+                    config,
+                )
+                .await
+                {
                     Ok(_) => ulog_info!("[im] Auto-start succeeded for bot {}", bot_id),
                     Err(e) => ulog_warn!("[im] Auto-start failed for bot {}: {}", bot_id, e),
                 }
@@ -3922,7 +4191,10 @@ fn read_im_configs_from_disk() -> Vec<(String, ImConfig)> {
         };
 
         if i > 0 {
-            ulog_warn!("[im] Recovered config from {} file", ["main", "bak", "tmp"][i]);
+            ulog_warn!(
+                "[im] Recovered config from {} file",
+                ["main", "bak", "tmp"][i]
+            );
         }
 
         return parse_bot_entries(app_config);
@@ -4179,13 +4451,20 @@ fn read_agent_configs_from_disk() -> Vec<AgentConfigRust> {
             Ok(c) => c,
             Err(e) => {
                 let label = ["main", "bak", "tmp"][i];
-                ulog_warn!("[agent] Config {} file corrupted, trying next: {}", label, e);
+                ulog_warn!(
+                    "[agent] Config {} file corrupted, trying next: {}",
+                    label,
+                    e
+                );
                 continue;
             }
         };
 
         if i > 0 {
-            ulog_warn!("[agent] Recovered config from {} file", ["main", "bak", "tmp"][i]);
+            ulog_warn!(
+                "[agent] Recovered config from {} file",
+                ["main", "bak", "tmp"][i]
+            );
         }
 
         if !app_config.agents.is_empty() {
@@ -4214,10 +4493,12 @@ fn persist_agent_config_patch(agent_id: &str, patch: &AgentConfigPatch) -> Resul
     let config_path = home.join(".myagents").join("config.json");
 
     with_config_lock(&config_path, true, |config| {
-        let agents = config.get_mut("agents")
+        let agents = config
+            .get_mut("agents")
             .and_then(|v| v.as_array_mut())
             .ok_or_else(|| "[agent] No agents[] in config.json".to_string())?;
-        let agent = agents.iter_mut()
+        let agent = agents
+            .iter_mut()
             .find(|a| a.get("id").and_then(|v| v.as_str()) == Some(agent_id))
             .ok_or_else(|| format!("[agent] Agent {} not found in config.json", agent_id))?;
 
@@ -4350,16 +4631,34 @@ pub fn schedule_agent_auto_start<R: Runtime>(app_handle: AppHandle<R>) {
                 let has_credentials = match im_config.platform {
                     ImPlatform::Telegram => !im_config.bot_token.is_empty(),
                     ImPlatform::Feishu => {
-                        im_config.feishu_app_id.as_ref().map(|s| !s.is_empty()).unwrap_or(false)
-                            && im_config.feishu_app_secret.as_ref().map(|s| !s.is_empty()).unwrap_or(false)
+                        im_config
+                            .feishu_app_id
+                            .as_ref()
+                            .map(|s| !s.is_empty())
+                            .unwrap_or(false)
+                            && im_config
+                                .feishu_app_secret
+                                .as_ref()
+                                .map(|s| !s.is_empty())
+                                .unwrap_or(false)
                     }
                     ImPlatform::Dingtalk => {
-                        im_config.dingtalk_client_id.as_ref().map(|s| !s.is_empty()).unwrap_or(false)
-                            && im_config.dingtalk_client_secret.as_ref().map(|s| !s.is_empty()).unwrap_or(false)
+                        im_config
+                            .dingtalk_client_id
+                            .as_ref()
+                            .map(|s| !s.is_empty())
+                            .unwrap_or(false)
+                            && im_config
+                                .dingtalk_client_secret
+                                .as_ref()
+                                .map(|s| !s.is_empty())
+                                .unwrap_or(false)
                     }
-                    ImPlatform::OpenClaw(_) => {
-                        im_config.openclaw_plugin_id.as_ref().map(|s| !s.is_empty()).unwrap_or(false)
-                    }
+                    ImPlatform::OpenClaw(_) => im_config
+                        .openclaw_plugin_id
+                        .as_ref()
+                        .map(|s| !s.is_empty())
+                        .unwrap_or(false),
                 };
                 if has_credentials {
                     let bot_id = channel.id.clone();
@@ -4372,7 +4671,10 @@ pub fn schedule_agent_auto_start<R: Runtime>(app_handle: AppHandle<R>) {
                                 let is_dead = {
                                     let ch = agent.channels.get(&bot_id).unwrap();
                                     let health_state = ch.bot_instance.health.get_state().await;
-                                    matches!(health_state.status, types::ImStatus::Error | types::ImStatus::Stopped)
+                                    matches!(
+                                        health_state.status,
+                                        types::ImStatus::Error | types::ImStatus::Stopped
+                                    )
                                 };
                                 if is_dead {
                                     ulog_info!("[agent] Channel {} in agent {} is dead, removing for auto-restart", bot_id, agent_config.id);
@@ -4384,15 +4686,28 @@ pub fn schedule_agent_auto_start<R: Runtime>(app_handle: AppHandle<R>) {
                             }
                         }
                     }
-                    ulog_info!("[agent] Auto-starting channel {} of agent {}", bot_id, agent_config.id);
+                    ulog_info!(
+                        "[agent] Auto-starting channel {} of agent {}",
+                        bot_id,
+                        agent_config.id
+                    );
                     // Create bot instance directly (no transit through ManagedImBots)
-                    match create_bot_instance(&app_handle, &sidecar_manager, bot_id.clone(), im_config, Some(agent_config.id.clone())).await {
+                    match create_bot_instance(
+                        &app_handle,
+                        &sidecar_manager,
+                        bot_id.clone(),
+                        im_config,
+                        Some(agent_config.id.clone()),
+                    )
+                    .await
+                    {
                         Ok((bot_instance, _bot_status)) => {
                             ulog_info!("[agent] Auto-start succeeded for channel {}", bot_id);
                             // Register channel directly in agent state
                             let mut agents_guard = agent_state.lock().await;
-                            let agent_instance = agents_guard.entry(agent_config.id.clone()).or_insert_with(|| {
-                                AgentInstance {
+                            let agent_instance = agents_guard
+                                .entry(agent_config.id.clone())
+                                .or_insert_with(|| AgentInstance {
                                     agent_id: agent_config.id.clone(),
                                     config: agent_config.clone(),
                                     channels: HashMap::new(),
@@ -4400,19 +4715,30 @@ pub fn schedule_agent_auto_start<R: Runtime>(app_handle: AppHandle<R>) {
                                     heartbeat_handle: None,
                                     heartbeat_wake_tx: None,
                                     heartbeat_config: None,
-                                    current_model: Arc::new(RwLock::new(agent_config.model.clone())),
-                                    current_provider_env: Arc::new(RwLock::new(
-                                        agent_config.provider_env_json.as_ref()
-                                            .and_then(|s| serde_json::from_str(s).ok())
+                                    current_model: Arc::new(RwLock::new(
+                                        agent_config.model.clone(),
                                     )),
-                                    permission_mode: Arc::new(RwLock::new(agent_config.permission_mode.clone())),
-                                    mcp_servers_json: Arc::new(RwLock::new(agent_config.mcp_servers_json.clone())),
-                                    runtime: Arc::new(RwLock::new(normalize_runtime_type(agent_config.runtime.as_deref()))),
-                                    runtime_config: Arc::new(RwLock::new(agent_config.runtime_config.clone())),
+                                    current_provider_env: Arc::new(RwLock::new(
+                                        agent_config
+                                            .provider_env_json
+                                            .as_ref()
+                                            .and_then(|s| serde_json::from_str(s).ok()),
+                                    )),
+                                    permission_mode: Arc::new(RwLock::new(
+                                        agent_config.permission_mode.clone(),
+                                    )),
+                                    mcp_servers_json: Arc::new(RwLock::new(
+                                        agent_config.mcp_servers_json.clone(),
+                                    )),
+                                    runtime: Arc::new(RwLock::new(normalize_runtime_type(
+                                        agent_config.runtime.as_deref(),
+                                    ))),
+                                    runtime_config: Arc::new(RwLock::new(
+                                        agent_config.runtime_config.clone(),
+                                    )),
                                     memory_update_config: None,
                                     memory_update_running: None,
-                                }
-                            });
+                                });
                             // Set agent_link so the processing loop can update lastActiveChannel
                             let link = AgentChannelLink {
                                 channel_id: channel.id.clone(),
@@ -4422,14 +4748,19 @@ pub fn schedule_agent_auto_start<R: Runtime>(app_handle: AppHandle<R>) {
                             };
                             *bot_instance.agent_link.write().await = Some(link);
 
-                            agent_instance.channels.insert(channel.id.clone(), ChannelInstance {
-                                channel_id: channel.id.clone(),
-                                bot_instance,
-                            });
+                            agent_instance.channels.insert(
+                                channel.id.clone(),
+                                ChannelInstance {
+                                    channel_id: channel.id.clone(),
+                                    bot_instance,
+                                },
+                            );
                             started_channel_ids.push(channel.id.clone());
                             drop(agents_guard);
                         }
-                        Err(e) => ulog_warn!("[agent] Auto-start failed for channel {}: {}", bot_id, e),
+                        Err(e) => {
+                            ulog_warn!("[agent] Auto-start failed for channel {}: {}", bot_id, e)
+                        }
                     }
                 }
             }
@@ -4491,7 +4822,8 @@ pub fn schedule_agent_auto_start<R: Runtime>(app_handle: AppHandle<R>) {
                         // Check if interval needs updating
                         {
                             let cfg = hb_config_for_loop.read().await;
-                            let desired = Duration::from_secs(cfg.interval_minutes.max(5) as u64 * 60);
+                            let desired =
+                                Duration::from_secs(cfg.interval_minutes.max(5) as u64 * 60);
                             if desired != interval.period() {
                                 ulog_info!(
                                     "[agent-heartbeat] Interval changed to {}min",
@@ -4537,7 +4869,8 @@ pub fn schedule_agent_auto_start<R: Runtime>(app_handle: AppHandle<R>) {
                                 &mau_provider_env,
                                 &mau_mcp_json,
                                 hb_tz.as_deref(),
-                            ).await;
+                            )
+                            .await;
                         }
 
                         // Gate: heartbeat enabled check
@@ -4563,23 +4896,30 @@ pub fn schedule_agent_auto_start<R: Runtime>(app_handle: AppHandle<R>) {
                             let agent = match agents_guard.get(&agent_id) {
                                 Some(a) => a,
                                 None => {
-                                    ulog_debug!("[agent-heartbeat] Agent {} not found, stopping", agent_id);
+                                    ulog_debug!(
+                                        "[agent-heartbeat] Agent {} not found, stopping",
+                                        agent_id
+                                    );
                                     break;
                                 }
                             };
                             // Clone channel refs for status collection + wake_tx for delegation
-                            let refs: Vec<_> = agent.channels.iter().map(|(ch_id, ch_inst)| {
-                                (
-                                    ch_id.clone(),
-                                    Arc::clone(&ch_inst.bot_instance.health),
-                                    Arc::clone(&ch_inst.bot_instance.router),
-                                    ch_inst.bot_instance.heartbeat_wake_tx.clone(),
-                                    ch_inst.bot_instance.started_at,
-                                    ch_inst.bot_instance.config.platform.clone(),
-                                    ch_inst.bot_instance.config.name.clone(),
-                                    ch_inst.bot_instance.bind_code.clone(),
-                                )
-                            }).collect();
+                            let refs: Vec<_> = agent
+                                .channels
+                                .iter()
+                                .map(|(ch_id, ch_inst)| {
+                                    (
+                                        ch_id.clone(),
+                                        Arc::clone(&ch_inst.bot_instance.health),
+                                        Arc::clone(&ch_inst.bot_instance.router),
+                                        ch_inst.bot_instance.heartbeat_wake_tx.clone(),
+                                        ch_inst.bot_instance.started_at,
+                                        ch_inst.bot_instance.config.platform.clone(),
+                                        ch_inst.bot_instance.config.name.clone(),
+                                        ch_inst.bot_instance.bind_code.clone(),
+                                    )
+                                })
+                                .collect();
                             let lac = Arc::clone(&agent.last_active_channel);
                             (refs, lac)
                         }; // agents_guard dropped here
@@ -4587,25 +4927,39 @@ pub fn schedule_agent_auto_start<R: Runtime>(app_handle: AppHandle<R>) {
                         // Build channel statuses without holding the Mutex
                         let (ch_refs, _lac) = channel_snapshot;
                         let mut statuses_map = HashMap::new();
-                        let mut wake_txs: HashMap<String, mpsc::Sender<types::WakeReason>> = HashMap::new();
-                        for (ch_id, health, router, wake_tx, started_at, platform, name, bind_code) in &ch_refs {
+                        let mut wake_txs: HashMap<String, mpsc::Sender<types::WakeReason>> =
+                            HashMap::new();
+                        for (
+                            ch_id,
+                            health,
+                            router,
+                            wake_tx,
+                            started_at,
+                            platform,
+                            name,
+                            bind_code,
+                        ) in &ch_refs
+                        {
                             let health_state = health.get_state().await;
                             let active_sessions = router.lock().await.active_sessions();
-                            statuses_map.insert(ch_id.clone(), ChannelStatus {
-                                channel_id: ch_id.clone(),
-                                channel_type: platform.clone(),
-                                name: name.clone(),
-                                status: health_state.status,
-                                bot_username: health_state.bot_username,
-                                uptime_seconds: started_at.elapsed().as_secs(),
-                                last_message_at: health_state.last_message_at,
-                                active_sessions,
-                                error_message: health_state.error_message,
-                                restart_count: health_state.restart_count,
-                                buffered_messages: health_state.buffered_messages,
-                                bind_url: None,
-                                bind_code: Some(bind_code.clone()),
-                            });
+                            statuses_map.insert(
+                                ch_id.clone(),
+                                ChannelStatus {
+                                    channel_id: ch_id.clone(),
+                                    channel_type: platform.clone(),
+                                    name: name.clone(),
+                                    status: health_state.status,
+                                    bot_username: health_state.bot_username,
+                                    uptime_seconds: started_at.elapsed().as_secs(),
+                                    last_message_at: health_state.last_message_at,
+                                    active_sessions,
+                                    error_message: health_state.error_message,
+                                    restart_count: health_state.restart_count,
+                                    buffered_messages: health_state.buffered_messages,
+                                    bind_url: None,
+                                    bind_code: Some(bind_code.clone()),
+                                },
+                            );
                             if let Some(tx) = wake_tx {
                                 wake_txs.insert(ch_id.clone(), tx.clone());
                             }
@@ -4622,7 +4976,10 @@ pub fn schedule_agent_auto_start<R: Runtime>(app_handle: AppHandle<R>) {
                         let target_ch_id = match target_ch_id {
                             Some(id) => id,
                             None => {
-                                ulog_debug!("[agent-heartbeat] No available channel for agent {}", agent_id);
+                                ulog_debug!(
+                                    "[agent-heartbeat] No available channel for agent {}",
+                                    agent_id
+                                );
                                 continue;
                             }
                         };
@@ -4637,7 +4994,8 @@ pub fn schedule_agent_auto_start<R: Runtime>(app_handle: AppHandle<R>) {
                             let _ = wake_tx.send(delegated_reason).await;
                             ulog_debug!(
                                 "[agent-heartbeat] Routed heartbeat to channel {} for agent {}",
-                                target_ch_id, agent_id
+                                target_ch_id,
+                                agent_id
                             );
                         } else {
                             ulog_debug!(
@@ -4650,7 +5008,6 @@ pub fn schedule_agent_auto_start<R: Runtime>(app_handle: AppHandle<R>) {
                         if is_high_priority {
                             interval.reset();
                         }
-
                     }
 
                     ulog_info!("[agent-heartbeat] Runner stopped for agent {}", agent_label);
@@ -4664,14 +5021,16 @@ pub fn schedule_agent_auto_start<R: Runtime>(app_handle: AppHandle<R>) {
                     agent_instance.heartbeat_config = Some(hb_config_arc);
                     agent_instance.memory_update_config = Some(mau_config_arc);
                     agent_instance.memory_update_running = Some(mau_running_arc);
-                    ulog_info!("[agent] Agent-level heartbeat started for {}", agent_config.id);
+                    ulog_info!(
+                        "[agent] Agent-level heartbeat started for {}",
+                        agent_config.id
+                    );
                 }
                 drop(agents_guard);
             }
         }
     });
 }
-
 
 /// Monitor agent channels and auto-restart dead ones (Error/Stopped).
 /// Periodically scans all agent channels, restarts dead ones using the same
@@ -4731,7 +5090,10 @@ pub async fn monitor_agent_channels(
         let mut dead_channels: Vec<(String, String)> = Vec::new();
         for (agent_id, channel_id, health) in &channel_health_refs {
             let state = health.get_state().await;
-            if matches!(state.status, types::ImStatus::Error | types::ImStatus::Stopped) {
+            if matches!(
+                state.status,
+                types::ImStatus::Error | types::ImStatus::Stopped
+            ) {
                 dead_channels.push((agent_id.clone(), channel_id.clone()));
             }
         }
@@ -4873,10 +5235,7 @@ pub async fn monitor_agent_channels(
                         BACKOFF_BASE_SECS.saturating_mul(2u64.saturating_pow(*count - 1)),
                         MAX_BACKOFF_SECS,
                     );
-                    next_retry.insert(
-                        channel_id.clone(),
-                        now + Duration::from_secs(backoff),
-                    );
+                    next_retry.insert(channel_id.clone(), now + Duration::from_secs(backoff));
                     ulog_error!(
                         "[agent-monitor] Failed to restart channel {} (attempt {}, next retry in {}s): {}",
                         channel_id,
@@ -4947,7 +5306,10 @@ pub async fn cmd_start_im_bot(
         .and_then(|s| serde_json::from_str::<types::HeartbeatConfig>(s).ok());
     // Load persisted group fields from disk so manual start/restart doesn't lose approvals
     let existing_configs = read_im_configs_from_disk();
-    let existing = existing_configs.iter().find(|(id, _)| id == &botId).map(|(_, c)| c);
+    let existing = existing_configs
+        .iter()
+        .find(|(id, _)| id == &botId)
+        .map(|(_, c)| c);
 
     let config = ImConfig {
         platform: im_platform,
@@ -4971,23 +5333,20 @@ pub async fn cmd_start_im_bot(
         runtime: None,
         runtime_config: None,
         heartbeat_config,
-        group_permissions: existing.map(|c| c.group_permissions.clone()).unwrap_or_default(),
+        group_permissions: existing
+            .map(|c| c.group_permissions.clone())
+            .unwrap_or_default(),
         group_activation: existing.and_then(|c| c.group_activation.clone()),
-        group_tools_deny: existing.map(|c| c.group_tools_deny.clone()).unwrap_or_default(),
+        group_tools_deny: existing
+            .map(|c| c.group_tools_deny.clone())
+            .unwrap_or_default(),
         openclaw_plugin_id: openclawPluginId,
         openclaw_npm_spec: openclawNpmSpec,
         openclaw_plugin_config: openclawPluginConfig,
         openclaw_enabled_tool_groups: None, // Legacy bot path — tool groups set via Agent channel config
     };
 
-    start_im_bot(
-        &app_handle,
-        &imState,
-        &sidecarManager,
-        botId,
-        config,
-    )
-    .await
+    start_im_bot(&app_handle, &imState, &sidecarManager, botId, config).await
 }
 
 #[deprecated(note = "Use cmd_stop_agent_channel instead")]
@@ -5028,7 +5387,9 @@ pub async fn cmd_im_bot_status(
             // Compute bind_url/bind_code like get_im_bot_status does
             let (bind_url, bind_code) = match ch.bot_instance.platform {
                 types::ImPlatform::Telegram => {
-                    let url = health_state.bot_username.as_ref()
+                    let url = health_state
+                        .bot_username
+                        .as_ref()
                         .map(|u| format!("https://t.me/{}?start={}", u, ch.bot_instance.bind_code));
                     (url, None)
                 }
@@ -5105,170 +5466,188 @@ fn persist_bot_config_patch(bot_id: &str, patch: &BotConfigPatch) -> Result<(), 
     let home = dirs::home_dir().ok_or("[im] Home dir not found")?;
     let config_path = home.join(".myagents").join("config.json");
     with_config_lock(&config_path, true, |config| {
-
-    // Find the bot/channel entry: search legacy imBotConfigs first, then agents[].channels[] (v0.1.42)
-    // Use JSON Pointer path to locate the entry, then get a mutable reference.
-    enum BotLocation { Legacy(usize), AgentChannel(usize, usize) }
-    let location = {
-        let mut found: Option<BotLocation> = None;
-        if let Some(bots) = config.get("imBotConfigs").and_then(|v| v.as_array()) {
-            for (i, b) in bots.iter().enumerate() {
-                if b.get("id").and_then(|v| v.as_str()) == Some(bot_id) {
-                    found = Some(BotLocation::Legacy(i));
-                    break;
+        // Find the bot/channel entry: search legacy imBotConfigs first, then agents[].channels[] (v0.1.42)
+        // Use JSON Pointer path to locate the entry, then get a mutable reference.
+        enum BotLocation {
+            Legacy(usize),
+            AgentChannel(usize, usize),
+        }
+        let location = {
+            let mut found: Option<BotLocation> = None;
+            if let Some(bots) = config.get("imBotConfigs").and_then(|v| v.as_array()) {
+                for (i, b) in bots.iter().enumerate() {
+                    if b.get("id").and_then(|v| v.as_str()) == Some(bot_id) {
+                        found = Some(BotLocation::Legacy(i));
+                        break;
+                    }
                 }
             }
-        }
-        if found.is_none() {
-            if let Some(agents) = config.get("agents").and_then(|v| v.as_array()) {
-                'search: for (ai, agent) in agents.iter().enumerate() {
-                    if let Some(channels) = agent.get("channels").and_then(|v| v.as_array()) {
-                        for (ci, ch) in channels.iter().enumerate() {
-                            if ch.get("id").and_then(|v| v.as_str()) == Some(bot_id) {
-                                found = Some(BotLocation::AgentChannel(ai, ci));
-                                break 'search;
+            if found.is_none() {
+                if let Some(agents) = config.get("agents").and_then(|v| v.as_array()) {
+                    'search: for (ai, agent) in agents.iter().enumerate() {
+                        if let Some(channels) = agent.get("channels").and_then(|v| v.as_array()) {
+                            for (ci, ch) in channels.iter().enumerate() {
+                                if ch.get("id").and_then(|v| v.as_str()) == Some(bot_id) {
+                                    found = Some(BotLocation::AgentChannel(ai, ci));
+                                    break 'search;
+                                }
                             }
                         }
                     }
                 }
             }
-        }
-        found.ok_or_else(|| format!("[im] Bot {} not found in config.json", bot_id))?
-    };
-    let is_channel = matches!(location, BotLocation::AgentChannel(_, _));
-    let bot = match location {
-        BotLocation::Legacy(i) => &mut config["imBotConfigs"][i],
-        BotLocation::AgentChannel(ai, ci) => &mut config["agents"][ai]["channels"][ci],
-    };
+            found.ok_or_else(|| format!("[im] Bot {} not found in config.json", bot_id))?
+        };
+        let is_channel = matches!(location, BotLocation::AgentChannel(_, _));
+        let bot = match location {
+            BotLocation::Legacy(i) => &mut config["imBotConfigs"][i],
+            BotLocation::AgentChannel(ai, ci) => &mut config["agents"][ai]["channels"][ci],
+        };
 
-    // Helper: apply optional string field (None=skip, Some("")=remove, Some(val)=set)
-    fn apply_opt(target: &mut serde_json::Value, key: &str, val: &Option<String>) {
-        if let Some(ref v) = *val {
-            if v.is_empty() {
-                if let Some(o) = target.as_object_mut() { o.remove(key); }
-            } else {
-                target[key] = serde_json::json!(v);
+        // Helper: apply optional string field (None=skip, Some("")=remove, Some(val)=set)
+        fn apply_opt(target: &mut serde_json::Value, key: &str, val: &Option<String>) {
+            if let Some(ref v) = *val {
+                if v.is_empty() {
+                    if let Some(o) = target.as_object_mut() {
+                        o.remove(key);
+                    }
+                } else {
+                    target[key] = serde_json::json!(v);
+                }
             }
         }
-    }
 
-    // AI-related fields: for AgentChannel → write to `overrides` sub-object
-    // (ChannelConfigRust::to_im_config reads from overrides, not channel root)
-    // For Legacy → write to root (backward compat)
-    if is_channel {
-        // Ensure overrides object exists
-        if bot["overrides"].is_null() {
-            bot["overrides"] = serde_json::json!({});
-        }
-        // Clean up stale root-level AI fields left by pre-fix code
-        if let Some(obj) = bot.as_object_mut() {
-            obj.remove("model");
-            obj.remove("providerId");
-            obj.remove("providerEnvJson");
-            obj.remove("permissionMode");
-        }
-        let ov = &mut bot["overrides"];
-        apply_opt(ov, "model", &patch.model);
-        apply_opt(ov, "providerId", &patch.provider_id);
-        apply_opt(ov, "providerEnvJson", &patch.provider_env_json);
-        apply_opt(ov, "permissionMode", &patch.permission_mode);
-    } else {
-        apply_opt(bot, "model", &patch.model);
-        apply_opt(bot, "providerId", &patch.provider_id);
-        apply_opt(bot, "providerEnvJson", &patch.provider_env_json);
-        apply_opt(bot, "permissionMode", &patch.permission_mode);
-    }
-
-    // Platform-specific fields → always at channel/bot root
-    apply_opt(bot, "defaultWorkspacePath", &patch.default_workspace_path);
-    apply_opt(bot, "name", &patch.name);
-    apply_opt(bot, "botToken", &patch.bot_token);
-    apply_opt(bot, "feishuAppId", &patch.feishu_app_id);
-    apply_opt(bot, "feishuAppSecret", &patch.feishu_app_secret);
-    apply_opt(bot, "dingtalkClientId", &patch.dingtalk_client_id);
-    apply_opt(bot, "dingtalkClientSecret", &patch.dingtalk_client_secret);
-    apply_opt(bot, "dingtalkCardTemplateId", &patch.dingtalk_card_template_id);
-
-    // dingtalk_use_ai_card → boolean field
-    if let Some(val) = patch.dingtalk_use_ai_card {
-        bot["dingtalkUseAiCard"] = serde_json::json!(val);
-    }
-
-    // telegram_use_draft → boolean field
-    if let Some(val) = patch.telegram_use_draft {
-        bot["telegramUseDraft"] = serde_json::json!(val);
-    }
-
-    // mcp_enabled_servers → persisted as "mcpEnabledServers"
-    if let Some(ref servers) = patch.mcp_enabled_servers {
-        bot["mcpEnabledServers"] = serde_json::json!(servers);
-    }
-
-    // mcp_servers_json → persisted as "mcpServersJson" (resolved definitions for auto-start)
-    if let Some(ref json) = patch.mcp_servers_json {
-        if json.is_empty() {
-            if let Some(o) = bot.as_object_mut() { o.remove("mcpServersJson"); }
-        } else {
-            bot["mcpServersJson"] = serde_json::json!(json);
-        }
-    }
-
-    // allowed_users → persisted as "allowedUsers"
-    if let Some(ref users) = patch.allowed_users {
-        bot["allowedUsers"] = serde_json::json!(users);
-    }
-
-    // heartbeat_config_json → deserialized and written as "heartbeat" object
-    if let Some(ref hcj) = patch.heartbeat_config_json {
-        if hcj.is_empty() || hcj == "null" {
-            if let Some(o) = bot.as_object_mut() { o.remove("heartbeat"); }
-        } else if let Ok(hb) = serde_json::from_str::<serde_json::Value>(hcj) {
-            bot["heartbeat"] = hb;
-        }
-    }
-
-    // enabled / setup_completed → boolean fields
-    if let Some(val) = patch.enabled {
-        bot["enabled"] = serde_json::json!(val);
-    }
-    if let Some(val) = patch.setup_completed {
-        bot["setupCompleted"] = serde_json::json!(val);
-    }
-
-    // OpenClaw plugin config (v0.1.38)
-    if let Some(ref val) = patch.openclaw_plugin_config {
-        if val.is_null() {
-            if let Some(o) = bot.as_object_mut() { o.remove("openclawPluginConfig"); }
-        } else {
-            bot["openclawPluginConfig"] = val.clone();
-        }
-    }
-
-    // Group chat fields (v0.1.28)
-    if let Some(ref perms) = patch.group_permissions {
-        bot["groupPermissions"] = serde_json::json!(perms);
-    }
-    if let Some(ref activation) = patch.group_activation {
-        if activation.is_empty() {
-            if let Some(o) = bot.as_object_mut() { o.remove("groupActivation"); }
-        } else {
-            bot["groupActivation"] = serde_json::json!(activation);
-        }
-    }
-    if let Some(ref tools) = patch.group_tools_deny {
-        // For channels: toolsDeny lives in overrides (ChannelOverrides.tools_deny)
-        // For legacy: groupToolsDeny at root
+        // AI-related fields: for AgentChannel → write to `overrides` sub-object
+        // (ChannelConfigRust::to_im_config reads from overrides, not channel root)
+        // For Legacy → write to root (backward compat)
         if is_channel {
+            // Ensure overrides object exists
             if bot["overrides"].is_null() {
                 bot["overrides"] = serde_json::json!({});
             }
-            bot["overrides"]["toolsDeny"] = serde_json::json!(tools);
-            // Clean up stale root-level field
-            if let Some(obj) = bot.as_object_mut() { obj.remove("groupToolsDeny"); }
+            // Clean up stale root-level AI fields left by pre-fix code
+            if let Some(obj) = bot.as_object_mut() {
+                obj.remove("model");
+                obj.remove("providerId");
+                obj.remove("providerEnvJson");
+                obj.remove("permissionMode");
+            }
+            let ov = &mut bot["overrides"];
+            apply_opt(ov, "model", &patch.model);
+            apply_opt(ov, "providerId", &patch.provider_id);
+            apply_opt(ov, "providerEnvJson", &patch.provider_env_json);
+            apply_opt(ov, "permissionMode", &patch.permission_mode);
         } else {
-            bot["groupToolsDeny"] = serde_json::json!(tools);
+            apply_opt(bot, "model", &patch.model);
+            apply_opt(bot, "providerId", &patch.provider_id);
+            apply_opt(bot, "providerEnvJson", &patch.provider_env_json);
+            apply_opt(bot, "permissionMode", &patch.permission_mode);
         }
-    }
+
+        // Platform-specific fields → always at channel/bot root
+        apply_opt(bot, "defaultWorkspacePath", &patch.default_workspace_path);
+        apply_opt(bot, "name", &patch.name);
+        apply_opt(bot, "botToken", &patch.bot_token);
+        apply_opt(bot, "feishuAppId", &patch.feishu_app_id);
+        apply_opt(bot, "feishuAppSecret", &patch.feishu_app_secret);
+        apply_opt(bot, "dingtalkClientId", &patch.dingtalk_client_id);
+        apply_opt(bot, "dingtalkClientSecret", &patch.dingtalk_client_secret);
+        apply_opt(
+            bot,
+            "dingtalkCardTemplateId",
+            &patch.dingtalk_card_template_id,
+        );
+
+        // dingtalk_use_ai_card → boolean field
+        if let Some(val) = patch.dingtalk_use_ai_card {
+            bot["dingtalkUseAiCard"] = serde_json::json!(val);
+        }
+
+        // telegram_use_draft → boolean field
+        if let Some(val) = patch.telegram_use_draft {
+            bot["telegramUseDraft"] = serde_json::json!(val);
+        }
+
+        // mcp_enabled_servers → persisted as "mcpEnabledServers"
+        if let Some(ref servers) = patch.mcp_enabled_servers {
+            bot["mcpEnabledServers"] = serde_json::json!(servers);
+        }
+
+        // mcp_servers_json → persisted as "mcpServersJson" (resolved definitions for auto-start)
+        if let Some(ref json) = patch.mcp_servers_json {
+            if json.is_empty() {
+                if let Some(o) = bot.as_object_mut() {
+                    o.remove("mcpServersJson");
+                }
+            } else {
+                bot["mcpServersJson"] = serde_json::json!(json);
+            }
+        }
+
+        // allowed_users → persisted as "allowedUsers"
+        if let Some(ref users) = patch.allowed_users {
+            bot["allowedUsers"] = serde_json::json!(users);
+        }
+
+        // heartbeat_config_json → deserialized and written as "heartbeat" object
+        if let Some(ref hcj) = patch.heartbeat_config_json {
+            if hcj.is_empty() || hcj == "null" {
+                if let Some(o) = bot.as_object_mut() {
+                    o.remove("heartbeat");
+                }
+            } else if let Ok(hb) = serde_json::from_str::<serde_json::Value>(hcj) {
+                bot["heartbeat"] = hb;
+            }
+        }
+
+        // enabled / setup_completed → boolean fields
+        if let Some(val) = patch.enabled {
+            bot["enabled"] = serde_json::json!(val);
+        }
+        if let Some(val) = patch.setup_completed {
+            bot["setupCompleted"] = serde_json::json!(val);
+        }
+
+        // OpenClaw plugin config (v0.1.38)
+        if let Some(ref val) = patch.openclaw_plugin_config {
+            if val.is_null() {
+                if let Some(o) = bot.as_object_mut() {
+                    o.remove("openclawPluginConfig");
+                }
+            } else {
+                bot["openclawPluginConfig"] = val.clone();
+            }
+        }
+
+        // Group chat fields (v0.1.28)
+        if let Some(ref perms) = patch.group_permissions {
+            bot["groupPermissions"] = serde_json::json!(perms);
+        }
+        if let Some(ref activation) = patch.group_activation {
+            if activation.is_empty() {
+                if let Some(o) = bot.as_object_mut() {
+                    o.remove("groupActivation");
+                }
+            } else {
+                bot["groupActivation"] = serde_json::json!(activation);
+            }
+        }
+        if let Some(ref tools) = patch.group_tools_deny {
+            // For channels: toolsDeny lives in overrides (ChannelOverrides.tools_deny)
+            // For legacy: groupToolsDeny at root
+            if is_channel {
+                if bot["overrides"].is_null() {
+                    bot["overrides"] = serde_json::json!({});
+                }
+                bot["overrides"]["toolsDeny"] = serde_json::json!(tools);
+                // Clean up stale root-level field
+                if let Some(obj) = bot.as_object_mut() {
+                    obj.remove("groupToolsDeny");
+                }
+            } else {
+                bot["groupToolsDeny"] = serde_json::json!(tools);
+            }
+        }
 
         Ok(())
     })?;
@@ -5337,16 +5716,17 @@ async fn update_bot_config_internal<R: Runtime>(
         openclaw_enabled_tool_groups: patch.openclaw_enabled_tool_groups.clone(),
     };
     let bid_for_disk = bid.clone();
-    tokio::task::spawn_blocking(move || {
-        persist_bot_config_patch(&bid_for_disk, &disk_patch)
-    }).await.map_err(|e| format!("spawn_blocking: {}", e))??;
+    tokio::task::spawn_blocking(move || persist_bot_config_patch(&bid_for_disk, &disk_patch))
+        .await
+        .map_err(|e| format!("spawn_blocking: {}", e))??;
 
     // 2. Update Arc fields if bot is running
     {
         let bots = im_state.lock().await;
         if let Some(inst) = bots.get(&bid) {
             if let Some(ref m) = patch_model {
-                *inst.current_model.write().await = if m.is_empty() { None } else { Some(m.clone()) };
+                *inst.current_model.write().await =
+                    if m.is_empty() { None } else { Some(m.clone()) };
             }
             if let Some(ref s) = patch_provider_env {
                 if s.is_empty() {
@@ -5359,7 +5739,11 @@ async fn update_bot_config_internal<R: Runtime>(
                 *inst.permission_mode.write().await = pm.clone();
             }
             if let Some(ref mj) = patch_mcp_json {
-                *inst.mcp_servers_json.write().await = if mj.is_empty() { None } else { Some(mj.clone()) };
+                *inst.mcp_servers_json.write().await = if mj.is_empty() {
+                    None
+                } else {
+                    Some(mj.clone())
+                };
             }
             if let Some(ref users) = patch_allowed {
                 *inst.allowed_users.write().await = users.clone();
@@ -5406,39 +5790,58 @@ async fn update_bot_config_internal<R: Runtime>(
                 // Provider env sync (parsed from patch string)
                 // MUST POST even when clearing (empty → null) so Bun's setSessionProviderEnv()
                 // detects the change and restarts the session with correct environment.
-                let parsed_provider_env: Option<serde_json::Value> = patch_provider_env.as_ref()
-                    .and_then(|s| if s.is_empty() { None } else { serde_json::from_str(s).ok() });
+                let parsed_provider_env: Option<serde_json::Value> =
+                    patch_provider_env.as_ref().and_then(|s| {
+                        if s.is_empty() {
+                            None
+                        } else {
+                            serde_json::from_str(s).ok()
+                        }
+                    });
                 if patch_provider_env.is_some() {
                     for port in &ports {
                         if let Some(ref penv) = parsed_provider_env {
-                            router.sync_ai_config(
-                                *port,
-                                &runtime,
-                                runtime_config.as_ref(),
-                                None,
-                                None,
-                                Some(penv),
-                            ).await;
-                        } else {
-                            if is_external_runtime_type(&runtime) {
-                                router.sync_ai_config(
+                            router
+                                .sync_ai_config(
                                     *port,
                                     &runtime,
                                     runtime_config.as_ref(),
                                     None,
                                     None,
-                                    None,
-                                ).await;
+                                    Some(penv),
+                                )
+                                .await;
+                        } else {
+                            if is_external_runtime_type(&runtime) {
+                                router
+                                    .sync_ai_config(
+                                        *port,
+                                        &runtime,
+                                        runtime_config.as_ref(),
+                                        None,
+                                        None,
+                                        None,
+                                    )
+                                    .await;
                             } else {
                                 // Clearing provider (switch to subscription) — POST null explicitly.
                                 // sync_ai_config skips None provider_env, so POST directly.
                                 let url = format!("http://127.0.0.1:{}/api/provider/set", *port);
-                                match router.http_client().post(&url)
+                                match router
+                                    .http_client()
+                                    .post(&url)
                                     .json(&json!({ "providerEnv": null }))
-                                    .send().await
+                                    .send()
+                                    .await
                                 {
-                                    Ok(_) => ulog_info!("[im] Cleared provider env on port {}", port),
-                                    Err(e) => ulog_warn!("[im] Failed to clear provider env on port {}: {}", port, e),
+                                    Ok(_) => {
+                                        ulog_info!("[im] Cleared provider env on port {}", port)
+                                    }
+                                    Err(e) => ulog_warn!(
+                                        "[im] Failed to clear provider env on port {}: {}",
+                                        port,
+                                        e
+                                    ),
                                 }
                             }
                         }
@@ -5447,27 +5850,31 @@ async fn update_bot_config_internal<R: Runtime>(
                 // Model sync
                 if patch_model.is_some() {
                     for port in &ports {
-                        router.sync_ai_config(
-                            *port,
-                            &runtime,
-                            runtime_config.as_ref(),
-                            patch_model.as_deref(),
-                            None,
-                            None,
-                        ).await;
+                        router
+                            .sync_ai_config(
+                                *port,
+                                &runtime,
+                                runtime_config.as_ref(),
+                                patch_model.as_deref(),
+                                None,
+                                None,
+                            )
+                            .await;
                     }
                 }
                 // MCP sync (runtime JSON, not enabled-list)
                 if patch_mcp_json.is_some() {
                     for port in &ports {
-                        router.sync_ai_config(
-                            *port,
-                            &runtime,
-                            runtime_config.as_ref(),
-                            None,
-                            patch_mcp_json.as_deref(),
-                            None,
-                        ).await;
+                        router
+                            .sync_ai_config(
+                                *port,
+                                &runtime,
+                                runtime_config.as_ref(),
+                                None,
+                                patch_mcp_json.as_deref(),
+                                None,
+                            )
+                            .await;
                     }
                 }
                 // Permission mode sync to Sidecar
@@ -5497,11 +5904,18 @@ fn add_bot_config_to_disk(bot_config: &serde_json::Value) -> Result<(), String> 
         if config.get("imBotConfigs").is_none() {
             config["imBotConfigs"] = serde_json::json!([]);
         }
-        let bots = config.get_mut("imBotConfigs").unwrap().as_array_mut().unwrap();
+        let bots = config
+            .get_mut("imBotConfigs")
+            .unwrap()
+            .as_array_mut()
+            .unwrap();
 
         // Upsert: if bot with same id exists, replace it; otherwise append
         let bot_id = bot_config.get("id").and_then(|v| v.as_str()).unwrap_or("");
-        if let Some(pos) = bots.iter().position(|b| b.get("id").and_then(|v| v.as_str()) == Some(bot_id)) {
+        if let Some(pos) = bots
+            .iter()
+            .position(|b| b.get("id").and_then(|v| v.as_str()) == Some(bot_id))
+        {
             bots[pos] = bot_config.clone();
         } else {
             bots.push(bot_config.clone());
@@ -5517,7 +5931,10 @@ fn remove_bot_config_from_disk(bot_id: &str) -> Result<(), String> {
     let home = dirs::home_dir().ok_or("[im] Home dir not found")?;
     let config_path = home.join(".myagents").join("config.json");
     with_config_lock(&config_path, true, |config| {
-        if let Some(bots) = config.get_mut("imBotConfigs").and_then(|v| v.as_array_mut()) {
+        if let Some(bots) = config
+            .get_mut("imBotConfigs")
+            .and_then(|v| v.as_array_mut())
+        {
             bots.retain(|b| b.get("id").and_then(|v| v.as_str()) != Some(bot_id));
         }
         Ok(())
@@ -5532,7 +5949,8 @@ fn read_available_providers_from_disk() -> Option<String> {
     let config_path = home.join(".myagents").join("config.json");
     let content = std::fs::read_to_string(&config_path).ok()?;
     let config: serde_json::Value = serde_json::from_str(strip_bom(&content)).ok()?;
-    config.get("availableProvidersJson")
+    config
+        .get("availableProvidersJson")
         .and_then(|v| v.as_str())
         .map(|s| s.to_string())
 }
@@ -5592,10 +6010,13 @@ pub async fn cmd_add_im_bot_config(
     botConfig: serde_json::Value,
 ) -> Result<(), String> {
     let config_clone = botConfig.clone();
-    tokio::task::spawn_blocking(move || {
-        add_bot_config_to_disk(&config_clone)
-    }).await.map_err(|e| format!("spawn_blocking: {}", e))??;
-    let bot_id = botConfig.get("id").and_then(|v| v.as_str()).unwrap_or("unknown");
+    tokio::task::spawn_blocking(move || add_bot_config_to_disk(&config_clone))
+        .await
+        .map_err(|e| format!("spawn_blocking: {}", e))??;
+    let bot_id = botConfig
+        .get("id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown");
     let _ = app_handle.emit("im:bot-config-changed", json!({ "botId": bot_id }));
     ulog_info!("[im] Bot config added: {}", bot_id);
     Ok(())
@@ -5619,7 +6040,9 @@ pub async fn cmd_remove_im_bot_config(
         remove_bot_config_from_disk(&bid)?;
         health::cleanup_bot_data(&bid);
         Ok::<(), String>(())
-    }).await.map_err(|e| format!("spawn_blocking: {}", e))??;
+    })
+    .await
+    .map_err(|e| format!("spawn_blocking: {}", e))??;
 
     let _ = app_handle.emit("im:bot-config-changed", json!({ "botId": botId }));
     ulog_info!("[im] Bot config removed: {}", botId);
@@ -5639,12 +6062,15 @@ async fn resolve_group_context(
     im_state: &ManagedImBots,
     agent_state: &ManagedAgents,
     bot_id: &str,
-) -> Result<(
-    Arc<tokio::sync::RwLock<Vec<GroupPermission>>>,
-    Arc<Mutex<GroupHistoryBuffer>>,
-    Arc<AnyAdapter>,
+) -> Result<
+    (
+        Arc<tokio::sync::RwLock<Vec<GroupPermission>>>,
+        Arc<Mutex<GroupHistoryBuffer>>,
+        Arc<AnyAdapter>,
+        String,
+    ),
     String,
-), String> {
+> {
     // 1. Check ManagedAgents first (new Agent architecture)
     {
         let agents = agent_state.lock().await;
@@ -5663,7 +6089,9 @@ async fn resolve_group_context(
     // 2. Fallback: legacy ManagedImBots
     {
         let bots = im_state.lock().await;
-        let inst = bots.get(bot_id).ok_or_else(|| "Bot not running".to_string())?;
+        let inst = bots
+            .get(bot_id)
+            .ok_or_else(|| "Bot not running".to_string())?;
         Ok((
             Arc::clone(&inst.group_permissions),
             Arc::clone(&inst.group_history),
@@ -5707,14 +6135,22 @@ pub async fn cmd_approve_group(
             ..Default::default()
         };
         persist_bot_config_patch(&bid, &patch)
-    }).await.map_err(|e| format!("spawn_blocking: {}", e))??;
+    })
+    .await
+    .map_err(|e| format!("spawn_blocking: {}", e))??;
 
     // Send confirmation message to group (lock-free)
-    if let Err(e) = adapter.send_message(&groupId, "✅ 群聊已授权！所有成员现在可以 @我 提问互动。").await {
+    if let Err(e) = adapter
+        .send_message(&groupId, "✅ 群聊已授权！所有成员现在可以 @我 提问互动。")
+        .await
+    {
         ulog_warn!("[im-cmd] send_message (group approved) failed: {}", e);
     }
 
-    let _ = app_handle.emit("im:group-permission-changed", json!({ "botId": botId, "event": "approved" }));
+    let _ = app_handle.emit(
+        "im:group-permission-changed",
+        json!({ "botId": botId, "event": "approved" }),
+    );
     let _ = app_handle.emit("im:bot-config-changed", json!({ "botId": botId }));
     ulog_info!("[im] Group approved: {} for bot {}", gid, botId);
     Ok(())
@@ -5751,9 +6187,14 @@ pub async fn cmd_reject_group(
             ..Default::default()
         };
         persist_bot_config_patch(&bid, &patch)
-    }).await.map_err(|e| format!("spawn_blocking: {}", e))??;
+    })
+    .await
+    .map_err(|e| format!("spawn_blocking: {}", e))??;
 
-    let _ = app_handle.emit("im:group-permission-changed", json!({ "botId": botId, "event": "rejected" }));
+    let _ = app_handle.emit(
+        "im:group-permission-changed",
+        json!({ "botId": botId, "event": "rejected" }),
+    );
     let _ = app_handle.emit("im:bot-config-changed", json!({ "botId": botId }));
     ulog_info!("[im] Group rejected: {} for bot {}", groupId, botId);
     Ok(())
@@ -5790,9 +6231,14 @@ pub async fn cmd_remove_group(
             ..Default::default()
         };
         persist_bot_config_patch(&bid, &patch)
-    }).await.map_err(|e| format!("spawn_blocking: {}", e))??;
+    })
+    .await
+    .map_err(|e| format!("spawn_blocking: {}", e))??;
 
-    let _ = app_handle.emit("im:group-permission-changed", json!({ "botId": botId, "event": "removed" }));
+    let _ = app_handle.emit(
+        "im:group-permission-changed",
+        json!({ "botId": botId, "event": "removed" }),
+    );
     let _ = app_handle.emit("im:bot-config-changed", json!({ "botId": botId }));
     ulog_info!("[im] Group removed: {} for bot {}", groupId, botId);
     Ok(())
@@ -5823,13 +6269,23 @@ pub async fn cmd_uninstall_openclaw_plugin(pluginId: String) -> Result<(), Strin
 /// Helper: get bridge port from agent channel.
 /// Both the outer (ManagedAgents) and inner (BridgeProcess) locks are held briefly
 /// to extract the port value, then released before the actual HTTP call.
-async fn get_bridge_port(agent_state: &ManagedAgents, agent_id: &str, channel_id: &str) -> Result<u16, String> {
+async fn get_bridge_port(
+    agent_state: &ManagedAgents,
+    agent_id: &str,
+    channel_id: &str,
+) -> Result<u16, String> {
     let agents_guard = agent_state.lock().await;
-    let agent = agents_guard.get(agent_id)
+    let agent = agents_guard
+        .get(agent_id)
         .ok_or_else(|| format!("Agent '{}' not found", agent_id))?;
-    let ch = agent.channels.get(channel_id)
+    let ch = agent
+        .channels
+        .get(channel_id)
         .ok_or_else(|| format!("Channel '{}' not found on agent '{}'", channel_id, agent_id))?;
-    let bp_mutex = ch.bot_instance.bridge_process.as_ref()
+    let bp_mutex = ch
+        .bot_instance
+        .bridge_process
+        .as_ref()
         .ok_or_else(|| "Channel has no Bridge process (not an OpenClaw plugin)".to_string())?;
     let port = bp_mutex.lock().await.port;
     drop(agents_guard);
@@ -5911,7 +6367,8 @@ pub async fn cmd_restart_channels_using_plugin(
         // Find the agent_id for this bot in ManagedAgents
         let found = {
             let agents = agentState.lock().await;
-            agents.iter()
+            agents
+                .iter()
                 .find(|(_, agent)| agent.channels.contains_key(bot_id))
                 .map(|(agent_id, _)| agent_id.clone())
         };
@@ -5919,7 +6376,10 @@ pub async fn cmd_restart_channels_using_plugin(
         let agent_id = match found {
             Some(id) => id,
             None => {
-                ulog_warn!("[agent] Bot {} not found in ManagedAgents, skipping restart", bot_id);
+                ulog_warn!(
+                    "[agent] Bot {} not found in ManagedAgents, skipping restart",
+                    bot_id
+                );
                 continue;
             }
         };
@@ -5940,11 +6400,9 @@ pub async fn cmd_restart_channels_using_plugin(
         };
 
         // Shutdown the old instance (consumes bot_instance — cannot be re-inserted on failure)
-        if let Err(e) = shutdown_bot_instance(
-            channel_instance.bot_instance,
-            &sidecarManager,
-            bot_id,
-        ).await {
+        if let Err(e) =
+            shutdown_bot_instance(channel_instance.bot_instance, &sidecarManager, bot_id).await
+        {
             ulog_warn!("[agent] Failed to shutdown channel {}: {}", bot_id, e);
             failed += 1;
             // Instance is consumed and partially cleaned up; attempt restart anyway
@@ -5957,7 +6415,9 @@ pub async fn cmd_restart_channels_using_plugin(
             bot_id.clone(),
             im_config,
             Some(agent_id.clone()),
-        ).await {
+        )
+        .await
+        {
             Ok((new_instance, _status)) => {
                 // Set agent_link before acquiring the agents lock
                 let link = AgentChannelLink {
@@ -5965,7 +6425,8 @@ pub async fn cmd_restart_channels_using_plugin(
                     agent_id: agent_id.clone(),
                     last_active_channel: {
                         let agents = agentState.lock().await;
-                        agents.get(&agent_id)
+                        agents
+                            .get(&agent_id)
                             .map(|a| Arc::clone(&a.last_active_channel))
                             .unwrap_or_else(|| Arc::new(RwLock::new(None)))
                     },
@@ -5981,10 +6442,13 @@ pub async fn cmd_restart_channels_using_plugin(
 
                 let mut agents = agentState.lock().await;
                 if let Some(agent) = agents.get_mut(&agent_id) {
-                    agent.channels.insert(bot_id.clone(), ChannelInstance {
-                        channel_id: bot_id.clone(),
-                        bot_instance: new_instance,
-                    });
+                    agent.channels.insert(
+                        bot_id.clone(),
+                        ChannelInstance {
+                            channel_id: bot_id.clone(),
+                            bot_instance: new_instance,
+                        },
+                    );
                     restarted += 1;
                     ulog_info!("[agent] Channel {} restarted successfully", bot_id);
                 }
@@ -6026,15 +6490,30 @@ pub async fn cmd_start_agent_channel(
                 let is_dead = {
                     let ch = agent.channels.get(&channelId).unwrap();
                     let health_state = ch.bot_instance.health.get_state().await;
-                    matches!(health_state.status, types::ImStatus::Error | types::ImStatus::Stopped)
+                    matches!(
+                        health_state.status,
+                        types::ImStatus::Error | types::ImStatus::Stopped
+                    )
                 };
                 if is_dead {
-                    ulog_info!("[agent] Channel {} in agent {} is dead, removing to allow restart", channelId, agentId);
+                    ulog_info!(
+                        "[agent] Channel {} in agent {} is dead, removing to allow restart",
+                        channelId,
+                        agentId
+                    );
                     agent.channels.remove(&channelId);
                 } else {
-                    ulog_warn!("[agent] Channel {} already running in agent {}, skipping start", channelId, agentId);
-                    let ch = agent.channels.get(&channelId)
-                        .ok_or_else(|| format!("[agent] Channel {} disappeared from agent {}", channelId, agentId))?;
+                    ulog_warn!(
+                        "[agent] Channel {} already running in agent {}, skipping start",
+                        channelId,
+                        agentId
+                    );
+                    let ch = agent.channels.get(&channelId).ok_or_else(|| {
+                        format!(
+                            "[agent] Channel {} disappeared from agent {}",
+                            channelId, agentId
+                        )
+                    })?;
                     let health_state = ch.bot_instance.health.get_state().await;
                     let active_sessions = ch.bot_instance.router.lock().await.active_sessions();
                     return Ok(ChannelStatus {
@@ -6076,8 +6555,9 @@ pub async fn cmd_start_agent_channel(
 
     // Insert directly into agent state
     let mut agents_guard = agentState.lock().await;
-    let agent_instance = agents_guard.entry(agentId.clone()).or_insert_with(|| {
-        AgentInstance {
+    let agent_instance = agents_guard
+        .entry(agentId.clone())
+        .or_insert_with(|| AgentInstance {
             agent_id: agentId.clone(),
             config: agentConfig.clone(),
             channels: HashMap::new(),
@@ -6087,17 +6567,20 @@ pub async fn cmd_start_agent_channel(
             heartbeat_config: None,
             current_model: Arc::new(RwLock::new(agentConfig.model.clone())),
             current_provider_env: Arc::new(RwLock::new(
-                agentConfig.provider_env_json.as_ref()
-                    .and_then(|s| serde_json::from_str(s).ok())
+                agentConfig
+                    .provider_env_json
+                    .as_ref()
+                    .and_then(|s| serde_json::from_str(s).ok()),
             )),
             permission_mode: Arc::new(RwLock::new(agentConfig.permission_mode.clone())),
             mcp_servers_json: Arc::new(RwLock::new(agentConfig.mcp_servers_json.clone())),
-            runtime: Arc::new(RwLock::new(normalize_runtime_type(agentConfig.runtime.as_deref()))),
+            runtime: Arc::new(RwLock::new(normalize_runtime_type(
+                agentConfig.runtime.as_deref(),
+            ))),
             runtime_config: Arc::new(RwLock::new(agentConfig.runtime_config.clone())),
             memory_update_config: None,
             memory_update_running: None,
-        }
-    });
+        });
 
     // Set agent_link so the processing loop can update lastActiveChannel
     let link = AgentChannelLink {
@@ -6108,13 +6591,17 @@ pub async fn cmd_start_agent_channel(
     };
     *bot_instance.agent_link.write().await = Some(link);
 
-    agent_instance.channels.insert(channelId.clone(), ChannelInstance {
-        channel_id: channelId.clone(),
-        bot_instance,
-    });
+    agent_instance.channels.insert(
+        channelId.clone(),
+        ChannelInstance {
+            channel_id: channelId.clone(),
+            bot_instance,
+        },
+    );
 
     // Start agent-level heartbeat if not already running
-    let needs_heartbeat = agent_instance.heartbeat_handle.is_none() && !agent_instance.channels.is_empty();
+    let needs_heartbeat =
+        agent_instance.heartbeat_handle.is_none() && !agent_instance.channels.is_empty();
     if needs_heartbeat {
         let hb_config = agentConfig.heartbeat.clone().unwrap_or_default();
         let agent_id_hb = agentId.clone();
@@ -6186,42 +6673,51 @@ pub async fn cmd_start_agent_channel(
                         Some(a) => a,
                         None => break,
                     };
-                    let refs: Vec<_> = agent.channels.iter().map(|(ch_id, ch_inst)| {
-                        (
-                            ch_id.clone(),
-                            Arc::clone(&ch_inst.bot_instance.health),
-                            Arc::clone(&ch_inst.bot_instance.router),
-                            ch_inst.bot_instance.heartbeat_wake_tx.clone(),
-                            ch_inst.bot_instance.started_at,
-                            ch_inst.bot_instance.config.platform.clone(),
-                            ch_inst.bot_instance.config.name.clone(),
-                            ch_inst.bot_instance.bind_code.clone(),
-                        )
-                    }).collect();
+                    let refs: Vec<_> = agent
+                        .channels
+                        .iter()
+                        .map(|(ch_id, ch_inst)| {
+                            (
+                                ch_id.clone(),
+                                Arc::clone(&ch_inst.bot_instance.health),
+                                Arc::clone(&ch_inst.bot_instance.router),
+                                ch_inst.bot_instance.heartbeat_wake_tx.clone(),
+                                ch_inst.bot_instance.started_at,
+                                ch_inst.bot_instance.config.platform.clone(),
+                                ch_inst.bot_instance.config.name.clone(),
+                                ch_inst.bot_instance.bind_code.clone(),
+                            )
+                        })
+                        .collect();
                     refs
                 }; // agents_guard dropped here
 
                 // Build channel statuses without holding the Mutex
                 let mut statuses_map = HashMap::new();
                 let mut wake_txs: HashMap<String, mpsc::Sender<types::WakeReason>> = HashMap::new();
-                for (ch_id, health, router, wake_tx, started_at, platform, name, bind_code) in &channel_snapshot {
+                for (ch_id, health, router, wake_tx, started_at, platform, name, bind_code) in
+                    &channel_snapshot
+                {
                     let health_state = health.get_state().await;
                     let active_sessions = router.lock().await.active_sessions();
-                    statuses_map.insert(ch_id.clone(), ChannelStatus {
-                        channel_id: ch_id.clone(),
-                        channel_type: platform.clone(),
-                        name: name.clone(),
-                        status: health_state.status,
-                        bot_username: health_state.bot_username,
-                        uptime_seconds: started_at.elapsed().as_secs(),
-                        last_message_at: health_state.last_message_at,
-                        active_sessions,
-                        error_message: health_state.error_message,
-                        restart_count: health_state.restart_count,
-                        buffered_messages: health_state.buffered_messages,
-                        bind_url: None,
-                        bind_code: Some(bind_code.clone()),
-                    });
+                    statuses_map.insert(
+                        ch_id.clone(),
+                        ChannelStatus {
+                            channel_id: ch_id.clone(),
+                            channel_type: platform.clone(),
+                            name: name.clone(),
+                            status: health_state.status,
+                            bot_username: health_state.bot_username,
+                            uptime_seconds: started_at.elapsed().as_secs(),
+                            last_message_at: health_state.last_message_at,
+                            active_sessions,
+                            error_message: health_state.error_message,
+                            restart_count: health_state.restart_count,
+                            buffered_messages: health_state.buffered_messages,
+                            bind_url: None,
+                            bind_code: Some(bind_code.clone()),
+                        },
+                    );
                     if let Some(tx) = wake_tx {
                         wake_txs.insert(ch_id.clone(), tx.clone());
                     }
@@ -6282,7 +6778,10 @@ pub async fn cmd_start_agent_channel(
         bind_code: bot_status.bind_code,
     };
 
-    let _ = app_handle.emit("agent:status-changed", json!({ "agentId": agentId, "event": "channel_started" }));
+    let _ = app_handle.emit(
+        "agent:status-changed",
+        json!({ "agentId": agentId, "event": "channel_started" }),
+    );
 
     Ok(channel_status)
 }
@@ -6310,10 +6809,17 @@ pub async fn cmd_stop_agent_channel(
     if let Some(instance) = bot_instance {
         shutdown_bot_instance(instance, &sidecarManager, &channelId).await?;
     } else {
-        ulog_debug!("[agent] Channel {} not found in agent {}", channelId, agentId);
+        ulog_debug!(
+            "[agent] Channel {} not found in agent {}",
+            channelId,
+            agentId
+        );
     }
 
-    let _ = app_handle.emit("agent:status-changed", json!({ "agentId": agentId, "event": "channel_stopped" }));
+    let _ = app_handle.emit(
+        "agent:status-changed",
+        json!({ "agentId": agentId, "event": "channel_stopped" }),
+    );
     Ok(())
 }
 
@@ -6364,8 +6870,10 @@ pub async fn cmd_agent_channel_status(
     let snapshot = {
         let agents_guard = agentState.lock().await;
         agents_guard.get(&agentId).and_then(|agent| {
-            agent.channels.get(&channelId).map(|ch_inst| {
-                ChannelStatusRef {
+            agent
+                .channels
+                .get(&channelId)
+                .map(|ch_inst| ChannelStatusRef {
                     channel_id: channelId.clone(),
                     channel_type: ch_inst.bot_instance.config.platform.clone(),
                     name: ch_inst.bot_instance.config.name.clone(),
@@ -6373,8 +6881,7 @@ pub async fn cmd_agent_channel_status(
                     router: Arc::clone(&ch_inst.bot_instance.router),
                     started_at: ch_inst.bot_instance.started_at,
                     bind_code: ch_inst.bot_instance.bind_code.clone(),
-                }
-            })
+                })
         })
     }; // agents_guard dropped
 
@@ -6397,8 +6904,10 @@ pub async fn cmd_agent_status(
     let snapshot = {
         let agents_guard = agentState.lock().await;
         agents_guard.get(&agentId).map(|agent| {
-            let ch_refs: Vec<ChannelStatusRef> = agent.channels.iter().map(|(ch_id, ch_inst)| {
-                ChannelStatusRef {
+            let ch_refs: Vec<ChannelStatusRef> = agent
+                .channels
+                .iter()
+                .map(|(ch_id, ch_inst)| ChannelStatusRef {
                     channel_id: ch_id.clone(),
                     channel_type: ch_inst.bot_instance.config.platform.clone(),
                     name: ch_inst.bot_instance.config.name.clone(),
@@ -6406,15 +6915,25 @@ pub async fn cmd_agent_status(
                     router: Arc::clone(&ch_inst.bot_instance.router),
                     started_at: ch_inst.bot_instance.started_at,
                     bind_code: ch_inst.bot_instance.bind_code.clone(),
-                }
-            }).collect();
-            (agent.agent_id.clone(), agent.config.name.clone(), agent.config.enabled, ch_refs)
+                })
+                .collect();
+            (
+                agent.agent_id.clone(),
+                agent.config.name.clone(),
+                agent.config.enabled,
+                ch_refs,
+            )
         })
     }; // agents_guard dropped here
 
     if let Some((aid, aname, enabled, ch_refs)) = snapshot {
         let channels = collect_channel_statuses(ch_refs).await;
-        Ok(AgentStatus { agent_id: aid, agent_name: aname, enabled, channels })
+        Ok(AgentStatus {
+            agent_id: aid,
+            agent_name: aname,
+            enabled,
+            channels,
+        })
     } else {
         Ok(AgentStatus {
             agent_id: agentId,
@@ -6434,26 +6953,45 @@ pub async fn cmd_all_agents_status(
     // Clone refs inside lock, then drop lock before any .await work
     let snapshots: Vec<_> = {
         let agents_guard = agentState.lock().await;
-        agents_guard.iter().map(|(agent_id, agent)| {
-            let ch_refs: Vec<ChannelStatusRef> = agent.channels.iter().map(|(ch_id, ch_inst)| {
-                ChannelStatusRef {
-                    channel_id: ch_id.clone(),
-                    channel_type: ch_inst.bot_instance.config.platform.clone(),
-                    name: ch_inst.bot_instance.config.name.clone(),
-                    health: Arc::clone(&ch_inst.bot_instance.health),
-                    router: Arc::clone(&ch_inst.bot_instance.router),
-                    started_at: ch_inst.bot_instance.started_at,
-                    bind_code: ch_inst.bot_instance.bind_code.clone(),
-                }
-            }).collect();
-            (agent_id.clone(), agent.agent_id.clone(), agent.config.name.clone(), agent.config.enabled, ch_refs)
-        }).collect()
+        agents_guard
+            .iter()
+            .map(|(agent_id, agent)| {
+                let ch_refs: Vec<ChannelStatusRef> = agent
+                    .channels
+                    .iter()
+                    .map(|(ch_id, ch_inst)| ChannelStatusRef {
+                        channel_id: ch_id.clone(),
+                        channel_type: ch_inst.bot_instance.config.platform.clone(),
+                        name: ch_inst.bot_instance.config.name.clone(),
+                        health: Arc::clone(&ch_inst.bot_instance.health),
+                        router: Arc::clone(&ch_inst.bot_instance.router),
+                        started_at: ch_inst.bot_instance.started_at,
+                        bind_code: ch_inst.bot_instance.bind_code.clone(),
+                    })
+                    .collect();
+                (
+                    agent_id.clone(),
+                    agent.agent_id.clone(),
+                    agent.config.name.clone(),
+                    agent.config.enabled,
+                    ch_refs,
+                )
+            })
+            .collect()
     }; // agents_guard dropped here
 
     let mut result = HashMap::new();
     for (key, aid, aname, enabled, ch_refs) in snapshots {
         let channels = collect_channel_statuses(ch_refs).await;
-        result.insert(key, AgentStatus { agent_id: aid, agent_name: aname, enabled, channels });
+        result.insert(
+            key,
+            AgentStatus {
+                agent_id: aid,
+                agent_name: aname,
+                enabled,
+                channels,
+            },
+        );
     }
     Ok(result)
 }
@@ -6548,7 +7086,11 @@ pub async fn cmd_update_agent_config(
             if let (Some(ref new_rt), Some(snapshot)) =
                 (new_runtime_for_change.as_ref(), pre_change_snapshot)
             {
-                debug_assert_eq!(new_rt.as_str(), normalized.as_str(), "runtime normalization stable");
+                debug_assert_eq!(
+                    new_rt.as_str(),
+                    normalized.as_str(),
+                    "runtime normalization stable"
+                );
                 runtime_change::freeze_and_rotate_for_runtime_change(
                     agent,
                     &old_runtime_for_change,
@@ -6629,14 +7171,21 @@ pub async fn cmd_update_agent_config(
                     }
                     // groupPermissions — always overwrite (the full channels array is sent,
                     // so empty Vec means "no permissions", not "field absent")
-                    *ch_inst.bot_instance.group_permissions.write().await = ch_config.group_permissions.clone();
+                    *ch_inst.bot_instance.group_permissions.write().await =
+                        ch_config.group_permissions.clone();
                 }
             }
         }
 
         // Push config changes to all active Sidecar ports (same as legacy update_bot_config_internal)
-        let parsed_provider_env: Option<serde_json::Value> = patch.provider_env_json.as_ref()
-            .and_then(|s| if s.is_empty() { None } else { serde_json::from_str(s).ok() });
+        let parsed_provider_env: Option<serde_json::Value> =
+            patch.provider_env_json.as_ref().and_then(|s| {
+                if s.is_empty() {
+                    None
+                } else {
+                    serde_json::from_str(s).ok()
+                }
+            });
         for (_ch_id, ch_inst) in &agent.channels {
             let router = ch_inst.bot_instance.router.lock().await;
             let runtime = ch_inst.bot_instance.runtime.read().await.clone();
@@ -6646,33 +7195,46 @@ pub async fn cmd_update_agent_config(
                 if patch.provider_env_json.is_some() {
                     for port in &ports {
                         if let Some(ref penv) = parsed_provider_env {
-                            router.sync_ai_config(
-                                *port,
-                                &runtime,
-                                runtime_config.as_ref(),
-                                None,
-                                None,
-                                Some(penv),
-                            ).await;
-                        } else {
-                            if is_external_runtime_type(&runtime) {
-                                router.sync_ai_config(
+                            router
+                                .sync_ai_config(
                                     *port,
                                     &runtime,
                                     runtime_config.as_ref(),
                                     None,
                                     None,
-                                    None,
-                                ).await;
+                                    Some(penv),
+                                )
+                                .await;
+                        } else {
+                            if is_external_runtime_type(&runtime) {
+                                router
+                                    .sync_ai_config(
+                                        *port,
+                                        &runtime,
+                                        runtime_config.as_ref(),
+                                        None,
+                                        None,
+                                        None,
+                                    )
+                                    .await;
                             } else {
                                 // Clearing provider — POST null so Bun detects the change
                                 let url = format!("http://127.0.0.1:{}/api/provider/set", *port);
-                                match router.http_client().post(&url)
+                                match router
+                                    .http_client()
+                                    .post(&url)
                                     .json(&json!({ "providerEnv": null }))
-                                    .send().await
+                                    .send()
+                                    .await
                                 {
-                                    Ok(_) => ulog_info!("[im] Cleared provider env on port {}", port),
-                                    Err(e) => ulog_warn!("[im] Failed to clear provider env on port {}: {}", port, e),
+                                    Ok(_) => {
+                                        ulog_info!("[im] Cleared provider env on port {}", port)
+                                    }
+                                    Err(e) => ulog_warn!(
+                                        "[im] Failed to clear provider env on port {}: {}",
+                                        port,
+                                        e
+                                    ),
                                 }
                             }
                         }
@@ -6680,26 +7242,30 @@ pub async fn cmd_update_agent_config(
                 }
                 if patch.model.is_some() {
                     for port in &ports {
-                        router.sync_ai_config(
-                            *port,
-                            &runtime,
-                            runtime_config.as_ref(),
-                            patch.model.as_deref(),
-                            None,
-                            None,
-                        ).await;
+                        router
+                            .sync_ai_config(
+                                *port,
+                                &runtime,
+                                runtime_config.as_ref(),
+                                patch.model.as_deref(),
+                                None,
+                                None,
+                            )
+                            .await;
                     }
                 }
                 if patch.mcp_servers_json.is_some() {
                     for port in &ports {
-                        router.sync_ai_config(
-                            *port,
-                            &runtime,
-                            runtime_config.as_ref(),
-                            None,
-                            patch.mcp_servers_json.as_deref(),
-                            None,
-                        ).await;
+                        router
+                            .sync_ai_config(
+                                *port,
+                                &runtime,
+                                runtime_config.as_ref(),
+                                None,
+                                patch.mcp_servers_json.as_deref(),
+                                None,
+                            )
+                            .await;
                     }
                 }
                 if let Some(ref pm) = patch.permission_mode {
@@ -6713,18 +7279,33 @@ pub async fn cmd_update_agent_config(
                     if let Some(ref config) = runtime_config {
                         for port in &ports {
                             let url = format!("http://127.0.0.1:{}/api/runtime/config", *port);
-                            match router.http_client().post(&url)
+                            match router
+                                .http_client()
+                                .post(&url)
                                 .json(&json!({ "runtime": runtime, "runtimeConfig": config }))
-                                .send().await
+                                .send()
+                                .await
                             {
                                 Ok(resp) if resp.status().is_success() => {
-                                    ulog_info!("[im] Synced runtime config for {} to port {}", runtime, port);
+                                    ulog_info!(
+                                        "[im] Synced runtime config for {} to port {}",
+                                        runtime,
+                                        port
+                                    );
                                 }
                                 Ok(resp) => {
-                                    ulog_warn!("[im] Failed to sync runtime config to port {}: HTTP {}", port, resp.status());
+                                    ulog_warn!(
+                                        "[im] Failed to sync runtime config to port {}: HTTP {}",
+                                        port,
+                                        resp.status()
+                                    );
                                 }
                                 Err(e) => {
-                                    ulog_warn!("[im] Failed to sync runtime config to port {}: {}", port, e);
+                                    ulog_warn!(
+                                        "[im] Failed to sync runtime config to port {}: {}",
+                                        port,
+                                        e
+                                    );
                                 }
                             }
                         }
@@ -6753,8 +7334,7 @@ pub async fn cmd_create_agent(
         let config_path = home.join(".myagents").join("config.json");
 
         with_config_lock(&config_path, true, |app_config| {
-            let agents = app_config.get_mut("agents")
-                .and_then(|v| v.as_array_mut());
+            let agents = app_config.get_mut("agents").and_then(|v| v.as_array_mut());
             let agent_value = serde_json::to_value(&config)
                 .map_err(|e| format!("[agent] Failed to serialize agent: {}", e))?;
             if let Some(arr) = agents {
@@ -6766,7 +7346,9 @@ pub async fn cmd_create_agent(
         })?;
 
         Ok::<(), String>(())
-    }).await.map_err(|e| format!("spawn_blocking: {}", e))??;
+    })
+    .await
+    .map_err(|e| format!("spawn_blocking: {}", e))??;
 
     let _ = app_handle.emit("agent:config-changed", json!({}));
     Ok(agent_id)
@@ -6812,14 +7394,20 @@ pub async fn cmd_delete_agent(
         let agent_data_dir = home.join(".myagents").join("agents").join(&aid);
         if agent_data_dir.exists() {
             if let Err(e) = std::fs::remove_dir_all(&agent_data_dir) {
-                ulog_warn!("[agent] Failed to remove agent data dir {:?}: {}", agent_data_dir, e);
+                ulog_warn!(
+                    "[agent] Failed to remove agent data dir {:?}: {}",
+                    agent_data_dir,
+                    e
+                );
             } else {
                 ulog_info!("[agent] Removed agent data dir {:?}", agent_data_dir);
             }
         }
 
         Ok::<(), String>(())
-    }).await.map_err(|e| format!("spawn_blocking: {}", e))??;
+    })
+    .await
+    .map_err(|e| format!("spawn_blocking: {}", e))??;
 
     let _ = app_handle.emit("agent:config-changed", json!({}));
     Ok(())

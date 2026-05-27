@@ -52,6 +52,8 @@ export interface HandoverArgs {
     sessionId: string;
     agentId: string;
     channelId: string;
+    /** Exact peer chat target, e.g. `agent:{agentId}:feishu:group:{chatId}` */
+    sessionKey?: string;
     /** Workspace path of the desktop session — must match the Agent's workspacePath */
     workspacePath: string;
 }
@@ -80,6 +82,7 @@ export async function handoverSessionToChannel(args: HandoverArgs): Promise<Hand
         sessionId: args.sessionId,
         agentId: args.agentId,
         channelId: args.channelId,
+        sessionKey: args.sessionKey,
         workspacePath: args.workspacePath,
     });
 }

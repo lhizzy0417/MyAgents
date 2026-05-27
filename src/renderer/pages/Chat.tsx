@@ -12,7 +12,7 @@ import DropZoneOverlay from '@/components/DropZoneOverlay';
 import MessageList from '@/components/MessageList';
 import SessionHistoryDropdown from '@/components/SessionHistoryDropdown';
 import SessionSurfaceTags from '@/components/SessionSurfaceTags';
-import SessionMenuButton from '@/components/SessionMenuButton';
+import SessionMenuButton, { type BotChannelCandidate } from '@/components/SessionMenuButton';
 import { FileActionProvider } from '@/context/FileActionContext';
 import SimpleChatInput, { type ImageAttachment, type SimpleChatInputHandle } from '@/components/SimpleChatInput';
 import AgentStatusPanel from '@/components/agent-status/AgentStatusPanel';
@@ -2934,14 +2934,14 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
   //   - session was not originally created from an IM source (sessionMeta.source)
   //   - workspace's Agent has at least one online channel to hand off to
   //   - not a background-completing session
-  const availableHandoverChannels = useMemo(() => {
+  const availableHandoverChannels = useMemo<BotChannelCandidate[]>(() => {
     if (!currentAgent) return [];
-    const out: { agentId: string; agentName: string; channelId: string; channelType: string; channelName: string; sessionKey: string; platformLabel: string }[] = [];
+    const out: BotChannelCandidate[] = [];
     const status = agentStatuses[currentAgent.id];
     if (!status) return out;
     for (const ch of status.channels) {
       if (ch.status !== 'online') continue;
-      out.push({
+      const base = {
         agentId: status.agentId,
         agentName: status.agentName,
         channelId: ch.channelId,
@@ -2950,10 +2950,25 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
         // `<localized platform> · <bot identity>` instead of falling back to
         // the human-friendly Agent name (which would duplicate the agent dir).
         channelName: ch.botUsername || ch.name || ch.channelType,
-        // sessionKey is computed server-side; UI doesn't need it for the candidate list
-        sessionKey: '',
         platformLabel: getChannelTypeLabel(ch.channelType),
-      });
+      };
+      if (ch.activeSessions.length === 0) {
+        out.push({
+          ...base,
+          disabledReason: '暂无聊天记录',
+        });
+        continue;
+      }
+      for (const active of ch.activeSessions) {
+        out.push({
+          ...base,
+          sessionKey: active.sessionKey,
+          sessionId: active.sessionId,
+          sourceType: active.sourceType,
+          sourceId: active.sourceId,
+          sourceDisplayName: active.sourceDisplayName || active.sourceId,
+        });
+      }
     }
     return out;
   }, [currentAgent, agentStatuses]);

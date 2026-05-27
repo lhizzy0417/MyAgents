@@ -78,7 +78,10 @@ impl<'de> Deserialize<'de> for ImPlatform {
                     Ok(Self::OpenClaw(channel_id))
                 }
             }
-            _ => Err(serde::de::Error::unknown_variant(&s, &["telegram", "feishu", "dingtalk", "openclaw:<id>"])),
+            _ => Err(serde::de::Error::unknown_variant(
+                &s,
+                &["telegram", "feishu", "dingtalk", "openclaw:<id>"],
+            )),
         }
     }
 }
@@ -181,10 +184,9 @@ impl MediaType {
             // Images
             "jpg" | "jpeg" | "png" | "gif" | "webp" | "bmp" | "svg" => Self::Image,
             // Documents & media files
-            "pdf" | "doc" | "docx" | "xls" | "xlsx" | "ppt" | "pptx"
-            | "mp4" | "mp3" | "ogg" | "wav" | "avi" | "mov" | "mkv"
-            | "zip" | "rar" | "7z" | "tar" | "gz"
-            | "csv" | "json" | "xml" | "html" | "txt" => Self::File,
+            "pdf" | "doc" | "docx" | "xls" | "xlsx" | "ppt" | "pptx" | "mp4" | "mp3" | "ogg"
+            | "wav" | "avi" | "mov" | "mkv" | "zip" | "rar" | "7z" | "tar" | "gz" | "csv"
+            | "json" | "xml" | "html" | "txt" => Self::File,
             // Everything else (code files, etc.)
             _ => Self::NonMedia,
         }
@@ -366,6 +368,12 @@ pub struct ImActiveSession {
     pub session_key: String,
     pub session_id: String,
     pub source_type: ImSourceType,
+    #[serde(default)]
+    pub source_id: Option<String>,
+    #[serde(default)]
+    pub source_display_name: Option<String>,
+    #[serde(default)]
+    pub last_sender_name: Option<String>,
     pub workspace_path: String,
     pub message_count: u32,
     pub last_active: String,
@@ -428,6 +436,8 @@ pub struct PeerSession {
     pub workspace_path: PathBuf,
     pub source_type: ImSourceType,
     pub source_id: String,
+    pub source_display_name: Option<String>,
+    pub last_sender_name: Option<String>,
     pub message_count: u32,
     pub last_active: Instant,
 }
@@ -637,10 +647,18 @@ pub struct MemoryAutoUpdateConfig {
     pub last_batch_session_count: Option<u32>,
 }
 
-fn default_mau_interval() -> u32 { 24 }
-fn default_mau_threshold() -> u32 { 5 }
-fn default_mau_window_start() -> String { "00:00".to_string() }
-fn default_mau_window_end() -> String { "06:00".to_string() }
+fn default_mau_interval() -> u32 {
+    24
+}
+fn default_mau_threshold() -> u32 {
+    5
+}
+fn default_mau_window_start() -> String {
+    "00:00".to_string()
+}
+fn default_mau_window_end() -> String {
+    "06:00".to_string()
+}
 
 impl Default for MemoryAutoUpdateConfig {
     fn default() -> Self {
@@ -951,7 +969,9 @@ impl ChannelConfigRust {
             },
             bot_token: self.bot_token.clone().unwrap_or_default(),
             allowed_users: self.allowed_users.clone(),
-            permission_mode: overrides.and_then(|o| o.permission_mode.clone()).unwrap_or_else(|| agent.permission_mode.clone()),
+            permission_mode: overrides
+                .and_then(|o| o.permission_mode.clone())
+                .unwrap_or_else(|| agent.permission_mode.clone()),
             default_workspace_path: Some(agent.workspace_path.clone()),
             enabled: self.enabled && agent.enabled,
             feishu_app_id: self.feishu_app_id.clone(),
@@ -965,13 +985,16 @@ impl ChannelConfigRust {
             // Channel root has higher priority than agent default because the user explicitly
             // chose a provider for this specific channel via /provider command (written to root
             // by persist_bot_config_patch before the bc06386 fix moved writes to overrides).
-            provider_id: overrides.and_then(|o| o.provider_id.clone())
+            provider_id: overrides
+                .and_then(|o| o.provider_id.clone())
                 .or_else(|| self.provider_id.clone())
                 .or_else(|| agent.provider_id.clone()),
-            model: overrides.and_then(|o| o.model.clone())
+            model: overrides
+                .and_then(|o| o.model.clone())
                 .or_else(|| self.model.clone())
                 .or_else(|| agent.model.clone()),
-            provider_env_json: overrides.and_then(|o| o.provider_env_json.clone())
+            provider_env_json: overrides
+                .and_then(|o| o.provider_env_json.clone())
                 .or_else(|| self.provider_env_json.clone())
                 .or_else(|| agent.provider_env_json.clone()),
             mcp_servers_json: agent.mcp_servers_json.clone(),
@@ -980,7 +1003,9 @@ impl ChannelConfigRust {
             heartbeat_config: agent.heartbeat.clone(),
             group_permissions: self.group_permissions.clone(),
             group_activation: self.group_activation.clone(),
-            group_tools_deny: overrides.and_then(|o| o.tools_deny.clone()).unwrap_or_default(),
+            group_tools_deny: overrides
+                .and_then(|o| o.tools_deny.clone())
+                .unwrap_or_default(),
             openclaw_plugin_id: self.openclaw_plugin_id.clone(),
             openclaw_npm_spec: self.openclaw_npm_spec.clone(),
             openclaw_plugin_config: self.openclaw_plugin_config.clone(),

@@ -1,4 +1,5 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import type { ComponentProps } from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { ToastProvider } from './Toast';
@@ -29,10 +30,11 @@ vi.mock('@/utils/sessionExport', () => ({
 }));
 
 import SessionMenuButton from './SessionMenuButton';
+import type { BotChannelCandidate } from './SessionMenuButton';
 
 const SESSION_ID = '642ea003-5219-4af7-a812-a9812d6e79de';
 
-function renderMenu() {
+function renderMenu(overrides: Partial<ComponentProps<typeof SessionMenuButton>> = {}) {
   return render(
     <ToastProvider>
       <SessionMenuButton
@@ -47,6 +49,7 @@ function renderMenu() {
         onOpenRename={vi.fn()}
         onFavoriteChanged={vi.fn()}
         onDeleted={vi.fn()}
+        {...overrides}
       />
     </ToastProvider>,
   );
@@ -79,6 +82,49 @@ describe('SessionMenuButton', () => {
 
     await waitFor(() => {
       expect(navigator.clipboard.writeText).toHaveBeenCalledWith(`SessionID: ${SESSION_ID}`);
+    });
+  });
+
+  it('hands over to the selected peer session instead of only the channel', async () => {
+    const privateTarget: BotChannelCandidate = {
+      agentId: 'agent-1',
+      agentName: 'Mino',
+      channelId: 'channel-1',
+      channelType: 'openclaw:feishu',
+      channelName: 'mino-bot',
+      platformLabel: '飞书',
+      sessionKey: 'agent:agent-1:openclaw:feishu:private:ou_target',
+      sessionId: 'old-im-session',
+      sourceType: 'private',
+      sourceId: 'ou_target',
+      sourceDisplayName: 'Ethan',
+    };
+    const groupTarget: BotChannelCandidate = {
+      ...privateTarget,
+      sessionKey: 'agent:agent-1:openclaw:feishu:group:oc_target',
+      sourceType: 'group',
+      sourceId: 'oc_target',
+      sourceDisplayName: 'Product Crew',
+    };
+    mocks.handoverSessionToChannel.mockResolvedValue({
+      ok: true,
+      sessionKey: groupTarget.sessionKey,
+      notified: true,
+    });
+    renderMenu({ availableChannels: [privateTarget, groupTarget] });
+
+    fireEvent.click(screen.getByRole('button', { name: '对话操作' }));
+    fireEvent.click(screen.getByRole('button', { name: /绑定聊天机器人/ }));
+    fireEvent.click(screen.getByText('群聊 · Product Crew'));
+
+    await waitFor(() => {
+      expect(mocks.handoverSessionToChannel).toHaveBeenCalledWith({
+        sessionId: SESSION_ID,
+        agentId: groupTarget.agentId,
+        channelId: groupTarget.channelId,
+        sessionKey: groupTarget.sessionKey,
+        workspacePath: '/Users/zhihu/Documents/project/MyAgents',
+      });
     });
   });
 });

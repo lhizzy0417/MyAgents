@@ -13,7 +13,7 @@
 import { useMemo } from 'react';
 
 import { extractPlatformDisplay } from '@/utils/taskCenterUtils';
-import type { AgentStatusMap, ChannelStatusData } from '@/hooks/useAgentStatuses';
+import type { ActiveSessionData, AgentStatusMap, ChannelStatusData } from '@/hooks/useAgentStatuses';
 import type { CronTask } from '@/types/cronTask';
 
 export interface ChannelSurface {
@@ -26,6 +26,9 @@ export interface ChannelSurface {
     channelName: string;
     /** Original sessionKey from peer_sessions binding (for handover commands) */
     sessionKey: string;
+    sourceType: ActiveSessionData['sourceType'];
+    sourceId?: string;
+    sourceDisplayName?: string;
     /** Localized label, e.g. `飞书`, `Telegram`, `企业微信` */
     platformLabel: string;
     /** Connection status — only `online` and `connecting` produce surfaces */
@@ -66,8 +69,7 @@ export function useSessionSurfaces(
         outer: for (const agent of Object.values(agentStatuses)) {
             for (const ch of agent.channels) {
                 if (ch.status !== 'online' && ch.status !== 'connecting') continue;
-                const active = ch.activeSessions as { sessionKey: string; sessionId: string }[];
-                for (const sess of active) {
+                for (const sess of ch.activeSessions) {
                     if (sess.sessionId === sessionId) {
                         channel = {
                             agentId: agent.agentId,
@@ -76,6 +78,9 @@ export function useSessionSurfaces(
                             channelType: ch.channelType,
                             channelName: ch.botUsername || ch.name || ch.channelType,
                             sessionKey: sess.sessionKey,
+                            sourceType: sess.sourceType,
+                            sourceId: sess.sourceId,
+                            sourceDisplayName: sess.sourceDisplayName,
                             platformLabel: extractPlatformDisplay(sess.sessionKey),
                             status: ch.status,
                         };

@@ -56,6 +56,13 @@ export interface BotChannelCandidate {
     channelName: string;
     /** Localized platform label, e.g. `飞书` */
     platformLabel: string;
+    /** Exact peer chat target. Empty when the channel has no known peer session yet. */
+    sessionKey?: string;
+    sessionId?: string;
+    sourceType?: 'private' | 'group';
+    sourceId?: string;
+    sourceDisplayName?: string;
+    disabledReason?: string;
 }
 
 export interface SessionMenuButtonProps {
@@ -118,7 +125,7 @@ export default function SessionMenuButton({
     const [pendingDelete, setPendingDelete] = useState(false);
     const [exporting, setExporting] = useState(false);
     const [favoriteInFlight, setFavoriteInFlight] = useState(false);
-    const [handoverPendingChannelId, setHandoverPendingChannelId] = useState<string | null>(null);
+    const [handoverPendingTargetKey, setHandoverPendingTargetKey] = useState<string | null>(null);
     const [sessionIdCopied, setSessionIdCopied] = useState(false);
     const copyResetTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -227,13 +234,15 @@ export default function SessionMenuButton({
     // ─── Bot submenu ──────────────────────────────────────────────────────
 
     const handleHandover = useCallback(async (candidate: BotChannelCandidate) => {
-        if (handoverPendingChannelId) return;
-        setHandoverPendingChannelId(candidate.channelId);
+        if (handoverPendingTargetKey) return;
+        if (!candidate.sessionKey || candidate.disabledReason) return;
+        setHandoverPendingTargetKey(candidate.sessionKey);
         try {
             const res = await handoverSessionToChannel({
                 sessionId,
                 agentId: candidate.agentId,
                 channelId: candidate.channelId,
+                sessionKey: candidate.sessionKey,
                 workspacePath,
             });
             if (res.ok) {
@@ -256,9 +265,9 @@ export default function SessionMenuButton({
             console.error('[SessionMenuButton] handover failed:', err);
             toast.error(`交接失败：${err instanceof Error ? err.message : String(err)}`);
         } finally {
-            setHandoverPendingChannelId(null);
+            setHandoverPendingTargetKey(null);
         }
-    }, [handoverPendingChannelId, sessionId, workspacePath, toast, closeAll]);
+    }, [handoverPendingTargetKey, sessionId, workspacePath, toast, closeAll]);
 
     // Show the bot menu item when we either have channels to bind to OR the
     // session is already bound — otherwise a session bound to a transiently
@@ -266,7 +275,7 @@ export default function SessionMenuButton({
     // bot is reconnecting, leaving the user no way to act on the binding.
     const showBotItem = !!boundChannel || availableChannels.length > 0;
     const otherChannels = boundChannel
-        ? availableChannels.filter((c) => c.channelId !== boundChannel.channelId)
+        ? availableChannels.filter((c) => c.sessionKey !== boundChannel.sessionKey)
         : availableChannels;
 
     return (
@@ -411,6 +420,9 @@ export default function SessionMenuButton({
                                 <span className="shrink-0 text-[var(--ink-subtle)]">·</span>
                                 <span className="min-w-0 flex-1 truncate text-[var(--ink-muted)]">
                                     {boundChannel.channelName}
+                                    {boundChannel.sourceDisplayName
+                                        ? ` · ${formatSourceLabel(boundChannel.sourceType)} ${boundChannel.sourceDisplayName}`
+                                        : ''}
                                 </span>
                                 <span className="shrink-0 rounded-sm bg-[var(--paper-inset)] px-1.5 py-0.5 text-[10px] text-[var(--ink-muted)]">
                                     已绑定
@@ -424,10 +436,10 @@ export default function SessionMenuButton({
                                     </div>
                                     {otherChannels.map((c) => (
                                         <ChannelMenuItem
-                                            key={c.channelId}
+                                            key={c.sessionKey || c.channelId}
                                             candidate={c}
-                                            pending={handoverPendingChannelId === c.channelId}
-                                            disabled={handoverPendingChannelId !== null}
+                                            pending={handoverPendingTargetKey === c.sessionKey}
+                                            disabled={handoverPendingTargetKey !== null}
                                             onClick={() => { void handleHandover(c); }}
                                         />
                                     ))}
@@ -437,10 +449,10 @@ export default function SessionMenuButton({
                     ) : (
                         availableChannels.map((c) => (
                             <ChannelMenuItem
-                                key={c.channelId}
+                                key={c.sessionKey || c.channelId}
                                 candidate={c}
-                                pending={handoverPendingChannelId === c.channelId}
-                                disabled={handoverPendingChannelId !== null}
+                                pending={handoverPendingTargetKey === c.sessionKey}
+                                disabled={handoverPendingTargetKey !== null}
                                 onClick={() => { void handleHandover(c); }}
                             />
                         ))
@@ -526,20 +538,36 @@ interface ChannelMenuItemProps {
 }
 
 function ChannelMenuItem({ candidate, pending, disabled, onClick }: ChannelMenuItemProps) {
+    const effectivelyDisabled = disabled || !!candidate.disabledReason || !candidate.sessionKey;
+    const sourceLabel = candidate.disabledReason
+        ? candidate.disabledReason
+        : `${formatSourceLabel(candidate.sourceType)} · ${candidate.sourceDisplayName || candidate.sourceId || '未知聊天'}`;
+
     return (
         <button
             type="button"
-            disabled={disabled}
+            disabled={effectivelyDisabled}
             onClick={onClick}
-            className="flex w-full items-center gap-2 px-3 py-2 text-left text-[12px] transition-colors hover:bg-[var(--hover-bg)] disabled:cursor-not-allowed disabled:opacity-50"
+            className="flex w-full items-start gap-2 px-3 py-2 text-left text-[12px] transition-colors hover:bg-[var(--hover-bg)] disabled:cursor-not-allowed disabled:opacity-50"
         >
-            <span className="inline-block h-1.5 w-1.5 shrink-0 rounded-full bg-[var(--success)]" />
-            <span className="shrink-0 font-medium text-[var(--ink)]">{candidate.platformLabel}</span>
-            <span className="shrink-0 text-[var(--ink-subtle)]">·</span>
-            <span className="min-w-0 flex-1 truncate text-[var(--ink-muted)]">
-                {candidate.channelName}
+            <span className="mt-1.5 inline-block h-1.5 w-1.5 shrink-0 rounded-full bg-[var(--success)]" />
+            <span className="min-w-0 flex-1">
+                <span className="flex min-w-0 items-center gap-1.5">
+                    <span className="shrink-0 font-medium text-[var(--ink)]">{candidate.platformLabel}</span>
+                    <span className="shrink-0 text-[var(--ink-subtle)]">·</span>
+                    <span className="min-w-0 truncate text-[var(--ink-muted)]">
+                        {candidate.channelName}
+                    </span>
+                </span>
+                <span className="mt-0.5 block truncate text-[11px] text-[var(--ink-subtle)]">
+                    {sourceLabel}
+                </span>
             </span>
             {pending && <Loader2 className="h-3 w-3 shrink-0 animate-spin text-[var(--ink-muted)]" />}
         </button>
     );
+}
+
+function formatSourceLabel(sourceType: 'private' | 'group' | undefined): string {
+    return sourceType === 'group' ? '群聊' : '私聊';
 }
