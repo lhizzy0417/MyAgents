@@ -124,6 +124,9 @@ const EMPTY_CUSTOM_FORM: CustomProviderForm = {
     upstreamFormat: 'chat_completions',
 };
 
+const MYAGENTS_GITHUB_URL = 'https://github.com/hAcKlyc/MyAgents';
+const MYAGENTS_RELEASES_URL = `${MYAGENTS_GITHUB_URL}/releases`;
+
 // Provider edit form data (for managing existing providers)
 interface ProviderEditForm {
     provider: Provider;
@@ -3246,6 +3249,12 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                                 ) : '检查更新'}
                                             </button>
                                         )}
+                                        <ExternalLink
+                                            href={MYAGENTS_RELEASES_URL}
+                                            className="rounded-lg bg-[var(--paper-inset)] px-2 py-0.5 text-xs text-[var(--ink-secondary)] transition-colors hover:bg-[var(--paper-elevated)]"
+                                        >
+                                            更新记录
+                                        </ExternalLink>
                                     </div>
                                     <p className="mt-3 text-base text-[var(--ink-secondary)]">
                                         Your Intent, Amplified
@@ -3393,6 +3402,15 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                             className="mt-1 block text-[var(--accent)] hover:underline"
                                         >
                                             myagents.io@gmail.com
+                                        </ExternalLink>
+                                    </div>
+                                    <div>
+                                        <p className="text-xs font-medium uppercase tracking-wider text-[var(--ink-muted)]">GitHub</p>
+                                        <ExternalLink
+                                            href={MYAGENTS_GITHUB_URL}
+                                            className="mt-1 block text-[var(--accent)] hover:underline"
+                                        >
+                                            更新记录
                                         </ExternalLink>
                                     </div>
                                 </div>
