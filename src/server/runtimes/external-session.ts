@@ -38,6 +38,11 @@ import {
 import { imEventBus, type ImEventType } from '../utils/im-event-bus';
 import { imRequestRegistry } from '../utils/im-request-registry';
 import { resolveLastRealUserMessagePreview } from '../utils/session-message-preview';
+import {
+  EXTERNAL_WATCHDOG_DEFAULT_TIMEOUT_MS,
+  externalRuntimeWatchdogTimeoutMs,
+  observedContextTokens,
+} from './external-watchdog-policy';
 
 // ─── Module state ───
 
@@ -170,6 +175,8 @@ function resetModuleState(): void {
   startingPromise = null;
   startingSessionId = null;
   if (watchdogTimer) { clearInterval(watchdogTimer); watchdogTimer = null; }
+  currentWatchdogTimeoutMs = EXTERNAL_WATCHDOG_DEFAULT_TIMEOUT_MS;
+  externalWatchdog.setTimeoutMs(EXTERNAL_WATCHDOG_DEFAULT_TIMEOUT_MS);
   lastRuntimeSessionId = '';
   lastModel = '';
   lastRuntimeReportedModel = '';
@@ -340,12 +347,30 @@ function flushAllPending(): void {
 // fix as the builtin watchdog. See utils/inactivity-watchdog.ts. (Previously a
 // reset-on-activity setTimeout, which fired on resume because its deadline
 // elapsed in wall-clock during sleep — a turn the runtime never actually hung.)
-const WATCHDOG_TIMEOUT_MS = 10 * 60 * 1000;
 const WATCHDOG_INTERVAL_MS = 30 * 1000;
-const externalWatchdog = new InactivityWatchdog({ timeoutMs: WATCHDOG_TIMEOUT_MS, intervalMs: WATCHDOG_INTERVAL_MS });
+const externalWatchdog = new InactivityWatchdog({
+  timeoutMs: EXTERNAL_WATCHDOG_DEFAULT_TIMEOUT_MS,
+  intervalMs: WATCHDOG_INTERVAL_MS,
+});
+let currentWatchdogTimeoutMs = EXTERNAL_WATCHDOG_DEFAULT_TIMEOUT_MS;
+
+function refreshWatchdogTimeout(): void {
+  const runtimeType = activeRuntime?.type ?? getCurrentRuntimeType();
+  const usageForBudget = currentTurnUsage ?? lastPersistedRuntimeUsageTotals;
+  const nextTimeoutMs = externalRuntimeWatchdogTimeoutMs(runtimeType, usageForBudget);
+  if (nextTimeoutMs === currentWatchdogTimeoutMs) return;
+
+  currentWatchdogTimeoutMs = nextTimeoutMs;
+  externalWatchdog.setTimeoutMs(nextTimeoutMs);
+
+  const minutes = Math.round(nextTimeoutMs / 60_000);
+  const tokens = observedContextTokens(usageForBudget);
+  console.log(`[external-session] Watchdog: timeout adjusted to ${minutes} minutes for ${runtimeType} contextTokens=${tokens}`);
+}
 
 /** Record runtime activity (and start the interval on the first call of a turn). */
 function resetWatchdog(): void {
+  refreshWatchdogTimeout();
   externalWatchdog.markActivity();
   if (watchdogTimer) return; // already armed — markActivity above is the reset
   externalWatchdog.reset();
@@ -365,8 +390,9 @@ function resetWatchdog(): void {
     }
     if (!fire) return;
     clearWatchdog();
-    console.error('[external-session] Watchdog: no runtime activity for 10 minutes of active time, killing process');
-    broadcast('chat:agent-error', { message: 'External runtime timed out (no activity for 10 minutes)' });
+    const minutes = Math.round(currentWatchdogTimeoutMs / 60_000);
+    console.error(`[external-session] Watchdog: no runtime activity for ${minutes} minutes of active time, killing process`);
+    broadcast('chat:agent-error', { message: `External runtime timed out (no activity for ${minutes} minutes)` });
     broadcast('chat:message-error', 'External runtime timed out');
     fireImCallback('error', 'External runtime timed out');
     void stopExternalSession();
@@ -376,6 +402,11 @@ function resetWatchdog(): void {
 
 function clearWatchdog(): void {
   if (watchdogTimer) { clearInterval(watchdogTimer); watchdogTimer = null; }
+}
+
+function recordRuntimeActivity(): void {
+  if (currentTurnStartTime === 0 || turnCompleted) return;
+  resetWatchdog();
 }
 
 // ─── Turn outcome tracking (stale text protection for cron/heartbeat) ───
@@ -2021,7 +2052,7 @@ function applyExternalToolResult(event: Extract<UnifiedEvent, { kind: 'tool_resu
       currentTurnAttachmentHints.push(hint);
     }
   }
-  resetWatchdog();
+  recordRuntimeActivity();
 }
 
 function autoDenyNonInteractiveRequest(event: Extract<UnifiedEvent, { kind: 'permission_request' }>): boolean {
@@ -2039,13 +2070,14 @@ function autoDenyNonInteractiveRequest(event: Extract<UnifiedEvent, { kind: 'per
 }
 
 function handleUnifiedEvent(event: UnifiedEvent): void {
+  recordRuntimeActivity();
+
   switch (event.kind) {
     case 'text_delta':
       broadcast('chat:message-chunk', event.text);
       currentAssistantText += event.text;
       pendingTextBuffer += event.text;
       fireImCallback('delta', event.text);
-      resetWatchdog();
       break;
 
     case 'text_stop':
@@ -2083,7 +2115,7 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
       pendingThinkingText += event.text;
       // Frontend expects { index, delta } — match builtin SSE shape
       broadcast('chat:thinking-chunk', { index: event.index, delta: event.text });
-      resetWatchdog();
+      recordRuntimeActivity();
       break;
 
     case 'thinking_stop':
@@ -2115,7 +2147,7 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
         toolId: event.toolUseId,
         delta: event.delta,
       });
-      resetWatchdog();  // Tool streaming is activity — prevent killing long-running tools
+      recordRuntimeActivity();  // Tool streaming is activity — prevent killing long-running tools
       break;
     }
 
@@ -2149,7 +2181,7 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
         toolUseId: event.toolUseId,
         delta: event.delta,
       });
-      resetWatchdog();
+      recordRuntimeActivity();
       break;
 
     case 'tool_result':
@@ -2190,7 +2222,7 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
         pendingId: event.pendingId,
         attachment: event.attachment,
       });
-      resetWatchdog();
+      recordRuntimeActivity();
       break;
     }
 
@@ -2250,7 +2282,7 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
       pendingExternalAskUserQuestions.delete(event.requestId);
       pendingExternalInteractiveRequests.delete(event.requestId);
       pendingPermissionSuggestions.delete(event.requestId);
-      resetWatchdog();
+      recordRuntimeActivity();
       break;
     }
 
@@ -2514,6 +2546,7 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
         modelUsage: event.modelUsage,
         semantics: event.semantics,
       };
+      recordRuntimeActivity();
       break;
 
     case 'log':
@@ -2577,7 +2610,7 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
               currentContentBlocks[toolBlockIdx].tool!.result = resultText.slice(0, 5000);
               currentContentBlocks[toolBlockIdx].tool!.isError = block.is_error === true;
             }
-            resetWatchdog();
+            recordRuntimeActivity();
           }
         }
         break;
@@ -2614,7 +2647,7 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
           broadcast('chat:message-chunk', text);
           currentAssistantText += text;
           pendingTextBuffer += text;
-          resetWatchdog();
+          recordRuntimeActivity();
         }
       }
       break;

@@ -53,7 +53,7 @@ export interface WatchdogTickResult {
 export class InactivityWatchdog {
   private lastActivityAt: number;
   private lastTickAt: number;
-  private readonly timeoutMs: number;
+  private timeoutMs: number;
   private readonly intervalMs: number;
   private readonly suspensionGapMs: number;
   private readonly now: () => number;
@@ -71,6 +71,14 @@ export class InactivityWatchdog {
   /** Record activity (call on each SDK/runtime event). Resets the idle clock. */
   markActivity(): void {
     this.lastActivityAt = this.now();
+  }
+
+  /** Adjust the active inactivity budget without resetting the idle clock. */
+  setTimeoutMs(timeoutMs: number): void {
+    if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+      throw new Error(`Invalid watchdog timeout: ${timeoutMs}`);
+    }
+    this.timeoutMs = timeoutMs;
   }
 
   /** Re-baseline both clocks (call at turn start). */
