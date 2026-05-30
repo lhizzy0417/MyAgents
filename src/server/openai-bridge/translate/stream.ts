@@ -1,6 +1,6 @@
 // StreamTranslator: OpenAI stream chunks → Anthropic SSE events (state machine)
 
-import type { AnthropicStreamEvent, AnthropicResponse } from '../types/anthropic';
+import type { AnthropicStreamEvent, AnthropicResponse, AnthropicStopReason } from '../types/anthropic';
 import type { OpenAIStreamChunk, OpenAIStreamToolCall } from '../types/openai';
 import { translateStopReason } from './response';
 import { generateMessageId, generateToolUseId } from '../utils/id';
@@ -21,6 +21,7 @@ export class StreamTranslator {
   private usage: UsageSnapshot = emptyUsage();
   private hasEmittedStart = false;
   private hasFinished = false;
+  private stopReason: AnthropicStopReason | null = null;
   private translateReasoning: boolean;
 
   constructor(requestModel: string, translateReasoning = true) {
@@ -95,20 +96,18 @@ export class StreamTranslator {
       }
     }
 
-    // Handle finish
+    // Handle finish.
+    // Per the OpenAI spec, with stream_options.include_usage=true the `usage`
+    // payload arrives in a SEPARATE trailing chunk (empty `choices`) AFTER this
+    // finish_reason chunk. Emitting the terminal message_delta/message_stop here
+    // would pin token counts to whatever was known so far (0) — the trailing
+    // usage chunk would then be dropped (it returns early above on `!choice`).
+    // So we close the active block + record the stop_reason now, but defer the
+    // terminal events to finalize() (emitted on stream end / flush), by which
+    // point `this.usage` has accumulated the trailing usage chunk. See issue #277.
     if (choice.finish_reason) {
       this.closeActiveBlock(events);
-      this.hasFinished = true;
-
-      events.push({
-        type: 'message_delta',
-        delta: {
-          stop_reason: translateStopReason(choice.finish_reason),
-          stop_sequence: null,
-        },
-        usage: { output_tokens: this.usage.outputTokens },
-      });
-      events.push({ type: 'message_stop' });
+      this.stopReason = translateStopReason(choice.finish_reason);
     }
 
     return events;
@@ -150,9 +149,13 @@ export class StreamTranslator {
   }
 
   /**
-   * Finalize the stream — emit closing events for incomplete streams.
-   * Called when the upstream connection ends (normally or abnormally).
-   * No-op if finish_reason was already received via feed().
+   * Finalize the stream — emit the terminal message_delta + message_stop.
+   * Invoked by the handler on the `[DONE]` protocol terminator (preferred) or on
+   * stream flush / transport end (fallback for streams that close without one).
+   * This is the SOLE emitter of terminal events: feed() defers them here so the
+   * full usage (including the trailing usage-only chunk) is reported. Carries the
+   * stop_reason captured from finish_reason (defaults to 'end_turn' for streams
+   * that ended without one). No-op if already finalized or never started.
    */
   finalize(): AnthropicStreamEvent[] {
     if (this.hasFinished || !this.hasEmittedStart) return [];
@@ -163,8 +166,8 @@ export class StreamTranslator {
 
     events.push({
       type: 'message_delta',
-      delta: { stop_reason: 'end_turn', stop_sequence: null },
-      usage: { output_tokens: this.usage.outputTokens },
+      delta: { stop_reason: this.stopReason ?? 'end_turn', stop_sequence: null },
+      usage: toAnthropicUsage(this.usage),
     });
     events.push({ type: 'message_stop' });
     return events;

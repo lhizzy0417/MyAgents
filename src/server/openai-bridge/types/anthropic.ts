@@ -127,7 +127,11 @@ export type AnthropicStreamEvent =
   | { type: 'content_block_start'; index: number; content_block: AnthropicResponseContentBlock }
   | { type: 'content_block_delta'; index: number; delta: AnthropicStreamDelta }
   | { type: 'content_block_stop'; index: number }
-  | { type: 'message_delta'; delta: { stop_reason: AnthropicStopReason | null; stop_sequence: string | null }; usage: { output_tokens: number } }
+  // usage carries the FULL accumulated usage (input + output + cache), not just
+  // output_tokens. The Anthropic SDK reads input_tokens / cache_*_input_tokens
+  // from message_delta.usage when present (MessageStream.accumulateMessage), so
+  // the bridge must report them here to surface non-zero usage. See issue #277.
+  | { type: 'message_delta'; delta: { stop_reason: AnthropicStopReason | null; stop_sequence: string | null }; usage: AnthropicUsage }
   | { type: 'message_stop' }
   | { type: 'ping' };
 

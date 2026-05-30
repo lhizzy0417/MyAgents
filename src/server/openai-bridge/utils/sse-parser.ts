@@ -45,12 +45,15 @@ export class SSEParser {
       this.buffer = this.buffer.slice(lineEnd + skip);
 
       if (line === '') {
-        // Empty line → dispatch accumulated event
+        // Empty line → dispatch accumulated event.
+        // NB: the OpenAI stream terminator `data: [DONE]` is surfaced like any
+        // other event — it is NOT filtered here. Consumers rely on seeing it as
+        // the protocol-level end signal (handler.ts uses it to finalize the
+        // StreamTranslator so trailing usage is reported — issue #277). This
+        // parser previously dropped `[DONE]` silently, which hid the terminator
+        // and forced finalization to depend on transport EOF instead.
         if (this.dataLines.length > 0) {
-          const data = this.dataLines.join('\n');
-          if (data !== '[DONE]') {
-            events.push({ event: this.eventType, data });
-          }
+          events.push({ event: this.eventType, data: this.dataLines.join('\n') });
         }
         this.eventType = undefined;
         this.dataLines = [];

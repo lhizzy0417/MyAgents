@@ -25,6 +25,24 @@ import { formatSSE } from './utils/sse-writer';
 const DEFAULT_TIMEOUT = 300_000; // 5 minutes
 const THOUGHT_SIG_CACHE_MAX = 500; // Max cached thought_signatures to prevent unbounded growth
 
+/**
+ * Sentinel forwarded through the Chat Completions parse→translate pipeline when
+ * the upstream emits the OpenAI stream terminator `data: [DONE]`.
+ *
+ * The translate stage finalizes the StreamTranslator on this signal — the
+ * PROTOCOL-correct boundary — instead of waiting for transport EOF
+ * (TransformStream `flush()`). With `stream_options.include_usage=true`, the
+ * `usage` payload arrives in a trailing chunk AFTER `finish_reason`, so the
+ * terminal `message_delta`/`message_stop` must be deferred until usage is in
+ * hand. Keying that solely on transport EOF is fragile: a provider that sends
+ * `[DONE]` but lingers before closing the body would have its terminal events
+ * delayed to the idle timeout → abort → `flush()` never runs → usage + stop
+ * lost. Finalizing on `[DONE]` fixes that; `flush()` remains a fallback for
+ * streams that close without a `[DONE]`. See issue #277.
+ */
+const STREAM_DONE = Symbol('openai-stream-done');
+type ChatPipelineItem = OpenAIStreamChunk | typeof STREAM_DONE;
+
 // Gemini-documented dummy value to skip thought_signature validation
 // when the real signature is unavailable (e.g., cross-model history, injected tool calls).
 // See: https://ai.google.dev/gemini-api/docs/thought-signatures
@@ -415,7 +433,10 @@ async function handleNonStreamResponse(
  */
 const UPSTREAM_IDLE_TIMEOUT_MS = 60_000;
 
-function handleStreamResponse(
+// Exported for the streaming-usage integration test (issue #277): drives the
+// real parse→translate pipeline from a synthetic upstream Response so the
+// `[DONE]`-driven finalization can be asserted without mocking the network.
+export function handleStreamResponse(
   upstreamResp: Response,
   requestModel: string,
   translateReasoning: boolean,
@@ -467,7 +488,7 @@ function handleStreamResponse(
 
   // Stage 1: bytes → SSE events (parse via SSEParser).
   const decoder = new TextDecoder();
-  const sseParseTransform = new TransformStream<Uint8Array, OpenAIStreamChunk>({
+  const sseParseTransform = new TransformStream<Uint8Array, ChatPipelineItem>({
     start() {
       armIdleTimer();
     },
@@ -476,7 +497,11 @@ function handleStreamResponse(
       const text = decoder.decode(chunk, { stream: true });
       const sseEvents = sseParser.feed(text);
       for (const sseEvent of sseEvents) {
-        if (sseEvent.data === '[DONE]') continue;
+        if (sseEvent.data === '[DONE]') {
+          // Protocol terminator — forward as the finalize signal (see STREAM_DONE).
+          controller.enqueue(STREAM_DONE);
+          continue;
+        }
         try {
           controller.enqueue(JSON.parse(sseEvent.data) as OpenAIStreamChunk);
         } catch {
@@ -491,8 +516,30 @@ function handleStreamResponse(
 
   // Stage 2: OpenAI chunks → Anthropic events.
   const encoder = new TextEncoder();
-  const translateTransform = new TransformStream<OpenAIStreamChunk, Uint8Array>({
+  const translateTransform = new TransformStream<ChatPipelineItem, Uint8Array>({
     transform(chunk, controller) {
+      // Protocol terminator: finalize now (emits terminal message_delta/message_stop
+      // with the fully-accumulated usage), THEN end the downstream response.
+      // flush() below is the fallback for streams that close without a [DONE];
+      // finalize() is idempotent, so no double-emit.
+      //
+      // We must close downstream here, not wait for transport EOF: the Anthropic
+      // SDK's SSE reader loops until the HTTP body ends (it does NOT stop on
+      // message_stop — see @anthropic-ai/sdk core/streaming.js), so a provider
+      // that sends [DONE] then lingers would otherwise hang the SDK until the
+      // 60s idle-timeout abort. terminate() closes the readable (the enqueued
+      // finalize bytes drain first, the SDK then sees a clean EOF) and unwinds
+      // the pipeline; we also clear the idle timer and abort the upstream fetch
+      // to release a lingering provider socket. See issue #277.
+      if (chunk === STREAM_DONE) {
+        for (const event of translator.finalize()) {
+          controller.enqueue(encoder.encode(formatSSE(event)));
+        }
+        cleanupIdleTimer();
+        controller.terminate();
+        try { upstreamController.abort(new Error('Upstream [DONE]')); } catch { /* ignore */ }
+        return;
+      }
       // Cache thought_signatures from streaming tool call chunks (Gemini thinking models).
       if (thoughtSignatureCache) {
         const delta = chunk.choices?.[0]?.delta;
@@ -641,7 +688,9 @@ async function handleResponsesNonStreamResponse(
   }
 }
 
-function handleResponsesStreamResponse(
+// Exported for the streaming-usage integration test (issue #277) — see
+// handleStreamResponse above.
+export function handleResponsesStreamResponse(
   upstreamResp: Response,
   requestModel: string,
   log: (msg: string) => void,
@@ -702,6 +751,17 @@ function handleResponsesStreamResponse(
       const anthropicEvents = translator.feed(event);
       for (const ae of anthropicEvents) {
         controller.enqueue(encoder.encode(formatSSE(ae)));
+      }
+      // The Responses translator finalizes inline on `response.completed` /
+      // `response.failed` (emits message_stop). That is the protocol terminator,
+      // so end the downstream response NOW rather than waiting for transport EOF
+      // — same liveness fix as the Chat path: the SDK reads until EOF, so a
+      // provider that lingers after the terminal event would otherwise hang it
+      // until the idle-timeout abort. See issue #277.
+      if (anthropicEvents.some((ae) => ae.type === 'message_stop')) {
+        cleanupIdleTimer();
+        controller.terminate();
+        try { upstreamController.abort(new Error('Upstream response complete')); } catch { /* ignore */ }
       }
     },
     flush(controller) {

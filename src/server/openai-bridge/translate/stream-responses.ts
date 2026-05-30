@@ -212,7 +212,7 @@ export class ResponsesStreamTranslator {
     events.push({
       type: 'message_delta',
       delta: { stop_reason: 'end_turn', stop_sequence: null },
-      usage: { output_tokens: this.usage.outputTokens },
+      usage: toAnthropicUsage(this.usage),
     });
     events.push({ type: 'message_stop' });
   }
@@ -259,7 +259,7 @@ export class ResponsesStreamTranslator {
     events.push({
       type: 'message_delta',
       delta: { stop_reason: stopReason, stop_sequence: null },
-      usage: { output_tokens: this.usage.outputTokens },
+      usage: toAnthropicUsage(this.usage),
     });
     events.push({ type: 'message_stop' });
   }
@@ -275,7 +275,7 @@ export class ResponsesStreamTranslator {
     events.push({
       type: 'message_delta',
       delta: { stop_reason: 'end_turn', stop_sequence: null },
-      usage: { output_tokens: this.usage.outputTokens },
+      usage: toAnthropicUsage(this.usage),
     });
     events.push({ type: 'message_stop' });
     return events;
