@@ -42,6 +42,7 @@ import { resolveAuthHeaders, onTokenChange, startTokenRefreshScheduler } from '.
 
 import type { ToolInput } from '../renderer/types/chat';
 import { parsePartialJson } from '../shared/parsePartialJson';
+import { deriveSessionTitle } from '../shared/sessionTitle';
 import type { SystemInitInfo } from '../shared/types/system';
 import { saveSessionMetadata, updateSessionTitleFromMessage, saveSessionMessages, saveAttachment, updateSessionMetadata, getSessionMetadata, getSessionData } from './SessionStore';
 import { createSessionMetadata, type SessionMessage, type MessageAttachment, type MessageUsage, type SessionSource } from './types/session';
@@ -6496,8 +6497,14 @@ export async function enqueueUserMessage(
     // Check if session metadata already exists (e.g., IM Bot session reloaded after Sidecar restart)
     const existingMeta = getSessionMetadata(sessionId);
     if (existingMeta) {
-      // Session already in index — only update title if it's still default
-      const title = trimmed ? trimmed.slice(0, 40) + (trimmed.length > 40 ? '...' : '') : '图片消息';
+      // Session already in index — only update title if it's still default.
+      // deriveSessionTitle strips the <system-reminder>/<CRON_TASK>/<HEARTBEAT>
+      // wrapper BEFORE the 40-char cap so cron/heartbeat turns don't store a
+      // wrapper-only scrap like "执行任务：请你帮 E..." (cron-title fix).
+      // Fallback split (adversarial-review #4): a wrapper-only TEXT turn strips
+      // to '' but is not an image message — only reserve '图片消息' for genuinely
+      // text-less (image-only) input; otherwise 'New Chat'.
+      const title = deriveSessionTitle(trimmed, 40) || (trimmed ? 'New Chat' : '图片消息');
       if (existingMeta.title === 'New Chat') {
         await updateSessionMetadata(sessionId, { title });
       }
@@ -6513,10 +6520,10 @@ export async function enqueueUserMessage(
       //   - 'im' / 'agent-channel' → live-follow (only runtime recorded)
       // If the agent lookup misses (workspace not registered), snapshot is `{}` and
       // `resolveSessionConfig`'s lazy fallback (meta ?? agent) covers it.
-      let title = trimmed ? trimmed.slice(0, 40) : '图片消息';
-      if (title.length < trimmed.length) {
-        title += '...';
-      }
+      // Strip the system wrapper before the 40-char cap (cron-title fix) —
+      // otherwise a cron/heartbeat first message stores a wrapper-only scrap.
+      // Fallback split (adversarial-review #4): '图片消息' only for text-less input.
+      const title = deriveSessionTitle(trimmed, 40) || (trimmed ? 'New Chat' : '图片消息');
       const { meta: sessionMeta, snapshotKind } = createMetadataForSessionId(
         sessionId,
         title,

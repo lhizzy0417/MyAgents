@@ -19,6 +19,7 @@ import type { AskUserQuestionInput } from '../../shared/types/askUserQuestion';
 import { getExternalRuntime, getCurrentRuntimeType, isExternalRuntime } from './factory';
 import { resolveCodexWorkspaceInstructions } from './workspace-instructions';
 import type { RuntimeType } from '../../shared/types/runtime';
+import { deriveSessionTitle } from '../../shared/sessionTitle';
 import { isPendingSessionId } from '../../shared/constants';
 import { saveSessionMetadata, saveSessionMessages, updateSessionMetadata, getSessionMetadata, getSessionData } from '../SessionStore';
 import { createSessionMetadata } from '../types/session';
@@ -305,8 +306,10 @@ async function registerSessionMetadataIfNew(
     deferredRuntimeSessionId = null;
   }
   const trimmed = messageText.trim();
-  meta.title = trimmed.slice(0, 40);
-  if (meta.title.length < trimmed.length) meta.title += '...';
+  // Strip the <system-reminder>/<CRON_TASK>/<HEARTBEAT> wrapper before the
+  // 40-char cap (cron-title fix) so cron/heartbeat turns don't persist a
+  // wrapper-only scrap like "执行任务：请你帮 E...".
+  meta.title = deriveSessionTitle(trimmed, 40) || meta.title || 'New Chat';
   await saveSessionMetadata(meta);
   console.log(`[external-session] session ${sessionId} persisted to SessionStore (${origin})`);
 }
