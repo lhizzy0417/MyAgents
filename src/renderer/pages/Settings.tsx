@@ -3513,6 +3513,27 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                         />
                                     </button>
                                 </div>
+
+                                {/* #264 — Background-agent permission policy */}
+                                <div className="mt-4 flex items-center justify-between border-t border-[var(--line)] pt-4">
+                                    <div className="flex-1 pr-4">
+                                        <p className="text-sm font-medium text-[var(--ink)]">后台 Agent 权限</p>
+                                        <p className="text-xs text-[var(--ink-muted)]">
+                                            通过 <span className="font-mono">run_in_background</span> 启动的后台 Agent 没有权限弹窗。「继承已授权」只放行你已点过「始终允许」的工具，其余拒绝并提示；「全自动」允许后台 Agent 使用所有非交互工具（权限更宽，请谨慎）。
+                                        </p>
+                                    </div>
+                                    <CustomSelect
+                                        value={config.backgroundAgentPermissionMode ?? 'inherit'}
+                                        options={[
+                                            { value: 'inherit', label: '继承已授权' },
+                                            { value: 'fullAgency', label: '全自动' },
+                                        ]}
+                                        onChange={(val) => {
+                                            updateConfig({ backgroundAgentPermissionMode: val as 'inherit' | 'fullAgency' });
+                                        }}
+                                        className="w-32 shrink-0"
+                                    />
+                                </div>
                             </div>
 
                             {/* AI Feedback */}
@@ -3585,7 +3606,7 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                             href={MYAGENTS_GITHUB_URL}
                                             className="mt-1 block text-[var(--accent)] hover:underline"
                                         >
-                                            更新记录
+                                            github.com/hAcKlyc/MyAgents
                                         </ExternalLink>
                                     </div>
                                 </div>

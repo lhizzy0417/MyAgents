@@ -12,7 +12,7 @@ import {
   hashAgentNameSync,
 } from '@/analytics';
 import type { Surface } from '@/analytics';
-import { stopTabSidecar, startGlobalSidecar, initGlobalSidecarReadyPromise, markGlobalSidecarReady, getGlobalServerUrl, getSessionActivation, updateSessionTab, ensureSessionSidecar, releaseSessionSidecar, activateSession, deactivateSession, upgradeSessionId, getSessionPort, stopSseProxy, startBackgroundCompletion, cancelBackgroundCompletion, updateGlobalServerUrl } from '@/api/tauriClient';
+import { stopTabSidecar, startGlobalSidecar, initGlobalSidecarReadyPromise, markGlobalSidecarReady, getGlobalServerUrl, getSessionActivation, updateSessionTab, ensureSessionSidecar, releaseSessionSidecar, activateSession, deactivateSession, upgradeSessionId, getSessionPort, stopSseProxy, startBackgroundCompletion, cancelBackgroundCompletion, updateGlobalServerUrl, canRestoreSession } from '@/api/tauriClient';
 import ConfirmDialog from '@/components/ConfirmDialog';
 import BugReportOverlay from '@/components/BugReportOverlay';
 import CustomTitleBar from '@/components/CustomTitleBar';
@@ -34,6 +34,8 @@ import {
   type Project,
 } from '@/config/types';
 import { type Tab, type InitialMessage, createNewTab, getFolderName, MAX_TABS } from '@/types/tab';
+import { buildRestoredTabs, saveOpenTabs } from '@/utils/tabPersistence';
+import { tabContentKind, isRestoreAbandoned } from '@/utils/tabContentKind';
 import type { ImageAttachment } from '@/components/SimpleChatInput';
 import { getAllCronTasks, getTabCronTask, updateCronTaskTab } from '@/api/cronTaskClient';
 import { type CronRecoverySummaryPayload, type CronTaskRecoveredPayload, CRON_EVENTS } from '@/types/cronEvents';
@@ -140,7 +142,9 @@ interface TabContentProps {
   taskCenterPendingIntent: { autofocusSearch?: boolean; nonce: number } | null;
 }
 
-const MemoizedTabContent = memo(function TabContent({
+// Exported for the cold-restore behavior test (Issue #232) — asserts a cold
+// tab renders a placeholder and never mounts TabProvider.
+export const MemoizedTabContent = memo(function TabContent({
   tab, isActive, isLoading, error, isDeferredMount,
   onLaunchProject, onBack, onSwitchSession, onNewSession,
   onUpdateGenerating, onUpdateTitle, onUpdateUnread, onRenameSession, onForkSession, onUpdateSessionId, onClearInitialMessage,
@@ -150,24 +154,25 @@ const MemoizedTabContent = memo(function TabContent({
   onCheckForUpdate, onRestartAndUpdate,
   taskCenterPendingIntent,
 }: TabContentProps) {
+  const kind = tabContentKind(tab, isDeferredMount);
   return (
     <div
       className={`absolute inset-0 ${isActive ? '' : 'pointer-events-none invisible'}`}
       style={isActive ? undefined : { contentVisibility: 'hidden' }}
     >
-      {isDeferredMount ? (
+      {kind === 'deferred' ? (
         // One-frame placeholder: paper-colored fill so the just-activated
         // tab paints instantly with no flash, while the real subtree mounts
         // on the following transition render (see handleNewTab).
         <div className="h-full w-full bg-[var(--paper)]" />
-      ) : tab.view === 'launcher' ? (
+      ) : kind === 'launcher' ? (
         <Launcher
           onLaunchProject={onLaunchProject}
           isStarting={isLoading}
           startError={error}
           isActive={isActive}
         />
-      ) : tab.view === 'settings' ? (
+      ) : kind === 'settings' ? (
         <Settings
           initialSection={settingsInitialSection}
           initialMcpId={settingsInitialMcpId}
@@ -183,8 +188,15 @@ const MemoizedTabContent = memo(function TabContent({
           onCheckForUpdate={onCheckForUpdate}
           onRestartAndUpdate={onRestartAndUpdate}
         />
-      ) : tab.view === 'taskcenter' ? (
+      ) : kind === 'taskcenter' ? (
         <TaskCenter isActive={isActive} pendingIntent={taskCenterPendingIntent} />
+      ) : kind === 'cold' ? (
+        // Restored-but-not-yet-activated chat tab (Issue #232). Render only a
+        // cheap placeholder — crucially NO TabProvider, so no SSE connect, no
+        // ensureSessionSidecar, no recovery timers fire for tabs the user hasn't
+        // opened yet. App.activateRestoredTab clears `restoreState` on first
+        // activation, after which the real TabProvider branch below mounts.
+        <div className="h-full w-full bg-[var(--paper)]" />
       ) : (
         <TabProvider
           tabId={tab.id}
@@ -283,9 +295,20 @@ export default function App() {
     }
   }, []);
 
-  // Multi-tab state
-  const [tabs, setTabs] = useState<Tab[]>(() => [createNewTab()]);
-  const [activeTabId, setActiveTabId] = useState<string | null>(() => tabs[0]?.id ?? null);
+  // Multi-tab state.
+  //
+  // Restore previously-open chat tabs after a restart / update (Issue #232).
+  // buildRestoredTabs() reads localStorage and hydrates them flagged
+  // `restoreState:'cold'` — they render as lightweight tab chrome only, with NO
+  // TabProvider / sidecar / SSE, until first activation (see activateRestoredTab
+  // + MemoizedTabContent). Falls back to a fresh launcher tab when nothing is
+  // stored. Validation that each session/workspace still exists happens lazily
+  // at activation (canRestoreSession), decoupled from global sidecar readiness.
+  const [restoredInitialState] = useState(() => buildRestoredTabs());
+  const [tabs, setTabs] = useState<Tab[]>(() => restoredInitialState?.tabs ?? [createNewTab()]);
+  const [activeTabId, setActiveTabId] = useState<string | null>(
+    () => restoredInitialState?.activeTabId ?? tabs[0]?.id ?? null,
+  );
 
   // Refs for stable callback access (avoids re-creating callbacks when tabs/activeTabId change)
   const tabsRef = useRef(tabs);
@@ -293,6 +316,42 @@ export default function App() {
 
   const activeTabIdRef = useRef(activeTabId);
   activeTabIdRef.current = activeTabId;
+
+  // Persist open chat tabs after every structural change (Issue #232). This is
+  // a POST-COMMIT effect — it flushes shortly after each tabs/activeTabId change
+  // (not synchronously inside the mutation). The payload is tiny (≤MAX_TABS × 4
+  // fields), and we deliberately avoid `beforeunload` (unreliable in Tauri
+  // WKWebView; update install + app quit both exit from the Rust side, not a
+  // renderer unload handshake — see the hide/quit flush below and
+  // handleRestartAndUpdate). Restored "cold" tabs are persisted too (they carry
+  // a real sessionId) — serializeTabs strips the runtime-only restoreState flag.
+  useEffect(() => {
+    saveOpenTabs(tabs, activeTabId);
+  }, [tabs, activeTabId]);
+
+  // Synchronous flush of the latest tab state. Used to close the narrow window
+  // where the process exits (update relaunch, Cmd+Q / Dock quit) in the same
+  // frame as a structural change, before the post-commit effect above runs.
+  const flushOpenTabsNow = useCallback(() => {
+    saveOpenTabs(tabsRef.current, activeTabIdRef.current);
+  }, []);
+
+  // Flush on window hide / pagehide — the Tauri-appropriate quit signal (the
+  // analytics tracker uses the same visibilitychange→hidden hook; beforeunload
+  // is unreliable here). Covers Cmd+Q / Dock-quit so a tab closed immediately
+  // before quitting doesn't resurrect on next launch.
+  useEffect(() => {
+    const onVisibility = () => {
+      if (document.visibilityState === 'hidden') flushOpenTabsNow();
+    };
+    const onPageHide = () => flushOpenTabsNow();
+    document.addEventListener('visibilitychange', onVisibility);
+    window.addEventListener('pagehide', onPageHide);
+    return () => {
+      document.removeEventListener('visibilitychange', onVisibility);
+      window.removeEventListener('pagehide', onPageHide);
+    };
+  }, [flushOpenTabsNow]);
 
   // Deferred-mount set for freshly created tabs. A tab whose id is in here
   // renders only a placeholder (see MemoizedTabContent), so clicking "+" /
@@ -393,6 +452,10 @@ export default function App() {
   // verification round-trip, the JS only console.warn-ed, and the user
   // assumed the button was broken.
   const handleRestartAndUpdate = useCallback(async () => {
+    // Flush open-tab state synchronously before the install/relaunch exits the
+    // process from Rust (Issue #232) — guarantees the tabs the user had open at
+    // the moment of clicking "重启更新" are restored on the next launch.
+    flushOpenTabsNow();
     const outcome = await restartAndUpdateRef.current();
     if (outcome === 'network-error') {
       toastRef.current?.error('无法验证更新（网络异常），请稍后重试');
@@ -402,7 +465,7 @@ export default function App() {
       toastRef.current?.error('安装更新失败，请重试或前往设置页手动重新检查');
     }
     // 'ok' → process is exiting via NSIS/relaunch, no toast needed
-  }, []);
+  }, [flushOpenTabsNow]);
 
   // Per-tab loading state (keyed by tabId)
   const [loadingTabs, setLoadingTabs] = useState<Record<string, boolean>>({});
@@ -1841,9 +1904,130 @@ export default function App() {
     }
   }, []);
 
+  // ---- Restored-tab activation (Issue #232) ---------------------------------
+  // A cold restored tab carries a real sessionId/agentDir but has NO sidecar and
+  // does NOT mount TabProvider (see MemoizedTabContent). The first time one
+  // becomes active we lazily validate it still exists on disk, ensure its
+  // sidecar + activate it, then clear `restoreState` so TabProvider mounts and
+  // runs its normal SSE/loadSession flow. Dedup guard prevents the startup
+  // auto-activation and a near-simultaneous user click from double-spawning.
+  const restoreActivationInFlight = useRef<Set<string>>(new Set());
+
+  // Remove a restored tab that can no longer be activated (deleted session or
+  // missing/moved workspace). Always keeps ≥1 tab and re-points activeTabId.
+  // Decisions are computed from the current committed list BEFORE the state
+  // updates so we never call setActiveTabId inside the setTabs updater (which
+  // would be a side-effecting, StrictMode-double-invoke-unsafe updater).
+  const dropRestoredTab = useCallback((tabId: string) => {
+    const remaining = tabsRef.current.filter((t) => t.id !== tabId);
+    if (remaining.length === 0) {
+      // Last tab gone → replace with a fresh launcher (never leave 0 tabs).
+      const fresh = createNewTab();
+      setTabs([fresh]);
+      setActiveTabId(fresh.id);
+      return;
+    }
+    setTabs((prev) => prev.filter((t) => t.id !== tabId));
+    setActiveTabId((curr) => (curr === tabId ? remaining[remaining.length - 1].id : curr));
+  }, []);
+
+  // Attach an already-on-disk session to a tab WITHOUT going through
+  // planSessionOpen — the planner would see the tab already holds this
+  // sessionId and return `jump-to-tab`, self-jumping and never ensuring a
+  // sidecar (handleLaunchProject's early return at the jump branch). This is the
+  // minimal ensure→activate path for a tab that owns no prior session.
+  const attachSessionToTab = useCallback(
+    async (tabId: string, sessionId: string, agentDir: string): Promise<{ joinedExisting: boolean }> => {
+      const result = await ensureSessionSidecar(sessionId, agentDir, 'tab', tabId);
+      await activateSession(sessionId, tabId, null, result.port, agentDir, false);
+      // Tab now owns the sidecar — safe to release any background-completion
+      // owner that may have kept it warm.
+      await cancelBackgroundCompletion(sessionId);
+      return { joinedExisting: !result.isNew };
+    },
+    [],
+  );
+
+  // Release a sidecar owner we acquired during a restore activation that was
+  // then abandoned (tab closed/switched mid-flight) or that threw partway.
+  // Idempotent — releaseSessionSidecar/deactivateSession no-op for an unknown
+  // owner, so it's safe even if the owner was never registered or already
+  // released by performCloseTab.
+  const releaseAbandonedRestore = useCallback(async (sessionId: string, tabId: string) => {
+    try {
+      await releaseSessionSidecar(sessionId, 'tab', tabId);
+      await deactivateSession(sessionId);
+    } catch (err) {
+      console.error(`[App] Error releasing abandoned restore for ${sessionId}:`, err);
+    }
+  }, []);
+
+  const activateRestoredTab = useCallback(
+    async (tabId: string) => {
+      const tab = tabsRef.current.find((t) => t.id === tabId);
+      if (!tab || tab.restoreState !== 'cold') return;
+      if (!tab.agentDir || !tab.sessionId) { dropRestoredTab(tabId); return; }
+      if (restoreActivationInFlight.current.has(tabId)) return;
+      restoreActivationInFlight.current.add(tabId);
+      const { sessionId, agentDir } = tab;
+      try {
+        // Lazy validation, decoupled from global sidecar readiness: reads
+        // sessions.json + workspace dir directly via Rust.
+        const ok = await canRestoreSession(sessionId, agentDir);
+        // If the user closed/switched the tab during validation, bail before
+        // acquiring any sidecar (nothing to release yet).
+        if (isRestoreAbandoned(tabsRef.current.find((t) => t.id === tabId), sessionId, agentDir)) return;
+        if (!ok) {
+          console.warn(`[App] Restored tab ${tabId}: session ${sessionId} or workspace gone, dropping`);
+          dropRestoredTab(tabId);
+          return;
+        }
+        const { joinedExisting } = await attachSessionToTab(tabId, sessionId, agentDir);
+        // attachSessionToTab registered Tab(tabId) as a sidecar owner. If the
+        // user closed/switched the tab while we were ensuring the sidecar,
+        // performCloseTab's release ran BEFORE our owner existed (no-op) → we
+        // now hold an orphan. Release it ourselves rather than leak it.
+        if (isRestoreAbandoned(tabsRef.current.find((t) => t.id === tabId), sessionId, agentDir)) {
+          await releaseAbandonedRestore(sessionId, tabId);
+          return;
+        }
+        // Clear restoreState → MemoizedTabContent mounts TabProvider, which
+        // connects SSE and loadSession()s the history from JSONL.
+        setTabs((prev) =>
+          prev.map((t) =>
+            t.id === tabId ? { ...t, restoreState: undefined, joinedExistingSidecar: joinedExisting } : t,
+          ),
+        );
+      } catch (err) {
+        console.error(`[App] Failed to activate restored tab ${tabId}:`, err);
+        // ensureSessionSidecar may have registered the owner before a later
+        // await threw — release defensively so a partial acquisition can't leak.
+        await releaseAbandonedRestore(sessionId, tabId);
+        dropRestoredTab(tabId);
+      } finally {
+        restoreActivationInFlight.current.delete(tabId);
+      }
+    },
+    [attachSessionToTab, dropRestoredTab, releaseAbandonedRestore],
+  );
+
   const handleSelectTab = useCallback((tabId: string) => {
     setActiveTabId(tabId);
   }, []);
+
+  // Activate a restored cold tab whenever it becomes active — via ANY path
+  // (click, Cmd+Tab/Cmd+1-9, swipe, session jump, or the initial active tab on
+  // startup). Centralizing on `activeTabId` rather than each switch handler is
+  // pit-of-success: no activation path can forget to wake a restored tab, and
+  // only the active tab spawns a sidecar at boot (the rest stay cold). The
+  // in-flight guard + post-activation `restoreState` clear make it idempotent.
+  useEffect(() => {
+    if (!activeTabId) return;
+    const tab = tabs.find((t) => t.id === activeTabId);
+    if (tab?.restoreState === 'cold') {
+      void activateRestoredTab(activeTabId);
+    }
+  }, [activeTabId, tabs, activateRestoredTab]);
 
   // Clear unread indicator whenever active tab changes (covers all activation paths:
   // handleSelectTab, keyboard shortcuts, session jumps, cron navigation, etc.)

@@ -95,6 +95,10 @@ export type EventName =
   | 'message_error'
   | 'message_retry'
   | 'message_copy'
+  | 'message_export'
+  // 思考过程导出 / 复制
+  | 'thinking_copy'
+  | 'thinking_export'
   // 工具使用
   | 'tool_use'
   // 权限控制

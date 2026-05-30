@@ -1,13 +1,15 @@
 import { Fragment, memo, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
-import { ChevronDown, Copy, Check, Undo2, RotateCcw, GitBranch, CheckCircle, XCircle, AlertCircle } from 'lucide-react';
+import { ChevronDown, Copy, Check, Undo2, RotateCcw, GitBranch, CheckCircle, XCircle, AlertCircle, Download } from 'lucide-react';
 
 import { track } from '@/analytics';
 import AttachmentPreviewList from '@/components/AttachmentPreviewList';
 import BlockGroup from '@/components/BlockGroup';
 import Markdown from '@/components/Markdown';
+import { useToastOptional } from '@/components/Toast';
 import WidgetRenderer from '@/components/tools/WidgetRenderer';
 import { parseWidgetTags, hasWidgetTags } from '@/components/tools/widgetTagParser';
 import Tip from '@/components/Tip';
+import { buildReplyMarkdown, downloadMarkdown, localDateStr } from '@/utils/markdownExport';
 import { useImagePreview } from '@/context/ImagePreviewContext';
 import type { ContentBlock, Message as MessageType } from '@/types/chat';
 import { SOURCE_LABELS, type MessageSource } from '../../shared/types/im';
@@ -141,12 +143,27 @@ function AssistantActions({ message, onRetry, onFork, className = '' }: {
 }) {
   const [copied, setCopied] = useState(false);
   const timerRef = useRef<ReturnType<typeof setTimeout>>(undefined);
+  const exportingRef = useRef(false);
+  const toast = useToastOptional();
 
   useEffect(() => {
     return () => { if (timerRef.current) clearTimeout(timerRef.current); };
   }, []);
 
   const text = extractAssistantText(message.content);
+
+  const handleExport = async () => {
+    // In-flight guard against double-click → duplicate download + toast.
+    if (!text.trim() || exportingRef.current) return;
+    exportingRef.current = true;
+    try {
+      track('message_export', {});
+      const fileName = `${localDateStr()}_回复.md`;
+      toast?.success(await downloadMarkdown(fileName, buildReplyMarkdown(text)));
+    } finally {
+      exportingRef.current = false;
+    }
+  };
 
   return (
     <div className={`flex items-center gap-2 -ml-1 pt-1 ${className}`}>
@@ -162,6 +179,14 @@ function AssistantActions({ message, onRetry, onFork, className = '' }: {
           }}
           className="rounded-lg p-1 text-[var(--ink-muted)] transition-all hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]">
           {copied ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}
+        </button>
+      </Tip>
+      <Tip label="导出 markdown">
+        <button type="button"
+          aria-label="导出 markdown"
+          onClick={handleExport}
+          className="rounded-lg p-1 text-[var(--ink-muted)] transition-all hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]">
+          <Download className="size-3.5" />
         </button>
       </Tip>
       {onRetry && (

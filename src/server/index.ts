@@ -108,7 +108,7 @@ import type { SessionSource } from './types/session';
 import { parseAgentFrontmatter, parseFullAgentContent, serializeAgentContent } from '../shared/agentCommands';
 import { scanAgents, readWorkspaceConfig, writeWorkspaceConfig, loadEnabledAgents, readAgentMeta, writeAgentMeta, findAgent } from './agents/agent-loader';
 import type { AgentFrontmatter, AgentMeta, AgentWorkspaceConfig } from '../shared/agentTypes';
-import type { McpServerDefinition } from '../shared/config-types';
+import type { McpServerDefinition, BackgroundAgentPermissionMode } from '../shared/config-types';
 import { ensureDirSync, ensureDir, isDirEntry } from './utils/fs-utils';
 import {
   setCronTaskContext,
@@ -527,6 +527,7 @@ import {
   initSocksBridgeFromEnv,
   getHistoricalSessionMessages,
   ensureSdkMcpInSync,
+  setBackgroundAgentPermissionMode,
   type ProviderEnv,
 } from './agent-session';
 import { getHomeDirOrNull, isSkillBlockedOnPlatform } from './utils/platform';
@@ -541,7 +542,7 @@ import {
   updateSessionMetadata,
   getAttachmentPath,
 } from './SessionStore';
-import { decodeProviderEnvSnapshot, findAgentByWorkspacePath, findProvider, getAllMcpServers, getEffectiveMcpServers, isProviderDisabled, resolveImProviderEnv, resolveProviderEnv } from './utils/admin-config';
+import { decodeProviderEnvSnapshot, findAgentByWorkspacePath, findProvider, getAllMcpServers, getEffectiveMcpServers, isProviderDisabled, loadConfig, resolveImProviderEnv, resolveProviderEnv } from './utils/admin-config';
 import { snapshotForOwnedSession } from './utils/session-snapshot';
 import { resolveSessionConfig } from './utils/resolve-session-config';
 import { resolveLastRealUserMessagePreview, shrinkSessionMessageForClient, shrinkSessionMessagesForClient } from './utils/session-message-preview';
@@ -646,6 +647,10 @@ type SendMessagePayload = {
   text?: string;
   images?: ImagePayload[];
   permissionMode?: PermissionMode;
+  // Background-agent permission policy (#264). Global app-config value the
+  // renderer echoes per-send (idempotent setter); controls the builtin
+  // PermissionRequest hook for run_in_background sub-agents.
+  backgroundAgentPermissionMode?: BackgroundAgentPermissionMode;
   runtimeConfig?: RuntimeConfig;
   model?: string;
   // 'subscription' = explicit switch to Anthropic subscription (from desktop)
@@ -670,6 +675,24 @@ function getRuntimeConfigModel(runtimeConfig?: RuntimeConfig | null): string | u
 function getRuntimeConfigPermissionMode(runtimeConfig?: RuntimeConfig | null): string | undefined {
   const permissionMode = runtimeConfig?.permissionMode?.trim();
   return permissionMode ? permissionMode : undefined;
+}
+
+/**
+ * #264 — Self-resolve the background-agent permission policy from disk for the
+ * IM / Cron lanes. Desktop sends carry it in the chat payload (frontend is the
+ * authority), but IM/Cron turns have no such payload, so per CLAUDE.md's
+ * "Tab 由前端配, IM/Cron self-resolve 从磁盘读" split they read `config.json`
+ * directly. Idempotent; defaults to the conservative 'inherit' on any read
+ * error so a missing/corrupt config never widens the background lane.
+ */
+function applyBackgroundAgentPermissionModeFromDisk(): void {
+  try {
+    const cfg = loadConfig();
+    const mode = cfg.backgroundAgentPermissionMode === 'fullAgency' ? 'fullAgency' : 'inherit';
+    setBackgroundAgentPermissionMode(mode);
+  } catch {
+    setBackgroundAgentPermissionMode('inherit');
+  }
 }
 
 /**
@@ -2223,6 +2246,12 @@ async function main() {
 
         // ─── Builtin Runtime (existing path) ───
         try {
+          // #264 — apply the background-agent permission policy before enqueue so
+          // the PermissionRequest hook sees the current value. Idempotent; the
+          // renderer echoes the global AppConfig value on every send.
+          if (payload?.backgroundAgentPermissionMode) {
+            setBackgroundAgentPermissionMode(payload.backgroundAgentPermissionMode);
+          }
           const providerLabel = typeof providerEnv === 'object' ? providerEnv?.baseUrl ?? 'anthropic' : (providerEnv ?? 'anthropic');
           console.log(`[chat] send text="${text.slice(0, 200)}" images=${images.length} mode=${permissionMode} model=${model ?? 'default'} baseUrl=${providerLabel}`);
           // PRD 0.2.14 — tag desktop-origin messages so the desktop→IM mirror
@@ -2876,6 +2905,7 @@ async function main() {
               return jsonResponse({ success: false, error: runtimeResult.error ?? 'Failed to start cron via external runtime' }, 503);
             }
           } else {
+            applyBackgroundAgentPermissionModeFromDisk(); // #264 — IM/Cron self-resolve
             await enqueueUserMessage(wrappedPrompt, [], effectivePermissionMode as PermissionMode, effectiveModel, effectiveProviderEnv);
           }
           // Reset scenario after enqueue — already consumed by startStreamingSession()
@@ -8538,6 +8568,7 @@ async function main() {
               }
             }
 
+            applyBackgroundAgentPermissionModeFromDisk(); // #264 — IM/Cron self-resolve
             const result = await enqueueUserMessage(
               finalMessage,
               payload.images,

@@ -1273,6 +1273,23 @@ export async function sessionHasPersistentOwners(sessionId: string): Promise<boo
 }
 
 /**
+ * Lazy validation for tab restore (Issue #232 / PRD 0.2.25). Returns true iff
+ * the session still exists in sessions.json AND its workspace dir still exists
+ * on disk. Read-only; does not require the global sidecar. Returns false on any
+ * error so a stale restored tab is dropped rather than resurrected as empty.
+ * In the browser dev harness (non-Tauri) there's no on-disk index, so we
+ * optimistically allow the restore to proceed.
+ */
+export async function canRestoreSession(sessionId: string, agentDir: string): Promise<boolean> {
+    if (!isTauri()) return true;
+    try {
+        return await invoke<boolean>('cmd_can_restore_session', { sessionId, agentDir });
+    } catch {
+        return false;
+    }
+}
+
+/**
  * Execute a cron task synchronously via Sidecar
  * This is the full execution that waits for completion and returns results
  *

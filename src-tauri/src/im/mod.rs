@@ -4086,6 +4086,104 @@ struct PartialBotEntry {
     config: ImConfig,
 }
 
+fn has_non_empty(value: Option<&String>) -> bool {
+    value.map(|s| !s.is_empty()).unwrap_or(false)
+}
+
+fn im_config_has_start_credentials(config: &ImConfig) -> bool {
+    match &config.platform {
+        ImPlatform::Telegram => !config.bot_token.is_empty(),
+        ImPlatform::Feishu => {
+            has_non_empty(config.feishu_app_id.as_ref())
+                && has_non_empty(config.feishu_app_secret.as_ref())
+        }
+        ImPlatform::Dingtalk => {
+            has_non_empty(config.dingtalk_client_id.as_ref())
+                && has_non_empty(config.dingtalk_client_secret.as_ref())
+        }
+        ImPlatform::OpenClaw(_) => has_non_empty(config.openclaw_plugin_id.as_ref()),
+    }
+}
+
+fn find_missing_startable_agent_channels(
+    agent_configs: &[types::AgentConfigRust],
+    running_channel_keys: &std::collections::HashSet<(String, String)>,
+    recovering_channels: &[(String, String)],
+) -> Vec<(String, String)> {
+    let mut missing = Vec::new();
+    for agent_cfg in agent_configs {
+        if !agent_cfg.enabled {
+            continue;
+        }
+        for channel_cfg in &agent_cfg.channels {
+            if !channel_cfg.enabled {
+                continue;
+            }
+            let key = (agent_cfg.id.clone(), channel_cfg.id.clone());
+            if running_channel_keys.contains(&key)
+                || recovering_channels
+                    .iter()
+                    .any(|(aid, cid)| aid == &agent_cfg.id && cid == &channel_cfg.id)
+            {
+                continue;
+            }
+            let im_config = channel_cfg.to_im_config(agent_cfg);
+            if im_config_has_start_credentials(&im_config) {
+                missing.push(key);
+            }
+        }
+    }
+    missing
+}
+
+#[cfg(test)]
+mod agent_monitor_tests {
+    use super::*;
+
+    fn agent_config_with_weixin_channel(enabled: bool) -> Vec<types::AgentConfigRust> {
+        serde_json::from_value(json!([{
+            "id": "agent-1",
+            "name": "Agent",
+            "enabled": true,
+            "workspacePath": "/tmp/project",
+            "channels": [{
+                "id": "weixin",
+                "type": "openclaw:weixin",
+                "enabled": enabled,
+                "openclawPluginId": "openclaw-weixin"
+            }]
+        }])).unwrap()
+    }
+
+    #[test]
+    fn monitor_reconcile_finds_enabled_channel_missing_from_runtime_state() {
+        let agents = agent_config_with_weixin_channel(true);
+        let running = std::collections::HashSet::new();
+
+        let missing = find_missing_startable_agent_channels(&agents, &running, &[]);
+
+        assert_eq!(missing, vec![("agent-1".to_string(), "weixin".to_string())]);
+    }
+
+    #[test]
+    fn monitor_reconcile_skips_running_or_disabled_channels() {
+        let agents = agent_config_with_weixin_channel(true);
+        let running = std::collections::HashSet::from([(
+            "agent-1".to_string(),
+            "weixin".to_string(),
+        )]);
+
+        assert!(find_missing_startable_agent_channels(&agents, &running, &[]).is_empty());
+
+        let disabled_agents = agent_config_with_weixin_channel(false);
+        assert!(find_missing_startable_agent_channels(
+            &disabled_agents,
+            &std::collections::HashSet::new(),
+            &[],
+        ).is_empty());
+    }
+}
+
 /// Auto-start all enabled IM Bots.
 /// Called from Tauri `setup` with a short delay to let the app initialize.
 pub fn schedule_auto_start<R: Runtime>(app_handle: AppHandle<R>) {
@@ -4103,38 +4201,7 @@ pub fn schedule_auto_start<R: Runtime>(app_handle: AppHandle<R>) {
         let sidecar_manager = app_handle.state::<ManagedSidecarManager>();
 
         for (bot_id, config) in configs {
-            let has_credentials = match config.platform {
-                ImPlatform::Telegram => !config.bot_token.is_empty(),
-                ImPlatform::Feishu => {
-                    config
-                        .feishu_app_id
-                        .as_ref()
-                        .map(|s| !s.is_empty())
-                        .unwrap_or(false)
-                        && config
-                            .feishu_app_secret
-                            .as_ref()
-                            .map(|s| !s.is_empty())
-                            .unwrap_or(false)
-                }
-                ImPlatform::Dingtalk => {
-                    config
-                        .dingtalk_client_id
-                        .as_ref()
-                        .map(|s| !s.is_empty())
-                        .unwrap_or(false)
-                        && config
-                            .dingtalk_client_secret
-                            .as_ref()
-                            .map(|s| !s.is_empty())
-                            .unwrap_or(false)
-                }
-                ImPlatform::OpenClaw(_) => config
-                    .openclaw_plugin_id
-                    .as_ref()
-                    .map(|s| !s.is_empty())
-                    .unwrap_or(false),
-            };
+            let has_credentials = im_config_has_start_credentials(&config);
             if config.enabled && has_credentials {
                 ulog_info!("[im] Auto-starting bot: {}", bot_id);
                 match start_im_bot(
@@ -4628,38 +4695,7 @@ pub fn schedule_agent_auto_start<R: Runtime>(app_handle: AppHandle<R>) {
                     ..types::HeartbeatConfig::default()
                 });
 
-                let has_credentials = match im_config.platform {
-                    ImPlatform::Telegram => !im_config.bot_token.is_empty(),
-                    ImPlatform::Feishu => {
-                        im_config
-                            .feishu_app_id
-                            .as_ref()
-                            .map(|s| !s.is_empty())
-                            .unwrap_or(false)
-                            && im_config
-                                .feishu_app_secret
-                                .as_ref()
-                                .map(|s| !s.is_empty())
-                                .unwrap_or(false)
-                    }
-                    ImPlatform::Dingtalk => {
-                        im_config
-                            .dingtalk_client_id
-                            .as_ref()
-                            .map(|s| !s.is_empty())
-                            .unwrap_or(false)
-                            && im_config
-                                .dingtalk_client_secret
-                                .as_ref()
-                                .map(|s| !s.is_empty())
-                                .unwrap_or(false)
-                    }
-                    ImPlatform::OpenClaw(_) => im_config
-                        .openclaw_plugin_id
-                        .as_ref()
-                        .map(|s| !s.is_empty())
-                        .unwrap_or(false),
-                };
+                let has_credentials = im_config_has_start_credentials(&im_config);
                 if has_credentials {
                     let bot_id = channel.id.clone();
                     // Dedup: skip if channel already running (and healthy) in agent state.
@@ -5032,6 +5068,263 @@ pub fn schedule_agent_auto_start<R: Runtime>(app_handle: AppHandle<R>) {
     });
 }
 
+async fn ensure_agent_level_runners_started<R: Runtime>(
+    app_handle: AppHandle<R>,
+    agent_state: ManagedAgents,
+    sidecar_manager: ManagedSidecarManager,
+    agent_config: AgentConfigRust,
+) {
+    let should_start = {
+        let agents_guard = agent_state.lock().await;
+        agents_guard
+            .get(&agent_config.id)
+            .map(|agent| agent.heartbeat_handle.is_none() && !agent.channels.is_empty())
+            .unwrap_or(false)
+    };
+    if !should_start {
+        return;
+    }
+
+    let hb_config = agent_config.heartbeat.clone().unwrap_or_default();
+    let agent_id = agent_config.id.clone();
+    let agent_label = agent_config.name.clone();
+    let agent_state_for_hb = Arc::clone(&agent_state);
+    let (wake_tx, mut wake_rx) = mpsc::channel::<types::WakeReason>(64);
+    let hb_config_arc = Arc::new(RwLock::new(hb_config));
+    let hb_config_for_loop = Arc::clone(&hb_config_arc);
+
+    let mau_config_arc = Arc::new(RwLock::new(agent_config.memory_auto_update.clone()));
+    let mau_running_arc = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let mau_config_for_loop = Arc::clone(&mau_config_arc);
+    let mau_running_for_loop = Arc::clone(&mau_running_arc);
+    let mau_workspace = agent_config.workspace_path.clone();
+    let mau_agent_id = agent_config.id.clone();
+    let mau_sidecar_mgr = Arc::clone(&sidecar_manager);
+    let mau_app_handle = app_handle.clone();
+    let (mau_model, mau_provider_env, mau_mcp_json) = {
+        let agents_guard = agent_state.lock().await;
+        if let Some(inst) = agents_guard.get(&agent_config.id) {
+            (
+                Arc::clone(&inst.current_model),
+                Arc::clone(&inst.current_provider_env),
+                Arc::clone(&inst.mcp_servers_json),
+            )
+        } else {
+            (
+                Arc::new(RwLock::new(agent_config.model.clone())),
+                Arc::new(RwLock::new(None)),
+                Arc::new(RwLock::new(agent_config.mcp_servers_json.clone())),
+            )
+        }
+    };
+
+    let hb_handle = tauri::async_runtime::spawn(async move {
+        use heartbeat::is_in_active_hours;
+
+        let initial_interval = {
+            let cfg = hb_config_for_loop.read().await;
+            Duration::from_secs(cfg.interval_minutes.max(5) as u64 * 60)
+        };
+        let mut interval = tokio::time::interval(initial_interval);
+        interval.tick().await;
+
+        ulog_info!(
+            "[agent-heartbeat] Runner started for agent {} (interval={}min)",
+            agent_label,
+            initial_interval.as_secs() / 60
+        );
+
+        loop {
+            {
+                let cfg = hb_config_for_loop.read().await;
+                let desired = Duration::from_secs(cfg.interval_minutes.max(5) as u64 * 60);
+                if desired != interval.period() {
+                    ulog_info!(
+                        "[agent-heartbeat] Interval changed to {}min",
+                        desired.as_secs() / 60
+                    );
+                    interval = tokio::time::interval(desired);
+                    interval.tick().await;
+                }
+            }
+
+            let reason = tokio::select! {
+                _ = interval.tick() => types::WakeReason::Interval,
+                Some(reason) = wake_rx.recv() => {
+                    let mut reasons = vec![reason];
+                    tokio::time::sleep(Duration::from_millis(250)).await;
+                    while let Ok(r) = wake_rx.try_recv() {
+                        reasons.push(r);
+                    }
+                    reasons.into_iter()
+                        .max_by_key(|r| if r.is_high_priority() { 1 } else { 0 })
+                        .unwrap_or(types::WakeReason::Interval)
+                }
+            };
+
+            let is_high_priority = reason.is_high_priority();
+
+            {
+                let hb_tz = {
+                    let cfg = hb_config_for_loop.read().await;
+                    cfg.active_hours.as_ref().map(|ah| ah.timezone.clone())
+                };
+                memory_update::check_and_spawn(
+                    &mau_agent_id,
+                    &mau_workspace,
+                    &mau_config_for_loop,
+                    &mau_running_for_loop,
+                    &mau_sidecar_mgr,
+                    &mau_app_handle,
+                    &mau_model,
+                    &mau_provider_env,
+                    &mau_mcp_json,
+                    hb_tz.as_deref(),
+                )
+                .await;
+            }
+
+            let config = hb_config_for_loop.read().await.clone();
+            if !config.enabled {
+                ulog_debug!("[agent-heartbeat] Skipped: disabled");
+                continue;
+            }
+
+            if !is_high_priority {
+                if let Some(ref active_hours) = config.active_hours {
+                    if !is_in_active_hours(active_hours) {
+                        ulog_debug!("[agent-heartbeat] Skipped: outside active hours");
+                        continue;
+                    }
+                }
+            }
+
+            let channel_snapshot = {
+                let agents_guard = agent_state_for_hb.lock().await;
+                let agent = match agents_guard.get(&agent_id) {
+                    Some(a) => a,
+                    None => {
+                        ulog_debug!(
+                            "[agent-heartbeat] Agent {} not found, stopping",
+                            agent_id
+                        );
+                        break;
+                    }
+                };
+                let refs: Vec<_> = agent
+                    .channels
+                    .iter()
+                    .map(|(ch_id, ch_inst)| {
+                        (
+                            ch_id.clone(),
+                            Arc::clone(&ch_inst.bot_instance.health),
+                            Arc::clone(&ch_inst.bot_instance.router),
+                            ch_inst.bot_instance.heartbeat_wake_tx.clone(),
+                            ch_inst.bot_instance.started_at,
+                            ch_inst.bot_instance.config.platform.clone(),
+                            ch_inst.bot_instance.config.name.clone(),
+                            ch_inst.bot_instance.bind_code.clone(),
+                        )
+                    })
+                    .collect();
+                refs
+            };
+
+            let mut statuses_map = HashMap::new();
+            let mut wake_txs: HashMap<String, mpsc::Sender<types::WakeReason>> = HashMap::new();
+            for (ch_id, health, router, wake_tx, started_at, platform, name, bind_code) in
+                &channel_snapshot
+            {
+                let health_state = health.get_state().await;
+                let active_sessions = router.lock().await.active_sessions();
+                statuses_map.insert(
+                    ch_id.clone(),
+                    ChannelStatus {
+                        channel_id: ch_id.clone(),
+                        channel_type: platform.clone(),
+                        name: name.clone(),
+                        status: health_state.status,
+                        bot_username: health_state.bot_username,
+                        uptime_seconds: started_at.elapsed().as_secs(),
+                        last_message_at: health_state.last_message_at,
+                        active_sessions,
+                        error_message: health_state.error_message,
+                        restart_count: health_state.restart_count,
+                        buffered_messages: health_state.buffered_messages,
+                        bind_url: None,
+                        bind_code: Some(bind_code.clone()),
+                    },
+                );
+                if let Some(tx) = wake_tx {
+                    wake_txs.insert(ch_id.clone(), tx.clone());
+                }
+            }
+
+            let target_ch_id = {
+                let agents_guard = agent_state_for_hb.lock().await;
+                match agents_guard.get(&agent_id) {
+                    Some(agent) => resolve_target_channel(agent, &statuses_map),
+                    None => None,
+                }
+            };
+            let target_ch_id = match target_ch_id {
+                Some(id) => id,
+                None => {
+                    ulog_debug!(
+                        "[agent-heartbeat] No available channel for agent {}",
+                        agent_id
+                    );
+                    continue;
+                }
+            };
+
+            let delegated_reason = if reason.is_high_priority() {
+                reason
+            } else {
+                types::WakeReason::Manual
+            };
+            if let Some(wake_tx) = wake_txs.get(&target_ch_id) {
+                let _ = wake_tx.send(delegated_reason).await;
+                ulog_debug!(
+                    "[agent-heartbeat] Routed heartbeat to channel {} for agent {}",
+                    target_ch_id,
+                    agent_id
+                );
+            } else {
+                ulog_debug!(
+                    "[agent-heartbeat] Channel {} has no heartbeat runner, skipping",
+                    target_ch_id
+                );
+            }
+
+            if is_high_priority {
+                interval.reset();
+            }
+        }
+
+        ulog_info!("[agent-heartbeat] Runner stopped for agent {}", agent_label);
+    });
+
+    let mut agents_guard = agent_state.lock().await;
+    if let Some(agent_instance) = agents_guard.get_mut(&agent_config.id) {
+        if agent_instance.heartbeat_handle.is_none() && !agent_instance.channels.is_empty() {
+            agent_instance.heartbeat_handle = Some(hb_handle);
+            agent_instance.heartbeat_wake_tx = Some(wake_tx);
+            agent_instance.heartbeat_config = Some(hb_config_arc);
+            agent_instance.memory_update_config = Some(mau_config_arc);
+            agent_instance.memory_update_running = Some(mau_running_arc);
+            ulog_info!(
+                "[agent] Agent-level heartbeat started for {}",
+                agent_config.id
+            );
+        } else {
+            hb_handle.abort();
+        }
+    } else {
+        hb_handle.abort();
+    }
+}
+
 /// Monitor agent channels and auto-restart dead ones (Error/Stopped).
 /// Periodically scans all agent channels, restarts dead ones using the same
 /// dedup + create_bot_instance pattern as schedule_agent_auto_start.
@@ -5050,15 +5343,18 @@ pub async fn monitor_agent_channels(
     tokio::time::sleep(Duration::from_secs(15)).await;
     ulog_info!("[agent-monitor] Agent channel health monitor started");
 
-    // Track per-channel: consecutive failures + next retry timestamp.
-    // failure_counts keys persist across cycles even if the channel is removed from
-    // agent_state during a failed restart — this prevents orphaned channels from
-    // being lost to monitoring.
-    let mut failure_counts: HashMap<String, u32> = HashMap::new();
-    let mut next_retry: HashMap<String, tokio::time::Instant> = HashMap::new();
-    // Orphaned channels: (channel_id → agent_id) for channels removed from agent_state
+    // Track per (agent_id, channel_id): consecutive failures + next retry timestamp.
+    // Keyed by the full pair — runtime identity is (agent_id, channel_id) everywhere
+    // else in this loop (dead_channels, running_channel_keys, find_missing_*), so the
+    // bookkeeping maps must match: a channel_id reused across two agents (imported /
+    // manually-edited config) would otherwise cross-contaminate backoff/orphan state.
+    // Keys persist across cycles even if the channel is removed from agent_state during
+    // a failed restart — this prevents orphaned channels from being lost to monitoring.
+    let mut failure_counts: HashMap<(String, String), u32> = HashMap::new();
+    let mut next_retry: HashMap<(String, String), tokio::time::Instant> = HashMap::new();
+    // Orphaned channels: (agent_id, channel_id) for channels removed from agent_state
     // during a failed restart. Merged into dead_channels on each cycle so they get retried.
-    let mut orphaned: HashMap<String, String> = HashMap::new();
+    let mut orphaned: std::collections::HashSet<(String, String)> = std::collections::HashSet::new();
 
     loop {
         tokio::time::sleep(Duration::from_secs(CHECK_INTERVAL_SECS)).await;
@@ -5070,7 +5366,9 @@ pub async fn monitor_agent_channels(
         let agent_state = app_handle.state::<ManagedAgents>();
         let sidecar_manager = app_handle.state::<ManagedSidecarManager>();
 
-        // Phase 1: Find dead channels — snapshot health refs under lock, check outside
+        // Phase 1: Find dead channels — snapshot health refs under lock, check outside.
+        // Also keep the running key set so the monitor can reconcile enabled
+        // channels that never made it into ManagedAgents during startup.
         let channel_health_refs: Vec<(String, String, Arc<crate::im::health::HealthManager>)> = {
             let agents_guard = agent_state.lock().await;
             let mut refs = Vec::new();
@@ -5086,6 +5384,11 @@ pub async fn monitor_agent_channels(
             refs
             // lock dropped here
         };
+        let running_channel_keys: std::collections::HashSet<(String, String)> =
+            channel_health_refs
+                .iter()
+                .map(|(agent_id, channel_id, _)| (agent_id.clone(), channel_id.clone()))
+                .collect();
 
         let mut dead_channels: Vec<(String, String)> = Vec::new();
         for (agent_id, channel_id, health) in &channel_health_refs {
@@ -5098,9 +5401,17 @@ pub async fn monitor_agent_channels(
             }
         }
 
+        // Phase 2: Read configs from disk for restart and missing-channel reconcile.
+        let agent_configs = read_agent_configs_from_disk();
+        dead_channels.extend(find_missing_startable_agent_channels(
+            &agent_configs,
+            &running_channel_keys,
+            &dead_channels,
+        ));
+
         // Merge orphaned channels (failed restart last cycle, no longer in agent_state)
-        for (channel_id, agent_id) in &orphaned {
-            if !dead_channels.iter().any(|(_, cid)| cid == channel_id) {
+        for (agent_id, channel_id) in &orphaned {
+            if !dead_channels.iter().any(|(aid, cid)| aid == agent_id && cid == channel_id) {
                 dead_channels.push((agent_id.clone(), channel_id.clone()));
             }
         }
@@ -5111,8 +5422,6 @@ pub async fn monitor_agent_channels(
             continue;
         }
 
-        // Phase 2: Read configs from disk for restart
-        let agent_configs = read_agent_configs_from_disk();
         if agent_configs.is_empty() {
             continue;
         }
@@ -5124,13 +5433,14 @@ pub async fn monitor_agent_channels(
                 break;
             }
 
-            let count = failure_counts.entry(channel_id.clone()).or_insert(0);
+            let key = (agent_id.clone(), channel_id.clone());
+            let count = failure_counts.entry(key.clone()).or_insert(0);
             if *count >= MAX_CONSECUTIVE_FAILURES {
                 continue;
             }
 
             // Skip if backoff hasn't elapsed yet (non-blocking)
-            if let Some(&retry_at) = next_retry.get(channel_id) {
+            if let Some(&retry_at) = next_retry.get(&key) {
                 if now < retry_at {
                     continue;
                 }
@@ -5157,6 +5467,9 @@ pub async fn monitor_agent_channels(
                 enabled: false,
                 ..types::HeartbeatConfig::default()
             });
+            if !im_config_has_start_credentials(&im_config) {
+                continue;
+            }
 
             // Remove dead channel — shut down old instance properly first
             let old_instance: Option<ImBotInstance> = {
@@ -5167,15 +5480,24 @@ pub async fn monitor_agent_channels(
                     None
                 }
             };
+            let was_missing = old_instance.is_none();
             if let Some(instance) = old_instance {
                 let _ = shutdown_bot_instance(instance, &sidecar_manager, channel_id).await;
             }
 
-            ulog_info!(
-                "[agent-monitor] Auto-restarting channel {} of agent {}",
-                channel_id,
-                agent_id
-            );
+            if was_missing {
+                ulog_info!(
+                    "[agent-monitor] Auto-starting missing channel {} of agent {}",
+                    channel_id,
+                    agent_id
+                );
+            } else {
+                ulog_info!(
+                    "[agent-monitor] Auto-restarting channel {} of agent {}",
+                    channel_id,
+                    agent_id
+                );
+            }
 
             match create_bot_instance(
                 &app_handle,
@@ -5187,33 +5509,75 @@ pub async fn monitor_agent_channels(
             .await
             {
                 Ok((bot_instance, _status)) => {
-                    failure_counts.remove(channel_id);
-                    next_retry.remove(channel_id);
-                    orphaned.remove(channel_id);
+                    failure_counts.remove(&key);
+                    next_retry.remove(&key);
+                    orphaned.remove(&key);
 
-                    // Re-insert into agent state
+                    // Re-insert into agent state. If startup missed this channel
+                    // completely, create the AgentInstance from disk config so
+                    // future monitor cycles can see it.
                     let mut agents_guard = agent_state.lock().await;
-                    if let Some(agent) = agents_guard.get_mut(agent_id) {
-                        let link = AgentChannelLink {
-                            channel_id: channel_id.clone(),
+                    let agent = agents_guard
+                        .entry(agent_id.clone())
+                        .or_insert_with(|| AgentInstance {
                             agent_id: agent_id.clone(),
-                            last_active_channel: Arc::clone(&agent.last_active_channel),
-                            runtime_config: Arc::clone(&agent.runtime_config),
-                        };
-                        *bot_instance.agent_link.write().await = Some(link);
+                            config: agent_cfg.clone(),
+                            channels: HashMap::new(),
+                            last_active_channel: Arc::new(RwLock::new(
+                                agent_cfg.last_active_channel.clone(),
+                            )),
+                            heartbeat_handle: None,
+                            heartbeat_wake_tx: None,
+                            heartbeat_config: None,
+                            current_model: Arc::new(RwLock::new(agent_cfg.model.clone())),
+                            current_provider_env: Arc::new(RwLock::new(
+                                agent_cfg
+                                    .provider_env_json
+                                    .as_ref()
+                                    .and_then(|s| serde_json::from_str(s).ok()),
+                            )),
+                            permission_mode: Arc::new(RwLock::new(
+                                agent_cfg.permission_mode.clone(),
+                            )),
+                            mcp_servers_json: Arc::new(RwLock::new(
+                                agent_cfg.mcp_servers_json.clone(),
+                            )),
+                            runtime: Arc::new(RwLock::new(normalize_runtime_type(
+                                agent_cfg.runtime.as_deref(),
+                            ))),
+                            runtime_config: Arc::new(RwLock::new(
+                                agent_cfg.runtime_config.clone(),
+                            )),
+                            memory_update_config: None,
+                            memory_update_running: None,
+                        });
+                    let link = AgentChannelLink {
+                        channel_id: channel_id.clone(),
+                        agent_id: agent_id.clone(),
+                        last_active_channel: Arc::clone(&agent.last_active_channel),
+                        runtime_config: Arc::clone(&agent.runtime_config),
+                    };
+                    *bot_instance.agent_link.write().await = Some(link);
 
-                        agent.channels.insert(
-                            channel_id.clone(),
-                            ChannelInstance {
-                                channel_id: channel_id.clone(),
-                                bot_instance,
-                            },
-                        );
-                    }
+                    agent.channels.insert(
+                        channel_id.clone(),
+                        ChannelInstance {
+                            channel_id: channel_id.clone(),
+                            bot_instance,
+                        },
+                    );
                     drop(agents_guard);
 
+                    ensure_agent_level_runners_started(
+                        app_handle.clone(),
+                        Arc::clone(&*agent_state),
+                        Arc::clone(&*sidecar_manager),
+                        agent_cfg.clone(),
+                    )
+                    .await;
+
                     ulog_info!(
-                        "[agent-monitor] Channel {} restarted successfully",
+                        "[agent-monitor] Channel {} is running after monitor recovery",
                         channel_id
                     );
                     let _ = app_handle.emit(
@@ -5229,13 +5593,13 @@ pub async fn monitor_agent_channels(
                     *count += 1;
                     // Track as orphaned so next cycle retries even though
                     // the channel was removed from agent_state
-                    orphaned.insert(channel_id.clone(), agent_id.clone());
+                    orphaned.insert(key.clone());
                     // Schedule next retry with exponential backoff
                     let backoff = std::cmp::min(
                         BACKOFF_BASE_SECS.saturating_mul(2u64.saturating_pow(*count - 1)),
                         MAX_BACKOFF_SECS,
                     );
-                    next_retry.insert(channel_id.clone(), now + Duration::from_secs(backoff));
+                    next_retry.insert(key.clone(), now + Duration::from_secs(backoff));
                     ulog_error!(
                         "[agent-monitor] Failed to restart channel {} (attempt {}, next retry in {}s): {}",
                         channel_id,
@@ -5249,13 +5613,13 @@ pub async fn monitor_agent_channels(
 
         // Clean up: remove entries for channels that recovered or were manually stopped
         // Keep entries that are in orphaned (awaiting retry) or in dead_channels
-        let tracked: std::collections::HashSet<String> = dead_channels
+        let tracked: std::collections::HashSet<(String, String)> = dead_channels
             .iter()
-            .map(|(_, cid)| cid.clone())
-            .chain(orphaned.keys().cloned())
+            .cloned()
+            .chain(orphaned.iter().cloned())
             .collect();
-        failure_counts.retain(|cid, _| tracked.contains(cid));
-        next_retry.retain(|cid, _| tracked.contains(cid));
+        failure_counts.retain(|k, _| tracked.contains(k));
+        next_retry.retain(|k, _| tracked.contains(k));
     }
 }
 

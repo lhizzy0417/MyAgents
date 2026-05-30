@@ -60,6 +60,7 @@ import type { CapabilityInitialSelect } from '../../shared/skillsTypes';
 import { CC_MODELS, CC_PERMISSION_MODES, CODEX_PERMISSION_MODES, GEMINI_PERMISSION_MODES, getDefaultRuntimePermissionMode, getRuntimePermissionModes, buildRuntimeChangePatch } from '../../shared/types/runtime';
 import type { RuntimeType, RuntimeDetections, RuntimeConfig } from '../../shared/types/runtime';
 import type { InitialMessage } from '@/types/tab';
+import { shouldAutoSendInitialMessage } from '@/utils/initialMessageAutoSend';
 import { resolveBuiltinPermissionMode } from '@/utils/optionResolve';
 // CronTaskConfig type is used via useCronTask hook
 
@@ -959,17 +960,24 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
   onInitialMessageConsumedRef.current = onInitialMessageConsumed;
 
   useEffect(() => {
-    if (!initialMessage || initialMessageConsumedRef.current) return;
+    if (!initialMessage) return;
     // Wait for SSE connection (sidecar reachable) instead of non-pending sessionId.
     // The sessionId upgrades from pending only after the first message is processed,
     // but the first message IS the auto-send — so checking isPendingSessionId would deadlock.
-    if (!isActive || !sessionId || !isConnected) return;
+    if (!shouldAutoSendInitialMessage({
+      hasInitialMessage: true,
+      alreadyConsumed: initialMessageConsumedRef.current,
+      hasSessionId: !!sessionId,
+      isConnected,
+      isActive,
+    })) return;
 
+    const launchMessage = initialMessage;
     initialMessageConsumedRef.current = true;
 
     // Resolved values hoisted out of `try` so the `catch` failure-recovery path
     // (PRD 0.2.7 §4.5) can reference them when restoring the launcher draft.
-    const builtinSel = initialMessage.builtinSelection;
+    const builtinSel = launchMessage.builtinSelection;
     // #244 (cross-review W2): when the initialMessage carries no explicit
     // permissionMode (internal producers — task-alignment / support / fork —
     // unlike the launcher, don't set it), derive the builtin mode from config
@@ -977,7 +985,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     // 'auto' default if useConfig() hasn't resolved yet. projectSynced:false
     // forces the agent→project→global fallback (there's no explicit choice to
     // honor on this auto-send).
-    const effectivePermission = (initialMessage.permissionMode ?? (isExternalRuntime
+    const effectivePermission = (launchMessage.permissionMode ?? (isExternalRuntime
       ? runtimePermissionMode
       : resolveBuiltinPermissionMode({
           projectSynced: false,
@@ -987,7 +995,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
           defaultPermissionMode: config.defaultPermissionMode,
         }))) as PermissionMode;
     const effectiveModel = isExternalRuntime
-      ? (initialMessage.runtimeModel ?? runtimeModel)
+      ? (launchMessage.runtimeModel ?? runtimeModel)
       : (builtinSel?.model ?? selectedModel);
     const provider = builtinSel
       ? providers.find(p => p.id === builtinSel.providerId) ?? currentProvider
@@ -997,12 +1005,12 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     const autoSend = async () => {
       try {
         // 1. Sync MCP configuration
-        if (initialMessage.mcpEnabledServers?.length) {
+        if (launchMessage.mcpEnabledServers?.length) {
           const allServers = await getAllMcpServers();
           syncMcpServerNames(allServers);
           const globalEnabled = await getEnabledMcpServerIds();
           const effective = allServers.filter(s =>
-            globalEnabled.includes(s.id) && initialMessage.mcpEnabledServers!.includes(s.id)
+            globalEnabled.includes(s.id) && launchMessage.mcpEnabledServers!.includes(s.id)
           );
           await apiPost('/api/mcp/set', { servers: effective });
         }
@@ -1011,21 +1019,21 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
         // Both `setWorkspaceEnabledPlugins` local state AND a session-enable
         // push so the sidecar's commonQueryOptions picks up the choice on
         // first pre-warm. Symmetric with MCP above.
-        if (initialMessage.enabledPluginIds) {
-          setWorkspaceEnabledPlugins(initialMessage.enabledPluginIds);
+        if (launchMessage.enabledPluginIds) {
+          setWorkspaceEnabledPlugins(launchMessage.enabledPluginIds);
           await apiPost('/api/cc-plugin/session-enable', {
-            enabledIds: initialMessage.enabledPluginIds,
+            enabledIds: launchMessage.enabledPluginIds,
           });
         }
 
         // 3. Update local UI state to reflect Launcher choices
-        if (initialMessage.permissionMode) {
+        if (launchMessage.permissionMode) {
           // External runtime has its own permission mode state (runtimePermissionMode),
           // while builtin uses permissionMode. Set the correct one based on runtime.
           if (isExternalRuntime) {
-            setRuntimePermissionMode(initialMessage.permissionMode);
+            setRuntimePermissionMode(launchMessage.permissionMode);
           } else {
-            setPermissionMode(initialMessage.permissionMode);
+            setPermissionMode(launchMessage.permissionMode);
             // #244: the launcher choice is now the authoritative builtin mode —
             // mark synced so effectivePermissionMode trusts state and doesn't
             // re-derive from the agent default (the project-sync effect is
@@ -1034,7 +1042,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
           }
         }
         if (isExternalRuntime) {
-          if (initialMessage.runtimeModel) setRuntimeModel(initialMessage.runtimeModel);
+          if (launchMessage.runtimeModel) setRuntimeModel(launchMessage.runtimeModel);
         } else if (builtinSel) {
           // Apply the paired (provider, model) atomically — type system guarantees both present.
           setSelectedProviderId(builtinSel.providerId);
@@ -1050,15 +1058,15 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
         //     from the normal send path to startCronTask. This both creates the
         //     CronTask via Rust and triggers the first execution — same as if the
         //     user had typed in the chat input and clicked send with cron enabled.
-        if (initialMessage.cron) {
+        if (launchMessage.cron) {
           enableCronMode({
-            prompt: initialMessage.text,
-            intervalMinutes: initialMessage.cron.intervalMinutes,
-            endConditions: initialMessage.cron.endConditions,
-            runMode: initialMessage.cron.runMode,
-            notifyEnabled: initialMessage.cron.notifyEnabled,
-            schedule: initialMessage.cron.schedule,
-            delivery: initialMessage.cron.delivery,
+            prompt: launchMessage.text,
+            intervalMinutes: launchMessage.cron.intervalMinutes,
+            endConditions: launchMessage.cron.endConditions,
+            runMode: launchMessage.cron.runMode,
+            notifyEnabled: launchMessage.cron.notifyEnabled,
+            schedule: launchMessage.cron.schedule,
+            delivery: launchMessage.cron.delivery,
             model: effectiveModel,
             permissionMode: effectivePermission,
             // PRD 0.2.9 — Pass providerId (live-resolve) instead of building
@@ -1069,20 +1077,20 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
             // Without this, the editor reopens defaulting to 'current_session'
             // because cronState.config.executionTarget is undefined → modal's
             // computed runMode lies about the user's choice. (Bug 2A.)
-            executionTarget: initialMessage.cron.executionTarget,
+            executionTarget: launchMessage.cron.executionTarget,
             // Pin the cron task's MCP set to the launcher's chosen list so
             // /cron/execute-sync's `applyMcpOverrideAndAwaitReady` matches
             // the pre-warm fingerprint and short-circuits as a no-op
             // (agent-session.ts:1282) instead of an abort+restart that
             // wastes ~5s on every launcher cron handoff.
-            mcpEnabledServers: initialMessage.mcpEnabledServers,
+            mcpEnabledServers: launchMessage.mcpEnabledServers,
           });
-          await startCronTask(initialMessage.text);
+          await startCronTask(launchMessage.text);
         } else {
           // 5b. Normal send path.
           await sendMessage(
-            initialMessage.text,
-            initialMessage.images,
+            launchMessage.text,
+            launchMessage.images,
             effectivePermission,
             effectiveModel,
             isExternalRuntime ? undefined : providerEnv
@@ -1105,27 +1113,27 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
         // without losing what they typed. Pre-PRD-0.2.7 the toast just said
         // "请重试" while the textarea was empty, silently dropping the draft.
         try {
-          chatInputRef.current?.setValue(initialMessage.text);
-          if (initialMessage.images && initialMessage.images.length > 0) {
-            chatInputRef.current?.setImages(initialMessage.images);
+          chatInputRef.current?.setValue(launchMessage.text);
+          if (launchMessage.images && launchMessage.images.length > 0) {
+            chatInputRef.current?.setImages(launchMessage.images);
           }
-          if (initialMessage.cron) {
+          if (launchMessage.cron) {
             enableCronMode({
-              prompt: initialMessage.text,
-              intervalMinutes: initialMessage.cron.intervalMinutes,
-              endConditions: initialMessage.cron.endConditions,
-              runMode: initialMessage.cron.runMode,
-              notifyEnabled: initialMessage.cron.notifyEnabled,
-              schedule: initialMessage.cron.schedule,
-              delivery: initialMessage.cron.delivery,
+              prompt: launchMessage.text,
+              intervalMinutes: launchMessage.cron.intervalMinutes,
+              endConditions: launchMessage.cron.endConditions,
+              runMode: launchMessage.cron.runMode,
+              notifyEnabled: launchMessage.cron.notifyEnabled,
+              schedule: launchMessage.cron.schedule,
+              delivery: launchMessage.cron.delivery,
               model: effectiveModel,
               permissionMode: effectivePermission,
               // PRD 0.2.9 — see above for the providerId rationale.
               providerId: !isExternalRuntime && provider ? provider.id : undefined,
               runtime: currentRuntime,
               runtimeConfig: buildCronRuntimeConfig(),
-              executionTarget: initialMessage.cron.executionTarget,
-              mcpEnabledServers: initialMessage.mcpEnabledServers,
+              executionTarget: launchMessage.cron.executionTarget,
+              mcpEnabledServers: launchMessage.mcpEnabledServers,
             });
           }
         } catch (restoreErr) {

@@ -46,7 +46,7 @@ use sidecar::{
     cmd_execute_cron_task,
     // Session-centric Sidecar API (v0.1.11)
     cmd_ensure_session_sidecar, cmd_release_session_sidecar, cmd_get_session_port,
-    cmd_upgrade_session_id, cmd_session_has_persistent_owners,
+    cmd_upgrade_session_id, cmd_session_has_persistent_owners, cmd_can_restore_session,
     // Background session completion
     cmd_start_background_completion, cmd_cancel_background_completion,
     cmd_get_background_sessions,
@@ -375,6 +375,7 @@ pub fn run() {
             cmd_get_session_port,
             cmd_upgrade_session_id,
             cmd_session_has_persistent_owners,
+            cmd_can_restore_session,
             // Background session completion
             cmd_start_background_completion,
             cmd_cancel_background_completion,

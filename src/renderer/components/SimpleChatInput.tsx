@@ -20,6 +20,7 @@ import { CUSTOM_EVENTS } from '../../shared/constants';
 import { isDebugMode } from '@/utils/debug';
 import { retainFocusOnMouseDown } from '@/utils/focusRetention';
 import { renameIfBareClipboardImage } from '@/utils/clipboardImage';
+import { detectExcessiveRepetition } from '@/utils/excessiveRepetition';
 import { isProviderAvailable } from '@/config/configService';
 import { modelSupportsModality } from '@/config/services/providerService';
 import RuntimeSelector from '@/components/RuntimeSelector';
@@ -58,73 +59,6 @@ function getCurrentModelLabel(
   return provider ? getModelDisplayName(provider, modelId) : modelId;
 }
 
-
-/**
- * Bug #123 guardrail — detect pathological content duplication that almost
- * certainly came from a third-party IME / voice-input glitch on macOS WebView
- * (WeChat 输入法 has been observed writing recognized speech into the
- * controlled textarea dozens of times, producing 77K-char messages on a
- * single Enter). We can't fix the IME / WebKit composition behavior itself,
- * so the input layer adds a confirm step before such content goes out.
- *
- * Two complementary checks (returns the repeat count when either flags):
- *
- *   A. Delimiter-split segment frequency. Split on whitespace + Chinese/English
- *      punctuation, take segments of length >= 10, flag when the top segment
- *      repeats >= 5 times AND covers >= 50% of total length. Catches the
- *      common voice-recognition case where punctuation is interleaved between
- *      duplicates.
- *
- *   B. Prefix-repetition fallback for delimiter-free runs. Voice recognition
- *      sometimes produces continuous CJK text without inserted punctuation;
- *      then check A finds segments.length <= 1 and misses. Sample candidate
- *      block lengths (50/100/200 chars), count occurrences of the leading
- *      block, and flag with the same coverage threshold.
- *
- * Tuned so normal repetition ("yes yes yes" — segments too short, prefix
- * doesn't repeat) and ordinary long pastes (no single dominant segment or
- * prefix block) do NOT trigger.
- */
-function detectExcessiveRepetition(text: string): number {
-  if (text.length < 1000) return 0;
-
-  // Check A — delimiter-split segment frequency.
-  const segments = text
-    .split(/[\s。！？；;.!?，,]+/)
-    .map((s) => s.trim())
-    .filter((s) => s.length >= 10);
-  if (segments.length >= 5) {
-    const counts = new Map<string, number>();
-    for (const s of segments) counts.set(s, (counts.get(s) ?? 0) + 1);
-    let topCount = 0;
-    let topLength = 0;
-    for (const [seg, c] of counts) {
-      if (c > topCount) {
-        topCount = c;
-        topLength = seg.length;
-      }
-    }
-    const coverage = (topLength * topCount) / text.length;
-    if (topCount >= 5 && coverage >= 0.5) return topCount;
-  }
-
-  // Check B — prefix-repetition fallback (delimiter-free duplication).
-  for (const blockLen of [50, 100, 200]) {
-    if (text.length < blockLen * 5) continue;
-    const block = text.slice(0, blockLen);
-    let count = 0;
-    let pos = 0;
-    while (true) {
-      const next = text.indexOf(block, pos);
-      if (next === -1) break;
-      count++;
-      pos = next + blockLen;
-    }
-    if (count >= 5 && count * blockLen >= text.length * 0.5) return count;
-  }
-
-  return 0;
-}
 
 // Image attachment type
 export interface ImageAttachment {
@@ -1387,6 +1321,11 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
   // Note: isLoading guard removed to allow queuing messages while AI is responding
   const bypassRepetitionRef = useRef(false);
   const handleSend = useCallback(async () => {
+    // IME composition can lag behind React's KeyboardEvent flags on macOS
+    // WebView. Do not let button-click or stale-keydown paths submit while
+    // the textarea is still in an active composition.
+    if (isComposingRef.current) return;
+
     const text = inputValue.trim();
     if (!text && images.length === 0) return;
 
@@ -1619,7 +1558,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
     // Chat-mode keyboard contract: plain Enter sends, Shift+Enter inserts
     // a newline. (Thought mode has its own editor — ThoughtInput — with
     // Cmd/Ctrl+Enter commit and no pass-through through this component.)
-    if (event.key === 'Enter' && !event.nativeEvent.isComposing && event.keyCode !== 229) {
+    if (event.key === 'Enter' && !isComposingRef.current && !event.nativeEvent.isComposing && event.keyCode !== 229) {
       const isCmdEnter = event.metaKey || event.ctrlKey;
       const isPlainEnter = !event.shiftKey && !isCmdEnter;
       const shouldSend = isPlainEnter;

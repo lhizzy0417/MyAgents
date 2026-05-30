@@ -29,15 +29,47 @@ use crate::sidecar::{
     SidecarOwner, ensure_session_sidecar, release_session_sidecar,
 };
 
-/// Normalize a path for comparison (removes trailing slashes)
-/// This ensures consistent path matching regardless of how paths are formatted
+/// Normalize a path for comparison across persisted and caller-supplied forms.
+/// Cron tasks may be stored with POSIX separators while Windows callers query
+/// with backslashes, so compare on a stable lexical identity instead of the raw
+/// string. This intentionally does not canonicalize: workspaces may not exist
+/// when listing historical tasks.
 fn normalize_path(path: &str) -> String {
-    let trimmed = path.trim_end_matches(['/', '\\']);
-    if trimmed.is_empty() {
-        path.to_string() // Keep original if it's root path
+    let windows_style = (path.len() >= 2 && path.as_bytes()[1] == b':')
+        || path.starts_with("\\\\")
+        || path.starts_with("//");
+    let mut normalized = if windows_style {
+        path.replace('\\', "/")
     } else {
-        trimmed.to_string()
+        path.to_string()
+    };
+    if normalized.is_empty() {
+        return normalized;
     }
+
+    let bytes = normalized.as_bytes();
+    let min_len = if bytes.len() >= 3 && bytes[1] == b':' && bytes[2] == b'/' {
+        3 // Windows drive root: C:/
+    } else if normalized.starts_with("//") {
+        2 // UNC/network root prefix
+    } else if normalized.starts_with('/') {
+        1 // POSIX root
+    } else {
+        0
+    };
+
+    while normalized.len() > min_len && normalized.ends_with('/') {
+        normalized.pop();
+    }
+
+    let is_windows_identity =
+        (normalized.len() >= 2 && normalized.as_bytes()[1] == b':')
+        || normalized.starts_with("//");
+    if is_windows_identity {
+        normalized = normalized.to_lowercase();
+    }
+
+    normalized
 }
 
 /// Validate a cron expression (and optional timezone) at data-boundary time
@@ -4209,6 +4241,94 @@ async fn try_recover_single_task(handle: &AppHandle, task: &CronTask) -> Result<
 #[cfg(test)]
 mod cron_dialect_tests {
     use super::*;
+
+    fn sample_task(id: &str, workspace_path: &str) -> CronTask {
+        let now = Utc::now();
+        CronTask {
+            id: id.to_string(),
+            workspace_path: workspace_path.to_string(),
+            session_id: "session".to_string(),
+            prompt: "prompt".to_string(),
+            interval_minutes: 60,
+            end_conditions: EndConditions::default(),
+            run_mode: RunMode::SingleSession,
+            status: TaskStatus::Running,
+            execution_count: 0,
+            created_at: now,
+            last_executed_at: None,
+            notify_enabled: true,
+            tab_id: None,
+            exit_reason: None,
+            permission_mode: default_permission_mode(),
+            model: None,
+            provider_env: None,
+            provider_id: None,
+            provider_intent: ProviderIntent::FollowAgent,
+            runtime: None,
+            runtime_config: None,
+            mcp_enabled_servers: None,
+            last_error: None,
+            last_run_ok: None,
+            last_run_duration_ms: None,
+            source_bot_id: None,
+            delivery: None,
+            schedule: None,
+            name: None,
+            next_execution_at: None,
+            internal_session_id: None,
+            updated_at: now,
+            task_id: None,
+        }
+    }
+
+    fn test_manager_with_task(task: CronTask) -> CronTaskManager {
+        let mut tasks = HashMap::new();
+        tasks.insert(task.id.clone(), task);
+        CronTaskManager {
+            tasks: Arc::new(RwLock::new(tasks)),
+            storage_path: PathBuf::from("unused"),
+            shutdown: Arc::new(RwLock::new(false)),
+            executing_tasks: Arc::new(RwLock::new(HashSet::new())),
+            active_schedulers: Arc::new(RwLock::new(HashSet::new())),
+            scheduler_handles: Arc::new(RwLock::new(HashMap::new())),
+            app_handle: Arc::new(RwLock::new(None)),
+        }
+    }
+
+    #[test]
+    fn normalize_path_matches_windows_separator_variants() {
+        assert_eq!(
+            normalize_path(r"C:\Users\me\project\"),
+            "c:/users/me/project"
+        );
+        assert_eq!(normalize_path("C:/Users/me/project"), "c:/users/me/project");
+        assert_eq!(
+            normalize_path(r"\\Server\Share\Project\"),
+            "//server/share/project"
+        );
+        assert_eq!(normalize_path("/Users/me/project/"), "/Users/me/project");
+        assert_eq!(normalize_path("/"), "/");
+        assert_eq!(normalize_path(r"C:\"), "c:/");
+    }
+
+    #[test]
+    fn normalize_path_keeps_posix_literal_backslashes() {
+        assert_ne!(normalize_path(r"/tmp/a\b"), normalize_path("/tmp/a/b"));
+        assert_eq!(normalize_path(r"/tmp/a\b/"), r"/tmp/a\b");
+    }
+
+    #[tokio::test]
+    async fn get_tasks_for_workspace_matches_backslash_query_to_forward_slash_storage() {
+        let task = sample_task("task-1", "C:/Users/me/project");
+        let manager = test_manager_with_task(task);
+
+        let tasks = manager
+            .get_tasks_for_workspace(r"C:\Users\me\project\")
+            .await;
+
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].id, "task-1");
+    }
 
     /// Fingerprint cases for `translate_unix_dow_to_crate_dow` — encodes the
     /// Unix→crate mapping that the rest of the app relies on.

@@ -380,26 +380,37 @@ impl ImAdapter for BridgeAdapter {
                     }
                 }
                 _ = tokio::time::sleep(Duration::from_secs(30)) => {
-                    // Pattern 4: poll /health/ready (gateway loaded + registered),
-                    // not /health (TCP only). A bridge whose gateway has crashed
-                    // post-startup keeps /health 200 but /health/ready 503.
+                    // Pattern 4: poll /health/functional (gateway is actually
+                    // serving), not just /health (TCP only) or /health/ready
+                    // (loaded + registered). A bridge whose gateway receive loop
+                    // is stuck can keep readiness green while functional health
+                    // exposes the stale gateway status.
                     //
-                    // Backward-compat: if /health/ready 404s (older bridge build
-                    // shipped without the new endpoint), fall back to /health for
-                    // one rollout cycle so a stale bundled bridge doesn't trip
-                    // the watchdog.
-                    let ready_url = self.url("/health/ready");
+                    // Backward-compat: if /health/functional 404s, fall back to
+                    // /health/ready; if that is also missing, fall back to
+                    // /health for one rollout cycle.
+                    let functional_url = self.url("/health/functional");
                     let mut probed_status: Option<reqwest::StatusCode> = None;
                     let mut probe_err: Option<String> = None;
-                    match self.client.get(&ready_url).send().await {
+                    let mut probed_endpoint = "/health/functional";
+                    match self.client.get(&functional_url).send().await {
                         Ok(resp) => {
                             let status = resp.status();
                             probed_status = Some(status);
                             if status == reqwest::StatusCode::NOT_FOUND {
-                                // Older bridge — fall back to /health. Remove
-                                // this branch one release after rollout.
-                                match self.client.get(self.url("/health")).send().await {
-                                    Ok(fb) => probed_status = Some(fb.status()),
+                                probed_endpoint = "/health/ready";
+                                match self.client.get(self.url("/health/ready")).send().await {
+                                    Ok(ready) => {
+                                        let ready_status = ready.status();
+                                        probed_status = Some(ready_status);
+                                        if ready_status == reqwest::StatusCode::NOT_FOUND {
+                                            probed_endpoint = "/health";
+                                            match self.client.get(self.url("/health")).send().await {
+                                                Ok(fb) => probed_status = Some(fb.status()),
+                                                Err(e) => probe_err = Some(e.to_string()),
+                                            }
+                                        }
+                                    }
                                     Err(e) => probe_err = Some(e.to_string()),
                                 }
                             }
@@ -419,7 +430,7 @@ impl ImAdapter for BridgeAdapter {
                             Ok(r) => r.text().await.unwrap_or_default(),
                             Err(_) => String::new(),
                         };
-                        ulog_error!("[bridge:{}] /health/ready returned {}, failure {}/{}, status={}", self.plugin_id, status, consecutive_failures, MAX_FAILURES, detail);
+                        ulog_error!("[bridge:{}] {} returned {}, failure {}/{}, status={}", self.plugin_id, probed_endpoint, status, consecutive_failures, MAX_FAILURES, detail);
                     } else if let Some(err) = probe_err {
                         consecutive_failures += 1;
                         ulog_error!("[bridge:{}] Health check failed: {}, failure {}/{}", self.plugin_id, err, consecutive_failures, MAX_FAILURES);

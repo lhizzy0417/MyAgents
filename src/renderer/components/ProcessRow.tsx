@@ -1,8 +1,12 @@
 
-import { AlertCircle, Brain, ChevronDown, Loader2, XCircle, StopCircle } from 'lucide-react';
+import { AlertCircle, Brain, ChevronDown, Loader2, XCircle, StopCircle, Copy, Check, Download } from 'lucide-react';
 import { memo, useEffect, useMemo, useRef, useState } from 'react';
 
+import { track } from '@/analytics';
 import Markdown from '@/components/Markdown';
+import Tip from '@/components/Tip';
+import { useToastOptional } from '@/components/Toast';
+import { buildThinkingMarkdown, downloadMarkdown, localDateStr } from '@/utils/markdownExport';
 import {
     formatDuration,
     getToolBadgeConfig,
@@ -34,6 +38,13 @@ const ProcessRow = memo(function ProcessRow({
     // Task tool elapsed time (for running tasks)
     const [taskElapsed, setTaskElapsed] = useState(0);
     const taskTimerRef = useRef<ReturnType<typeof setInterval> | undefined>(undefined);
+    // Thinking-block copy feedback (icon swap, auto-resets after 1.5s)
+    const [thinkingCopied, setThinkingCopied] = useState(false);
+    const copyTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+    const exportingRef = useRef(false);
+    const toast = useToastOptional();
+
+    useEffect(() => () => { if (copyTimerRef.current) clearTimeout(copyTimerRef.current); }, []);
 
     const isThinking = block.type === 'thinking';
     const isTool = block.type === 'tool_use' || block.type === 'server_tool_use';
@@ -112,7 +123,6 @@ const ProcessRow = memo(function ProcessRow({
     }, [isTaskRunning, block.tool?.taskStartTime]);
 
     // Parse Task result once (memoized to avoid repeated JSON parsing)
-    // eslint-disable-next-line react-hooks/preserve-manual-memoization -- Intentional: only re-parse when result changes
     const taskParsedResult = useMemo(() => {
         if (!isTaskTool || !block.tool?.result) return null;
         try {
@@ -155,6 +165,33 @@ const ProcessRow = memo(function ProcessRow({
     const handleToggle = () => {
         if (!hasContent) return;
         setUserToggled(prev => prev === null ? true : !prev);
+    };
+
+    const handleCopyThinking = () => {
+        // Guard a missing Clipboard API (insecure/unsupported context) so the
+        // synchronous deref can't throw, and only flip the "已复制" checkmark
+        // once the write actually resolves (no false success on rejection).
+        if (!block.thinking || !navigator.clipboard) return;
+        navigator.clipboard.writeText(block.thinking).then(() => {
+            track('thinking_copy', {});
+            setThinkingCopied(true);
+            if (copyTimerRef.current) clearTimeout(copyTimerRef.current);
+            copyTimerRef.current = setTimeout(() => setThinkingCopied(false), 1500);
+        }).catch(() => {});
+    };
+
+    const handleExportThinking = async () => {
+        // In-flight guard: a rapid double-click would otherwise fire two
+        // downloads + two toasts for the same file.
+        if (!block.thinking || exportingRef.current) return;
+        exportingRef.current = true;
+        try {
+            track('thinking_export', {});
+            const fileName = `${localDateStr()}_思考过程.md`;
+            toast?.success(await downloadMarkdown(fileName, buildThinkingMarkdown(block.thinking)));
+        } finally {
+            exportingRef.current = false;
+        }
     };
 
     // Build display content
@@ -298,8 +335,28 @@ const ProcessRow = memo(function ProcessRow({
                         <div className="border-t border-[var(--line)] bg-[var(--paper-elevated)]/50 px-4 pb-4 pt-3">
                             <div className="ml-7">
                                 {isThinking && block.thinking && (
-                                    <div className="text-[var(--ink-secondary)] select-text">
+                                    <div className="group/think text-[var(--ink-secondary)] select-text">
                                         <Markdown compact>{block.thinking}</Markdown>
+                                        {!isThinkingActive && (
+                                            <div className="mt-2 flex select-none items-center gap-2 opacity-0 transition-opacity duration-150 group-hover/think:opacity-100 focus-within:opacity-100">
+                                                <Tip label={thinkingCopied ? '已复制' : '复制'}>
+                                                    <button type="button"
+                                                        aria-label="复制思考过程"
+                                                        onClick={handleCopyThinking}
+                                                        className="rounded-lg p-1 text-[var(--ink-muted)] transition-all hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]">
+                                                        {thinkingCopied ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}
+                                                    </button>
+                                                </Tip>
+                                                <Tip label="导出 markdown">
+                                                    <button type="button"
+                                                        aria-label="导出思考过程为 markdown"
+                                                        onClick={handleExportThinking}
+                                                        className="rounded-lg p-1 text-[var(--ink-muted)] transition-all hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]">
+                                                        <Download className="size-3.5" />
+                                                    </button>
+                                                </Tip>
+                                            </div>
+                                        )}
                                     </div>
                                 )}
                                 {isTool && block.tool && (

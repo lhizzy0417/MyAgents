@@ -4782,6 +4782,53 @@ fn resolve_session_runtime(session_id: &str) -> Option<String> {
     None
 }
 
+/// Lazy validation for tab restore (Issue #232 / PRD 0.2.25).
+///
+/// A restored "cold" chat tab is only activatable if (a) its session still
+/// exists in `~/.myagents/sessions.json` and (b) its workspace directory still
+/// exists on disk. This is read-only and reads the disk directly — it does NOT
+/// depend on the global sidecar being up (which is async + flaky on startup),
+/// matching the PRD's "validate lazily at first activation, decoupled from
+/// global sidecar readiness" decision.
+///
+/// Returns false (drop the tab) on any miss: deleted session, moved/deleted
+/// workspace, or unreadable index.
+#[tauri::command]
+#[allow(non_snake_case)]
+pub fn cmd_can_restore_session(sessionId: String, agentDir: String) -> bool {
+    // Validate the workspace through the project's canonical chokepoint
+    // (system blacklist + must be an existing directory), same as every other
+    // workspace command — NOT a bare `is_dir()`, which would accept relative /
+    // credential / system paths. Catches moved/deleted workspaces that would
+    // otherwise become a cold-start sidecar-spawn failure on click.
+    if crate::workspace_files::path_safety::validate_workspace_root(&agentDir).is_err() {
+        return false;
+    }
+    let Some(sessions_path) = dirs::home_dir().map(|h| h.join(".myagents").join("sessions.json"))
+    else {
+        return false;
+    };
+    let Ok(content) = std::fs::read_to_string(&sessions_path) else {
+        return false;
+    };
+    let Ok(sessions) = serde_json::from_str::<serde_json::Value>(strip_bom(&content)) else {
+        return false;
+    };
+    let Some(arr) = sessions.as_array() else {
+        return false;
+    };
+    // The session must exist AND belong to this workspace. Cross-checking
+    // agentDir prevents a corrupted/stale localStorage entry from restoring
+    // session A under workspace B (which would apply the wrong workspace / MCP /
+    // model config to an existing conversation). Both agentDir values originate
+    // from the same launch path (persisted tab vs session metadata), so a raw
+    // string compare is correct.
+    arr.iter().any(|s| {
+        s.get("id").and_then(|v| v.as_str()) == Some(&sessionId)
+            && s.get("agentDir").and_then(|v| v.as_str()) == Some(&agentDir)
+    })
+}
+
 /// v0.1.69 T13: Runtime invariant check on Sidecar reuse.
 ///
 /// Under the v0.1.69 layered-snapshot model, a session's `runtime` is part of

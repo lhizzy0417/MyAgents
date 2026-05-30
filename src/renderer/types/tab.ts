@@ -84,6 +84,13 @@ export interface Tab {
     // Sidecar lifecycle is now managed by SidecarManager's Owner model.
     // Use getSessionPort(sessionId) to get the port when needed.
     joinedExistingSidecar?: boolean;  // Tab joined an already-running sidecar (e.g. IM Bot session)
+    /** Runtime-only (never persisted). 'cold' = restored from a previous
+     *  session on startup but not yet activated: App renders it as lightweight
+     *  tab chrome WITHOUT mounting TabProvider — so no SSE connect, no
+     *  ensureSessionSidecar, no recovery timers fire — until the user (or the
+     *  initial active-tab activation) opens it. Cleared by
+     *  App.activateRestoredTab once its sidecar is ensured. See PRD 0.2.25. */
+    restoreState?: 'cold';
 }
 
 export interface TabState {

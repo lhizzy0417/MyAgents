@@ -1,5 +1,6 @@
 import { randomUUID } from 'crypto';
 import type { RuntimeType } from '../../shared/types/runtime';
+import { deriveSessionTitle } from '../../shared/sessionTitle';
 
 /**
  * Session statistics for tracking usage
@@ -180,15 +181,13 @@ export function generateSessionId(): string {
  * Generate session title from first user message
  */
 export function generateSessionTitle(message: string): string {
-    const maxLength = 20;
-    const trimmed = message.trim();
-    if (!trimmed) {
-        return 'New Chat';
-    }
-    if (trimmed.length <= maxLength) {
-        return trimmed;
-    }
-    return trimmed.slice(0, maxLength) + '...';
+    // Route through the shared deriveSessionTitle so this path (the
+    // "session created first, message sent later" flow via
+    // updateSessionTitleFromMessage) strips the <system-reminder>/<CRON_TASK>/
+    // <HEARTBEAT> wrapper before truncating — same as the other storage sites.
+    // Previously a blind slice(0,20) stored a wrapper-only scrap for cron/IM
+    // turns (cron-title fix). 40-char cap aligns with the sibling sites.
+    return deriveSessionTitle(message, 40) || 'New Chat';
 }
 
 /**

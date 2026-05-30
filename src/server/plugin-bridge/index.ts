@@ -20,6 +20,7 @@ import { getBotIdentity, abortResolver } from './bot-identity';
 import { FeishuStreamingSession } from './streaming-adapter';
 import { createMcpHandler } from './mcp-handler';
 import { getPendingDispatch, resolvePendingDispatch, rejectPendingDispatch, clearAllPendingDispatches } from './pending-dispatch';
+import { buildFunctionalHealth, buildReadyHealth, type GatewayRuntimeStatus } from './gateway-health';
 import { serve as honoServe } from '@hono/node-server';
 import { readFile, mkdtemp, writeFile, rm } from 'node:fs/promises';
 import { readFileSync } from 'node:fs';
@@ -208,6 +209,11 @@ let pluginName = 'unknown';
 let gatewayError: string | null = null;
 let gatewayStarted = false; // true once startAccount() has been invoked
 let waitingForQrLogin = false; // true when plugin supports QR login but isn't configured yet
+let gatewayStatus: GatewayRuntimeStatus | null = null;
+
+function mergeGatewayStatus(update: GatewayRuntimeStatus): void {
+  gatewayStatus = { ...(gatewayStatus ?? {}), ...update };
+}
 
 // Streaming sessions (keyed by streamId)
 const streamingSessions = new Map<string, FeishuStreamingSession>();
@@ -564,6 +570,7 @@ async function loadPlugin() {
         const errMsg = 'Plugin reports account is not configured (missing required credentials)';
         console.error(`[plugin-bridge] ${errMsg}`);
         gatewayError = errMsg;
+        mergeGatewayStatus({ running: false, lastError: errMsg });
         return; // Don't start gateway — credentials are missing
       }
     }
@@ -573,7 +580,8 @@ async function loadPlugin() {
   const startAccount = capturedPlugin.gateway?.startAccount;
   if (typeof startAccount === 'function') {
     const abortController = new AbortController();
-    let status: Record<string, unknown> = { running: false, connected: false };
+    gatewayStatus = null;
+    let status: GatewayRuntimeStatus = { running: false, connected: false };
 
     const resolvedAccountId = (account.accountId as string) || persistedAccountId || 'default';
     const ctx = {
@@ -590,7 +598,10 @@ async function loadPlugin() {
       channelRuntime: { ...runtime.channel, channel: runtime.channel },
       cfg: openclawCfg,
       getStatus: () => status,
-      setStatus: (s: Record<string, unknown>) => { status = s; },
+      setStatus: (s: GatewayRuntimeStatus) => {
+        status = { ...status, ...s };
+        mergeGatewayStatus(s);
+      },
     };
 
     // Don't await — let the gateway run in background (it may be long-lived)
@@ -608,6 +619,7 @@ async function loadPlugin() {
         const errMsg = err instanceof Error ? err.message : String(err);
         console.error(`[plugin-bridge] Gateway error:`, errMsg);
         gatewayError = errMsg;
+        mergeGatewayStatus({ running: false, lastError: errMsg });
       });
 
     // Store abort controller for graceful shutdown
@@ -615,6 +627,7 @@ async function loadPlugin() {
   } else {
     // No gateway — plugin is a send-only channel, mark as ready immediately
     gatewayStarted = true;
+    gatewayStatus = null;
     // Pre-warm bot identity resolver (same rationale as above).
     void getBotIdentity(capturedPlugin.id, pluginConfig);
   }
@@ -633,9 +646,9 @@ const server = honoServe({
     //   /health/live        — bridge process is alive + listening.
     //   /health/ready       — plugin loaded AND gateway registered/started
     //                         (or waiting-for-QR-login). Failure ⇒ structured 503.
-    //   /health/functional  — gateway has had a successful forward to Rust
-    //                         in the last 60s. Failure ⇒ "alive but not
-    //                         actually serving" (watchdog should restart).
+    //   /health/functional  — gateway status still receives successful polls
+    //                         (or recent forwards for plugins without status).
+    //                         Failure ⇒ "alive but not actually serving".
     if (path === '/health' || path === '/health/live') {
       return Response.json({ ok: true, pluginName });
     }
@@ -653,63 +666,31 @@ const server = honoServe({
     }
 
     if (path === '/health/ready') {
-      // Loaded plugin + gateway started (or waiting on QR) + no fatal error.
-      const pluginLoaded = !!capturedPlugin;
-      const gatewayOk = pluginLoaded && !gatewayError && (gatewayStarted || waitingForQrLogin);
-      if (gatewayOk) {
-        return Response.json({ state: 'ready', pluginName, waitingForQrLogin });
-      }
-      const reason: string =
-        !pluginLoaded ? 'plugin-not-loaded'
-        : gatewayError ? 'gateway-error'
-        : 'gateway-not-started';
-      return Response.json({
-        state: 'pending',
-        reason,
-        pluginName,
-        error: gatewayError || undefined,
+      const health = buildReadyHealth({
+        pluginLoaded: !!capturedPlugin,
+        gatewayError,
+        gatewayStarted,
         waitingForQrLogin,
-      }, { status: 503 });
+        hasGateway: typeof capturedPlugin?.gateway?.startAccount === 'function',
+        pluginName,
+        gatewayStatus,
+      });
+      return Response.json(health.body, { status: health.status });
     }
 
     if (path === '/health/functional') {
-      // Functional = readiness + recent forward (or, if the plugin has no
-      // gateway at all because it's send-only, we accept readiness alone).
-      const pluginLoaded = !!capturedPlugin;
-      const gatewayOk = pluginLoaded && !gatewayError && (gatewayStarted || waitingForQrLogin);
-      if (!gatewayOk) {
-        return Response.json({
-          state: 'unready',
-          reason: !pluginLoaded ? 'plugin-not-loaded' : gatewayError ? 'gateway-error' : 'gateway-not-started',
-          error: gatewayError || undefined,
-        }, { status: 503 });
-      }
       const lastForward = (globalThis as { __pluginBridgeLastForwardAt?: number }).__pluginBridgeLastForwardAt;
-      const hasGateway = typeof capturedPlugin?.gateway?.startAccount === 'function';
-      // Send-only channels never forward inbound messages; consider them
-      // functional whenever they're ready.
-      if (!hasGateway) {
-        return Response.json({ state: 'functional', reason: 'send-only' });
-      }
-      // Just-started bridges may not have seen any traffic yet — give a
-      // grace period equal to the staleness window before we judge.
-      const STALENESS_MS = 60_000;
-      const ageMs = lastForward ? Date.now() - lastForward : Infinity;
-      if (waitingForQrLogin) {
-        // Waiting on user to scan a QR code — no traffic expected yet.
-        return Response.json({ state: 'functional', reason: 'awaiting-qr-login' });
-      }
-      if (ageMs <= STALENESS_MS) {
-        return Response.json({ state: 'functional', lastForwardMsAgo: ageMs });
-      }
-      // Either no forward ever, or last forward >60s ago. We can't easily
-      // ping the gateway from here without plugin-specific code, so report
-      // staleness as "unknown" rather than "broken" for ready-but-quiet bots.
-      return Response.json({
-        state: lastForward ? 'stale' : 'unknown',
-        lastForwardMsAgo: lastForward ? ageMs : null,
-        message: 'no successful forward in the last 60s',
+      const health = buildFunctionalHealth({
+        pluginLoaded: !!capturedPlugin,
+        gatewayError,
+        gatewayStarted,
+        waitingForQrLogin,
+        hasGateway: typeof capturedPlugin?.gateway?.startAccount === 'function',
+        pluginName,
+        gatewayStatus,
+        lastForwardAt: lastForward,
       });
+      return Response.json(health.body, { status: health.status });
     }
 
     if (path === '/status') {
@@ -721,6 +702,7 @@ const server = honoServe({
         ready: !!capturedPlugin && !gatewayError && (gatewayStarted || waitingForQrLogin),
         error: gatewayError || undefined,
         waitingForQrLogin,
+        gatewayStatus: gatewayStatus || undefined,
       });
     }
 
@@ -1241,7 +1223,8 @@ const server = honoServe({
             return Response.json({ ok: false, error: 'Bridge runtime not initialized; cannot restart gateway' }, { status: 500 });
           }
           const newAbort = new AbortController();
-          let status: Record<string, unknown> = { running: false, connected: false };
+          gatewayStatus = null;
+          let status: GatewayRuntimeStatus = { running: false, connected: false };
           const restartAccountId = (account.accountId as string) || qrAccountId || 'default';
           const channelSurface = loadedRuntime.channel;
           const ctx = {
@@ -1253,7 +1236,10 @@ const server = honoServe({
             channelRuntime: { ...channelSurface, channel: channelSurface },
             cfg: loadedOpenclawConfig,
             getStatus: () => status,
-            setStatus: (s: Record<string, unknown>) => { status = s; },
+            setStatus: (s: GatewayRuntimeStatus) => {
+              status = { ...status, ...s };
+              mergeGatewayStatus(s);
+            },
           };
           gatewayError = null;
           gatewayStarted = true;
@@ -1268,6 +1254,7 @@ const server = honoServe({
             .then(() => console.log('[plugin-bridge] Gateway restarted after QR login'))
             .catch((err: unknown) => {
               gatewayError = err instanceof Error ? err.message : String(err);
+              mergeGatewayStatus({ running: false, lastError: gatewayError });
               console.error('[plugin-bridge] Gateway restart error:', gatewayError);
             });
           (globalThis as Record<string, unknown>).__bridgeAbort = newAbort;
@@ -1294,6 +1281,7 @@ const server = honoServe({
       // Abort the gateway via AbortController
       const abortCtrl = (globalThis as Record<string, unknown>).__bridgeAbort as AbortController | undefined;
       if (abortCtrl) abortCtrl.abort();
+      mergeGatewayStatus({ running: false });
       // Abort any in-flight bot-identity resolver fetches.
       abortResolver();
       // Also try calling stopAccount if available — OpenClaw expects same context as startAccount

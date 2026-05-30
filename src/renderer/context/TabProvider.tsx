@@ -304,6 +304,12 @@ export default function TabProvider({
     // returns ('unknown' / null) when no agent is bound, which is itself a
     // useful signal (means launcher / no-agent session).
     const { config: appConfig } = useConfigData();
+    // sendMessage is a useCallback keyed only on [tabId] (exhaustive-deps off), so
+    // reading appConfig directly inside it would capture a stale render. Mirror it
+    // into a ref (updated every render) so the per-send background-agent policy echo
+    // reflects the user's latest Settings choice without recreating the callback.
+    const appConfigRef = useRef(appConfig);
+    appConfigRef.current = appConfig;
     const analyticsMetaRef = useRef({
         runtime: 'builtin' as 'builtin' | 'claude-code' | 'codex' | 'gemini' | 'unknown',
         agentHash: null as string | null,
@@ -3014,6 +3020,11 @@ export default function TabProvider({
             text: trimmed,
             images: imageData,
             permissionMode: permissionMode ?? 'auto',
+            // #264 — echo the global background-agent permission policy so the
+            // builtin PermissionRequest hook applies it to run_in_background sub-agents.
+            // Read via ref (not the closure-captured appConfig) so a Settings change
+            // takes effect immediately in already-mounted tabs.
+            backgroundAgentPermissionMode: appConfigRef.current?.backgroundAgentPermissionMode ?? 'inherit',
             model,
             providerEnv: providerEnv ?? 'subscription',
         }).then((response) => {

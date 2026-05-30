@@ -31,6 +31,7 @@ import { updateSession, type SessionMetadata } from '@/api/sessionClient';
 import type { Project } from '@/config/types';
 import OverlayBackdrop from '@/components/OverlayBackdrop';
 import SessionSearchItem from '@/components/search/SessionSearchItem';
+import { parseSessionIdQuery } from '@/utils/parseSessionIdQuery';
 
 interface TaskCenterOverlayProps {
     projects: Project[];
@@ -148,12 +149,14 @@ export default memo(function TaskCenterOverlay({
         
         let isStale = false;
         const timeout = setTimeout(async () => {
-            if (!searchQuery.trim()) {
+            // A pasted session id short-circuits full-text search — it's resolved
+            // synchronously via directSessionMatch (Issue #260).
+            if (!searchQuery.trim() || parseSessionIdQuery(searchQuery)) {
                 setSearchResults([]);
                 setIsSearching(false);
                 return;
             }
-            
+
             setIsSearching(true);
             try {
                 const result = await searchSessions(searchQuery);
@@ -179,6 +182,28 @@ export default memo(function TaskCenterOverlay({
             projects.find(p => p.path === session.agentDir),
         [projects]
     );
+
+    // Paste-to-jump (Issue #260): if the query is a pasted session id (bare or
+    // the `SessionID: <uuid>` copy-button format), resolve it directly against
+    // the already-loaded sessions instead of running full-text search.
+    //   - { kind: 'found' }    → render one clickable result, Enter opens it
+    //   - { kind: 'notFound' } → the id is well-formed but no loaded session matches
+    //   - null                 → not a session id, fall through to normal search
+    const directSessionMatch = useMemo(() => {
+        const sessionId = parseSessionIdQuery(searchQuery);
+        if (!sessionId) return null;
+        const session = sessions.find(s => s.id.toLowerCase() === sessionId);
+        const project = session ? getProjectForSession(session) : undefined;
+        if (session && project) return { kind: 'found' as const, session, project };
+        return { kind: 'notFound' as const };
+    }, [searchQuery, sessions, getProjectForSession]);
+
+    // Open the direct-match session (used by Enter in the search box).
+    const openDirectMatch = useCallback(() => {
+        if (directSessionMatch?.kind === 'found') {
+            onOpenTask(directSessionMatch.session, directSessionMatch.project);
+        }
+    }, [directSessionMatch, onOpenTask]);
 
     const cronProtectedSessionIds = useMemo(
         () => new Set(cronTasks.filter(t => t.status === 'running').map(t => t.sessionId)),
@@ -295,6 +320,10 @@ export default memo(function TaskCenterOverlay({
                                             if (e.key === "Escape") {
                                                 setIsSearchMode(false);
                                                 setSearchQuery("");
+                                            } else if (e.key === "Enter" && directSessionMatch?.kind === 'found') {
+                                                // Paste-to-jump: Enter opens the matched session (#260).
+                                                e.preventDefault();
+                                                openDirectMatch();
                                             }
                                         }}
                                     />
@@ -360,7 +389,41 @@ export default memo(function TaskCenterOverlay({
 
                         {/* Session list */}
                         <div className="flex-1 overflow-y-auto overscroll-contain" style={{ scrollbarGutter: 'stable' }}>
-                            {filteredSessions.length === 0 ? (
+                            {isSearchMode && directSessionMatch ? (
+                                /* Paste-to-jump (#260): query is a session id — show the
+                                   resolved session as one clickable row (Enter also opens it),
+                                   bypassing full-text search and the filteredSessions guard. */
+                                directSessionMatch.kind === 'found' ? (
+                                    <div className="space-y-2">
+                                        <div className="px-1 text-[11px] text-[var(--ink-muted)]/60">
+                                            匹配到会话 · 回车或点击打开
+                                        </div>
+                                        <div
+                                            role="button"
+                                            onClick={openDirectMatch}
+                                            className="group flex w-full cursor-pointer items-center gap-2.5 rounded-lg border border-[var(--accent)]/30 px-3 py-2.5 text-left transition-all hover:bg-[var(--hover-bg)]"
+                                        >
+                                            <div className="flex w-14 shrink-0 items-center gap-1 text-[11px] text-[var(--ink-muted)]/50">
+                                                <Clock className="h-2.5 w-2.5" />
+                                                <span>{formatTime(directSessionMatch.session.lastActiveAt)}</span>
+                                            </div>
+                                            <span className="min-w-0 flex-1 truncate text-[13px] text-[var(--ink-secondary)] transition-colors group-hover:text-[var(--ink)]">
+                                                {getSessionDisplayText(directSessionMatch.session)}
+                                            </span>
+                                            <div className="flex shrink-0 items-center gap-1.5 text-[11px] text-[var(--ink-muted)]/45">
+                                                <WorkspaceIcon icon={directSessionMatch.project.icon} size={14} />
+                                                <span className="max-w-[80px] truncate">
+                                                    {getFolderName(directSessionMatch.project.path)}
+                                                </span>
+                                            </div>
+                                        </div>
+                                    </div>
+                                ) : (
+                                    <div className="py-8 text-center text-[13px] text-[var(--ink-muted)]/60">
+                                        未找到该 SessionID 对应的会话
+                                    </div>
+                                )
+                            ) : filteredSessions.length === 0 ? (
                                 <div className="py-8 text-center text-[13px] text-[var(--ink-muted)]/60">
                                     暂无匹配的历史对话
                                 </div>

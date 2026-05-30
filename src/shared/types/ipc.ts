@@ -26,6 +26,8 @@ export interface SendMessagePayload {
   model?: string;
   /** Permission mode to use for this message */
   permissionMode?: 'auto' | 'plan' | 'fullAgency' | 'custom';
+  /** Background-agent permission policy (#264); echoed from global AppConfig. */
+  backgroundAgentPermissionMode?: 'inherit' | 'fullAgency';
   /** Provider environment variables (baseUrl, apiKey, authType) for third-party providers */
   providerEnv?: {
     baseUrl?: string;

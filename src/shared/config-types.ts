@@ -6,6 +6,15 @@
 export type PermissionMode = 'auto' | 'plan' | 'fullAgency';
 
 /**
+ * Background-agent permission policy (issue #264).
+ * - 'inherit'    — background (run_in_background) sub-agents inherit only the
+ *                  user's session "always allow" grants; ungranted tools denied.
+ * - 'fullAgency' — background lane fully autonomous (non-interaction tools allowed).
+ * See src/server/utils/background-agent-permission.ts for the decision core.
+ */
+export type BackgroundAgentPermissionMode = 'inherit' | 'fullAgency';
+
+/**
  * Permission mode display configuration
  * Based on PRD 0.0.17 mode definitions
  */
@@ -387,6 +396,13 @@ export interface AppConfig {
   // Default settings for new projects
   defaultProviderId?: string;
   defaultPermissionMode: PermissionMode;
+  // Background-agent permission policy (issue #264). Controls what a
+  // `run_in_background` sub-agent may do when it hits a tool the SDK can't
+  // auto-resolve. 'inherit' (default) = background agents inherit only the
+  // user's session "always allow" grants, ungranted tools are denied with a
+  // clear message; 'fullAgency' = background lane is fully autonomous (every
+  // non-interaction tool allowed). Omitted/undefined ⇒ treated as 'inherit'.
+  backgroundAgentPermissionMode?: BackgroundAgentPermissionMode;
   // UI preferences
   theme: 'light' | 'dark' | 'system';
   minimizeToTray: boolean;
@@ -1125,6 +1141,7 @@ export function getEffectiveModelAliases(
 export const DEFAULT_CONFIG: AppConfig = {
   defaultProviderId: undefined, // No default — resolved at runtime from first available provider
   defaultPermissionMode: 'auto',
+  backgroundAgentPermissionMode: 'inherit', // background agents inherit granted perms; nothing wider (#264)
   theme: 'system',
   minimizeToTray: true,   // 默认开启最小化到托盘
   showDevTools: false,

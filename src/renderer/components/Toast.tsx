@@ -134,3 +134,16 @@ export function useToast(): ToastContextValue {
     }
     return context;
 }
+
+/**
+ * Non-throwing variant: returns null when there is no ToastProvider above.
+ *
+ * Use this in widely-reused, deeply-nested components (e.g. Message /
+ * ProcessRow) where toast is best-effort feedback for an optional action — so
+ * rendering the component outside a provider (notably in unit tests) degrades
+ * gracefully to "no toast" instead of crashing the whole subtree. In the real
+ * app ToastProvider always wraps the tree, so this returns the live toast.
+ */
+export function useToastOptional(): ToastContextValue | null {
+    return useContext(ToastContext);
+}

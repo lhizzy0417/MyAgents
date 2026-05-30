@@ -7,6 +7,7 @@
  */
 
 import { getSessionDetails } from '@/api/sessionClient';
+import { localDateStr, sanitizeFileName, downloadMarkdown, exportHeader } from '@/utils/markdownExport';
 
 export interface SessionExportResult {
     ok: boolean;
@@ -44,11 +45,10 @@ export async function exportSessionAsMarkdown(sessionId: string): Promise<Sessio
             return { ok: false, message: '该对话暂无内容可导出', empty: true };
         }
 
-        const now = new Date();
-        const dateStr = `${now.getFullYear()}-${pad2(now.getMonth() + 1)}-${pad2(now.getDate())}`;
+        const dateStr = localDateStr();
 
         const lines: string[] = [];
-        lines.push(`<!-- Exported from MyAgents · ${dateStr} -->`);
+        lines.push(exportHeader(dateStr));
         lines.push(`<!-- Session: ${data.title} -->`);
         lines.push('');
 
@@ -66,25 +66,10 @@ export async function exportSessionAsMarkdown(sessionId: string): Promise<Sessio
         }
 
         const markdown = lines.join('\n');
-        const safeTitle = data.title.replace(/[/\\:*?"<>|]/g, '_').slice(0, 60);
-        const fileName = `${dateStr}_${safeTitle}.md`;
+        const fileName = `${dateStr}_${sanitizeFileName(data.title)}.md`;
 
-        const blob = new Blob([markdown], { type: 'text/markdown;charset=utf-8' });
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = fileName;
-        a.click();
-        URL.revokeObjectURL(url);
-
-        try {
-            const { downloadDir, join: joinPath } = await import('@tauri-apps/api/path');
-            const dlDir = await downloadDir();
-            const fullPath = await joinPath(dlDir, fileName);
-            return { ok: true, message: `已导出：${fullPath}` };
-        } catch {
-            return { ok: true, message: `已导出到下载目录：${fileName}` };
-        }
+        const message = await downloadMarkdown(fileName, markdown);
+        return { ok: true, message };
     } catch {
         return { ok: false, message: '导出失败，请重试' };
     }
