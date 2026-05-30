@@ -12,6 +12,7 @@ pub mod im;
 pub mod inbox;
 pub mod notification;
 pub mod local_http;
+mod litellm_cache;
 pub mod logger;
 pub mod legacy_upgrade;
 #[cfg(target_os = "macos")]
@@ -1006,6 +1007,15 @@ pub fn run() {
                 ulog_info!("[App] Background update task completed");
             });
             ulog_info!("[App] Background update task spawned successfully");
+
+            // LiteLLM model-data cache: startup conditional check + 24h interval
+            // (gated by config.liteLLMModelDataRefresh, default on). Single owner
+            // lives in the Tauri process; the sidecar reads the cached file. See
+            // litellm_cache.rs.
+            tauri::async_runtime::spawn(async move {
+                litellm_cache::start_periodic_refresh().await;
+            });
+            ulog_info!("[App] LiteLLM model-data refresh task spawned");
 
             Ok(())
         })

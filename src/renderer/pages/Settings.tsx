@@ -3666,6 +3666,28 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                             </div>
                                         </div>
 
+                                        {/* LiteLLM Model Data Refresh Toggle */}
+                                        <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5">
+                                            <div className="flex items-center justify-between">
+                                                <div>
+                                                    <h3 className="text-sm font-medium text-[var(--ink)]">模型数据自动更新（LiteLLM）</h3>
+                                                    <p className="mt-1 text-xs text-[var(--ink-muted)]">
+                                                        定期从 GitHub 拉取 LiteLLM 模型库，作为模型上下文长度的兜底数据源（启动检查 + 每日增量，未改动几乎不耗流量）。
+                                                    </p>
+                                                </div>
+                                                <button
+                                                    onClick={() => updateConfig({ liteLLMModelDataRefresh: !(config.liteLLMModelDataRefresh ?? true) })}
+                                                    className={`relative h-6 w-11 shrink-0 cursor-pointer rounded-full transition-colors ${(config.liteLLMModelDataRefresh ?? true) ? 'bg-[var(--accent)]' : 'bg-[var(--line-strong)]'
+                                                        }`}
+                                                >
+                                                    <span
+                                                        className={`absolute left-0.5 top-0.5 h-5 w-5 rounded-full bg-[var(--toggle-thumb)] shadow transition-transform ${(config.liteLLMModelDataRefresh ?? true) ? 'translate-x-5' : 'translate-x-0'
+                                                            }`}
+                                                    />
+                                                </button>
+                                            </div>
+                                        </div>
+
                                         {/* Build Versions */}
                                         <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5">
                                             <h3 className="mb-3 text-sm font-medium text-[var(--ink)]">构建信息</h3>

@@ -409,6 +409,10 @@ export interface AppConfig {
   showDevTools: boolean; // 显示开发者工具 (Logs/System Info)
   multiAgentRuntime?: boolean; // 多 Agent Runtime 模式（开发者，默认关闭）
   experimentalSplitView?: boolean; // 实验性：文件预览在右侧分屏而非弹窗
+  /** 开发者：定期从 LiteLLM (GitHub) 拉取 model_prices_and_context_window.json，
+   *  作为模型 contextLength/maxOutputTokens 的最低优先级兜底数据源。缺省视同 true。
+   *  抓取在 Rust 侧（启动条件检查 + 24h interval，ETag/If-None-Match 增量）。 */
+  liteLLMModelDataRefresh?: boolean;
   // General settings
   autoStart: boolean; // 开机启动
   /** PRD 0.2.16 全局唤起快捷键。缺省视同 enabled=true + 默认键。
@@ -1146,6 +1150,7 @@ export const DEFAULT_CONFIG: AppConfig = {
   theme: 'system',
   minimizeToTray: true,   // 默认开启最小化到托盘
   showDevTools: false,
+  liteLLMModelDataRefresh: true, // 默认开启 LiteLLM 模型数据兜底刷新（开发者可关）
   autoStart: false,       // 默认不开启开机启动
   osNotifications: true,  // 默认开启系统通知
   notificationSound: true, // 默认开启通知声音

@@ -16,6 +16,10 @@
  *   2. `~/.myagents/config.json::presetCustomModels[providerId][]` — models
  *      discovered/added by the user via the UI on preset providers.
  *   3. `PRESET_PROVIDERS` (bundled in `renderer/config/types.ts`) — fallback.
+ *   4. `~/.myagents/cache/litellm_model_prices.json` — LiteLLM community data,
+ *      fetched by the Rust side on a 24h cadence. LOWEST priority: fills only
+ *      models none of 1–3 defined (covers third-party models whose `/v1/models`
+ *      doesn't report a context window). Absent until the first fetch.
  *
  * Rationale for the order: it mirrors the `findProvider`-style disk-first
  * precedence elsewhere in admin-config. If a user pins a corrected
@@ -67,7 +71,7 @@ export interface ModelCapability {
    * filters and the modality badges in the model picker without re-research.
    */
   inputModalities?: string[];
-  source: 'preset' | 'custom' | 'discovered';
+  source: 'preset' | 'custom' | 'discovered' | 'litellm';
 }
 
 /** Modality kinds we recognize. Mirrors OpenAI / OpenRouter convention. */
@@ -82,6 +86,21 @@ const MAX_CONFIG_FILE_BYTES = 10 * 1024 * 1024;       // 10 MB
 // Values above this are almost certainly bogus. Largest known public model is
 // ~10M context (Gemini 2M, Llama 3.1 10M); 20M is generous headroom.
 const MAX_PLAUSIBLE_TOKENS = 20_000_000;
+
+// LiteLLM fallback (issue: per-model context for third-party models the
+// provider's /v1/models doesn't report). The Rust side fetches
+// `model_prices_and_context_window.json` (~1.5MB, ~2700 entries) to this path
+// on a 24h cadence; we read it here as the LOWEST-priority registry source.
+const LITELLM_CACHE_REL = ['.myagents', 'cache', 'litellm_model_prices.json'] as const;
+// The file is ~1.5MB today; 24MB headroom guards against runaway growth while
+// still rejecting an absurd/poisoned file before we JSON.parse it.
+const MAX_LITELLM_FILE_BYTES = 24 * 1024 * 1024;
+// LiteLLM `mode` values that denote a text LLM whose context window is
+// meaningful to us. The file also carries image_generation / embedding /
+// audio_* / rerank / moderation entries (and path-like keys such as
+// `1024-x-1024/.../bedrock/...`) whose token fields are NOT chat context — those
+// MUST be filtered out or they poison the registry.
+const LITELLM_LLM_MODES = new Set(['chat', 'completion', 'responses']);
 
 /** Coerce a JSON-ish numeric field to a finite positive integer, or null. */
 function coercePositiveFinite(v: unknown): number | undefined {
@@ -195,6 +214,65 @@ function loadPresetCustomModels(home: string): Record<string, unknown> | null {
 }
 
 /**
+ * Parse a LiteLLM `model_prices_and_context_window.json` object into a
+ * capability map. PURE (no I/O) — unit-tested separately.
+ *
+ *  - Skips the `sample_spec` doc entry.
+ *  - Filters to text-LLM `mode`s (chat/completion/responses); drops
+ *    image_generation / embedding / audio_* / rerank / moderation and the
+ *    path-like keys (`1024-x-1024/.../bedrock/...`) whose token fields are not
+ *    a chat context window. Entries with NO `mode` are kept (some valid text
+ *    models omit it; they're lowest-priority and only fill genuine gaps).
+ *  - Maps `max_input_tokens` → contextLength (fallback `max_tokens`),
+ *    `max_output_tokens` → maxOutputTokens (reusing coercePositiveFinite so
+ *    string numbers / bogus values are handled identically to other sources).
+ *  - Indexes each model under its literal key AND, for `provider/model` keys,
+ *    the provider-stripped tail — so our bare `deepseek-chat` matches LiteLLM's
+ *    `deepseek/deepseek-chat`. First-wins WITHIN this map (literal key beats a
+ *    later tail collision); the caller enforces first-wins across sources.
+ */
+export function parseLiteLLMCatalog(raw: unknown): Map<string, ModelCapability> {
+  const out = new Map<string, ModelCapability>();
+  if (!raw || typeof raw !== 'object') return out;
+  const add = (id: string, cap: ModelCapability): void => {
+    if (id && !out.has(id)) out.set(id, cap);
+  };
+  for (const [key, val] of Object.entries(raw as Record<string, unknown>)) {
+    if (key === 'sample_spec') continue;
+    if (!val || typeof val !== 'object') continue;
+    const e = val as Record<string, unknown>;
+    const mode = typeof e.mode === 'string' ? e.mode : undefined;
+    if (mode && !LITELLM_LLM_MODES.has(mode)) continue;
+    const contextLength = coercePositiveFinite(e.max_input_tokens) ?? coercePositiveFinite(e.max_tokens);
+    const maxOutputTokens = coercePositiveFinite(e.max_output_tokens);
+    if (!contextLength && !maxOutputTokens) continue;
+    const cap: ModelCapability = { contextLength, maxOutputTokens, source: 'litellm' };
+    add(key, cap);
+    const slash = key.lastIndexOf('/');
+    if (slash >= 0 && slash < key.length - 1) add(key.slice(slash + 1), cap);
+  }
+  return out;
+}
+
+/** Load + parse the Rust-maintained LiteLLM cache file (lowest-priority source). */
+function loadLiteLLMCatalogFromDisk(home: string): Map<string, ModelCapability> {
+  const filePath = resolve(home, ...LITELLM_CACHE_REL);
+  if (!existsSync(filePath)) return new Map();
+  try {
+    const stat = statSync(filePath);
+    if (stat.size > MAX_LITELLM_FILE_BYTES) {
+      console.warn(`[model-caps] skip oversize LiteLLM cache ${filePath} (${stat.size} bytes > ${MAX_LITELLM_FILE_BYTES})`);
+      return new Map();
+    }
+    const raw = JSON.parse(stripBom(readFileSync(filePath, 'utf-8'))) as unknown;
+    return parseLiteLLMCatalog(raw);
+  } catch (err) {
+    console.warn('[model-caps] failed to read LiteLLM cache:', (err as Error)?.message ?? err);
+    return new Map();
+  }
+}
+
+/**
  * Mtime-keyed cache for `buildRegistry()`.
  *
  * Hot-path callers — every `enqueueUserMessage`, every pre-warm, every model
@@ -217,6 +295,7 @@ interface RegistryCacheEntry {
   map: Map<string, ModelCapability>;
   providersDirMtimeMs: number;     // -1 when dir absent
   configMtimeMs: number;           // -1 when file absent
+  litellmFileMtimeMs: number;      // -1 when file absent; bumps when Rust writes new data (not on 304)
   homeAtBuild: string | null;      // re-keyed on home change (test isolation)
 }
 let registryCache: RegistryCacheEntry | null = null;
@@ -234,14 +313,17 @@ function buildRegistry(): Map<string, ModelCapability> {
 
   const providersDir = home ? resolve(home, '.myagents', 'providers') : '';
   const configPath = home ? resolve(home, '.myagents', 'config.json') : '';
+  const litellmPath = home ? resolve(home, ...LITELLM_CACHE_REL) : '';
   const providersDirMtimeMs = providersDir ? statMtimeMs(providersDir) : -1;
   const configMtimeMs = configPath ? statMtimeMs(configPath) : -1;
+  const litellmFileMtimeMs = litellmPath ? statMtimeMs(litellmPath) : -1;
 
   if (
     registryCache &&
     registryCache.homeAtBuild === home &&
     registryCache.providersDirMtimeMs === providersDirMtimeMs &&
-    registryCache.configMtimeMs === configMtimeMs
+    registryCache.configMtimeMs === configMtimeMs &&
+    registryCache.litellmFileMtimeMs === litellmFileMtimeMs
   ) {
     return registryCache.map;
   }
@@ -277,7 +359,17 @@ function buildRegistry(): Map<string, ModelCapability> {
   //    discovery has filled the same modelId.
   ingestProviderList(PRESET_PROVIDERS, map, 'preset');
 
-  registryCache = { map, providersDirMtimeMs, configMtimeMs, homeAtBuild: home };
+  // 4) LiteLLM cached catalog (Rust-maintained ~/.myagents/cache/) — LOWEST
+  //    priority. first-wins means it only fills models that custom/discovered/
+  //    preset never defined; our hand-curated presets (e.g. MiniMax 200K, which
+  //    corrects LiteLLM's wrong 1M) always win. Absent until the first fetch.
+  if (home) {
+    for (const [mid, cap] of loadLiteLLMCatalogFromDisk(home)) {
+      if (!map.has(mid)) map.set(mid, cap);
+    }
+  }
+
+  registryCache = { map, providersDirMtimeMs, configMtimeMs, litellmFileMtimeMs, homeAtBuild: home };
   return map;
 }
 
