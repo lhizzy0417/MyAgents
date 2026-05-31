@@ -55,7 +55,7 @@ import {
   isLiveFollowScenario,
   type SessionMaterializationScenario,
 } from './utils/session-materialization';
-import { findAgentByWorkspacePath } from './utils/admin-config';
+import { findAgentByWorkspacePath, loadConfig as loadAdminConfig } from './utils/admin-config';
 import type { AgentConfig } from '../shared/types/agent';
 import { broadcast } from './sse';
 import {
@@ -7479,9 +7479,9 @@ export async function rewindSession(userMessageId: string): Promise<{
  * The new session uses SDK's forkSession option on first startup.
  */
 /**
- * PRD 0.2.27 — eager fork via the standalone SDK `forkSession()` function (behind the
- * MYAGENTS_EAGER_FORK flag; default OFF, the lazy forkFrom path stays the default). Creates
- * the fork's SDK transcript up front, rebuilds the old→new sdkUuid map at SDK granularity,
+ * PRD 0.2.27 — eager fork via the standalone SDK `forkSession()` function (gated by
+ * AppConfig.eagerFork, a developer toggle in Settings→About, DEFAULT ON; off → lazy forkFrom
+ * path). Creates the fork's SDK transcript up front, rebuilds the old→new sdkUuid map at SDK granularity,
  * and re-stamps our copied rows so the forked session resumes as a plain session (no forkFrom
  * state machine, no fork-at-tail degradation). Returns `ok:false` — caller falls back to the
  * lazy path — on a turn-in-flight / not-yet-flushed anchor / SDK error / ANY structural
@@ -7680,11 +7680,13 @@ export async function forkSession(assistantMessageId: string): Promise<{
       }
     };
 
-    // PRD 0.2.27 — EAGER fork (behind MYAGENTS_EAGER_FORK; default OFF). Create the SDK fork
-    // up front + re-stamp our rows' sdkUuids, so the fork resumes as a plain session with NO
-    // forkFrom state machine (#134/#135) and NO fork-at-tail degradation (#220). Any decline
-    // (turn in flight / anchor not flushed / structural mismatch) cleanly falls back below.
-    if (process.env.MYAGENTS_EAGER_FORK === '1') {
+    // PRD 0.2.27 — EAGER fork (AppConfig.eagerFork, developer toggle in Settings→About, DEFAULT
+    // ON; flip off → lazy path). Create the SDK fork up front + re-stamp our rows' sdkUuids, so
+    // the fork resumes as a plain session with NO forkFrom state machine (#134/#135) and NO
+    // fork-at-tail degradation (#220). Any decline (source busy / anchor not flushed / structural
+    // mismatch) cleanly falls back below. Read disk-first (config.json is authoritative; fork is
+    // a rare user action so a sync read is fine). Missing field ⇒ on.
+    if (loadAdminConfig().eagerFork !== false) {
       const eager = await tryEagerFork({
         sourceSdkSid: sourceMeta?.sdkSessionId ?? sourceSessionId,
         anchorUuid: targetMsg.sdkUuid,

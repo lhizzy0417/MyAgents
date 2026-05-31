@@ -3688,6 +3688,28 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                             </div>
                                         </div>
 
+                                        {/* Eager Fork Toggle (PRD 0.2.27) */}
+                                        <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5">
+                                            <div className="flex items-center justify-between">
+                                                <div>
+                                                    <h3 className="text-sm font-medium text-[var(--ink)]">急切 Fork（实验性）</h3>
+                                                    <p className="mt-1 text-xs text-[var(--ink-muted)]">
+                                                        Fork 会话时用 SDK 独立 forkSession() 急切分叉（点击即创建 + UUID 重映射），消除旧的懒分叉状态机。关掉则回退稳定的旧路径。
+                                                    </p>
+                                                </div>
+                                                <button
+                                                    onClick={() => updateConfig({ eagerFork: !(config.eagerFork ?? true) })}
+                                                    className={`relative h-6 w-11 shrink-0 cursor-pointer rounded-full transition-colors ${(config.eagerFork ?? true) ? 'bg-[var(--accent)]' : 'bg-[var(--line-strong)]'
+                                                        }`}
+                                                >
+                                                    <span
+                                                        className={`absolute left-0.5 top-0.5 h-5 w-5 rounded-full bg-[var(--toggle-thumb)] shadow transition-transform ${(config.eagerFork ?? true) ? 'translate-x-5' : 'translate-x-0'
+                                                            }`}
+                                                    />
+                                                </button>
+                                            </div>
+                                        </div>
+
                                         {/* Build Versions */}
                                         <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5">
                                             <h3 className="mb-3 text-sm font-medium text-[var(--ink)]">构建信息</h3>
