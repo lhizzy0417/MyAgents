@@ -41,7 +41,7 @@
 
 /**
  * Model aliases for sub-agent routing. Structurally identical to
- * `ModelAliases` in `agent-session.ts` and `config/types.ts`; inlined
+ * `ModelAliases` in `utils/model-aliases.ts` and `config/types.ts`; inlined
  * here to keep this module dependency-free (it's loaded eagerly from
  * the route handler, while agent-session is heavyweight).
  */

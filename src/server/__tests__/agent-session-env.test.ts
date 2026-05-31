@@ -32,3 +32,44 @@ describe('buildClaudeSessionEnv npm prefix isolation', () => {
     expect(pathValue.split(delimiter)).toContain(binDir);
   });
 });
+
+describe('session model alias resolution', () => {
+  it('uses the active model for built-in subagent alias env when aliases are collapsed', () => {
+    const env = buildClaudeSessionEnv(
+      {
+        baseUrl: 'https://api.minimax.example',
+        apiKey: 'test-key',
+        modelAliases: {
+          sonnet: 'MiniMax-M2.7',
+          opus: 'MiniMax-M2.7',
+          haiku: 'MiniMax-M2.7',
+        },
+      },
+      'MiniMax-M2.5',
+    );
+
+    expect(env.ANTHROPIC_DEFAULT_SONNET_MODEL).toBe('MiniMax-M2.5');
+    expect(env.ANTHROPIC_DEFAULT_OPUS_MODEL).toBe('MiniMax-M2.5');
+    expect(env.ANTHROPIC_DEFAULT_HAIKU_MODEL).toBe('MiniMax-M2.5');
+    expect(env.ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME).toBe('MiniMax-M2.5');
+  });
+
+  it('keeps split subagent alias env unchanged', () => {
+    const env = buildClaudeSessionEnv(
+      {
+        baseUrl: 'https://api.deepseek.example',
+        apiKey: 'test-key',
+        modelAliases: {
+          sonnet: 'provider-pro',
+          opus: 'provider-pro',
+          haiku: 'provider-flash',
+        },
+      },
+      'provider-pro',
+    );
+
+    expect(env.ANTHROPIC_DEFAULT_SONNET_MODEL).toBe('provider-pro');
+    expect(env.ANTHROPIC_DEFAULT_OPUS_MODEL).toBe('provider-pro');
+    expect(env.ANTHROPIC_DEFAULT_HAIKU_MODEL).toBe('provider-flash');
+  });
+});

@@ -16,6 +16,7 @@ import { getCrossPlatformEnv, isSkillBlockedOnPlatform } from './utils/platform'
 import { ensureDirSync, isDirEntry } from './utils/fs-utils';
 import { getMyAgentsNpmGlobalBinDir, getMyAgentsNpmGlobalPrefix, scrubMyAgentsNpmPrefixEnv } from './utils/npm-prefix-env';
 import { applyContextWindowSuffix, lookupModelContextLength, modelSupportsModality } from './utils/model-capabilities';
+import { modelAliasEnvChangesForModel, resolveSessionModelAliases, type ModelAliases } from './utils/model-aliases';
 import { deriveReloadResumeAnchor, resolveEffectiveResumeAt } from './utils/rewind-anchor';
 import { buildForkUuidRemap, remapStoredSdkUuids } from './utils/fork-remap';
 import { isEmptySuccessfulSdkResult, isRecoveredAssistantMessageError } from './utils/sdk-turn-outcome';
@@ -539,7 +540,8 @@ type RestartReason =
   | 'provider'     // setSessionProviderEnv — provider env (baseUrl, apiKey, etc.) changed
   | 'proxy'        // triggerProxyRestart — HTTP proxy changed via Settings
   | 'oauth'        // MCP OAuth token acquired/refreshed
-  | 'model-window' // setSessionModel — contextLength crossed a boundary, need to reinject CLAUDE_CODE_AUTO_COMPACT_WINDOW
+  | 'model-window'  // setSessionModel — contextLength crossed a boundary, need to reinject CLAUDE_CODE_AUTO_COMPACT_WINDOW
+  | 'model-aliases' // setSessionModel — collapsed provider aliases now target a different active model
   | 'plugins';     // PRD 0.2.17 — Claude plugin install / uninstall / toggle
 
 // Deferred config restart: config changes during an active turn / pre-warm
@@ -917,12 +919,6 @@ let prePlanPermissionMode: PermissionMode | null = null;
 // Current model for the session (updates on each user message if changed)
 let currentModel: string | undefined = undefined;
 // Provider environment config (baseUrl, apiKey, authType) for third-party providers
-export type ModelAliases = {
-  sonnet?: string;
-  opus?: string;
-  haiku?: string;
-};
-
 export type ProviderEnv = {
   baseUrl?: string;
   apiKey?: string;
@@ -1017,7 +1013,7 @@ function resolveActiveSessionUpstreamConfig(): UpstreamBridgeConfig {
   // when the session bridge is registered; that's a registration error
   // upstream of us. Defensive: empty-string baseUrl + no model → bridge
   // handler will fail the upstream call with a clear error.
-  const aliases = currentProviderEnv?.modelAliases;
+  const aliases = resolveSessionModelAliases(currentProviderEnv?.modelAliases, currentModel);
   return {
     baseUrl: currentProviderEnv?.baseUrl ?? '',
     apiKey: currentProviderEnv?.apiKey ?? '',
@@ -1110,7 +1106,7 @@ export function startOneShotBridge(
     throw new Error('startOneShotBridge called with non-OpenAI provider — caller should not need a bridge');
   }
   const token = randomUUID();
-  const aliases = providerEnv.modelAliases;
+  const aliases = resolveSessionModelAliases(providerEnv.modelAliases, modelOverride);
   const snapshot: UpstreamBridgeConfig = {
     baseUrl: providerEnv.baseUrl ?? '',
     apiKey: providerEnv.apiKey ?? '',
@@ -2247,6 +2243,7 @@ export function setSessionModel(model: string): void {
   if (model === currentModel) return;
 
   const oldModel = currentModel;
+  const aliasEnvChanged = modelAliasEnvChangesForModel(currentProviderEnv?.modelAliases, oldModel, model);
   currentModel = model;
   console.log(`[agent] session model set: ${oldModel ?? 'undefined'} -> ${model}`);
 
@@ -2279,6 +2276,21 @@ export function setSessionModel(model: string): void {
     if (querySession) {
       console.log(`[agent] model window changed (${oldCtx ?? 'SDK-default'} → ${newCtx ?? 'SDK-default'}) → schedule deferred restart to reinject CLAUDE_CODE_AUTO_COMPACT_WINDOW`);
       scheduleDeferredRestart('model-window');
+    }
+  }
+
+  // ANTHROPIC_DEFAULT_*_MODEL is also baked into the SDK subprocess env.
+  // querySession.setModel() updates the parent model only; SDK built-in
+  // subagents such as Explore keep resolving their own model aliases from
+  // those env vars until the subprocess is respawned.
+  if (aliasEnvChanged && querySession) {
+    if (isTurnInFlight()) {
+      console.log('[agent] model aliases changed during active turn -> schedule deferred restart to reinject ANTHROPIC_DEFAULT_*_MODEL');
+      scheduleDeferredRestart('model-aliases');
+    } else {
+      console.log('[agent] model aliases changed while idle/pre-warming -> aborting session to reinject ANTHROPIC_DEFAULT_*_MODEL');
+      abortPersistentSession();
+      schedulePreWarm();
     }
   }
 }
@@ -4259,7 +4271,8 @@ export function buildClaudeSessionEnv(
   // For third-party providers, set ANTHROPIC_DEFAULT_*_MODEL so the SDK resolves aliases
   // to provider-specific model IDs (e.g., "sonnet" → "deepseek-chat" instead of "claude-sonnet-4-6").
   // Hoisted above the OpenAI early return so both protocol paths benefit.
-  const aliases = effectiveProviderEnv?.modelAliases;
+  const resolvedModel = modelOverride ?? currentModel;
+  const aliases = resolveSessionModelAliases(effectiveProviderEnv?.modelAliases, resolvedModel);
   if (aliases) {
     // _MODEL is what SDK feeds into getContextWindowForModel(); for 1M-window
     // alias targets we MUST tag it with [1m] so the SDK takes the 1M path.
@@ -4313,7 +4326,6 @@ export function buildClaudeSessionEnv(
   // case (primary model hits its own 128K ceiling) is what this fixes;
   // sub-agents on a smaller window would be further over-capped, not
   // under-capped.
-  const resolvedModel = modelOverride ?? currentModel;
   const modelContextLength = lookupModelContextLength(resolvedModel);
   if (modelContextLength && modelContextLength > 0) {
     env.CLAUDE_CODE_AUTO_COMPACT_WINDOW = String(modelContextLength);
@@ -6221,7 +6233,20 @@ async function applySessionConfig(newModel?: string, newPermissionMode?: Permiss
   // applySessionConfig invocation that runs concurrently also drains via
   // pendingSetModelPromise.
   if (newModel && newModel !== currentModel) {
+    const aliasEnvChanged = modelAliasEnvChangesForModel(currentProviderEnv?.modelAliases, currentModel, newModel);
     try {
+      if (aliasEnvChanged) {
+        const oldModel = currentModel;
+        currentModel = newModel;
+        console.log(`[agent] runtime model aliases changed (${oldModel ?? 'undefined'} -> ${newModel}) -> restarting session to reinject ANTHROPIC_DEFAULT_*_MODEL`);
+        abortPersistentSession();
+        await awaitSessionTermination(10_000, 'applySessionConfig/modelAliasChange');
+        querySession = null;
+        isProcessing = false;
+        setSessionState('idle');
+        resetAbortFlag();
+        return;
+      }
       await dispatchSetModelToSdk(newModel);
       currentModel = newModel;
       console.log(`[agent] runtime model switched to: ${newModel}`);
