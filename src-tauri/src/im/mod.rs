@@ -4105,6 +4105,32 @@ fn im_config_has_start_credentials(config: &ImConfig) -> bool {
     }
 }
 
+fn missing_configured_channel_status(
+    persisted_status: &types::ImStatus,
+) -> types::ImStatus {
+    if matches!(persisted_status, types::ImStatus::Error) {
+        return types::ImStatus::Error;
+    }
+    types::ImStatus::Connecting
+}
+
+fn agent_channel_has_start_credentials(
+    agent_cfg: &types::AgentConfigRust,
+    channel_cfg: &types::ChannelConfigRust,
+) -> bool {
+    let im_config = channel_cfg.to_im_config(agent_cfg);
+    im_config_has_start_credentials(&im_config)
+}
+
+fn should_report_missing_configured_channel(
+    agent_cfg: &types::AgentConfigRust,
+    channel_cfg: &types::ChannelConfigRust,
+) -> bool {
+    agent_cfg.enabled
+        && channel_cfg.enabled
+        && agent_channel_has_start_credentials(agent_cfg, channel_cfg)
+}
+
 fn find_missing_startable_agent_channels(
     agent_configs: &[types::AgentConfigRust],
     running_channel_keys: &std::collections::HashSet<(String, String)>,
@@ -4181,6 +4207,95 @@ mod agent_monitor_tests {
             &std::collections::HashSet::new(),
             &[],
         ).is_empty());
+    }
+
+    #[test]
+    fn missing_configured_channel_reports_connecting_when_enabled_and_startable() {
+        let status = missing_configured_channel_status(&types::ImStatus::Stopped);
+
+        assert_eq!(status, types::ImStatus::Connecting);
+    }
+
+    #[test]
+    fn missing_configured_channel_preserves_error_for_enabled_startable_channel() {
+        assert_eq!(
+            missing_configured_channel_status(&types::ImStatus::Error),
+            types::ImStatus::Error
+        );
+    }
+
+    #[test]
+    fn missing_configured_channel_is_only_reported_when_startable() {
+        let mut agents = agent_config_with_weixin_channel(true);
+        let agent = agents.remove(0);
+        let mut channel = agent.channels[0].clone();
+
+        assert!(should_report_missing_configured_channel(&agent, &channel));
+
+        channel.enabled = false;
+        assert!(!should_report_missing_configured_channel(&agent, &channel));
+
+        let mut missing_plugin = agent.channels[0].clone();
+        missing_plugin.openclaw_plugin_id = None;
+        assert!(!should_report_missing_configured_channel(
+            &agent,
+            &missing_plugin
+        ));
+    }
+
+    #[test]
+    fn configured_channel_status_from_state_reports_startable_missing_channel() {
+        let mut agents = agent_config_with_weixin_channel(true);
+        let agent = agents.remove(0);
+        let channel = agent.channels[0].clone();
+
+        let status =
+            configured_channel_status_from_state(&agent, &channel, types::ImHealthState::default())
+                .expect("startable missing channel should be reported");
+
+        assert_eq!(status.channel_id, "weixin");
+        assert_eq!(status.status, types::ImStatus::Connecting);
+        assert!(status.error_message.is_none());
+    }
+
+    #[test]
+    fn configured_channel_status_from_state_skips_disabled_or_uncredentialed_channel() {
+        let mut agents = agent_config_with_weixin_channel(true);
+        let agent = agents.remove(0);
+        let mut channel = agent.channels[0].clone();
+
+        channel.enabled = false;
+        assert!(configured_channel_status_from_state(
+            &agent,
+            &channel,
+            types::ImHealthState::default()
+        )
+        .is_none());
+
+        let mut missing_plugin = agent.channels[0].clone();
+        missing_plugin.openclaw_plugin_id = None;
+        assert!(configured_channel_status_from_state(
+            &agent,
+            &missing_plugin,
+            types::ImHealthState::default()
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn configured_channel_status_from_state_preserves_startable_error() {
+        let mut agents = agent_config_with_weixin_channel(true);
+        let agent = agents.remove(0);
+        let channel = agent.channels[0].clone();
+        let mut health_state = types::ImHealthState::default();
+        health_state.status = types::ImStatus::Error;
+        health_state.error_message = Some("bridge failed".to_string());
+
+        let status = configured_channel_status_from_state(&agent, &channel, health_state)
+            .expect("startable missing channel error should be reported");
+
+        assert_eq!(status.status, types::ImStatus::Error);
+        assert_eq!(status.error_message.as_deref(), Some("bridge failed"));
     }
 }
 
@@ -7223,6 +7338,83 @@ async fn collect_channel_statuses(refs: Vec<ChannelStatusRef>) -> Vec<ChannelSta
     out
 }
 
+fn configured_channel_status_from_state(
+    agent_cfg: &AgentConfigRust,
+    channel_cfg: &ChannelConfigRust,
+    health_state: types::ImHealthState,
+) -> Option<ChannelStatus> {
+    if !should_report_missing_configured_channel(agent_cfg, channel_cfg) {
+        return None;
+    }
+    let status = missing_configured_channel_status(&health_state.status);
+    let is_error = matches!(status, types::ImStatus::Error);
+
+    Some(ChannelStatus {
+        channel_id: channel_cfg.id.clone(),
+        channel_type: channel_cfg.channel_type.clone(),
+        name: channel_cfg.name.clone(),
+        status,
+        bot_username: health_state.bot_username,
+        uptime_seconds: 0,
+        last_message_at: health_state.last_message_at,
+        active_sessions: health_state.active_sessions,
+        error_message: if is_error {
+            health_state.error_message
+        } else {
+            None
+        },
+        restart_count: health_state.restart_count,
+        buffered_messages: health_state.buffered_messages,
+        bind_url: None,
+        bind_code: None,
+    })
+}
+
+async fn configured_channel_status_from_disk(
+    agent_cfg: &AgentConfigRust,
+    channel_cfg: &ChannelConfigRust,
+) -> Option<ChannelStatus> {
+    if !should_report_missing_configured_channel(agent_cfg, channel_cfg) {
+        return None;
+    }
+    let health = HealthManager::new(health::agent_channel_health_path(
+        &agent_cfg.id,
+        &channel_cfg.id,
+    ));
+    configured_channel_status_from_state(agent_cfg, channel_cfg, health.get_state().await)
+}
+
+async fn merge_configured_channel_statuses(
+    agent_cfg: &AgentConfigRust,
+    runtime_statuses: Vec<ChannelStatus>,
+) -> Vec<ChannelStatus> {
+    let configured_ids: std::collections::HashSet<&str> =
+        agent_cfg.channels.iter().map(|ch| ch.id.as_str()).collect();
+    let mut runtime_by_id: HashMap<String, ChannelStatus> = HashMap::new();
+    let mut extras = Vec::new();
+
+    for status in runtime_statuses {
+        if configured_ids.contains(status.channel_id.as_str()) {
+            runtime_by_id.insert(status.channel_id.clone(), status);
+        } else {
+            extras.push(status);
+        }
+    }
+
+    let mut out = Vec::with_capacity(agent_cfg.channels.len() + extras.len());
+    for channel_cfg in &agent_cfg.channels {
+        if let Some(status) = runtime_by_id.remove(&channel_cfg.id) {
+            out.push(status);
+        } else if let Some(status) =
+            configured_channel_status_from_disk(agent_cfg, channel_cfg).await
+        {
+            out.push(status);
+        }
+    }
+    out.extend(extras);
+    out
+}
+
 /// Get status for a single agent channel.
 #[tauri::command]
 #[allow(non_snake_case)]
@@ -7253,7 +7445,22 @@ pub async fn cmd_agent_channel_status(
         let statuses = collect_channel_statuses(vec![r]).await;
         Ok(statuses.into_iter().next())
     } else {
-        Ok(None)
+        let agent_configs = read_agent_configs_from_disk();
+        let disk_channel = agent_configs
+            .iter()
+            .find(|agent| agent.id == agentId)
+            .and_then(|agent| {
+                agent
+                    .channels
+                    .iter()
+                    .find(|channel| channel.id == channelId)
+                    .map(|channel| (agent, channel))
+            });
+        if let Some((agent, channel)) = disk_channel {
+            Ok(configured_channel_status_from_disk(agent, channel).await)
+        } else {
+            Ok(None)
+        }
     }
 }
 
@@ -7264,6 +7471,9 @@ pub async fn cmd_agent_status(
     agentState: tauri::State<'_, ManagedAgents>,
     agentId: String,
 ) -> Result<AgentStatus, String> {
+    let agent_configs = read_agent_configs_from_disk();
+    let disk_agent = agent_configs.iter().find(|agent| agent.id == agentId);
+
     // Clone refs inside lock, then drop lock before any .await work
     let snapshot = {
         let agents_guard = agentState.lock().await;
@@ -7292,11 +7502,23 @@ pub async fn cmd_agent_status(
 
     if let Some((aid, aname, enabled, ch_refs)) = snapshot {
         let channels = collect_channel_statuses(ch_refs).await;
+        let channels = if let Some(agent_cfg) = disk_agent {
+            merge_configured_channel_statuses(agent_cfg, channels).await
+        } else {
+            channels
+        };
         Ok(AgentStatus {
-            agent_id: aid,
-            agent_name: aname,
-            enabled,
+            agent_id: disk_agent.map(|a| a.id.clone()).unwrap_or(aid),
+            agent_name: disk_agent.map(|a| a.name.clone()).unwrap_or(aname),
+            enabled: disk_agent.map(|a| a.enabled).unwrap_or(enabled),
             channels,
+        })
+    } else if let Some(agent_cfg) = disk_agent {
+        Ok(AgentStatus {
+            agent_id: agent_cfg.id.clone(),
+            agent_name: agent_cfg.name.clone(),
+            enabled: agent_cfg.enabled,
+            channels: merge_configured_channel_statuses(agent_cfg, Vec::new()).await,
         })
     } else {
         Ok(AgentStatus {
@@ -7314,6 +7536,12 @@ pub async fn cmd_agent_status(
 pub async fn cmd_all_agents_status(
     agentState: tauri::State<'_, ManagedAgents>,
 ) -> Result<HashMap<String, AgentStatus>, String> {
+    let agent_configs = read_agent_configs_from_disk();
+    let agent_config_by_id: HashMap<&str, &AgentConfigRust> = agent_configs
+        .iter()
+        .map(|agent| (agent.id.as_str(), agent))
+        .collect();
+
     // Clone refs inside lock, then drop lock before any .await work
     let snapshots: Vec<_> = {
         let agents_guard = agentState.lock().await;
@@ -7347,12 +7575,36 @@ pub async fn cmd_all_agents_status(
     let mut result = HashMap::new();
     for (key, aid, aname, enabled, ch_refs) in snapshots {
         let channels = collect_channel_statuses(ch_refs).await;
+        let disk_agent = agent_config_by_id.get(aid.as_str()).copied();
+        let channels = if let Some(agent_cfg) = disk_agent {
+            merge_configured_channel_statuses(agent_cfg, channels).await
+        } else {
+            channels
+        };
         result.insert(
             key,
             AgentStatus {
-                agent_id: aid,
-                agent_name: aname,
-                enabled,
+                agent_id: disk_agent.map(|a| a.id.clone()).unwrap_or(aid),
+                agent_name: disk_agent.map(|a| a.name.clone()).unwrap_or(aname),
+                enabled: disk_agent.map(|a| a.enabled).unwrap_or(enabled),
+                channels,
+            },
+        );
+    }
+    for agent_cfg in &agent_configs {
+        if result.contains_key(&agent_cfg.id) {
+            continue;
+        }
+        let channels = merge_configured_channel_statuses(agent_cfg, Vec::new()).await;
+        if channels.is_empty() {
+            continue;
+        }
+        result.insert(
+            agent_cfg.id.clone(),
+            AgentStatus {
+                agent_id: agent_cfg.id.clone(),
+                agent_name: agent_cfg.name.clone(),
+                enabled: agent_cfg.enabled,
                 channels,
             },
         );
