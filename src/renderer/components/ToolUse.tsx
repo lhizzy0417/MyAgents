@@ -109,8 +109,11 @@ function renderToolBody(tool: ToolUseSimple): React.JSX.Element {
       return <GrepTool tool={tool} />;
     case 'Skill':
       return <SkillTool tool={tool} />;
+    // PRD 0.2.27 — Codex 'CollabAgent' spawn card renders as a sub-agent
+    // container (same expandable nested-trace UI as builtin Task / Agent).
     case 'Task':
     case 'Agent':
+    case 'CollabAgent':
       return <TaskTool tool={tool} />;
     case 'TodoWrite':
       return <TodoWriteTool tool={tool} />;

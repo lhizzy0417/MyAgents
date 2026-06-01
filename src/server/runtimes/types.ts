@@ -57,6 +57,31 @@ export interface RuntimeProcess {
 }
 
 /**
+ * Sub-agent scope for a tool event. Set ONLY by runtimes whose protocol exposes
+ * multi-agent / multi-thread tool activity within a single session (currently
+ * Codex collab-agent: a spawned worker is a separate Codex thread). When present,
+ * the session layer nests the tool under the parent card identified by
+ * `parentToolUseId` (mirroring builtin's `parent_tool_use_id` → `subagentCalls`
+ * path) instead of rendering it flat in the main transcript.
+ *
+ * builtin (Claude Agent SDK) does NOT use this — it has its own native
+ * `parent_tool_use_id` stream path in agent-session.ts. Gemini / Claude Code
+ * never set it, so their behaviour is unchanged.
+ *
+ * `parentToolUseId` is the toolUseId of the card that REPRESENTS the sub-agent
+ * (for Codex: the `spawnAgent` collabAgentToolCall item id), already resolved by
+ * the runtime to the TOP-LEVEL spawn card so the session layer stays
+ * thread-agnostic.
+ */
+export interface SubAgentScope {
+  parentToolUseId: string;
+  /** Human-readable nickname assigned by the runtime to the spawned agent (optional). */
+  nickname?: string;
+  /** Role label assigned by the runtime to the spawned agent (optional). */
+  role?: string;
+}
+
+/**
  * Unified event emitted by any runtime, consumed by the session layer.
  * The session layer maps these to SSE broadcast calls.
  */
@@ -71,14 +96,18 @@ export type UnifiedEvent =
   | { kind: 'thinking_stop'; index: number }
 
   // === Tool use ===
-  | { kind: 'tool_use_start'; toolUseId: string; toolName: string; input?: Record<string, unknown> }
-  | { kind: 'tool_input_delta'; toolUseId: string; delta: string }
-  | { kind: 'tool_use_stop'; toolUseId: string }
-  | { kind: 'tool_result_delta'; toolUseId: string; delta: string }
+  // `subAgent` (optional, Codex-only today): when set, the session layer nests
+  // this tool under the parent spawn card instead of rendering it flat. See
+  // SubAgentScope. Absent for builtin / Gemini / Claude Code.
+  | { kind: 'tool_use_start'; toolUseId: string; toolName: string; input?: Record<string, unknown>; subAgent?: SubAgentScope }
+  | { kind: 'tool_input_delta'; toolUseId: string; delta: string; subAgent?: SubAgentScope }
+  | { kind: 'tool_use_stop'; toolUseId: string; subAgent?: SubAgentScope }
+  | { kind: 'tool_result_delta'; toolUseId: string; delta: string; subAgent?: SubAgentScope }
   | {
     kind: 'tool_result';
     toolUseId: string;
     content: string;
+    subAgent?: SubAgentScope;
     /**
      * Rich-media attachments (image/audio/pdf/file). Each entry references a
      * file already persisted by the sidecar (or a placeholder pending async

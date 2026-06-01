@@ -606,6 +606,18 @@ export default function TaskTool({ tool }: TaskToolProps) {
             traceExpanded={traceExpanded}
             onToggleTrace={handleToggleTrace}
           />
+        ) : hasTrace ? (
+          // PRD 0.2.27 — Codex collab cards have a nested trace but no JSON result
+          // and may lack taskStartTime. Without this branch the trace toggle would
+          // be unreachable. Synthesize a status-aware stats row so the toggle shows;
+          // toolCount falls back to subagentCalls length on history replay (no taskStats).
+          <TaskCompletedStats
+            result={{ status: isRunning ? 'pending' : (tool.isError ? 'error' : 'completed') }}
+            stats={tool.taskStats ?? { toolCount: tool.subagentCalls?.length ?? 0, inputTokens: 0, outputTokens: 0 }}
+            hasTrace={hasTrace}
+            traceExpanded={traceExpanded}
+            onToggleTrace={handleToggleTrace}
+          />
         ) : null}
       </div>
 

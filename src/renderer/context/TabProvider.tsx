@@ -27,6 +27,7 @@ import type { AskUserQuestionRequest, AskUserQuestion } from '../../shared/types
 import type { ExitPlanModeRequest, EnterPlanModeRequest, ExitPlanModeAllowedPrompt } from '../../shared/types/planMode';
 import { CUSTOM_EVENTS, isPendingSessionId } from '../../shared/constants';
 import { TabContext, TabApiContext, TabActiveContext, type SessionState, type TabContextValue, type TabApiContextValue } from './TabContext';
+import { isSubagentContainerTool } from '@/components/tools/toolBadgeConfig';
 import type { Message, ContentBlock, ToolUseSimple, ToolInput, TaskStats, SubagentToolCall } from '@/types/chat';
 import type { ToolUse } from '@/types/stream';
 import type { SystemInitInfo } from '../../shared/types/system';
@@ -1558,14 +1559,18 @@ export default function TabProvider({
                 // This map is read in chat:tool-result-complete to trigger directory refresh.
                 toolNameMapRef.current.set(tool.id, tool.name);
 
-                // For Task tool, add taskStartTime and initial taskStats
+                // For sub-agent container tools (builtin Task/Agent + Codex CollabAgent,
+                // PRD 0.2.27), add taskStartTime + initial taskStats so the running stats
+                // bar (with the trace toggle + live elapsed timer) renders. Single source
+                // of truth: isSubagentContainerTool() (toolBadgeConfig.tsx).
+                const isSubagentContainer = isSubagentContainerTool(tool.name);
                 const initialInputJson = Object.keys(tool.input ?? {}).length > 0
                     ? JSON.stringify(tool.input, null, 2)
                     : '';
                 const initialParsedInput = Object.keys(tool.input ?? {}).length > 0
                     ? tool.input as unknown as ToolInput
                     : undefined;
-                const toolSimple: ToolUseSimple = (tool.name === 'Task' || tool.name === 'Agent')
+                const toolSimple: ToolUseSimple = isSubagentContainer
                     ? {
                         ...tool,
                         inputJson: initialInputJson,

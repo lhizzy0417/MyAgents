@@ -208,6 +208,31 @@ Server → Client (Notification): {"jsonrpc":"2.0","method":"item/agentMessage/d
 
 未列出的 item type 会在 `console.warn` 中打印 unhandled，方便 Codex 升级后定位漏接。
 
+### Sub-agent（collab-agent）工具嵌套（PRD 0.2.27）
+
+Codex 主 agent 可派生 sub-agent（`collabAgentToolCall` 的 `spawnAgent`）。**sub-agent 是独立的 Codex thread**，其工具调用通过同一条 app-server stdio 连接多路复用回来——每条 `item/started` / `item/completed` 通知都带顶层 `threadId` + `turnId`。沿用 builtin 的嵌套渲染（`Task` 卡片 → `subagentCalls[]` → `chat:subagent-*` SSE → `TaskTool` 可展开 trace），把 sub-agent 的工具折叠进对应 spawn 卡片，而不是平铺进主 transcript。
+
+**协议事实（用独立探针驱动 `codex app-server` 0.135.0 实测,不是凭 schema 臆测）**:
+
+| 实测事实 | 用途 / 注意 |
+|---|---|
+| `ItemStartedNotification` / `ItemCompletedNotification` 带顶层 `threadId` | 区分"哪个 agent/线程发出的工具";**子线程的 item 确实带子线程 id 到达本连接**(实测:子 `commandExecution` 带 child threadId) |
+| `collabAgentToolCall(spawnAgent).receiverThreadIds` | **`item/started` 时为空,`item/completed` 时填入子线程 id** —— 这是父 spawn 卡片↔子线程的**主要且唯一可靠**连线。时序上 spawn `completed`(建表)早于子线程任何工具到达,无竞态 |
+| 子线程 `thread/started` + `Thread.source` | **0.135.0 实测:子线程不在本连接发 thread/started** → nickname/role + depth>1 链路当前**拿不到**,优雅降级。代码保留(best-effort,容忍 `subagent`/`subAgent` 两种 casing),供未来 Codex 版本 |
+| 子线程发**自己的** `turn/started` / `turn/completed`(isMain=false) | **必须按 `threadId` 闸掉** —— 否则子线程 turn 完成会提前终结用户 turn + `resetTurnAccumulators()` 清空 `currentContentBlocks`(spawn 卡片 + 嵌套调用),既破坏 turn 完整性又毁掉嵌套 |
+
+**关联与打标（`codex.ts`）**:`CodexProcess` 持三张 map:`subThreadToCard`(子线程→spawn 卡片 id,来自 spawnAgent `item/completed` 的 `receiverThreadIds` —— 主信号)、`subThreadToParent` / `subThreadMeta`(来自 `thread/started`,当前 inert,forward-compat)。
+
+- **生命周期闸门**:`isChildThreadLifecycleMethod(method)`(`turn/started`/`turn/completed`/`thread/status/changed`/`thread/closed`)+ `threadId !== mainThreadId` → `parseNotification` 直接 `return null`,子线程生命周期绝不驱动主 session。item 通知**不**闸(要的就是子工具)。
+- `computeSubAgentScope(threadId, mainThreadId, …)` → `resolveTopLevelSpawnCard()` 沿父链上溯,深层 sub-sub-agent 工具归并到第一层 spawn 卡片(UI 只一层);主线程 item / 未关联 threadId → null → 顶层平铺(不丢调用)。
+- 打标在 `UnifiedEvent` 工具事件挂 `subAgent: SubAgentScope { parentToolUseId, nickname?, role? }`(见 `types.ts`)。map 仅在**主线程** `turn/completed` + session reset 清空。
+
+**路由（`external-session.ts`）**:`tool_use_start` 命中 `event.subAgent` 时尝试归并进父卡片 `subagentCalls[]`;若父卡片尚未入 `currentContentBlocks`(罕见)→ `handleSubagentToolUseStart` 返回 false → **回退顶层平铺(不丢)**。归并成功才写 `childToolToParent`;后续 `tool_input_delta`/`tool_use_stop`/`tool_result(_delta)` **只按 `childToolToParent` 锁存路由**(不再每条重判 `event.subAgent`),杜绝"先平铺后嵌套"闪烁。复用 5 个 `chat:subagent-tool-*`(无新增 SSE)。`PersistContentBlock.tool.subagentCalls` 随父卡片落库,history replay 自动重建嵌套。
+
+**前端**：`isSubagentContainerTool(name)`（`toolBadgeConfig.tsx`，单一真源）把 `CollabAgent` 与 builtin `Task`/`Agent` 一视同仁——`ToolUse` 路由到 `TaskTool`、`ProcessRow` 锚点、`TabProvider` 初始化 `taskStartTime`/`taskStats`。`TaskTool` 对无 JSON 结果的 collab 卡片合成一个 status-aware 统计栏，保证 trace 展开钮可达。
+
+**仅 Codex 设 `subAgent`**；builtin 走自有 `parent_tool_use_id` 路径，Gemini / Claude Code 不设 → 行为不变。**非目标**：sub-agent 工具的多级 UI 嵌套（归并到顶层卡片）、sub-agent 富媒体 attachments（走文本摘要）、历史已平铺会话回填。
+
 ### 富媒体产物（ToolAttachment）
 
 Codex 的 `imageGeneration` / `mcpToolCall` 含 image content / `dynamicToolCall` 含 inputImage 三条

@@ -6,6 +6,18 @@ import '@testing-library/jest-dom/vitest';
 import { cleanup } from '@testing-library/react';
 import { afterEach } from 'vitest';
 
+// jsdom lacks ResizeObserver, which several components (CollapsibleContent,
+// MessageList, editors) construct in effects. Provide a no-op stub so rendering
+// them under jsdom doesn't throw. Tests that assert on observed sizes mock it
+// per-test; this default just keeps construction from crashing.
+if (typeof globalThis.ResizeObserver === 'undefined') {
+  globalThis.ResizeObserver = class {
+    observe(): void { /* no-op */ }
+    unobserve(): void { /* no-op */ }
+    disconnect(): void { /* no-op */ }
+  } as unknown as typeof ResizeObserver;
+}
+
 afterEach(() => {
   cleanup();
 });

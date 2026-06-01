@@ -16,7 +16,7 @@ import type {
   RuntimeProxyPolicy, RuntimeDiagnosticIssue,
 } from '../../shared/types/runtime';
 import { CODEX_PERMISSION_MODES } from '../../shared/types/runtime';
-import type { AgentRuntime, RuntimeProcess, SessionStartOptions, UnifiedEvent, UnifiedEventCallback, ImagePayload } from './types';
+import type { AgentRuntime, RuntimeProcess, SessionStartOptions, UnifiedEvent, UnifiedEventCallback, ImagePayload, SubAgentScope } from './types';
 import { StaleRuntimeSessionError } from './types';
 import { augmentedProcessEnv, resolveCommand, stripAnsi } from './env-utils';
 import { ensureDirSync } from '../utils/fs-utils';
@@ -541,6 +541,146 @@ function resolvedServerRequestId(params: Record<string, unknown>): string | null
   return null;
 }
 
+// ─── Sub-agent (collab-agent) thread correlation ───
+//
+// Codex sub-agents are SEPARATE threads multiplexed over the one app-server
+// stdio connection; every item/started + item/completed notification carries a
+// top-level `threadId`. A spawnAgent `collabAgentToolCall` links a parent thread
+// to its child thread(s) via `receiverThreadIds`. We use these to nest a
+// sub-agent's tool calls under the spawn card that created it — mirroring how the
+// builtin SDK nests `parent_tool_use_id` tools under the `Task` card.
+
+/**
+ * Resolve a Codex thread to the TOP-LEVEL `spawnAgent` card it should nest under.
+ *
+ * A sub-agent can itself spawn deeper sub-agents (`thread_spawn.depth > 0`). The
+ * renderer nests ONE level only (a spawn card holds a flat list of descendant
+ * tools), so every descendant tool is attributed to its first-level ancestor
+ * spawn card. We walk the `parent_thread_id` chain to the root and return the
+ * card of the highest ancestor thread that has one.
+ *
+ * @param threadId        the thread that emitted the item
+ * @param threadToCard    child threadId → spawnAgent collabAgentToolCall id (from receiverThreadIds)
+ * @param threadToParent  child threadId → its immediate parent thread id (from thread/started subagent source)
+ * @returns the spawn card id to nest under, or null when threadId maps to no
+ *          spawn card (main-thread tools, or unknown thread → render flat).
+ */
+export function resolveTopLevelSpawnCard(
+  threadId: string,
+  threadToCard: ReadonlyMap<string, string>,
+  threadToParent: ReadonlyMap<string, string>,
+): string | null {
+  const visited = new Set<string>();
+  let current: string | undefined = threadId;
+  let topCard: string | null = null;
+  while (current && !visited.has(current)) {
+    visited.add(current);
+    const card = threadToCard.get(current);
+    if (card) topCard = card; // keep the highest-ancestor card seen so far
+    current = threadToParent.get(current);
+  }
+  return topCard;
+}
+
+/**
+ * Thread/turn LIFECYCLE notification methods that drive the MAIN MyAgents
+ * session and carry a top-level `threadId`. When such an event comes from a
+ * spawned sub-agent thread it must be ignored (see the guard in
+ * parseNotification). Item notifications are deliberately excluded — those are
+ * the sub-agent tools we want to surface/nest.
+ */
+const CHILD_GATED_LIFECYCLE_METHODS: ReadonlySet<string> = new Set([
+  'turn/started',
+  'turn/completed',
+  'thread/status/changed',
+  'thread/closed',
+]);
+export function isChildThreadLifecycleMethod(method: string): boolean {
+  return CHILD_GATED_LIFECYCLE_METHODS.has(method);
+}
+
+/**
+ * Extract `{ parentThreadId, nickname, role }` from a Codex Thread's `source`
+ * when it is a sub-agent thread-spawn, else null. Best-effort: Codex 0.135.0
+ * does NOT emit `thread/started` for spawned children on the app-server
+ * connection (verified live), so this currently only fires on future/other
+ * Codex versions that do — the primary card↔child link is the spawnAgent
+ * `receiverThreadIds` (populated at item/completed). Tolerant of BOTH the v2
+ * app-server casing (`subagent`) and the legacy root-schema casing (`subAgent`),
+ * plus the snake_case spawn fields (ts-rs emits Rust names verbatim).
+ */
+export function parseSubAgentThreadSource(thread: unknown): {
+  parentThreadId: string;
+  nickname?: string;
+  role?: string;
+} | null {
+  if (!isRecord(thread)) return null;
+  const source = thread.source;
+  if (!isRecord(source)) return null;
+  const subagent = isRecord(source.subagent) ? source.subagent : (isRecord(source.subAgent) ? source.subAgent : undefined);
+  if (!isRecord(subagent)) return null;
+  const spawn = subagent.thread_spawn;
+  if (!isRecord(spawn)) return null;
+  const parentThreadId = stringValue(spawn.parent_thread_id);
+  if (!parentThreadId) return null;
+  return {
+    parentThreadId,
+    // Prefer the spawn-source names; fall back to the Thread-level fields.
+    nickname: stringValue(spawn.agent_nickname) ?? stringValue(thread.agentNickname),
+    role: stringValue(spawn.agent_role) ?? stringValue(thread.agentRole),
+  };
+}
+
+/**
+ * Record `spawnAgent` child threads → this spawn card id. ONLY `spawnAgent`
+ * creates the parent/child relationship; `wait`/`closeAgent`/`sendInput`
+ * reference existing children and must NOT remap them (that would re-parent a
+ * sub-agent's tools under the wait card). Idempotent.
+ */
+export function recordSpawnAgentChildThreads(
+  proc: { subThreadToCard: Map<string, string> },
+  tool: string | undefined,
+  cardId: string,
+  receiverThreadIds: string[] | undefined,
+): void {
+  if (tool !== 'spawnAgent' || !Array.isArray(receiverThreadIds)) return;
+  for (const childId of receiverThreadIds) {
+    if (typeof childId === 'string' && childId) {
+      proc.subThreadToCard.set(childId, cardId);
+    }
+  }
+}
+
+/**
+ * Decide the sub-agent scope for an item notification's tool events from its
+ * `threadId`. Returns null for main-thread items and for threads that map to no
+ * spawn card (→ render flat). Pure — the single tagging decision, unit-tested.
+ */
+export function computeSubAgentScope(
+  itemThreadId: string | undefined,
+  mainThreadId: string,
+  threadToCard: ReadonlyMap<string, string>,
+  threadToParent: ReadonlyMap<string, string>,
+  threadMeta: ReadonlyMap<string, { nickname?: string; role?: string }>,
+): SubAgentScope | null {
+  if (!itemThreadId || itemThreadId === mainThreadId) return null;
+  const parentToolUseId = resolveTopLevelSpawnCard(itemThreadId, threadToCard, threadToParent);
+  if (!parentToolUseId) return null;
+  const meta = threadMeta.get(itemThreadId);
+  return { parentToolUseId, nickname: meta?.nickname, role: meta?.role };
+}
+
+/** Tool-bearing UnifiedEvent kinds eligible for sub-agent scoping. */
+function isToolScopedEvent(
+  event: UnifiedEvent,
+): event is Extract<UnifiedEvent, { kind: 'tool_use_start' | 'tool_input_delta' | 'tool_use_stop' | 'tool_result_delta' | 'tool_result' }> {
+  return event.kind === 'tool_use_start'
+    || event.kind === 'tool_input_delta'
+    || event.kind === 'tool_use_stop'
+    || event.kind === 'tool_result_delta'
+    || event.kind === 'tool_result';
+}
+
 // ─── Model cache ───
 
 let modelCache: { models: RuntimeModelInfo[]; timestamp: number } | null = null;
@@ -733,6 +873,17 @@ class CodexProcess implements RuntimeProcess {
   currentTurnId = '';
   agentMessageTextById = new Map<string, string>();
   pendingRequests = new Map<string, PendingCodexRequest>();
+
+  // ── Sub-agent (collab-agent) thread correlation ──
+  // Child threadId → the spawnAgent collabAgentToolCall id that created it
+  // (from `receiverThreadIds`). The card a sub-agent's tools nest under.
+  subThreadToCard = new Map<string, string>();
+  // Child threadId → its immediate parent thread id (from thread/started
+  // subagent source). Used to walk depth>1 chains up to the top-level card.
+  subThreadToParent = new Map<string, string>();
+  // Child threadId → { nickname, role } (from thread/started). Decorative labels.
+  subThreadMeta = new Map<string, { nickname?: string; role?: string }>();
+
   workspacePath = '';
   model = '';
   approvalPolicy: CodexApprovalPolicy = 'on-request';
@@ -1484,6 +1635,10 @@ export class CodexRuntime implements AgentRuntime {
           if (item) {
             detail = ` type=${item.type}`;
             if (item.id) detail += ` id=${(item.id as string).slice(0, 12)}`;
+            // PRD 0.2.27 — log threadId so sub-agent items are distinguishable
+            // from main-thread items in production triage (Codex carries it; we
+            // previously dropped it from logs, making this class of issue opaque).
+            if (typeof p?.threadId === 'string') detail += ` thread=${p.threadId.slice(0, 12)}`;
             // Tool-specific context
             if (item.type === 'commandExecution' && item.command) detail += ` cmd=${(item.command as string).slice(0, 80)}`;
             if (item.type === 'fileChange' && Array.isArray(item.changes)) detail += ` files=${(item.changes as Array<{path:string}>).map(c => c.path).join(',')}`;
@@ -1515,6 +1670,26 @@ export class CodexRuntime implements AgentRuntime {
       if (!result) return;
       // parseNotification may return one event or an array (e.g., tool_use_stop + tool_result)
       const events = Array.isArray(result) ? result : [result];
+      // PRD 0.2.27 — sub-agent scoping (single tagging point). Codex multiplexes
+      // spawned sub-agent threads over this one stream; every item notification
+      // carries a top-level `threadId`. When an item comes from a spawned
+      // sub-agent thread, stamp its tool events with the spawn card to nest under
+      // — so external-session routes them to chat:subagent-* instead of flat.
+      // The top-level spawnAgent card itself is emitted on the MAIN thread, so
+      // the `!== threadId` guard naturally leaves it untagged (it IS the parent).
+      const notifParams = params as Record<string, unknown> | undefined;
+      const scope = computeSubAgentScope(
+        stringValue(notifParams?.threadId),
+        codexProc.threadId,
+        codexProc.subThreadToCard,
+        codexProc.subThreadToParent,
+        codexProc.subThreadMeta,
+      );
+      if (scope) {
+        for (const event of events) {
+          if (isToolScopedEvent(event)) event.subAgent = scope;
+        }
+      }
       for (const event of events) wrappedOnEvent(event);
     });
 
@@ -1837,11 +2012,42 @@ export class CodexRuntime implements AgentRuntime {
   ): UnifiedEvent | UnifiedEvent[] | null {
     const p = params as Record<string, unknown>;
 
+    // PRD 0.2.27 — sub-agent threads run their OWN turns/lifecycle multiplexed
+    // over this connection (verified live: a spawned child emits its own
+    // turn/started + turn/completed with isMain=false, plus thread lifecycle).
+    // Those MUST NOT drive the MAIN MyAgents session: a child's turn/completed
+    // would otherwise finalize the user's turn early and resetTurnAccumulators()
+    // mid-fan-out — wiping currentContentBlocks (the spawn card + its nested
+    // calls) and breaking both turn integrity and the nesting itself. Child
+    // ITEM notifications (the tools we nest) are intentionally NOT gated here.
+    if (isChildThreadLifecycleMethod(method)) {
+      const evtThreadId = stringValue(p.threadId);
+      if (evtThreadId && codexProc.threadId && evtThreadId !== codexProc.threadId) {
+        return null; // ignore child-thread lifecycle; only the main thread drives the session
+      }
+    }
+
     switch (method) {
       // ── Thread lifecycle ──
-      case 'thread/started':
-        // Thread started notification — no UnifiedEvent needed (session_init already emitted)
+      case 'thread/started': {
+        // Thread started — no UnifiedEvent needed (session_init already emitted).
+        // SIDE EFFECT (best-effort): if a spawned sub-agent thread ever emits
+        // thread/started here, record its parent link + nickname/role for richer
+        // labels + depth>1 chains. NOTE: Codex 0.135.0 does NOT emit child
+        // thread/started on the app-server connection (verified live) — so this
+        // is currently inert; the PRIMARY card↔child link is the spawnAgent
+        // item's receiverThreadIds (populated at item/completed). Kept for
+        // forward-compat with Codex versions that do surface it.
+        const sub = parseSubAgentThreadSource(p.thread);
+        const childId = stringValue(objectValue(p.thread).id);
+        if (sub && childId) {
+          codexProc.subThreadToParent.set(childId, sub.parentThreadId);
+          if (sub.nickname || sub.role) {
+            codexProc.subThreadMeta.set(childId, { nickname: sub.nickname, role: sub.role });
+          }
+        }
         return null;
+      }
 
       case 'thread/status/changed': {
         const status = p.status as { type: string } | undefined;
@@ -1861,6 +2067,12 @@ export class CodexRuntime implements AgentRuntime {
 
       case 'turn/completed': {
         const turn = p.turn as { status: string; error?: { message: string } } | undefined;
+        // PRD 0.2.27 — sub-agent threads live within a turn; clear correlation
+        // maps at turn end so a stale child threadId can't re-parent next turn's
+        // tools and the maps don't grow unbounded across a long session.
+        codexProc.subThreadToCard.clear();
+        codexProc.subThreadToParent.clear();
+        codexProc.subThreadMeta.clear();
         if (turn?.status === 'failed') {
           return {
             kind: 'session_complete',
@@ -1976,6 +2188,11 @@ export class CodexRuntime implements AgentRuntime {
           }
           case 'collabAgentToolCall': {
             // PRD 0.2.15 — surface collab agent invocation as a tool card.
+            // PRD 0.2.27 — record the spawn card↔child-thread link so the child's
+            // tools nest under THIS card. receiverThreadIds is often empty at
+            // started; item/completed is authoritative. Only `spawnAgent` creates
+            // the relationship (wait/closeAgent/sendInput reference existing ones).
+            recordSpawnAgentChildThreads(codexProc, item.tool, item.id, item.receiverThreadIds);
             const input: Record<string, unknown> = {};
             if (item.tool) input.tool = item.tool;
             if (item.prompt) input.prompt = item.prompt;
@@ -2252,6 +2469,9 @@ export class CodexRuntime implements AgentRuntime {
           }
           case 'collabAgentToolCall': {
             // PRD 0.2.15 — multi-agent collab tool was completely dropped before.
+            // PRD 0.2.27 — authoritative spawn card↔child-thread link (receiverThreadIds
+            // is populated by completion time).
+            recordSpawnAgentChildThreads(codexProc, item.tool, item.id, item.receiverThreadIds);
             const parts: string[] = [];
             if (item.tool) parts.push(`Tool: ${item.tool}`);
             if (item.prompt) parts.push(`Prompt: ${item.prompt}`);

@@ -12,7 +12,8 @@ import {
     getToolBadgeConfig,
     getToolLabel,
     getToolMainLabel,
-    getToolSummaryNode
+    getToolSummaryNode,
+    isSubagentContainerTool
 } from '@/components/tools/toolBadgeConfig';
 import ToolUse from '@/components/ToolUse';
 import type { ContentBlock } from '@/types/chat';
@@ -55,7 +56,7 @@ const ProcessRow = memo(function ProcessRow({
     const isTool = block.type === 'tool_use' || block.type === 'server_tool_use';
     const isServerTool = block.type === 'server_tool_use';
     const isLastBlock = index === totalBlocks - 1;
-    const isTaskTool = isTool && !isServerTool && (block.tool?.name === 'Task' || block.tool?.name === 'Agent');
+    const isTaskTool = isTool && !isServerTool && !!block.tool?.name && isSubagentContainerTool(block.tool.name);
 
     // Thinking: 没有 isComplete 且正在 streaming 才是 active（避免历史消息计时器永跑）
     const isThinkingActive = isThinking && block.isComplete !== true && isStreaming;

@@ -539,9 +539,36 @@ export function getToolBadgeConfig(toolName: string): ToolBadgeConfig {
 // external runtimes (like Gemini) surface their real tool identifier (e.g.
 // "run_shell_command") in the UI while internally still routing tool.name to a
 // MyAgents-native component (BashTool/GrepTool/...) for rich body rendering.
+/**
+ * Tools that render as an expandable sub-agent container (a card holding a nested
+ * `subagentCalls` trace). Single source of truth — used by ToolUse routing,
+ * ProcessRow anchoring, TabProvider stats init, and the label helpers below.
+ * builtin: Task / Agent (SDK `parent_tool_use_id`). Codex: CollabAgent (collab
+ * spawn card, PRD 0.2.27). Keep these call sites in lockstep via this predicate.
+ */
+export function isSubagentContainerTool(name: string): boolean {
+  return name === 'Task' || name === 'Agent' || name === 'CollabAgent';
+}
+
+// Human-readable label for a Codex collab-agent card by its action + model.
+const COLLAB_ACTION_LABELS: Record<string, string> = {
+  spawnAgent: '派生子 Agent',
+  wait: '等待子 Agent',
+  closeAgent: '关闭子 Agent',
+  sendInput: '发送指令',
+  resumeAgent: '恢复子 Agent',
+};
+function getCollabAgentLabel(tool: ToolUseSimple): string {
+  const action = getStringProp(tool.parsedInput, 'tool');
+  const model = getStringProp(tool.parsedInput, 'model');
+  const base = action ? (COLLAB_ACTION_LABELS[action] ?? action) : 'Sub-agent';
+  return model ? `${base} · ${model}` : base;
+}
+
 export function getToolMainLabel(tool: ToolUseSimple): string {
   const displayNameOverride = getStringProp(tool.parsedInput, '_displayName');
   if (displayNameOverride) return displayNameOverride;
+  if (tool.name === 'CollabAgent') return 'Sub-agent';
   if (tool.name === 'Task' || tool.name === 'Agent') {
     const subagentType = getStringProp(tool.parsedInput, 'subagent_type');
     return subagentType || tool.name;
@@ -653,11 +680,10 @@ export function getToolLabel(tool: ToolUseSimple): string {
       return 'Find';
     }
     case 'Task':
-    case 'Agent': {
-      const description = getStringProp(tool.parsedInput, 'description');
-      const subagentType = getStringProp(tool.parsedInput, 'subagent_type') || tool.name;
+    case 'Agent':
+    case 'CollabAgent': {
       const isTaskRunning = tool.isLoading && !tool.result;
-      // When Task/Agent is running, show the latest subagent tool (running or most recent)
+      // When running, show the latest subagent tool (running or most recent).
       if (isTaskRunning && tool.subagentCalls && tool.subagentCalls.length > 0) {
         // Prefer running tool, otherwise show the last tool
         const runningCall = tool.subagentCalls.find(c => c.isLoading);
@@ -666,9 +692,15 @@ export function getToolLabel(tool: ToolUseSimple): string {
           return getSubagentCallLabel(latestCall);
         }
       }
+      // Codex collab card has no description/subagent_type — label by action + model.
+      if (tool.name === 'CollabAgent') {
+        return getCollabAgentLabel(tool);
+      }
       // When completed or no subagent calls yet, show the description.
       // No JS truncation — CSS truncate handles overflow via max-width in ProcessRow.
       // No (后台) suffix — the 后台 badge tag already indicates background mode.
+      const description = getStringProp(tool.parsedInput, 'description');
+      const subagentType = getStringProp(tool.parsedInput, 'subagent_type') || tool.name;
       if (description) return description;
       return subagentType;
     }
