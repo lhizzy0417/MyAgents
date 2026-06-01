@@ -7,15 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-## [Unreleased]
+## [0.2.27] - 2026-06-02
+
+> 本版聚焦外部 Runtime（尤其 Codex）的多 agent 体验与超长会话稳定性：Codex 子 agent 的工具调用现在像内置 Task 一样折叠展示；外部 Runtime 支持回合中途排队消息；修复了包含大量工具输出的超长会话重开后内容截断的问题；生成式 UI 图表内置、更稳定。
 
 ### Added
 
+- **Codex 子 agent 工具调用折叠展示**：使用 Codex 外部 Runtime 且主 agent 派生子 agent 并行干活时，子 agent 的工具调用现在折叠在对应的子 agent 卡片内、可展开查看，不再平铺混在主对话流里 —— 与内置 Runtime 的 Task 卡片体验一致。
 - **生成式 UI 图表开箱即用**：图表类 Widget 现在内置 Chart.js 并在沙箱内联注入，不再依赖外部 CDN —— 解决了 Windows 上图表 Widget 偶发空白的问题（沙箱 CSP 在 Chromium/WebView2 下会继承父页限制，拦掉外部脚本）；同时放开 Google Fonts，Widget 可使用更丰富的字体。Widget 脚本执行失败时会显式提示，不再静默空白。
 - **外部 Runtime 支持回合中途排队消息**：使用 Claude Code / Codex / Gemini 外部 Runtime 时，AI 回合进行中输入的消息会排队，回合结束后自动按序发送，行为与内置 Runtime 对齐。
 
 ### Fixed
 
+- **超长会话恢复后内容截断**：包含大量工具输出的超长会话（尤其 Codex 子 agent 批量产出的回合）重新打开时，历史不再卡在中间某条消息、后续内容不显示；现在会完整加载，个别超大的单条消息折叠为预览，完整内容仍保存在本地会话文件。
 - **HTML 预览窗口定位异常**（[#290](https://github.com/hAcKlyc/MyAgents/issues/290)）：点击文件名预览 HTML 时，内嵌浏览器有时以 0 宽度创建、悬浮覆盖在聊天区域上方而非显示在右侧浏览器面板。根因是右侧分栏容器在聊天区 300ms 宽度过渡动画期间宽度仍为 0，创建时读到的尺寸是 0。现已改为等容器完成布局后再创建 webview，并在前后端两侧都拦截退化尺寸。
 - **强制发送会浮现在途排队消息**（[#289](https://github.com/hAcKlyc/MyAgents/issues/289)）：对排队消息点「立即发送」时，正在处理中的那条消息会正确浮现为对话气泡（而非被丢弃），与「停止」语义区分开。
 - **多选问答回答丢失**：升级 SDK 0.3.158 后，内置「向用户提问」工具改为按问题文本回填答案，旧的按序号回填会让模型收到「用户未作答」。现已改为按问题文本作答案键。
