@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.2.28] - 2026-06-03
+
+> 本版聚焦安全与稳定性：Plan（规划）模式现在真正强制只读，杜绝第三方模型在规划阶段误执行写操作或命令；「重启更新」后的标签页恢复也更可靠。
+
+### Fixed
+
+- **Plan（规划）模式现在真正强制只读**（[#295](https://github.com/hAcKlyc/MyAgents/issues/295)）：此前在 Plan 模式下，部分第三方模型仍可能不经审批就直接执行写文件、运行命令等有副作用的操作，存在误操作风险。现在这类操作会被硬性拦截 —— Plan 模式下 AI 只能做只读调研与规划，必须经你审批退出 Plan 模式后才能执行写操作（内置读取、搜索与「向用户提问 / 提交方案」不受影响）。
+- **「重启更新」后标签页恢复更可靠**（[#232](https://github.com/hAcKlyc/MyAgents/issues/232) 加固）：标签恢复此前只写 localStorage，而 WebView 把 localStorage 落盘是异步的——点「重启更新」时进程被立即强制退出（Windows 走 NSIS `exit(0)`、macOS 走 `relaunch()`），最后一次写入可能还没落盘就丢了，导致重启后标签没恢复。现在在退出前额外把标签快照 fsync 落盘到 `~/.myagents/open-tabs.json`（复用 config.json 的原子写），重启时若 localStorage 读到空就从这个兜底快照恢复，用完即删。
+
+---
+
 ## [0.2.27] - 2026-06-02
 
 > 本版聚焦外部 Runtime（尤其 Codex）的多 agent 体验与超长会话稳定性：Codex 子 agent 的工具调用现在像内置 Task 一样折叠展示；外部 Runtime 支持回合中途排队消息；修复了包含大量工具输出的超长会话重开后内容截断的问题；生成式 UI 图表内置、更稳定。

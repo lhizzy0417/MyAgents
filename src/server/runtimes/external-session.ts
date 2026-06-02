@@ -846,7 +846,7 @@ export function restoreExternalSessionState(
   if (meta?.permissionMode) {
     lastPermissionMode = meta.permissionMode;
   }
-  console.log(`[external-session] Restored state for session ${sessionId}, runtimeSessionId=${lastRuntimeSessionId} (${allSessionMessages.length} messages)`);
+  console.log(`[external-session] Restored state for session ${sessionId}, runtimeSessionId=${lastRuntimeSessionId} (${allSessionMessages.length} messages), permissionMode=${lastPermissionMode || '(default)'}, model=${lastModel || '(default)'}`);
 }
 
 // Pattern B — `setExternalImStreamCallback` removed. The /api/im/chat handler
@@ -2050,6 +2050,31 @@ export async function popLastUserMessageForRetry(userMessageId: string): Promise
  * any concurrent send, so a user who sends a message before pre-warm finishes
  * spawning is safely queued behind it.
  */
+/**
+ * Resolve the permission mode pre-warm should resume an existing EXTERNAL session
+ * with. The renderer fires `/api/runtime/prewarm` at Tab-open, often BEFORE its
+ * session-snapshot→input-state sync has run — so the caller-supplied mode can be
+ * a generic default (e.g. `'auto'`, which isn't even a Codex mode and maps to the
+ * prompting `on-request` policy). For a session with a persisted snapshot, the
+ * SESSION METADATA is the authority for what the resumed runtime process must run
+ * at; trusting the racy caller value instead resumes the thread with the wrong
+ * approval policy, and because pre-warm has already created the live process the
+ * first user message reuses it (sendExternalMessage Case 3) without re-resuming —
+ * so the wrong mode sticks while the UI pill later converges to the (correct)
+ * snapshot. Prefer the snapshot; fall back to the caller's value only for
+ * brand-new sessions with no persisted mode yet.
+ *
+ * (Builtin runtimes are handled separately via resolveWorkspaceConfig; this is
+ * the external-runtime analog, scoped to external because Codex/Gemini modes
+ * differ from the builtin auto/plan/fullAgency set.)
+ */
+export function resolvePrewarmPermissionMode(
+  metaPermissionMode: string | undefined,
+  callerPermissionMode: string | undefined,
+): string | undefined {
+  return metaPermissionMode ?? callerPermissionMode;
+}
+
 export async function prewarmExternalSession(options: {
   sessionId: string;
   workspacePath: string;
@@ -2088,14 +2113,21 @@ export async function prewarmExternalSession(options: {
     ? lastRuntimeSessionId
     : undefined;
 
-  console.log(`[external-session] Pre-warming ${runtimeType} for session ${options.sessionId}${resumeSessionId ? ` (resume=${resumeSessionId})` : ' (fresh)'}`);
+  // The session snapshot is authoritative for the resumed process's permission
+  // mode — NOT the renderer's racy prewarm payload (which can be a stale default
+  // like 'auto' before the Tab's snapshot sync runs). Without this, pre-warm
+  // resumes Codex with the wrong approvalPolicy and the first send reuses the
+  // pre-warmed process (Case 3) without re-resuming, so it sticks.
+  const effectivePermissionMode = resolvePrewarmPermissionMode(meta?.permissionMode, options.permissionMode);
+
+  console.log(`[external-session] Pre-warming ${runtimeType} for session ${options.sessionId}${resumeSessionId ? ` (resume=${resumeSessionId})` : ' (fresh)'} permissionMode=${effectivePermissionMode ?? '(default)'}${meta?.permissionMode && meta.permissionMode !== options.permissionMode ? ` (snapshot override; caller sent ${options.permissionMode ?? '(none)'})` : ''}`);
 
   await startExternalSession({
     sessionId: options.sessionId,
     workspacePath: options.workspacePath,
     // initialMessage intentionally omitted — this is the pre-warm signal
     model: options.model,
-    permissionMode: options.permissionMode,
+    permissionMode: effectivePermissionMode,
     scenario: options.scenario,
     resumeSessionId,
   });

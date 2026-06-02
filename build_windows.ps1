@@ -103,6 +103,47 @@ try {
     Write-Host ""
 
     # ========================================
+    # 检查统计上报配置 (VITE_ANALYTICS_*)
+    # ========================================
+    # 埋点是编译期 gate：isAnalyticsEnabled() 要求 VITE_ANALYTICS_ENABLED=true 且
+    # API_KEY / ENDPOINT 非空 (src/renderer/analytics/config.ts)。.env 是 gitignored，
+    # 不会随 git checkout 过来——若这台 Windows 构建机没填好 .env，Vite 会把这三个变量
+    # 编译成空字符串，整个 Windows 包**完全不上报统计**，平台分布看板里 Windows 凭空消失。
+    # build_macos.sh 在 .env 缺失时直接 exit，所以 mac 包从不会静默掉这个；Windows 这条
+    # 之前是"警告 + 继续"，于是出现过 Windows 包带着 analytics OFF 发版。这里改成显式确认，
+    # 与上面的签名私钥检查同一套交互（Fork / 自建无需上报者直接回车继续）。
+    Write-Host "[1.5/7] 检查统计上报配置..." -ForegroundColor Blue
+    $AnalyticsEnabled = [Environment]::GetEnvironmentVariable("VITE_ANALYTICS_ENABLED", "Process")
+    $AnalyticsKey = [Environment]::GetEnvironmentVariable("VITE_ANALYTICS_API_KEY", "Process")
+    $AnalyticsEndpoint = [Environment]::GetEnvironmentVariable("VITE_ANALYTICS_ENDPOINT", "Process")
+    $AnalyticsOn = ($AnalyticsEnabled -eq "true") `
+        -and -not [string]::IsNullOrWhiteSpace($AnalyticsKey) `
+        -and -not [string]::IsNullOrWhiteSpace($AnalyticsEndpoint)
+    if ($AnalyticsOn) {
+        Write-Host "  OK - 统计上报已启用 (endpoint=$AnalyticsEndpoint)" -ForegroundColor Green
+    }
+    else {
+        Write-Host ""
+        Write-Host "=========================================" -ForegroundColor Yellow
+        Write-Host "  警告: 统计上报未启用 (VITE_ANALYTICS_* 缺失或为空)" -ForegroundColor Yellow
+        Write-Host "  此 Windows 构建将不会上报任何统计事件！" -ForegroundColor Yellow
+        Write-Host "  → 平台分布看板里 Windows 用户会凭空消失。" -ForegroundColor Yellow
+        Write-Host "  官方发版请确认本机 .env 已配置:" -ForegroundColor Yellow
+        Write-Host "    VITE_ANALYTICS_ENABLED=true" -ForegroundColor Yellow
+        Write-Host "    VITE_ANALYTICS_API_KEY=<key>" -ForegroundColor Yellow
+        Write-Host "    VITE_ANALYTICS_ENDPOINT=<url>" -ForegroundColor Yellow
+        Write-Host "  (Fork / 自建无需上报可忽略本提示。)" -ForegroundColor Yellow
+        Write-Host "=========================================" -ForegroundColor Yellow
+        Write-Host ""
+        $continueAnalytics = Read-Host "是否继续构建? (Y/n)"
+        if ($continueAnalytics -eq "n" -or $continueAnalytics -eq "N") {
+            Write-Host "构建已取消" -ForegroundColor Red
+            throw "用户取消构建"
+        }
+    }
+    Write-Host ""
+
+    # ========================================
     # 检查依赖
     # ========================================
     Write-Host "[2/7] 检查依赖..." -ForegroundColor Blue

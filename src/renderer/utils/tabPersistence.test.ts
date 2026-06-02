@@ -1,6 +1,12 @@
 import { describe, it, expect } from 'vitest';
 
-import { serializeTabs, deserializeTabs } from './tabPersistence';
+import {
+    serializeTabs,
+    deserializeTabs,
+    hydratePersistedState,
+    pickDurableOverride,
+    type PersistedTabState,
+} from './tabPersistence';
 import { MAX_TABS, type Tab } from '@/types/tab';
 
 function chatTab(over: Partial<Tab> = {}): Tab {
@@ -166,5 +172,49 @@ describe('deserializeTabs', () => {
     it('returns null when no valid tabs remain', () => {
         const raw = JSON.stringify({ version: 1, tabs: [{ id: 'a' }], activeTabId: 'a' });
         expect(deserializeTabs(raw)).toBeNull();
+    });
+});
+
+describe('hydratePersistedState', () => {
+    const state: PersistedTabState = {
+        version: 1,
+        tabs: [
+            { id: 'a', agentDir: '/ws/a', sessionId: 's-a', title: 'A' },
+            { id: 'b', agentDir: '/ws/b', sessionId: 's-b', title: 'B' },
+        ],
+        activeTabId: 'b',
+    };
+
+    it('hydrates each persisted tab as a cold chat tab', () => {
+        const { tabs, activeTabId } = hydratePersistedState(state);
+        expect(activeTabId).toBe('b');
+        expect(tabs).toEqual([
+            { id: 'a', agentDir: '/ws/a', sessionId: 's-a', view: 'chat', title: 'A', restoreState: 'cold' },
+            { id: 'b', agentDir: '/ws/b', sessionId: 's-b', view: 'chat', title: 'B', restoreState: 'cold' },
+        ]);
+    });
+});
+
+describe('pickDurableOverride', () => {
+    const durable: PersistedTabState = {
+        version: 1,
+        tabs: [{ id: 'a', agentDir: '/ws/a', sessionId: 's-a', title: 'A' }],
+        activeTabId: 'a',
+    };
+
+    it('keeps the localStorage result when it restored tabs (it is at least as fresh)', () => {
+        expect(pickDurableOverride(true, durable)).toBeNull();
+    });
+
+    it('adopts the durable snapshot only when localStorage came up empty', () => {
+        expect(pickDurableOverride(false, durable)).toBe(durable);
+    });
+
+    it('returns null when there is no durable snapshot to fall back to', () => {
+        expect(pickDurableOverride(false, null)).toBeNull();
+    });
+
+    it('returns null when the durable snapshot has no tabs', () => {
+        expect(pickDurableOverride(false, { version: 1, tabs: [], activeTabId: null })).toBeNull();
     });
 });

@@ -34,7 +34,8 @@ import {
   type Project,
 } from '@/config/types';
 import { type Tab, type InitialMessage, createNewTab, getFolderName, MAX_TABS } from '@/types/tab';
-import { buildRestoredTabs, saveOpenTabs } from '@/utils/tabPersistence';
+import { buildRestoredTabs, saveOpenTabs, hydratePersistedState, pickDurableOverride } from '@/utils/tabPersistence';
+import { persistOpenTabsDurable, loadAndClearOpenTabsDurable, clearOpenTabsDurable } from '@/utils/tabPersistenceDurable';
 import { tabContentKind, isRestoreAbandoned } from '@/utils/tabContentKind';
 import type { ImageAttachment } from '@/components/SimpleChatInput';
 import { getAllCronTasks, getTabCronTask, updateCronTaskTab } from '@/api/cronTaskClient';
@@ -353,6 +354,52 @@ export default function App() {
     };
   }, [flushOpenTabsNow]);
 
+  // Durable-handoff recovery (Issue #232 hardening). localStorage is the primary
+  // restore source (read synchronously above for instant first paint), but its
+  // asynchronous WebView disk-flush can be lost to the abrupt update-restart
+  // exit (NSIS exit(0) / relaunch()). handleRestartAndUpdate fsyncs a durable
+  // ~/.myagents/open-tabs.json backstop right before that exit; here we CONSUME
+  // it on boot (read-then-delete) and adopt it ONLY when the localStorage read
+  // came up EMPTY (pickDurableOverride) — the exact case that produces the
+  // reported "no tabs at all" symptom.
+  //
+  // Deliberately NOT a full "durable always wins": when localStorage DID restore
+  // we trust it. In the rare partial-loss window (localStorage flushed an older
+  // snapshot but lost the final setItem before the abrupt exit) this restores a
+  // tab set that is one structural change stale — e.g. a tab closed in the last
+  // sub-second before clicking 重启更新 may reappear. That residue is accepted:
+  // adopting durable unconditionally would re-mount + re-activate the healthy
+  // boot path on EVERY update, which is a far worse, ever-present cost than a
+  // rare one-tab discrepancy. (Codex review — known, bounded limitation.)
+  //
+  // Guards: the ref keeps it single-shot under StrictMode's double-invoke (the
+  // file is deleted on read, so a second pass is a no-op anyway); and we only
+  // adopt while the tab list is still the pristine boot list — if the user opened
+  // or switched a tab during the async read, their live state wins.
+  const durableHandoffConsumedRef = useRef(false);
+  useEffect(() => {
+    if (durableHandoffConsumedRef.current) return;
+    durableHandoffConsumedRef.current = true;
+    void (async () => {
+      const durable = await loadAndClearOpenTabsDurable();
+      const override = pickDurableOverride(restoredInitialState != null, durable);
+      if (!override) return;
+      // We only adopt onto the pristine empty-boot fallback (one launcher tab).
+      // If the user opened/switched a tab during the async read — or anything
+      // else replaced that lone launcher — their live state wins, so bail rather
+      // than clobber it. (Content check, not reference: a no-op setTabs must not
+      // produce a false negative that defeats recovery.)
+      const live = tabsRef.current;
+      if (live.length !== 1 || live[0]?.view !== 'launcher') return;
+      const { tabs: recovered, activeTabId: recoveredActive } = hydratePersistedState(override);
+      console.warn(
+        `[App] localStorage tab restore was empty; recovered ${recovered.length} tab(s) from durable backstop`,
+      );
+      setTabs(recovered);
+      setActiveTabId(recoveredActive ?? recovered[0]?.id ?? null);
+    })();
+  }, [restoredInitialState]);
+
   // Deferred-mount set for freshly created tabs. A tab whose id is in here
   // renders only a placeholder (see MemoizedTabContent), so clicking "+" /
   // Cmd+T does not synchronously mount the heavy Launcher subtree in the
@@ -452,11 +499,30 @@ export default function App() {
   // verification round-trip, the JS only console.warn-ed, and the user
   // assumed the button was broken.
   const handleRestartAndUpdate = useCallback(async () => {
-    // Flush open-tab state synchronously before the install/relaunch exits the
-    // process from Rust (Issue #232) — guarantees the tabs the user had open at
-    // the moment of clicking "重启更新" are restored on the next launch.
+    // Persist open-tab state before the install/relaunch exits the process from
+    // Rust (Issue #232). flushOpenTabsNow() writes localStorage (the fast path),
+    // but WebKit/WebView2 persist localStorage to disk ASYNCHRONOUSLY, so the
+    // abrupt NSIS exit(0) (Windows) / relaunch() (macOS) can drop that last
+    // write. persistOpenTabsDurable() additionally fsyncs a ~/.myagents/
+    // open-tabs.json backstop and is AWAITED here, so the tabs the user had
+    // open at the click are committed to disk before the process dies; boot
+    // consumes the backstop and adopts it only if localStorage came up empty.
     flushOpenTabsNow();
-    const outcome = await restartAndUpdateRef.current();
+    await persistOpenTabsDurable(tabsRef.current, activeTabIdRef.current);
+    let outcome: Awaited<ReturnType<typeof restartAndUpdateRef.current>> | undefined;
+    try {
+      outcome = await restartAndUpdateRef.current();
+    } finally {
+      // Drop the durable handoff UNLESS the restart is actually proceeding
+      // (outcome 'ok' → the process is exiting and boot will consume it). Any
+      // non-'ok' outcome OR a thrown error means the process stays alive, so the
+      // backstop we wrote just before must not resurrect this now-frozen snapshot
+      // on a later boot. Awaited (not fire-and-forget) so it can't race a retry's
+      // fresh persist, and placed in `finally` so an uncaught throw still clears.
+      if (outcome !== 'ok') {
+        await clearOpenTabsDurable();
+      }
+    }
     if (outcome === 'network-error') {
       toastRef.current?.error('无法验证更新（网络异常），请稍后重试');
     } else if (outcome === 'version-mismatch') {

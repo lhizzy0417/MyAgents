@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "MyAgents",
-  "version": "0.2.27",
+  "version": "0.2.28",
   "identifier": "com.myagents.app",
   "build": {
     "frontendDist": "../dist",

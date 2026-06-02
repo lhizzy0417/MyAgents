@@ -2,7 +2,7 @@ import { randomUUID } from 'crypto';
 import { existsSync, readdirSync, symlinkSync, lstatSync, readFileSync, readlinkSync, rmSync } from 'fs';
 import { dirname, join, resolve, sep } from 'path';
 import { createRequire } from 'module';
-import { query, getSessionMessages as sdkGetSessionMessages, forkSession as sdkForkSession, deleteSession as sdkDeleteSession, type Query, type SDKUserMessage, type AgentDefinition, type HookInput, type HookJSONOutput, type PostToolUseHookInput, type PermissionRequestHookInput } from '@anthropic-ai/claude-agent-sdk';
+import { query, getSessionMessages as sdkGetSessionMessages, forkSession as sdkForkSession, deleteSession as sdkDeleteSession, type Query, type SDKUserMessage, type AgentDefinition, type HookInput, type HookJSONOutput, type PreToolUseHookInput, type PostToolUseHookInput, type PermissionRequestHookInput } from '@anthropic-ai/claude-agent-sdk';
 import {
   decideBackgroundAgentPermission,
   isBackgroundAgentToolRequest,
@@ -20,6 +20,7 @@ import { modelAliasEnvChangesForModel, resolveSessionModelAliases, type ModelAli
 import { deriveReloadResumeAnchor, resolveEffectiveResumeAt } from './utils/rewind-anchor';
 import { buildForkUuidRemap, remapStoredSdkUuids } from './utils/fork-remap';
 import { decideInFlightActionOnResult } from './utils/inflight-terminal';
+import { shouldBlockToolInPlanMode, planModeDenyMessage, isPlanModeInEffect, PLAN_MODE_READONLY_TOOLS, PLAN_MODE_HOST_INTERACTION_TOOLS } from './utils/plan-mode-gate';
 import { isEmptySuccessfulSdkResult, isRecoveredAssistantMessageError } from './utils/sdk-turn-outcome';
 import { InactivityWatchdog } from './utils/inactivity-watchdog';
 import { processImage, resizeToolImageContent, classifyImageError } from './utils/imageResize';
@@ -3040,7 +3041,9 @@ function getPermissionRules(mode: PermissionMode): PermissionRules {
       };
     case 'plan':
       return {
-        allowedTools: ['Read', 'Glob', 'Grep', 'LS'], // Read-only
+        // Read-only allowlist — shared with the plan-mode PreToolUse gate
+        // (plan-mode-gate.ts) so canUseTool and the hard hook can't drift. #295
+        allowedTools: [...PLAN_MODE_READONLY_TOOLS],
         deniedTools: ['*'], // Everything else denied in plan mode
       };
     case 'fullAgency':
@@ -6078,6 +6081,10 @@ export async function initializeAgent(
         currentModel = resolved.model;
         console.log(`[agent] self-resolved model: ${resolved.model}`);
       }
+      if (resolved.permissionMode && !isExternalRuntime(getCurrentRuntimeType()) && resolved.permissionMode !== currentPermissionMode) {
+        currentPermissionMode = resolved.permissionMode as PermissionMode;
+        console.log(`[agent] self-resolved permissionMode: ${resolved.permissionMode}`);
+      }
     } catch (error) {
       // Self-resolution failure is non-fatal — fall back to external sync (Rust sync_ai_config)
       console.warn('[agent] self-resolution failed, falling back to external sync:', error);
@@ -6200,6 +6207,19 @@ export async function switchToSession(targetSessionId: string): Promise<boolean>
   // Update agentDir from session
   if (sessionMeta.agentDir) {
     agentDir = sessionMeta.agentDir;
+  }
+
+  if (agentDir && !isExternalRuntime(getCurrentRuntimeType())) {
+    try {
+      const { resolveWorkspaceConfig } = await import('./utils/admin-config');
+      const resolved = resolveWorkspaceConfig(agentDir, sessionMeta, { includeMcp: false });
+      if (resolved.permissionMode && resolved.permissionMode !== currentPermissionMode) {
+        currentPermissionMode = resolved.permissionMode as PermissionMode;
+        console.log(`[agent] switchToSession: restored permissionMode=${resolved.permissionMode}`);
+      }
+    } catch (error) {
+      console.warn('[agent] switchToSession: permission self-resolution failed:', error);
+    }
   }
 
   // Initialize logger for the target session (lazy file creation)
@@ -8286,7 +8306,9 @@ async function startStreamingSession(preWarm = false): Promise<void> {
         // tools that require explicit human review (AskUserQuestion, EnterPlanMode, ExitPlanMode).
         // This guard catches the case where the SDK didn't honor setPermissionMode('bypassPermissions')
         // — e.g., pre-warm started with acceptEdits and the mid-session mode switch was ignored.
-        const USER_INTERACTION_TOOLS = ['AskUserQuestion', 'EnterPlanMode', 'ExitPlanMode'];
+        // Shared with the plan-mode PreToolUse gate so both paths exempt the
+        // same control-transfer tools (plan-mode-gate.ts).
+        const USER_INTERACTION_TOOLS = PLAN_MODE_HOST_INTERACTION_TOOLS as readonly string[];
         if (currentPermissionMode === 'fullAgency' && !USER_INTERACTION_TOOLS.includes(toolName)) {
           console.debug(`[permission] fullAgency fast-path: auto-approved ${toolName}`);
           return {
@@ -8590,6 +8612,43 @@ async function startStreamingSession(preWarm = false): Promise<void> {
       // Claude API rejects images exceeding 8000px per dimension; MCP tools (e.g. browser screenshots)
       // can produce arbitrarily large images that bypass our user-upload resize pipeline.
       hooks: {
+        // PreToolUse hook (#295): hard-enforce plan mode's read-only guarantee.
+        // We always pass `allowDangerouslySkipPermissions: true` (so fullAgency's
+        // bypassPermissions can be switched to mid-session), which sets the native
+        // CLI's `isBypassPermissionsModeAvailable=true`. The CLI's resolver then
+        // returns "allow" for EVERY tool in plan mode and never emits a
+        // can_use_tool control request — so our plan-mode rules in canUseTool are
+        // silently skipped and writes (Bash rm -rf, Edit, …) execute unchecked.
+        // PreToolUse hooks run BEFORE that resolver and a `deny` is honored
+        // regardless, so this is the only place that can restore the guarantee
+        // while keeping the flag. It fails closed on EITHER the SDK's own
+        // per-call `permission_mode` (authoritative for this tool call) OR the
+        // live module-global `currentPermissionMode` mirror — trusting only the
+        // async-updated mirror leaves a desync window where a freshly-entered
+        // plan mode (AI EnterPlanMode mid-turn) isn't reflected yet and a write
+        // tool slips through. This covers every plan-entry path (agent config /
+        // UI toggle / AI EnterPlanMode). See isPlanModeInEffect + plan-mode-gate.ts.
+        PreToolUse: [{
+          hooks: [
+            async (input: HookInput): Promise<HookJSONOutput> => {
+              const pre = input as PreToolUseHookInput;
+              // Fail-closed effective mode: 'plan' if either source says plan
+              // (see isPlanModeInEffect for the two desync windows this closes).
+              const effectiveMode = isPlanModeInEffect(currentPermissionMode, pre.permission_mode) ? 'plan' : currentPermissionMode;
+              if (!shouldBlockToolInPlanMode(pre.tool_name, effectiveMode)) {
+                return {}; // not plan mode, or a read-only / control-transfer tool → normal flow
+              }
+              console.log(`[permission] plan-mode hard gate denied: ${pre.tool_name} (local=${currentPermissionMode}, hook=${pre.permission_mode ?? 'n/a'})`);
+              return {
+                hookSpecificOutput: {
+                  hookEventName: 'PreToolUse' as const,
+                  permissionDecision: 'deny' as const,
+                  permissionDecisionReason: planModeDenyMessage(pre.tool_name),
+                },
+              };
+            },
+          ],
+        }],
         PostToolUse: [{
           hooks: [
             async (input: HookInput, _toolUseId: string | undefined, options: { signal: AbortSignal }): Promise<HookJSONOutput> => {

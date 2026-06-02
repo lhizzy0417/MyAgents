@@ -181,12 +181,12 @@ export function loadPersistedTabs(): PersistedTabState | null {
     }
 }
 
-/** Hydrate persisted tabs into live `Tab` objects flagged `restoreState:'cold'`
- *  so App renders them as lightweight chrome (no TabProvider / sidecar) until
- *  first activation. Returns null when there's nothing to restore. */
-export function buildRestoredTabs(): { tabs: Tab[]; activeTabId: string | null } | null {
-    const state = loadPersistedTabs();
-    if (!state) return null;
+/** Hydrate a validated PersistedTabState into live `Tab` objects flagged
+ *  `restoreState:'cold'` so App renders them as lightweight chrome (no
+ *  TabProvider / sidecar) until first activation. Shared by the localStorage
+ *  boot read (buildRestoredTabs) and the durable-handoff recovery path (see
+ *  tabPersistenceDurable). */
+export function hydratePersistedState(state: PersistedTabState): { tabs: Tab[]; activeTabId: string | null } {
     const tabs: Tab[] = state.tabs.map((t) => ({
         id: t.id,
         agentDir: t.agentDir,
@@ -196,4 +196,31 @@ export function buildRestoredTabs(): { tabs: Tab[]; activeTabId: string | null }
         restoreState: 'cold',
     }));
     return { tabs, activeTabId: state.activeTabId };
+}
+
+/** Read + hydrate the localStorage-persisted tabs. Returns null when there's
+ *  nothing to restore (caller falls back to a fresh launcher tab). */
+export function buildRestoredTabs(): { tabs: Tab[]; activeTabId: string | null } | null {
+    const state = loadPersistedTabs();
+    if (!state) return null;
+    return hydratePersistedState(state);
+}
+
+/** Decide whether the durable-handoff snapshot (fsync'd to disk right before an
+ *  abrupt update-restart — see tabPersistenceDurable) should override the
+ *  synchronous localStorage boot read.
+ *
+ *  localStorage is written on every structural change AND flushed on a clean
+ *  quit, so whenever it yields a restore it is at least as fresh as the durable
+ *  handoff — trust it. The durable snapshot only wins when localStorage came up
+ *  EMPTY, i.e. its asynchronous WebView disk-flush was lost to the abrupt exit
+ *  (the exact failure this backstop exists to fix). Returns the state to adopt,
+ *  or null to keep the localStorage result. */
+export function pickDurableOverride(
+    hadLocalRestore: boolean,
+    durable: PersistedTabState | null,
+): PersistedTabState | null {
+    if (hadLocalRestore) return null;
+    if (!durable || durable.tabs.length === 0) return null;
+    return durable;
 }
