@@ -20,7 +20,7 @@ import { modelAliasEnvChangesForModel, resolveSessionModelAliases, type ModelAli
 import { deriveReloadResumeAnchor, resolveEffectiveResumeAt } from './utils/rewind-anchor';
 import { buildForkUuidRemap, remapStoredSdkUuids } from './utils/fork-remap';
 import { decideInFlightActionOnResult } from './utils/inflight-terminal';
-import { shouldBlockToolInPlanMode, planModeDenyMessage, PLAN_MODE_READONLY_TOOLS, PLAN_MODE_HOST_INTERACTION_TOOLS } from './utils/plan-mode-gate';
+import { shouldBlockToolInPlanMode, planModeDenyMessage, isPlanModeInEffect, PLAN_MODE_READONLY_TOOLS, PLAN_MODE_HOST_INTERACTION_TOOLS } from './utils/plan-mode-gate';
 import { isEmptySuccessfulSdkResult, isRecoveredAssistantMessageError } from './utils/sdk-turn-outcome';
 import { InactivityWatchdog } from './utils/inactivity-watchdog';
 import { processImage, resizeToolImageContent, classifyImageError } from './utils/imageResize';
@@ -8621,17 +8621,24 @@ async function startStreamingSession(preWarm = false): Promise<void> {
         // silently skipped and writes (Bash rm -rf, Edit, …) execute unchecked.
         // PreToolUse hooks run BEFORE that resolver and a `deny` is honored
         // regardless, so this is the only place that can restore the guarantee
-        // while keeping the flag. It reads currentPermissionMode live → covers
-        // every plan-entry path (agent config / UI toggle / AI EnterPlanMode).
-        // See plan-mode-gate.ts for the full root-cause writeup.
+        // while keeping the flag. It fails closed on EITHER the SDK's own
+        // per-call `permission_mode` (authoritative for this tool call) OR the
+        // live module-global `currentPermissionMode` mirror — trusting only the
+        // async-updated mirror leaves a desync window where a freshly-entered
+        // plan mode (AI EnterPlanMode mid-turn) isn't reflected yet and a write
+        // tool slips through. This covers every plan-entry path (agent config /
+        // UI toggle / AI EnterPlanMode). See isPlanModeInEffect + plan-mode-gate.ts.
         PreToolUse: [{
           hooks: [
             async (input: HookInput): Promise<HookJSONOutput> => {
               const pre = input as PreToolUseHookInput;
-              if (!shouldBlockToolInPlanMode(pre.tool_name, currentPermissionMode)) {
+              // Fail-closed effective mode: 'plan' if either source says plan
+              // (see isPlanModeInEffect for the two desync windows this closes).
+              const effectiveMode = isPlanModeInEffect(currentPermissionMode, pre.permission_mode) ? 'plan' : currentPermissionMode;
+              if (!shouldBlockToolInPlanMode(pre.tool_name, effectiveMode)) {
                 return {}; // not plan mode, or a read-only / control-transfer tool → normal flow
               }
-              console.log(`[permission] plan-mode hard gate denied: ${pre.tool_name} (mode=${currentPermissionMode})`);
+              console.log(`[permission] plan-mode hard gate denied: ${pre.tool_name} (local=${currentPermissionMode}, hook=${pre.permission_mode ?? 'n/a'})`);
               return {
                 hookSpecificOutput: {
                   hookEventName: 'PreToolUse' as const,

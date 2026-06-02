@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import {
   shouldBlockToolInPlanMode,
   planModeDenyMessage,
+  isPlanModeInEffect,
   PLAN_MODE_READONLY_TOOLS,
   PLAN_MODE_HOST_INTERACTION_TOOLS,
 } from './plan-mode-gate';
@@ -48,6 +49,33 @@ describe('shouldBlockToolInPlanMode (#295 plan-mode hard gate)', () => {
       (PLAN_MODE_HOST_INTERACTION_TOOLS as readonly string[]).includes(t)
     );
     expect(overlap).toEqual([]);
+  });
+});
+
+describe('isPlanModeInEffect (#295 fail-closed desync window)', () => {
+  it('is in effect when the local mirror says plan (UI toggle / agent config path)', () => {
+    expect(isPlanModeInEffect('plan', undefined)).toBe(true);
+    expect(isPlanModeInEffect('plan', 'auto')).toBe(true);
+  });
+
+  it('is in effect when the SDK hook says plan even if the async mirror lags (the critical fix)', () => {
+    // AI EnterPlanMode mid-turn: SDK fires PreToolUse with permission_mode 'plan'
+    // before the sidecar stream loop updates currentPermissionMode (still 'auto').
+    expect(isPlanModeInEffect('auto', 'plan')).toBe(true);
+    // And the gate must then BLOCK a write tool against this fail-closed mode —
+    // the exact bypass that trusting only the local mirror would let through.
+    const effective = isPlanModeInEffect('auto', 'plan') ? 'plan' : 'auto';
+    expect(shouldBlockToolInPlanMode('Bash', effective)).toBe(true);
+    expect(shouldBlockToolInPlanMode('Edit', effective)).toBe(true);
+  });
+
+  it('is NOT in effect when neither source says plan', () => {
+    expect(isPlanModeInEffect('auto', undefined)).toBe(false);
+    expect(isPlanModeInEffect('auto', 'auto')).toBe(false);
+    expect(isPlanModeInEffect('fullAgency', 'acceptEdits')).toBe(false);
+    // and a read-only allowlist tool still flows normally in that case
+    const effective = isPlanModeInEffect('auto', 'auto') ? 'plan' : 'auto';
+    expect(shouldBlockToolInPlanMode('Bash', effective)).toBe(false);
   });
 });
 

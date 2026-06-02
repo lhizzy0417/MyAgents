@@ -65,6 +65,33 @@ export const PLAN_MODE_READONLY_TOOLS = ['Read', 'Glob', 'Grep', 'LS'] as const;
 export const PLAN_MODE_HOST_INTERACTION_TOOLS = ['AskUserQuestion', 'ExitPlanMode', 'EnterPlanMode'] as const;
 
 /**
+ * Fail-closed resolution of whether plan mode is in effect for a PreToolUse hook.
+ *
+ * The hook sees TWO sources of truth and they can desync mid-turn:
+ *   - `hookMode` — the SDK's own per-call `PreToolUseHookInput.permission_mode`
+ *     (BaseHookInput.permission_mode, sdk.d.ts), authoritative for the exact tool
+ *     call about to run.
+ *   - `localMode` — the sidecar's module-global mirror (`currentPermissionMode`),
+ *     updated ASYNCHRONOUSLY from the status-message stream.
+ *
+ * They diverge in two windows, both fail-OPEN if we trust only `localMode`:
+ *   1. The AI calls `EnterPlanMode` mid-turn; the SDK fires the next PreToolUse
+ *      with `permission_mode: 'plan'` before the stream loop has updated the
+ *      mirror (still `'auto'`) → a write tool slips through. This is the exact
+ *      `plan + bypassAvailable ⇒ allow` hole #295 exists to close.
+ *   2. `setSessionPermissionMode()` flips the mirror to `'auto'` OPTIMISTICALLY
+ *      before `querySession.setPermissionMode()` is acked, while the CLI is still
+ *      internally in plan.
+ *
+ * Treating plan as in effect when EITHER source says `'plan'` keeps the gate
+ * fail-closed across both windows (worst case: one extra deny that the model
+ * retries after ExitPlanMode — never an unchecked write).
+ */
+export function isPlanModeInEffect(localMode: string, hookMode: string | undefined): boolean {
+  return localMode === 'plan' || hookMode === 'plan';
+}
+
+/**
  * Decide whether a PreToolUse hook should DENY a tool because the session is in
  * plan mode.
  *
