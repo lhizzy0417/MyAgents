@@ -3,8 +3,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { ChatSendShortcut } from '@/utils/chatSendKey';
 
-// Mutable preference the mocked config returns.
-const state = vi.hoisted(() => ({ pref: 'enter' as ChatSendShortcut }));
+// Mutable preference the mocked config returns. `undefined` exercises the
+// real existing-user path (no chatSendShortcut key on disk ⇒ defaults to 'enter').
+const state = vi.hoisted(() => ({ pref: 'enter' as ChatSendShortcut | undefined }));
 
 vi.mock('@/config/useConfigData', () => ({
   useConfigData: () => ({ config: { chatSendShortcut: state.pref } }),
@@ -73,6 +74,16 @@ describe('useChatComposerKeydown', () => {
     it('Ctrl+Enter sends', () => {
       press({ ctrlKey: true });
       expect(onSend).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('default fallback (existing users with no chatSendShortcut on disk)', () => {
+    beforeEach(() => { state.pref = undefined; render(<Harness onSend={onSend} />); });
+
+    it("undefined preference behaves as 'enter' — bare Enter sends", () => {
+      const { prevented } = press({});
+      expect(onSend).toHaveBeenCalledTimes(1);
+      expect(prevented).toBe(true);
     });
   });
 

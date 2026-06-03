@@ -151,6 +151,19 @@ describe('shortcut run() side effects', () => {
     expect(closes.closeCurrentTab).toHaveBeenCalledTimes(1);
   });
 
+  it('jump-to-tab also works on Windows (Ctrl modifier)', () => {
+    const ctx = mkCtx();
+    dispatchAppShortcut(ev({ ctrlKey: true, key: '9' }), WIN, ctx);
+    expect(ctx.setActiveTabId).toHaveBeenCalledWith('c');
+  });
+
+  it('tab-switch is a no-op when the active tab is missing from the list', () => {
+    const ctx = mkCtx({ activeTabId: 'gone' });
+    dispatchAppShortcut(ev({ ctrlKey: true, key: 'Tab' }), MAC, ctx);
+    dispatchAppShortcut(ev({ metaKey: true, shiftKey: true, code: 'BracketRight' }), MAC, ctx);
+    expect(ctx.setActiveTabId).not.toHaveBeenCalled();
+  });
+
   it('new-tab / task-center / settings delegate to ctx', () => {
     const ctx = mkCtx();
     dispatchAppShortcut(ev({ metaKey: true, key: 't' }), MAC, ctx);
