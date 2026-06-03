@@ -3,6 +3,10 @@ import { describe, expect, it, vi } from 'vitest';
 
 import { ImagePreviewProvider } from '@/context/ImagePreviewContext';
 
+vi.mock('@/config/useConfigData', () => ({
+  useConfigData: () => ({ config: { chatSendShortcut: 'enter' } }),
+}));
+
 import SimpleChatInput from './SimpleChatInput';
 import { ToastProvider } from './Toast';
 
@@ -29,12 +33,12 @@ describe('SimpleChatInput IME submission guard', () => {
 
     fireEvent.change(textarea, { target: { value: '输入法提交测试' } });
     fireEvent.compositionStart(textarea);
-    fireEvent.click(screen.getByTitle('发送'));
+    fireEvent.click(screen.getByTitle(/发送/));
 
     expect(onSend).not.toHaveBeenCalled();
 
     fireEvent.compositionEnd(textarea);
-    fireEvent.click(screen.getByTitle('发送'));
+    fireEvent.click(screen.getByTitle(/发送/));
 
     expect(onSend).toHaveBeenCalledWith('输入法提交测试', undefined);
   });
