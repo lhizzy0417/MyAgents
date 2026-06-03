@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.2.29] - 2026-06-04
+
+> 本版聚焦输入与配置体验：聊天发送键可自定义并在所有对话输入框统一；修复了切换会话时模型 / Provider 被静默重置、Agent 渠道配置异常导致自启失败等问题；外部 Runtime（Codex / Claude Code / Gemini）的记忆更新与子 agent 富媒体产物也更完善。
+
+### Added
+
+- **聊天发送键可自定义**：新增「快捷键」设置区，消息发送键可在「Enter 发送」与「⌘/Ctrl + Enter 发送」之间切换，并在主对话框、AI 小助理、问题反馈三处统一生效。沿用旧习惯的用户默认仍是 Enter 发送，升级后无感知变化。
+- **文件工具卡片路径可点击**：Write / Edit / Read 等工具卡片中的文件路径，现在和 AI 正文里的路径一样可点击 —— 预览、引用、打开、打开所在文件夹（路径不存在或非聊天场景时退化为普通显示）。
+
+### Fixed
+
+- **切换会话不再静默重置模型 / Provider**（[#300](https://github.com/hAcKlyc/MyAgents/issues/300)）：此前切回一个绑定了不可用 Provider（缺 API Key / 已禁用）的会话时，会静默回退到第一个可用 Provider 并把模型覆盖成它的默认模型，导致下一条消息被计费到错误的 Provider（402）。现在会保留你 pin 的合法模型；Provider 不可用时拦截发送并明确提示，而不是悄悄切走、错误计费。
+- **Agent 渠道配置更健壮**（[#301](https://github.com/hAcKlyc/MyAgents/issues/301)）：修复了 Agent 的 Provider / MCP 配置在某些情况下被存成对象（而非字符串化 JSON），导致渠道启动报 `invalid type: map`、甚至开机时全部 Agent 自启失败的问题。现在加载时自动归一化，且单个损坏的 Agent 不再拖垮其它 Agent 的自启。
+- **外部 Runtime 记忆更新修复**：使用 Codex / Claude Code / Gemini 外部 Runtime 的会话，定时记忆更新此前会静默空转（0 轮、假成功，留下孤儿气泡）。现在正确走对应 Runtime 执行，并以真实回合成功为准。
+- **中文输入法误发修复**（[#123](https://github.com/hAcKlyc/MyAgents/issues/123)）：AI 小助理与问题反馈输入框，在用中文 / 日文输入法选词时按回车不再误发送。
+- **嵌套子 agent 图片产物显示修复**：使用 Codex 外部 Runtime 时，子 agent 生成的图片等富媒体产物此前会被丢弃、只显示一行文字；现在能像主流程一样正确渲染图库。
+- **稳定性修复**：响应超时后更可靠地自动恢复；修复切换会话时极小概率把上一会话的恢复提示发到新会话；修复满队列时记忆更新误报「成功」；修复配置加载期与原子写并发可能丢失改动。
+
+---
+
 ## [0.2.28] - 2026-06-03
 
 > 本版聚焦安全与稳定性：Plan（规划）模式现在真正强制只读，杜绝第三方模型在规划阶段误执行写操作或命令；「重启更新」后的标签页恢复也更可靠。
