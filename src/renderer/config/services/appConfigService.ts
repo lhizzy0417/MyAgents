@@ -125,15 +125,19 @@ export async function loadAppConfig(): Promise<AppConfig> {
             // had cron on" from "user had cron off".
             const migrated = migrateOsNotificationsField(loaded);
             // Heal any agent `providerEnvJson`/`mcpServersJson` that was persisted
-            // as a raw object instead of a stringified JSON (issue #301). Done
-            // before the dynamicDefault merge (agents live in `loaded`), and the
-            // healed config is persisted once so every consumer — including the
-            // independent Rust reader — sees the declared string shape.
-            if (normalizeStringifiedJsonFields(migrated)) {
-                saveAppConfig(migrated).catch(err => {
-                    console.error('[configService] Failed to persist stringified-JSON normalization:', err);
-                });
-            }
+            // as a raw object instead of a stringified JSON (issue #301), so no
+            // consumer — the renderer's `cmd_start_agent_channel` payload or the
+            // merged config — ever sees the wrong shape. Done before the
+            // dynamicDefault merge (agents live in `loaded`).
+            //
+            // Deliberately IN-MEMORY ONLY — we do NOT persist here. A
+            // fire-and-forget `saveAppConfig` from `loadAppConfig` races with
+            // `atomicModifyConfig` (which calls `loadAppConfig` while holding
+            // `withConfigLock`): the queued save would land after the modifier's
+            // write and clobber it. The disk heals opportunistically on the next
+            // real config write (its `before` snapshot is taken post-normalize),
+            // and the independent Rust reader normalizes the same way at boot.
+            normalizeStringifiedJsonFields(migrated);
             const merged = { ...dynamicDefault, ...migrated };
             return migrateImBotConfig(merged);
         }

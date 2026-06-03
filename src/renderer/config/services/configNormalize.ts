@@ -22,7 +22,8 @@ import type { AppConfig } from '../types';
  * object is exactly what the string is meant to contain, so any downstream
  * `JSON.parse` round-trips to the same value. Idempotent — already-string
  * values are left untouched. Mutates `config` in place and returns whether
- * anything changed (so the caller can persist the healed config once).
+ * anything changed (used by tests; callers normalize in-memory on every load
+ * and let the disk heal opportunistically on the next config write).
  *
  * MUST stay in sync with the Rust twin `normalize_stringified_json_value`
  * (`src-tauri/src/im/mod.rs`) — the two independent config readers restore the
