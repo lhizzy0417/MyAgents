@@ -44,8 +44,9 @@ import { isBrowserDevMode, isTauriEnvironment } from '@/utils/browserMock';
 import { apiGetJson } from '@/api/apiFetch';
 import { updateSession } from '@/api/sessionClient';
 import { dismissTopmost } from '@/utils/closeLayer';
+import { dispatchAppShortcut } from '@/utils/appShortcuts';
 import { forceFlushLogs, setLogServerUrl, clearLogServerUrl } from '@/utils/frontendLogger';
-import { normalizeRuntime, planSessionOpen } from '@/utils/sessionOpenPlan';
+import { normalizeRuntime, resolveEffectiveRuntime, planSessionOpen } from '@/utils/sessionOpenPlan';
 import { applyTerminalSessionToTabs } from '@/utils/sessionTermination';
 import { listenWithCleanup } from '@/utils/tauriListen';
 import { CUSTOM_EVENTS, createPendingSessionId, isPendingSessionId } from '../shared/constants';
@@ -268,7 +269,7 @@ export default function App() {
 
   // App config for tray behavior (shared via ConfigProvider — no CONFIG_CHANGED event needed)
   // Also get projects + CRUD actions for bug report (ensureSelfAwarenessWorkspace needs them)
-  const { config, providers: appProviders, apiKeys: appApiKeys, providerVerifyStatus: appProviderVerifyStatus, projects: configProjects, addProject: configAddProject, patchProject: configPatchProject } = useConfig();
+  const { config, isLoading: configLoading, providers: appProviders, apiKeys: appApiKeys, providerVerifyStatus: appProviderVerifyStatus, projects: configProjects, addProject: configAddProject, patchProject: configPatchProject } = useConfig();
 
   // Helper Agent's persisted model defaults — used by BugReportOverlay for
   // initial picker selection + persist on pick. The LAUNCH_BUG_REPORT handler
@@ -608,16 +609,41 @@ export default function App() {
   // 方案 A: Rust 统一恢复 - 前端不再主动恢复，只监听事件
   // Rust 层 initialize_cron_manager 会自动恢复所有 running 状态的任务
 
+  // app_launch (DAU) — fire exactly once, but only AFTER config finishes loading
+  // from disk. Gating on `!configLoading` makes the runtimes_active adoption
+  // snapshot accurate: DEFAULT_CONFIG has no `agents` key, so a genuine no-agents
+  // user would otherwise be indistinguishable from "config not loaded yet"
+  // (cross-review W1). isLoading always reaches false (ConfigProvider sets it in
+  // a finally), so this is DAU-safe — app_launch will always fire. initAnalytics
+  // is idempotent, so awaiting it here just guarantees device_id/version preload.
+  const appLaunchTrackedRef = useRef(false);
+  useEffect(() => {
+    if (appLaunchTrackedRef.current || configLoading) return;
+    appLaunchTrackedRef.current = true;
+    void initAnalytics().then(() => {
+      const cfg = configRef.current;
+      // distinct effective external runtimes the user has configured agents for.
+      // gate-aware → '' when multiAgentRuntime is off; '' (not omitted) for a
+      // loaded-but-no-agents user. Captures "configured but maybe never used"
+      // runtimes that turn-level events (ai_turn_complete) can't see.
+      const runtimesActive = Array.from(new Set(
+        (cfg.agents ?? [])
+          .map((a) => resolveEffectiveRuntime(a.runtime, !!cfg.multiAgentRuntime))
+          .filter((r) => r !== 'builtin'),
+      )).sort().join(',');
+      track('app_launch', { launch_type: 'cold', runtimes_active: runtimesActive });
+    });
+  }, [configLoading]);
+
   // Start Global Sidecar on mount, cleanup on unmount
   useEffect(() => {
     mountedRef.current = true;
     retryCountRef.current = 0;
 
-    // Initialize analytics (async, non-blocking)
-    void initAnalytics().then(() => {
-      // Track app launch event
-      track('app_launch', { launch_type: 'cold' });
-    });
+    // Initialize analytics (async, non-blocking). app_launch itself is tracked
+    // in a dedicated config-loaded effect (see above) so its runtimes_active
+    // adoption snapshot reflects the real on-disk agent set, not DEFAULT_CONFIG.
+    void initAnalytics();
 
     // Initialize the ready promise BEFORE starting the sidecar
     // This allows other components to wait for it
@@ -997,108 +1023,26 @@ export default function App() {
   // eslint-disable-next-line react-hooks/exhaustive-deps -- callbacks stabilized via tabsRef
   }, []);
 
-  // Keyboard shortcuts: Cmd+T, Cmd+W, Cmd+Shift+[/], Cmd+1~9, Ctrl+Tab/Ctrl+Shift+Tab
+  // Application-level keyboard shortcuts (new/close/switch tab, task-center,
+  // settings, reload-block). The bindings + matching live in the declarative
+  // APP_SHORTCUTS table (utils/appShortcuts.ts) — the same source the Settings
+  // 「快捷键」reference renders from. Here we only build the side-effecting
+  // context and dispatch; callbacks are stabilized via refs so the empty-deps
+  // closure resolves them at press time.
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       const isMac = navigator.platform.toLowerCase().includes('mac');
-      const modKey = isMac ? e.metaKey : e.ctrlKey;
-
-      // Block reload shortcuts (F5 / Ctrl+F5 / Cmd|Ctrl+R / Cmd|Ctrl+Shift+R).
-      // Reload wipes in-memory tab state (Tab.sessionId / Sidecar owner /
-      // loading flags live in React state, not on disk), tears down every
-      // tab's Sidecar (~30 s to cold-start back), and interrupts in-flight
-      // AI conversations. Windows WebView2 enables these accelerators by
-      // default (`AreBrowserAcceleratorKeysEnabled`); on macOS / Linux the
-      // WebView still honors a JS `preventDefault()` on the keydown.
-      // `e.code === 'KeyR'` covers non-Latin keyboard layouts where the
-      // physical R key produces a non-`r`/`R` `e.key`.
-      if (
-        e.key === 'F5'
-        || (modKey && !e.altKey && (e.key === 'r' || e.key === 'R' || e.code === 'KeyR'))
-      ) {
-        e.preventDefault();
-        return;
-      }
-
-      // --- Ctrl+Tab / Ctrl+Shift+Tab: cycle through tabs (both platforms use Ctrl) ---
-      if (e.ctrlKey && !e.metaKey && !e.altKey && e.key === 'Tab') {
-        e.preventDefault();
-        const tabs = tabsRef.current;
-        const activeId = activeTabIdRef.current;
-        if (tabs.length <= 1 || !activeId) return;
-        const idx = tabs.findIndex((t) => t.id === activeId);
-        if (idx === -1) return;
-        const newIdx = e.shiftKey
-          ? (idx - 1 + tabs.length) % tabs.length   // wrap backward
-          : (idx + 1) % tabs.length;                 // wrap forward
-        setActiveTabId(tabs[newIdx].id);
-        return;
-      }
-
-      if (!modKey) return;
-
-      // --- Cmd/Ctrl + 1~9: jump to Nth tab (9 = last tab) ---
-      const digit = parseInt(e.key, 10);
-      if (digit >= 1 && digit <= 9 && !e.shiftKey && !e.altKey) {
-        e.preventDefault();
-        const tabs = tabsRef.current;
-        if (tabs.length === 0) return;
-        const targetIdx = digit === 9 ? tabs.length - 1 : digit - 1;
-        if (targetIdx < tabs.length) {
-          setActiveTabId(tabs[targetIdx].id);
-        }
-        return;
-      }
-
-      if (!e.shiftKey && !e.altKey && (e.key === 't' || e.key === 'T')) {
-        // Cmd/Ctrl+T — new tab. `!e.shiftKey` guard lets Cmd+Shift+T
-        // flow through to page-level handlers (e.g. Launcher BrandSection
-        // uses it as the 任务/想法 mode-toggle chord). Without this guard
-        // Cmd+Shift+T would silently collapse onto "new tab" and users
-        // couldn't reach the mode toggle from the keyboard at all.
-        e.preventDefault();
-        // Route through handleNewTab so Cmd+T shares the deferred-mount path
-        // (instant chip + non-blocking Launcher mount) and the MAX_TABS guard,
-        // instead of duplicating tab-creation logic. handleNewTab is a stable
-        // useCallback, so this empty-deps effect's keydown closure resolves it
-        // correctly at press time.
-        handleNewTab();
-      } else if (!e.shiftKey && !e.altKey && (e.key === 'y' || e.key === 'Y')) {
-        // Cmd/Ctrl+Y — open Task Center as a singleton tab. Mirrors the
-        // header button's CUSTOM_EVENTS.OPEN_TASK_CENTER dispatch so both
-        // entry points converge on the same handler (see line ~1544).
-        e.preventDefault();
-        window.dispatchEvent(new CustomEvent(CUSTOM_EVENTS.OPEN_TASK_CENTER));
-      } else if (!e.shiftKey && !e.altKey && (e.key === 'u' || e.key === 'U')) {
-        // Cmd/Ctrl+U — open Settings. `OPEN_SETTINGS` is already the
-        // designated cross-component entry (line ~1489); reusing it keeps
-        // the shortcut and the titlebar button path identical.
-        e.preventDefault();
-        window.dispatchEvent(new CustomEvent(CUSTOM_EVENTS.OPEN_SETTINGS));
-      } else if (e.key === 'w' || e.key === 'W') {
-        // macOS: native menu (Window > Close Tab, Cmd+W) emits window:cmd-w
-        // and useTrayEvents handles it — this branch is normally dead code.
-        // Kept as a defensive fallback if the menu accelerator ever misfires.
-        // Windows/Linux: no native menu with Ctrl+W, so this is the primary path.
-        e.preventDefault();
-        if (!dismissTopmost()) {
-          if (!document.querySelector('.fixed.inset-0[class*="backdrop-blur"]')) {
-            closeCurrentTab();
-          }
-        }
-      } else if (e.shiftKey && (e.code === 'BracketLeft' || e.code === 'BracketRight')) {
-        // Cmd+Shift+[ = previous tab, Cmd+Shift+] = next tab
-        e.preventDefault();
-        const tabs = tabsRef.current;
-        const activeId = activeTabIdRef.current;
-        if (tabs.length <= 1 || !activeId) return;
-        const idx = tabs.findIndex((t) => t.id === activeId);
-        if (idx === -1) return;
-        const newIdx = e.code === 'BracketLeft' ? idx - 1 : idx + 1;
-        if (newIdx >= 0 && newIdx < tabs.length) {
-          setActiveTabId(tabs[newIdx].id);
-        }
-      }
+      dispatchAppShortcut(e, isMac, {
+        tabs: tabsRef.current,
+        activeTabId: activeTabIdRef.current,
+        setActiveTabId,
+        newTab: handleNewTab,
+        closeCurrentTab,
+        dismissTopmost,
+        hasBlockingBackdrop: () => !!document.querySelector('.fixed.inset-0[class*="backdrop-blur"]'),
+        openTaskCenter: () => window.dispatchEvent(new CustomEvent(CUSTOM_EVENTS.OPEN_TASK_CENTER)),
+        openSettings: () => window.dispatchEvent(new CustomEvent(CUSTOM_EVENTS.OPEN_SETTINGS)),
+      });
     };
 
     // Capture phase: application-level shortcuts (Cmd+W/T/Tab, etc.) MUST fire before
@@ -1145,24 +1089,25 @@ export default function App() {
     // consume the surface from THE NEW tabId, not the original activeTabId.
     // Tracked here for review feedback B2/H2 (Codex BLOCKER, Codex HIGH).
     let pendingSurfaceForLaunch: Surface | null = null;
-    {
+    if (!sessionId) {
+      // workspace_open path (NEW session): agent_card (no initialMessage) vs
+      // launcher_input (initialMessage present). For a new session the agent's
+      // current config IS the spawn runtime, so the agent-config effective
+      // runtime is authoritative here (agrees with server-side ai_turn_complete).
       const cfg = configRef.current;
       const agent = getAgentByWorkspacePath(cfg, project.path);
-      const runtime = agent ? normalizeRuntime(agent.runtime) : 'builtin';
-      const agent_hash = hashAgentNameSync(agent?.name ?? null);
-
-      if (sessionId) {
-        // history_click path: switching to existing session, no new session
-        // minted, so we do NOT plan a surface. Explicit `session_id: null`
-        // suppresses Active Context auto-injection of a stale source-session id.
-        track('history_open', { agent_hash, runtime, session_id: null });
-      } else {
-        // workspace_open path: agent_card (no initialMessage) vs launcher_input
-        // (initialMessage present). Stored locally; applied with final targetTabId.
-        pendingSurfaceForLaunch = initialMessage ? 'launcher_input' : 'agent_card';
-        track('workspace_open', { agent_hash, runtime, session_id: null });
-      }
+      pendingSurfaceForLaunch = initialMessage ? 'launcher_input' : 'agent_card';
+      track('workspace_open', {
+        agent_hash: hashAgentNameSync(agent?.name ?? null),
+        runtime: resolveEffectiveRuntime(agent?.runtime, !!cfg.multiAgentRuntime),
+        session_id: null,
+      });
     }
+    // history_open (existing session) is tracked in the `sessionId` branch below,
+    // AFTER the session's frozen runtime (targetRuntime) is resolved. The agent's
+    // config may have changed since the session was created, so config-based
+    // runtime would diverge from the server-side ai_turn_complete (cross-review C2).
+    // Explicit `session_id: null` there suppresses Active Context auto-injection.
 
     setTabErrors((prev) => ({ ...prev, [activeTabId]: null }));
     setLoadingTabs((prev) => ({ ...prev, [activeTabId]: true }));
@@ -1188,6 +1133,15 @@ export default function App() {
           getSessionActivation(sessionId),
           getTabCronTask(activeTabId),
         ]);
+        // history_open analytics (cross-review C2): report the session's FROZEN
+        // runtime (targetRuntime, from session metadata) — matches the sidecar
+        // spawn runtime and thus server-side ai_turn_complete.runtime — rather
+        // than the agent's possibly-drifted current config.
+        track('history_open', {
+          agent_hash: hashAgentNameSync(getAgentByWorkspacePath(cfg, project.path)?.name ?? null),
+          runtime: targetRuntime,
+          session_id: null,
+        });
         const currentRuntime = activeTab?.sessionId ? resolvedCurrentRuntime : targetRuntime;
         const plan = planSessionOpen({
           tabs: tabsRef.current,

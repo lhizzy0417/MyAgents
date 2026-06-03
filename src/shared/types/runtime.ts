@@ -56,6 +56,52 @@ export const RUNTIME_DISPLAY_NAMES: Record<RuntimeType, string> = {
 };
 
 /**
+ * Coerce an arbitrary string (agent config value, persisted state, env) into a
+ * valid `RuntimeType`, defaulting to `'builtin'` for missing/unknown values.
+ *
+ * Single source of truth — re-exported from `@/utils/sessionOpenPlan` for
+ * renderer callers. Lives in `shared/` so renderer + sidecar consume one impl.
+ */
+export function normalizeRuntime(value: string | null | undefined): RuntimeType {
+  return VALID_RUNTIMES.includes(value as RuntimeType) ? (value as RuntimeType) : 'builtin';
+}
+
+/**
+ * Resolve the **agent-config** effective runtime, gated by the `multiAgentRuntime`
+ * developer flag: when it is OFF, everything collapses to `builtin` regardless of
+ * the agent's configured runtime.
+ *
+ * SCOPE — this is the spawn runtime for a NEW session (and the pre-session
+ * fallback), NOT the authoritative runtime of an EXISTING session. It mirrors
+ * only the **config fallback** leg of the Rust spawn decision in
+ * `src-tauri/src/sidecar.rs::resolve_agent_runtime_from_config` (gate check +
+ * builtin fallback). The Rust spawn path for an existing Tab/Cron sidecar
+ * resolves `resolve_session_runtime(session_id)` FIRST (the frozen runtime the
+ * session was created with), and only falls back to agent config when there is
+ * no session yet. That frozen value — surfaced to the frontend as
+ * `chat:system-init.payload.runtime` / session metadata — is what the
+ * server-side `ai_turn_complete.runtime` reports.
+ *
+ * Therefore **session-scoped analytics** (`session_new` / `message_send` /
+ * `message_complete` / `history_open`) MUST prefer the frozen session runtime
+ * (`sessionRuntime ?? resolveEffectiveRuntime(agentConfig, gate)`, the canonical
+ * precedence in `Chat.tsx` `currentRuntime`); using this helper alone would
+ * diverge from `ai_turn_complete` once a user changes an agent's runtime after
+ * session creation. Only genuinely config-level callers (`workspace_open` for a
+ * brand-new session, `app_launch` adoption snapshot) may use this directly.
+ *
+ * Keep the gate + builtin-fallback semantics in sync with the Rust function
+ * above (and vice-versa).
+ */
+export function resolveEffectiveRuntime(
+  agentRuntime: string | null | undefined,
+  multiAgentRuntimeEnabled: boolean,
+): RuntimeType {
+  if (!multiAgentRuntimeEnabled) return 'builtin';
+  return normalizeRuntime(agentRuntime);
+}
+
+/**
  * Structured hint for recoverable CLI errors.
  *
  * Emitted by Admin-API handlers when they reject a request for a reason that

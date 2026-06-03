@@ -202,6 +202,12 @@ export interface HistoryOpenParams {
  * caller 无需手动传。同名规则适用于本文件下方所有"session-scoped"事件。
  */
 export interface MessageSendParams {
+  /** Effective runtime of THIS session — same value as the server-side
+   *  ai_turn_complete.runtime, so the desktop funnel can be sliced by runtime
+   *  without joining to session_new. Resolved as the session-FROZEN runtime
+   *  (`sessionRuntime`) when known, else the agent-config effective runtime
+   *  (`resolveEffectiveRuntime`). See analyticsMetaRef in TabProvider. */
+  runtime: AnalyticsRuntime;
   mode: string;           // 权限模式: auto | confirm | deny
   model: string;          // 当前模型
   skill?: string | null;  // 技能/指令名称
@@ -215,6 +221,9 @@ export interface MessageSendParams {
  * message_complete 事件参数
  */
 export interface MessageCompleteParams {
+  /** Effective runtime of THIS session (frozen sessionRuntime ?? agent-config) —
+   *  see MessageSendParams.runtime. */
+  runtime: AnalyticsRuntime;
   model?: string;                // 主模型名称
   input_tokens: number;          // 输入 tokens
   output_tokens: number;         // 输出 tokens
@@ -222,6 +231,21 @@ export interface MessageCompleteParams {
   cache_creation_tokens: number; // 缓存创建 tokens
   tool_count: number;            // 工具调用次数
   duration_ms: number;           // 响应耗时（毫秒）
+}
+
+/**
+ * app_launch 事件参数
+ */
+export interface AppLaunchParams {
+  /** 启动类型（目前固定 'cold'） */
+  launch_type: string;
+  /**
+   * 逗号分隔的 distinct 有效外部 runtime 列表（如 `"codex"` / `"claude-code,codex"`）。
+   * gate-aware：`multiAgentRuntime` 关闭时为 `''`（所有 agent 实际跑 builtin）。
+   * 用于"已配置但可能从未使用"的 runtime 采用率分析——turn 级事件看不到这部分。
+   * config 尚未加载时该字段缺省（区分 `''`=无外部 与 缺省=未知）。
+   */
+  runtimes_active?: string;
 }
 
 /**

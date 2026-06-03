@@ -17,7 +17,8 @@ import { track, consumePendingSurface, setPendingSurface, hashAgentNameSync } fr
 import type { Surface } from '@/analytics';
 import { useConfigData } from '@/config/useConfigData';
 import { getAgentByWorkspacePath } from '@/config/services/agentConfigService';
-import { normalizeRuntime } from '@/utils/sessionOpenPlan';
+import { normalizeRuntime, resolveEffectiveRuntime } from '@/utils/sessionOpenPlan';
+import type { RuntimeType } from '@/../shared/types/runtime';
 import { generateSessionTitle } from '@/api/sessionClient';
 import type { SessionMetadata } from '@/api/sessionClient';
 import { createSseConnection, type SseConnection } from '@/api/SseConnection';
@@ -312,19 +313,12 @@ export default function TabProvider({
     const appConfigRef = useRef(appConfig);
     appConfigRef.current = appConfig;
     const analyticsMetaRef = useRef({
-        runtime: 'builtin' as 'builtin' | 'claude-code' | 'codex' | 'gemini' | 'unknown',
+        runtime: 'builtin' as RuntimeType,
         agentHash: null as string | null,
     });
-    useEffect(() => {
-        if (!agentDir) {
-            analyticsMetaRef.current = { runtime: 'builtin', agentHash: null };
-            return;
-        }
-        const agent = getAgentByWorkspacePath(appConfig, agentDir);
-        const runtime = agent ? normalizeRuntime(agent.runtime) : 'builtin';
-        const agentHash = hashAgentNameSync(agent?.name ?? null);
-        analyticsMetaRef.current = { runtime, agentHash };
-    }, [appConfig, agentDir]);
+    // NOTE: the effect that POPULATES analyticsMetaRef lives below, after the
+    // `sessionRuntime` state declaration — it depends on the session-frozen
+    // runtime (cross-review C1) which isn't in scope here yet.
 
     // PRD 0.2.19 cross-review fix (B2): Tab-scoped track wrapper that always
     // attaches THIS tab's session_id (from `currentSessionIdRef`) AND tab_id
@@ -409,6 +403,23 @@ export default function TabProvider({
     const loadingOlderRef = useRef(false);
     const [sessionState, setSessionState] = useState<SessionState>('idle');
     const [sessionRuntime, setSessionRuntime] = useState<string | null>(null);
+    // Populate analyticsMetaRef (declared above). The session-FROZEN runtime is
+    // authoritative once known — it mirrors the runtime the sidecar was actually
+    // spawned with (Rust resolve_session_runtime takes precedence over agent
+    // config), which is exactly what the server-side ai_turn_complete.runtime
+    // reports. This is the canonical `sessionRuntime ?? agentRuntime` precedence
+    // (see Chat.tsx currentRuntime). resolveEffectiveRuntime(agent config) is
+    // only the pre-session / new-session fallback. Without the frozen value,
+    // session_new / message_send / message_complete would diverge from
+    // ai_turn_complete after a user changes an agent's runtime (cross-review C1).
+    useEffect(() => {
+        const agent = agentDir ? getAgentByWorkspacePath(appConfig, agentDir) : undefined;
+        const runtime: RuntimeType = sessionRuntime
+            ? normalizeRuntime(sessionRuntime)
+            : resolveEffectiveRuntime(agent?.runtime, !!appConfig.multiAgentRuntime);
+        const agentHash = hashAgentNameSync(agent?.name ?? null);
+        analyticsMetaRef.current = { runtime, agentHash };
+    }, [appConfig, agentDir, sessionRuntime]);
     const [sessionMeta, setSessionMeta] = useState<SessionMetadata | null>(null);
     const [logs, setLogs] = useState<string[]>([]);
     const [unifiedLogs, setUnifiedLogs] = useState<LogEntry[]>([]);
@@ -1929,6 +1940,7 @@ export default function TabProvider({
                 }
                 // Always track message_complete, use defaults if payload is missing
                 trackTabEvent('message_complete', {
+                    runtime: analyticsMetaRef.current.runtime,
                     model: completePayload?.model,
                     input_tokens: completePayload?.input_tokens ?? 0,
                     output_tokens: completePayload?.output_tokens ?? 0,
@@ -3035,6 +3047,7 @@ export default function TabProvider({
         }).then((response) => {
             if (response.success) {
                 trackTabEvent('message_send', {
+                    runtime: analyticsMetaRef.current.runtime,
                     mode: permissionMode ?? 'auto',
                     model: model ?? 'default',
                     skill,

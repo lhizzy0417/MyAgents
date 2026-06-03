@@ -1,4 +1,8 @@
-import { VALID_RUNTIMES, type RuntimeType } from '../../shared/types/runtime';
+import { type RuntimeType } from '../../shared/types/runtime';
+
+// Single source of truth lives in shared/ (consumed by sidecar too). Re-exported
+// here so existing renderer callers (`@/utils/sessionOpenPlan`) keep working.
+export { normalizeRuntime, resolveEffectiveRuntime } from '../../shared/types/runtime';
 
 export interface SessionOpenTabState {
   id: string;
@@ -29,10 +33,6 @@ export interface SessionOpenPlanInput {
   targetRuntime?: RuntimeType;
   targetActivation?: SessionOpenActivationState | null;
   currentTabCronRunning: boolean;
-}
-
-export function normalizeRuntime(value: string | null | undefined): RuntimeType {
-  return VALID_RUNTIMES.includes(value as RuntimeType) ? value as RuntimeType : 'builtin';
 }
 
 export function planSessionOpen(input: SessionOpenPlanInput): SessionOpenPlan {

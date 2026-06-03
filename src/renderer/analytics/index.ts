@@ -41,6 +41,7 @@ export { setPendingSurface, consumePendingSurface, clearPendingSurface } from '.
 export type {
   EventName,
   EventParams,
+  AppLaunchParams,
   MessageSendParams,
   MessageCompleteParams,
   Source,
