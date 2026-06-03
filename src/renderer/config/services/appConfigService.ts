@@ -20,6 +20,7 @@ import {
     mockLoadConfig,
     mockSaveConfig,
 } from '@/utils/browserMock';
+import { normalizeStringifiedJsonFields } from './configNormalize';
 import { type ImBotConfig, DEFAULT_IM_BOT_CONFIG } from '../../../shared/types/im';
 // Agent migration is triggered from ConfigProvider after both config + projects are loaded
 import { isDebugMode } from '@/utils/debug';
@@ -123,6 +124,16 @@ export async function loadAppConfig(): Promise<AppConfig> {
             // legacy field is masked and we can no longer distinguish "user
             // had cron on" from "user had cron off".
             const migrated = migrateOsNotificationsField(loaded);
+            // Heal any agent `providerEnvJson`/`mcpServersJson` that was persisted
+            // as a raw object instead of a stringified JSON (issue #301). Done
+            // before the dynamicDefault merge (agents live in `loaded`), and the
+            // healed config is persisted once so every consumer — including the
+            // independent Rust reader — sees the declared string shape.
+            if (normalizeStringifiedJsonFields(migrated)) {
+                saveAppConfig(migrated).catch(err => {
+                    console.error('[configService] Failed to persist stringified-JSON normalization:', err);
+                });
+            }
             const merged = { ...dynamicDefault, ...migrated };
             return migrateImBotConfig(merged);
         }
