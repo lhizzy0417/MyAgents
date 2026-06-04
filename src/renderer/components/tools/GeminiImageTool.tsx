@@ -74,6 +74,11 @@ function imageMime(filePath: string): string {
 export default function GeminiImageTool({ tool }: GeminiImageToolProps) {
   const parsed = parseToolResult(tool.result);
   const { openPreview } = useImagePreview();
+  // PRD 0.2.30 — when the image is surfaced via the first-class attachment
+  // pipeline (ToolAttachmentGallery renders it in-flow below this card), the card
+  // shows meta only. Older history results carry no attachments → keep the
+  // embedded image as a legacy fallback.
+  const hasAttachments = (tool.attachments?.length ?? 0) > 0;
   // Use key-based reset instead of useEffect setState to avoid cascading renders
   const resultKey = tool.result ?? '';
   const [imageState, setImageState] = useState<{ loaded: boolean; error: boolean; key: string }>({ loaded: false, error: false, key: resultKey });
@@ -86,7 +91,9 @@ export default function GeminiImageTool({ tool }: GeminiImageToolProps) {
 
   // Resolve image URL (blob URL in Tauri, direct URL in browser)
   useEffect(() => {
-    if (!parsed.filePath) {
+    if (!parsed.filePath || hasAttachments) {
+      // No filePath, or the image is rendered by ToolAttachmentGallery instead —
+      // skip the blob resolution to avoid a wasted read + leaked object URL.
       // Use rAF to avoid synchronous setState in effect body (react-hooks/set-state-in-effect)
       const id = requestAnimationFrame(() => setImageUrl(null));
       return () => cancelAnimationFrame(id);
@@ -116,7 +123,7 @@ export default function GeminiImageTool({ tool }: GeminiImageToolProps) {
         blobUrlRef.current = null;
       }
     };
-  }, [parsed.filePath, resultKey]);
+  }, [parsed.filePath, resultKey, hasAttachments]);
 
   const toolLabel = tool.name.includes('edit_image') ? '编辑图片' : '生成图片';
   const isGenerating = !tool.result;
@@ -170,8 +177,9 @@ export default function GeminiImageTool({ tool }: GeminiImageToolProps) {
         </div>
       )}
 
-      {/* Image display */}
-      {parsed.filePath && !parsed.error && (
+      {/* Image display — legacy fallback only (no attachments). New results render
+          in-flow via ToolAttachmentGallery → ToolImageAttachment below the card. */}
+      {parsed.filePath && !parsed.error && !hasAttachments && (
         <div className="mt-2">
           <div
             className="relative cursor-pointer group rounded-lg overflow-hidden inline-block border border-[var(--line-subtle)]"
@@ -212,6 +220,7 @@ export default function GeminiImageTool({ tool }: GeminiImageToolProps) {
         <div className="text-[10px] text-[var(--ink-muted)] space-y-0.5 mt-1">
           {parsed.resolution && <div>分辨率: {parsed.resolution} {parsed.aspectRatio && `| 宽高比: ${parsed.aspectRatio}`}</div>}
           {parsed.model && <div>模型: {parsed.model}</div>}
+          {parsed.filePath && <div className="font-mono opacity-60 break-all">文件: {parsed.filePath}</div>}
           <div className="font-mono opacity-60">contextId: {parsed.contextId}</div>
         </div>
       )}

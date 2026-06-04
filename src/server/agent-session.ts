@@ -20,7 +20,7 @@ import { modelAliasEnvChangesForModel, resolveSessionModelAliases, type ModelAli
 import { deriveReloadResumeAnchor, resolveEffectiveResumeAt } from './utils/rewind-anchor';
 import { buildForkUuidRemap, remapStoredSdkUuids } from './utils/fork-remap';
 import { decideInFlightActionOnResult } from './utils/inflight-terminal';
-import { shouldBlockToolInPlanMode, planModeDenyMessage, isPlanModeInEffect, PLAN_MODE_READONLY_TOOLS, PLAN_MODE_HOST_INTERACTION_TOOLS } from './utils/plan-mode-gate';
+import { shouldBlockToolInPlanMode, planModeDenyMessage, isPlanModeInEffect, PLAN_MODE_READONLY_TOOLS, PLAN_MODE_HOST_INTERACTION_TOOLS, applyPermissionModeSelection, computePlanExitState, computeRestoredPlanState } from './utils/plan-mode-gate';
 import { isEmptySuccessfulSdkResult, isRecoveredAssistantMessageError } from './utils/sdk-turn-outcome';
 import { InactivityWatchdog } from './utils/inactivity-watchdog';
 import { WATCHDOG_RESUME_REMINDER, planWatchdogAutoResume, shouldAdoptPendingContinueIntoScheduledAutoResume, shouldConsumePendingContinueAfterAbort, shouldDeferPendingContinueToScheduledAutoResume, shouldPrependWatchdogAutoResume } from './utils/watchdog-auto-resume';
@@ -52,6 +52,7 @@ import { parsePartialJson } from '../shared/parsePartialJson';
 import { deriveSessionTitle } from '../shared/sessionTitle';
 import type { SystemInitInfo } from '../shared/types/system';
 import { saveSessionMetadata, updateSessionTitleFromMessage, saveSessionMessages, saveAttachment, updateSessionMetadata, getSessionMetadata, getSessionData } from './SessionStore';
+import { firePostTurnTitleHook } from './turn-hooks';
 import { createSessionMetadata, type SessionMessage, type MessageAttachment, type MessageUsage, type SessionSource } from './types/session';
 import {
   createMaterializedSessionMetadata,
@@ -71,10 +72,13 @@ import { setAmbientLogContext, clearAmbientLogContextField } from './logger-cont
 import { beginTurn as beginTurnAbort, endTurn as endTurnAbort, abortTurn as abortTurnAbort } from './utils/turn-abort';
 import type { CancelReason } from './utils/cancellation';
 import { localTimestamp } from '../shared/logTime';
+import { isAbortedTerminalReason, shouldTitleCompletedTurn } from '../shared/terminalReason';
 import { trackServer } from './analytics';
 import { getCurrentRuntimeType, isExternalRuntime } from './runtimes/factory';
 import { resolveLastRealUserMessagePreview } from './utils/session-message-preview';
 import type { ImagePayload } from './runtimes/types';
+import { buildBuiltinMediaAttachments } from './runtimes/builtin-media-attachments';
+import type { ToolAttachment } from '../shared/types/tool-attachment';
 import { imEventBus, type ImEventType } from './utils/im-event-bus';
 import { imRequestRegistry } from './utils/im-request-registry';
 import { mirrorIfChannelBound, type MirrorImage } from './utils/im-mirror';
@@ -426,6 +430,10 @@ type ToolUseState = {
   subagentCalls?: SubagentToolCall[];
   /** Gemini thinking models: opaque signature that must be round-tripped on tool calls */
   thought_signature?: string;
+  /** PRD 0.2.30 — rich-media produced by a builtin media tool (edge-tts audio /
+   *  gemini-image image), normalized into the same first-class attachment channel
+   *  as the Codex runtime. Persisted with the block; rendered via ToolAttachmentGallery. */
+  attachments?: ToolAttachment[];
 };
 
 type SubagentToolCall = {
@@ -2153,25 +2161,35 @@ export function getSessionPermissionMode(): PermissionMode {
 export function setSessionPermissionMode(mode: PermissionMode): void {
   if (mode === currentPermissionMode) return;
   const oldMode = currentPermissionMode;
-  currentPermissionMode = mode;
-  console.log(`[agent] session permission mode set: ${oldMode} -> ${mode}`);
+  const oldPrePlan = prePlanPermissionMode;
+  // Route through the shared transition so the UI toggle keeps the plan
+  // capture/restore invariant: switching INTO plan captures the prior mode so a
+  // later ExitPlanMode has something to restore. Before this, the UI toggle set
+  // currentPermissionMode='plan' WITHOUT touching prePlanPermissionMode, so
+  // ExitPlanMode approval was a no-op and the hard gate stayed engaged — the
+  // session was stuck in plan until the user hand-switched to fullAgency.
+  const next = applyPermissionModeSelection(currentPermissionMode, prePlanPermissionMode, mode);
+  currentPermissionMode = next.permissionMode;
+  prePlanPermissionMode = next.prePlanPermissionMode;
+  console.log(`[agent] session permission mode set: ${oldMode} -> ${currentPermissionMode} (prePlan=${prePlanPermissionMode ?? 'none'})`);
 
   // Apply permission mode change to SDK subprocess immediately (same as setSessionModel).
   // Without this, the SDK subprocess stays in the old mode until the next message
   // triggers applySessionConfig(). Critical for plan mode: user switches to plan in UI
   // but SDK keeps auto → canUseTool may be skipped → tools execute unchecked.
   if (querySession) {
-    const sdkMode = mapToSdkPermissionMode(mode);
+    const sdkMode = mapToSdkPermissionMode(currentPermissionMode);
     querySession.setPermissionMode(sdkMode).catch(err => {
       console.error('[agent] failed to apply permission mode to running session:', err);
-      // Rollback: restore old mode and notify frontend to undo
+      // Rollback: restore old mode + capture and notify frontend to undo
       currentPermissionMode = oldMode;
+      prePlanPermissionMode = oldPrePlan;
       broadcast('chat:permission-mode-changed', { permissionMode: oldMode });
     });
   }
 
   // Notify frontend of the mode change so UI stays in sync
-  broadcast('chat:permission-mode-changed', { permissionMode: mode });
+  broadcast('chat:permission-mode-changed', { permissionMode: currentPermissionMode });
 }
 
 /**
@@ -3326,12 +3344,18 @@ export function handleExitPlanModeResponse(
     return false;
   }
   pendingExitPlanMode.delete(requestId);
-  // Restore currentPermissionMode so applySessionConfig won't override SDK's internal state
-  if (approved && prePlanPermissionMode) {
-    currentPermissionMode = prePlanPermissionMode;
-    prePlanPermissionMode = null;
+  // Restore currentPermissionMode so the hard gate + applySessionConfig stop
+  // treating the session as plan. Runs on ANY approval (no longer gated on
+  // prePlanPermissionMode): computePlanExitState falls back to a concrete
+  // non-plan mode when nothing was captured, so exiting plan can never be a
+  // no-op — that no-op was the deadlock when plan was entered via the UI toggle
+  // (or restored from disk) without a captured prior mode.
+  if (approved) {
+    const next = computePlanExitState(prePlanPermissionMode);
+    currentPermissionMode = next.permissionMode;
+    prePlanPermissionMode = next.prePlanPermissionMode;
     console.debug(`[ExitPlanMode] Restored currentPermissionMode to: ${currentPermissionMode}`);
-    // Notify frontend that mode changed (plan → auto/custom/etc.)
+    // Notify frontend that mode changed (plan → auto/fullAgency)
     broadcast('chat:permission-mode-changed', { permissionMode: currentPermissionMode });
   }
   const trimmed = feedback?.trim();
@@ -3391,10 +3415,15 @@ export function handleEnterPlanModeResponse(requestId: string, approved: boolean
     return false;
   }
   pendingEnterPlanMode.delete(requestId);
-  // Sync currentPermissionMode so applySessionConfig won't override SDK's plan mode
+  // Sync currentPermissionMode so applySessionConfig won't override SDK's plan mode.
+  // Route through the shared transition: it captures the prior mode, but if we're
+  // ALREADY in plan it preserves the existing capture instead of overwriting it
+  // with 'plan' (re-entering plan to "fix" a stuck state must not poison the
+  // restore target — that previously made the deadlock permanent).
   if (approved) {
-    prePlanPermissionMode = currentPermissionMode;
-    currentPermissionMode = 'plan';
+    const next = applyPermissionModeSelection(currentPermissionMode, prePlanPermissionMode, 'plan');
+    currentPermissionMode = next.permissionMode;
+    prePlanPermissionMode = next.prePlanPermissionMode;
     console.debug(`[EnterPlanMode] Saved prePlanPermissionMode=${prePlanPermissionMode}, switched to plan`);
     broadcast('chat:permission-mode-changed', { permissionMode: 'plan' });
   }
@@ -4968,6 +4997,14 @@ function handleToolResultComplete(toolUseId: string, content: string, isError?: 
   setToolResult(toolUseId, content, isError);
 }
 
+// #296 — the most recent turn-end persist promise (assigned inside
+// handleMessageComplete). The post-turn auto-title hook chains off this so it
+// reads a transcript + stats.messageCount that already include the just-completed
+// turn (the Title Service reads from disk). Turns are serial per session, so this
+// is always the current turn's persist at the fire site. Initialized resolved so a
+// fire before any turn is a harmless no-op.
+let lastTurnEndPersist: Promise<unknown> = Promise.resolve();
+
 function handleMessageComplete(): void {
   isStreamingMessage = false;
   // Capture before fallback potentially re-arms it, so the post-teardown
@@ -5135,7 +5172,9 @@ function handleMessageComplete(): void {
   // Fire-and-forget: persistMessagesToStorage is async (cooperative file lock),
   // but the enclosing handler is a sync stream-event callback. Errors are already
   // swallowed inside SessionStore writers; surfacing them here would be no-op.
-  void persistMessagesToStorage({
+  // #296: capture the promise into `lastTurnEndPersist` so the post-turn auto-title
+  // hook can fire AFTER this turn is durable on disk (still fire-and-forget here).
+  lastTurnEndPersist = persistMessagesToStorage({
     inputTokens: currentTurnUsage.inputTokens,
     outputTokens: currentTurnUsage.outputTokens,
     cacheReadTokens: currentTurnUsage.cacheReadTokens || undefined,
@@ -5449,6 +5488,42 @@ function appendToolResultContent(toolUseId: string, content: string, isError?: b
   const next = existing ? `${existing}\n${content}` : content;
   setToolResult(toolUseId, next, isError);
   return next;
+}
+
+/**
+ * PRD 0.2.30 — for builtin media tools (edge-tts audio / gemini-image image),
+ * normalize the just-completed tool result into `ToolAttachment[]`, set them on
+ * the persisted tool block, and return them so the caller can include them in
+ * the `chat:tool-result-complete` broadcast. No-op (returns undefined) for any
+ * non-media tool. Idempotent — if the block already carries attachments (e.g.
+ * the result surfaced via a second delivery path), the existing set is reused
+ * without re-saving to disk.
+ *
+ * Synchronous save is fine here: the file already exists on disk and the
+ * trusted-root copy is a cheap base64 round-trip; gating to two tool names
+ * keeps every other tool result on the zero-cost path.
+ */
+async function attachBuiltinMediaIfAny(
+  toolUseId: string,
+  contentStr: string,
+): Promise<ToolAttachment[] | undefined> {
+  const toolBlock = findToolBlockById(toolUseId);
+  if (!toolBlock) return undefined;
+  if (toolBlock.tool.attachments && toolBlock.tool.attachments.length > 0) {
+    return toolBlock.tool.attachments;
+  }
+  try {
+    const attachments = await buildBuiltinMediaAttachments(toolBlock.tool.name, contentStr, {
+      sessionId,
+      toolUseId,
+    });
+    if (attachments.length === 0) return undefined;
+    toolBlock.tool.attachments = attachments;
+    return attachments;
+  } catch (err) {
+    console.warn('[agent] builtin media attachment failed:', err instanceof Error ? err.message : String(err));
+    return undefined;
+  }
 }
 
 function formatAssistantContent(content: unknown): string {
@@ -6085,9 +6160,16 @@ export async function initializeAgent(
         currentModel = resolved.model;
         console.log(`[agent] self-resolved model: ${resolved.model}`);
       }
-      if (resolved.permissionMode && !isExternalRuntime(getCurrentRuntimeType()) && resolved.permissionMode !== currentPermissionMode) {
-        currentPermissionMode = resolved.permissionMode as PermissionMode;
-        console.log(`[agent] self-resolved permissionMode: ${resolved.permissionMode}`);
+      if (resolved.permissionMode && !isExternalRuntime(getCurrentRuntimeType())) {
+        if (resolved.permissionMode !== currentPermissionMode) {
+          console.log(`[agent] self-resolved permissionMode: ${resolved.permissionMode}`);
+        }
+        // Restored mode is authoritative session state; drop any prePlanPermissionMode
+        // carried from a prior session/context so a later ExitPlanMode / SDK-status exit
+        // can't "restore" the wrong session's mode (codex review). See computeRestoredPlanState.
+        const restored = computeRestoredPlanState(resolved.permissionMode as PermissionMode);
+        currentPermissionMode = restored.permissionMode;
+        prePlanPermissionMode = restored.prePlanPermissionMode;
       }
     } catch (error) {
       // Self-resolution failure is non-fatal — fall back to external sync (Rust sync_ai_config)
@@ -6217,9 +6299,17 @@ export async function switchToSession(targetSessionId: string): Promise<boolean>
     try {
       const { resolveWorkspaceConfig } = await import('./utils/admin-config');
       const resolved = resolveWorkspaceConfig(agentDir, sessionMeta, { includeMcp: false });
-      if (resolved.permissionMode && resolved.permissionMode !== currentPermissionMode) {
-        currentPermissionMode = resolved.permissionMode as PermissionMode;
-        console.log(`[agent] switchToSession: restored permissionMode=${resolved.permissionMode}`);
+      if (resolved.permissionMode) {
+        if (resolved.permissionMode !== currentPermissionMode) {
+          console.log(`[agent] switchToSession: restored permissionMode=${resolved.permissionMode}`);
+        }
+        // prePlanPermissionMode belonged to the PREVIOUS session — reset on switch so a
+        // later ExitPlanMode / SDK-status exit restores THIS session's fallback, not the
+        // prior session's mode (codex review). Safe: switchToSession early-returns when
+        // targetSessionId === sessionId, so this never drops the current session's capture.
+        const restored = computeRestoredPlanState(resolved.permissionMode as PermissionMode);
+        currentPermissionMode = restored.permissionMode;
+        prePlanPermissionMode = restored.prePlanPermissionMode;
       }
       // #300: also restore model + provider env from the TARGET session's snapshot.
       // Previously only permissionMode was restored, so the pre-warm scheduled below
@@ -6269,14 +6359,17 @@ async function applySessionConfig(newModel?: string, newPermissionMode?: Permiss
     const sdkMode = mapToSdkPermissionMode(newPermissionMode);
     try {
       await querySession.setPermissionMode(sdkMode);
-      currentPermissionMode = newPermissionMode;
-      // If currently in plan mode (prePlanPermissionMode is set), update the saved mode
-      // so that exiting plan mode restores the user's LATEST choice, not the stale one.
-      if (prePlanPermissionMode) {
-        prePlanPermissionMode = newPermissionMode;
-        console.log(`[agent] updated prePlanPermissionMode to: ${newPermissionMode}`);
-      }
-      console.log(`[agent] runtime permission mode switched to: ${newPermissionMode} (SDK: ${sdkMode})`);
+      // Route through the shared transition so a config-driven switch keeps the
+      // plan capture/restore invariant: switching INTO plan captures the prior
+      // mode (so ExitPlanMode can restore it), switching to a non-plan mode
+      // clears the capture. Previously this set currentPermissionMode directly
+      // and only refreshed prePlanPermissionMode when it was already set — so a
+      // config path that entered plan from a non-plan mode never captured one
+      // (same deadlock class as the UI toggle).
+      const next = applyPermissionModeSelection(currentPermissionMode, prePlanPermissionMode, newPermissionMode);
+      currentPermissionMode = next.permissionMode;
+      prePlanPermissionMode = next.prePlanPermissionMode;
+      console.log(`[agent] runtime permission mode switched to: ${currentPermissionMode} (SDK: ${sdkMode}, prePlan=${prePlanPermissionMode ?? 'none'})`);
     } catch (error) {
       console.error('[agent] failed to set permission mode:', error);
     }
@@ -6747,12 +6840,14 @@ export async function enqueueUserMessage(
   if (!isSessionBusy) {
     await applySessionConfig(model, permissionMode);
 
-    // Update local tracking even if SDK call is skipped (e.g., first message before pre-warm)
+    // Update local tracking even if SDK call is skipped (e.g., first message before pre-warm).
+    // Same shared transition as applySessionConfig so a first-message payload of
+    // 'plan' captures the prior mode instead of leaving the restore target empty.
     if (permissionMode && permissionMode !== currentPermissionMode) {
-      currentPermissionMode = permissionMode;
-      // Keep prePlanPermissionMode in sync (same as applySessionConfig)
-      if (prePlanPermissionMode) prePlanPermissionMode = permissionMode;
-      if (isDebugMode) console.log(`[agent] permission mode set to: ${permissionMode}`);
+      const next = applyPermissionModeSelection(currentPermissionMode, prePlanPermissionMode, permissionMode);
+      currentPermissionMode = next.permissionMode;
+      prePlanPermissionMode = next.prePlanPermissionMode;
+      if (isDebugMode) console.log(`[agent] permission mode set to: ${currentPermissionMode} (prePlan=${prePlanPermissionMode ?? 'none'})`);
     }
     if (model && model !== currentModel) {
       currentModel = model;
@@ -6766,10 +6861,10 @@ export async function enqueueUserMessage(
     // the "config locked while streaming" contract. canUseTool() reads currentPermissionMode
     // live (line ~4081), so updating it mid-turn would change permission behavior unexpectedly.
     if (permissionMode && permissionMode !== currentPermissionMode) {
-      currentPermissionMode = permissionMode;
-      // Keep prePlanPermissionMode in sync (same as !isSessionBusy branch)
-      if (prePlanPermissionMode) prePlanPermissionMode = permissionMode;
-      if (isDebugMode) console.log(`[agent] permission mode staged for restart: ${permissionMode}`);
+      const next = applyPermissionModeSelection(currentPermissionMode, prePlanPermissionMode, permissionMode);
+      currentPermissionMode = next.permissionMode;
+      prePlanPermissionMode = next.prePlanPermissionMode;
+      if (isDebugMode) console.log(`[agent] permission mode staged for restart: ${currentPermissionMode} (prePlan=${prePlanPermissionMode ?? 'none'})`);
     }
     if (model && model !== currentModel) {
       currentModel = model;
@@ -9369,17 +9464,23 @@ async function startStreamingSession(preWarm = false): Promise<void> {
         console.log(`[agent] System status: ${statusResult.status}`);
         broadcast('chat:system-status', { status: statusResult.status });
 
-        // Detect SDK-initiated plan mode changes (EnterPlanMode is auto-allowed by SDK)
+        // Detect SDK-initiated plan mode changes (EnterPlanMode is auto-allowed by SDK).
+        // Both branches go through the shared transition so the prePlanPermissionMode
+        // capture/restore invariant matches the UI-toggle / ExitPlanMode paths.
         if (statusResult.permissionMode === 'plan' && currentPermissionMode !== 'plan') {
-          prePlanPermissionMode = currentPermissionMode;
-          currentPermissionMode = 'plan';
+          const next = applyPermissionModeSelection(currentPermissionMode, prePlanPermissionMode, 'plan');
+          currentPermissionMode = next.permissionMode;
+          prePlanPermissionMode = next.prePlanPermissionMode;
           broadcast('enter-plan-mode:request', { requestId: `sdk_auto_${Date.now()}`, autoApproved: true });
           broadcast('chat:permission-mode-changed', { permissionMode: 'plan' });
           console.log(`[agent] SDK auto-entered plan mode, saved prePlanPermissionMode=${prePlanPermissionMode}`);
         } else if (statusResult.permissionMode && statusResult.permissionMode !== 'plan' && prePlanPermissionMode) {
-          // SDK exited plan mode (e.g. after ExitPlanMode approval)
-          currentPermissionMode = prePlanPermissionMode;
-          prePlanPermissionMode = null;
+          // SDK exited plan mode (e.g. after ExitPlanMode approval). Gate stays on
+          // prePlanPermissionMode (truthy) to avoid acting during the optimistic
+          // setPermissionMode window; computePlanExitState never restores to 'plan'.
+          const next = computePlanExitState(prePlanPermissionMode);
+          currentPermissionMode = next.permissionMode;
+          prePlanPermissionMode = next.prePlanPermissionMode;
           broadcast('chat:permission-mode-changed', { permissionMode: currentPermissionMode });
           console.log(`[agent] SDK exited plan mode, restored currentPermissionMode=${currentPermissionMode}`);
         }
@@ -10005,9 +10106,12 @@ async function startStreamingSession(preWarm = false): Promise<void> {
               } else {
                 // Top-level tool result (e.g., WebSearch without parent)
                 const stripped = strippedToolResultIds.has(toolResultBlock.tool_use_id) || isPlaywrightTool(toolResultBlock.tool_use_id);
+                // PRD 0.2.30 — builtin media tools (edge-tts / gemini-image) → first-class attachments.
+                const attachments = await attachBuiltinMediaIfAny(toolResultBlock.tool_use_id, contentStr);
                 broadcast('chat:tool-result-complete', {
                   toolUseId: toolResultBlock.tool_use_id,
-                  content: stripped ? PLAYWRIGHT_RESULT_SENTINEL : contentStr
+                  content: stripped ? PLAYWRIGHT_RESULT_SENTINEL : contentStr,
+                  ...(attachments ? { attachments } : {}),
                 });
                 inFlightToolCount = Math.max(0, inFlightToolCount - 1);
               }
@@ -10140,10 +10244,16 @@ async function startStreamingSession(preWarm = false): Promise<void> {
                 });
               } else {
                 const stripped = strippedToolResultIds.has(toolResultBlock.tool_use_id) || isPlaywrightTool(toolResultBlock.tool_use_id);
+                // PRD 0.2.30 — builtin media tools (edge-tts / gemini-image) → first-class attachments.
+                // Idempotent with Site A; only one delivery path fires per tool result.
+                const attachments = toolResultBlock.is_error
+                  ? undefined
+                  : await attachBuiltinMediaIfAny(toolResultBlock.tool_use_id, contentStr);
                 broadcast('chat:tool-result-complete', {
                   toolUseId: toolResultBlock.tool_use_id,
                   content: stripped ? PLAYWRIGHT_RESULT_SENTINEL : contentStr,
-                  isError: toolResultBlock.is_error || false
+                  isError: toolResultBlock.is_error || false,
+                  ...(attachments ? { attachments } : {}),
                 });
                 inFlightToolCount = Math.max(0, inFlightToolCount - 1);
               }
@@ -10225,6 +10335,21 @@ async function startStreamingSession(preWarm = false): Promise<void> {
         };
         const resultText = resultMessage.result || '';
 
+        // #307: did the user/system just abort this turn (stop button, config-change
+        // restart, session takeover)? The SDK wraps an abort as an is_error result
+        // whose `result` text is the internal parser diagnostic
+        // ("[ede_diagnostic] result_type=user ..."). That string must never reach a
+        // user — not the desktop error banner, not the IM error reply. We detect the
+        // abort two ways because terminal_reason can be MISSING when the interrupt
+        // lands between yields (see the terminal_reason field comment above):
+        //   1. terminal_reason starts with 'aborted_' (the normal abort result), or
+        //   2. an interrupt is actively in progress (isInterruptingResponse).
+        // NOT shouldSurfaceTerminalReason() — that returns false for a *missing*
+        // reason too, which would wrongly swallow legitimate no-terminal_reason
+        // errors from third-party providers.
+        const isAbortResult =
+          isAbortedTerminalReason(resultMessage.terminal_reason) || isInterruptingResponse;
+
         // Forward SDK error results to IM callback (prevents "(No Response)")
         if (resultMessage.is_error) {
           const rawError = resultText || resultMessage.errors?.join('; ') || currentTurnLastAssistantMessageError || '';
@@ -10251,7 +10376,7 @@ async function startStreamingSession(preWarm = false): Promise<void> {
             shouldResetSessionAfterError = true;
             shouldResetReason = 'stale';
           }
-          if (pendingRequestIds.length > 0) {
+          if (pendingRequestIds.length > 0 && !isAbortResult) {
             const errorText = localizeImError(rawError);
             console.warn('[agent] SDK result is_error, forwarding to IM bus:', errorText);
             emitImEvent('error', errorText);
@@ -10261,6 +10386,12 @@ async function startStreamingSession(preWarm = false): Promise<void> {
               imRequestRegistry.setStatus(failedReq, 'failed');
               imRequestRegistry.unregister(failedReq);
             }
+          } else if (pendingRequestIds.length > 0 && isAbortResult) {
+            // #307: an aborted IM turn must NOT push the internal diagnostic to the
+            // IM peer as an error. handleMessageComplete() below runs for is_error
+            // aborts (isEmptySuccessfulSdkResult is false when is_error), so it
+            // emits the IM 'complete' event and pops/unregisters the pending request.
+            console.log('[agent] Suppressing IM error forward for aborted turn (handleMessageComplete will finalize)');
           }
         }
 
@@ -10334,7 +10465,14 @@ async function startStreamingSession(preWarm = false): Promise<void> {
         const hasResultText = resultText.trim().length > 0;
         const resultErrorText = (hasResultText ? resultText : '') || resultMessage.errors?.join('; ') || currentTurnLastAssistantMessageError || '';
         const noOutputResultText = resultMessage.is_error ? resultErrorText : (hasResultText ? resultText : '');
-        if (noOutputResultText && !currentTurnHasOutput && !currentTurnToolCount) {
+        // #307: skip the no-output error/banner block for aborts (isAbortResult
+        // computed above). On abort the only "result text" is the SDK's internal
+        // parser diagnostic; surfacing it via the is_error branch below would show
+        // that scary internal string in the red error banner. The turn instead flows
+        // to handleMessageComplete() below carrying terminal_reason='aborted_streaming',
+        // which the frontend renders as the normal inline "已停止" feedback (banner
+        // suppressed by describeTerminalReason).
+        if (noOutputResultText && !currentTurnHasOutput && !currentTurnToolCount && !isAbortResult) {
           if (resultMessage.is_error) {
             console.warn('[agent] SDK error result with no streamed output, showing as agent-error:', resultErrorText);
             lastAgentError = resultErrorText;
@@ -10459,6 +10597,31 @@ async function startStreamingSession(preWarm = false): Promise<void> {
           });
 
           handleMessageComplete();
+
+          // #296 — backend-owned auto session titling, fired through the
+          // `turn-hooks` leaf slot (dependency inversion) so this file never
+          // imports the Title Service / title-generator (no import cycle). Three
+          // correctness requirements, all handled here:
+          //  1. Gate on a genuinely successful turn — mirror the external path's
+          //     `lastTurnSucceeded` and the retired renderer's #245 gate. This
+          //     `else` branch is also reached by is_error results with visible
+          //     text and by non-completed terminal reasons (aborted_streaming /
+          //     max_turns); those must never seed a title.
+          //  2. Fire AFTER the turn-end persist resolves so the Title Service
+          //     reads a transcript + stats.messageCount that already include THIS
+          //     turn — matches external ordering and ensures a session ending at
+          //     exactly the round threshold still gets titled (not one turn late,
+          //     not never-titled if the tab is then closed).
+          //  3. Snapshot raw model + providerEnv now (module globals a mid-session
+          //     /model/set could mutate before the persist resolves).
+          // Still best-effort + non-blocking (void .then, errors swallowed downstream).
+          if (shouldTitleCompletedTurn(resultMessage.is_error === true, resultMessage.terminal_reason)) {
+            const titleSid = sessionId;
+            const titleModel = currentModel;
+            const titleProviderEnv = currentProviderEnv;
+            void lastTurnEndPersist.then(() =>
+              firePostTurnTitleHook(titleSid, 'builtin', titleModel, titleProviderEnv));
+          }
 
           // PRD 0.2.18 Session Inbox — turn-end reply pushback.
           // If this turn was triggered by an inbox message with replyBack=true,

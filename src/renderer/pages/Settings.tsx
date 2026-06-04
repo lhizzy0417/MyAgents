@@ -74,6 +74,7 @@ import BugReportOverlay from '@/components/BugReportOverlay';
 import SettingsHelperInbox from '@/components/SettingsHelperInbox';
 import ShortcutRecorder from '@/components/ShortcutRecorder';
 import { VISIBLE_APP_SHORTCUTS } from '@/utils/appShortcuts';
+import { shouldDebounceAutoVerify } from '@/utils/apiKeyAutoVerify';
 import { DEFAULT_SUMMON_ACCELERATOR } from '../../shared/config-types';
 import ProviderEnableOrderDialog from '@/components/ProviderEnableOrderDialog';
 
@@ -1944,7 +1945,10 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
             return;
         }
 
-        // Bump generation counter — any in-flight verify for this provider becomes stale
+        // Bump generation counter — any in-flight verify for this provider becomes stale.
+        // Note: handleSaveApiKey ALSO bumps this counter on every keystroke (#306) so a verify
+        // already in flight against an older key value will see current != gen and bail before
+        // surfacing a toast. Both writers just want "older work becomes stale" — order doesn't matter.
         const gen = (verifyGenRef.current[provider.id] ?? 0) + 1;
         verifyGenRef.current[provider.id] = gen;
 
@@ -2034,6 +2038,9 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
 
     // Auto-verify when API key changes (with debounce)
     const handleSaveApiKey = useCallback(async (provider: Provider, key: string) => {
+        // Snapshot BEFORE the await — saveApiKey eventually swaps apiKeysRef.current
+        // via ConfigProvider's state update. Reading afterwards races that swap.
+        const prevKey = apiKeysRef.current[provider.id] ?? '';
         await saveApiKey(provider.id, key);
 
         // Clear previous timeout for this provider
@@ -2045,13 +2052,24 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
         setVerifyError((prev) => { const next = { ...prev }; delete next[provider.id]; return next; });
         if (errorDetailOpenId === provider.id) setErrorDetailOpenId(null);
 
-        // Clear verification status when key changes - will re-verify
-        if (key) {
-            // Debounce verification
-            verifyTimeoutRef.current[provider.id] = setTimeout(() => {
-                verifyProvider(provider, key);
-            }, 500);
+        // Bump the generation counter so any in-flight verify (still running
+        // from a prior keystroke / paste) becomes stale and won't fire a toast
+        // against the now-changed key. #306: users backspacing an expired key
+        // were getting stacked "invalid" toasts as previous verify cycles
+        // landed against intermediate prefixes.
+        verifyGenRef.current[provider.id] = (verifyGenRef.current[provider.id] ?? 0) + 1;
+
+        if (!shouldDebounceAutoVerify(prevKey, key)) {
+            // User is shortening (backspace / cut) or the field is empty.
+            // Skip auto-verify entirely — the user can paste / type forward to
+            // trigger one. Avoids the #306 keystroke-per-verify cascade.
+            return;
         }
+
+        // Debounce verification for the grow-the-key case
+        verifyTimeoutRef.current[provider.id] = setTimeout(() => {
+            verifyProvider(provider, key);
+        }, 500);
     }, [saveApiKey, verifyProvider, errorDetailOpenId]);
 
     // Cleanup timeouts on unmount

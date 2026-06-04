@@ -587,6 +587,7 @@ export async function updateSessionMetadata(
         | 'favorite'
         | 'lastMessagePreview'
         | 'titleSource'
+        | 'titleGenAttempts'
         | 'runtime'
         | 'runtimeSessionId'
         | 'runtimeUsageTotals'
@@ -597,7 +598,17 @@ export async function updateSessionMetadata(
         | 'providerEnvJson'
         | 'configSnapshotAt'
         | 'pendingContinueAfterAbort'
-    >>
+    >>,
+    /**
+     * Optional compare-and-set guard evaluated INSIDE the lock against the
+     * freshly-read current metadata. When it returns false the write is skipped
+     * and this returns null. This closes a check-then-write TOCTOU that a
+     * caller cannot close on its own: reading metadata, deciding, then calling
+     * this leaves a window where a concurrent writer can change the very field
+     * the decision was based on. Auto-titling uses it to never clobber a title
+     * the user renamed during the multi-second LLM call (review #3).
+     */
+    precondition?: (current: SessionMetadata) => boolean,
 ): Promise<SessionMetadata | null> {
     // Race-safe read-modify-write — must happen entirely under
     // `withSessionsLock` so a concurrent updater (e.g. periodic stats /
@@ -617,6 +628,10 @@ export async function updateSessionMetadata(
         const idx = all.findIndex(s => s.id === sessionId);
         if (idx < 0) {
             // session not found — leave result=null
+            return;
+        }
+        if (precondition && !precondition(all[idx])) {
+            // CAS guard failed against the in-lock snapshot — skip the write.
             return;
         }
         const updated: SessionMetadata = { ...all[idx], ...updates };

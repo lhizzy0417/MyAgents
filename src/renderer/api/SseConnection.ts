@@ -64,6 +64,7 @@ const JSON_EVENTS = new Set([
     'config:changed', // Admin CLI modified app config — triggers frontend refresh
     'chat:api-retry', // SDK API retry status (v0.2.77+) — rate limit / transient error retrying
     'chat:permission-mode-changed', // Backend permission mode changed (plan/auto/etc.) — sync frontend UI
+    'chat:session-title-changed', // #296 — backend Title Service applied an AI title; carries {sessionId,title,titleSource}
     // (Phase E PRD 0.2.7: `workspace:files-changed` SSE event removed —
     // renderer subscribes to Rust workspace_files watcher via Tauri event
     // `workspace:files-changed:<eventKey>` instead.)

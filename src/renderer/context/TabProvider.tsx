@@ -17,9 +17,9 @@ import { track, consumePendingSurface, setPendingSurface, hashAgentNameSync } fr
 import type { Surface } from '@/analytics';
 import { useConfigData } from '@/config/useConfigData';
 import { getAgentByWorkspacePath } from '@/config/services/agentConfigService';
+import { notifyConfigChanged } from '@/config/services/appConfigService';
 import { normalizeRuntime, resolveEffectiveRuntime } from '@/utils/sessionOpenPlan';
 import type { RuntimeType } from '@/../shared/types/runtime';
-import { generateSessionTitle } from '@/api/sessionClient';
 import type { SessionMetadata } from '@/api/sessionClient';
 import { createSseConnection, type SseConnection } from '@/api/SseConnection';
 import type { ImageAttachment } from '@/components/SimpleChatInput';
@@ -34,8 +34,6 @@ import type { ToolUse } from '@/types/stream';
 import type { SystemInitInfo } from '../../shared/types/system';
 import type { RuntimeDiagnostics } from '../../shared/types/runtime';
 import type { TerminalReason } from '../../shared/terminalReason';
-import { shouldRecordTurnForTitle } from '../../shared/terminalReason';
-import { isLikelyErrorTitle } from '../../shared/titleFilters';
 import type { LogEntry } from '@/types/log';
 import { parsePartialJson } from '@/utils/parsePartialJson';
 import { subscribeFrontendLogs, setCurrentTabId } from '@/utils/frontendLogger';
@@ -54,9 +52,6 @@ import {
     notifyPlanModeRequest,
 } from '@/services/notificationService';
 import { setBackgroundTaskStatus, setBackgroundTaskDescription, getBackgroundTaskDescription, clearAllBackgroundTaskStatuses, registerBackgroundTask } from '@/utils/backgroundTaskStatus';
-
-/** Minimum QA rounds before triggering AI title generation */
-const AUTO_TITLE_MIN_ROUNDS = 3;
 
 // Pattern 3 §3.2.2 — display cap on streaming tool results. The renderer
 // truncates the inline result to this many characters; the full result is
@@ -463,17 +458,10 @@ export default function TabProvider({
     const isActiveRef = useRef(isActive);
     isActiveRef.current = isActive;
 
-    // Auto-title generation refs
-    // Collect QA rounds; trigger AI title after 3+ rounds for sufficient context.
-    // For 1-2 rounds, the default truncated user query is shown instead.
-    const autoTitleAttemptedRef = useRef(false);
-    const titleRoundsRef = useRef<Array<{ user: string; assistant: string }>>([]);
-    // FIFO queue: supports queued sends where user sends B before A completes.
-    // Each send pushes to the queue; each message-complete shifts from it.
-    const pendingUserMessagesRef = useRef<string[]>([]);
-    const lastCompletedTextRef = useRef('');
-    const lastProviderEnvRef = useRef<{ baseUrl?: string; apiKey?: string; authType?: string; apiProtocol?: 'anthropic' | 'openai'; maxOutputTokens?: number; maxOutputTokensParamName?: 'max_tokens' | 'max_completion_tokens' | 'max_output_tokens'; upstreamFormat?: 'chat_completions' | 'responses'; modelAliases?: { sonnet?: string; opus?: string; haiku?: string } } | undefined>(undefined);
-    const lastModelRef = useRef<string | undefined>(undefined);
+    // Auto-title generation is backend-owned (#296): the sidecar triggers it
+    // after a successful turn and pushes the result via the
+    // `chat:session-title-changed` SSE event (handled below). The frontend no
+    // longer accumulates rounds or decides when to title — it only displays.
 
     // Notify parent when generating state changes (for close confirmation)
     useEffect(() => {
@@ -618,13 +606,6 @@ export default function TabProvider({
         // new one (or a Tab that just switched to builtin runtime).
         setRuntimeDiagnostics(null);
         clearInteractiveState();
-        // Reset auto-title state for new conversation
-        autoTitleAttemptedRef.current = false;
-        titleRoundsRef.current = [];
-        pendingUserMessagesRef.current = [];
-        lastCompletedTextRef.current = '';
-        lastProviderEnvRef.current = undefined;
-        lastModelRef.current = undefined;
         // NOTE: Do NOT clear currentSessionId here. The old session ID is the only way
         // to find the still-running sidecar via getSessionPort(). Setting it to null
         // causes all subsequent API calls to fail ("No running sidecar for tab") because
@@ -719,12 +700,6 @@ export default function TabProvider({
         setLogs([]);
         setSessionMeta(null);
         clearInteractiveState();
-        autoTitleAttemptedRef.current = false;
-        titleRoundsRef.current = [];
-        pendingUserMessagesRef.current = [];
-        lastCompletedTextRef.current = '';
-        lastProviderEnvRef.current = undefined;
-        lastModelRef.current = undefined;
 
         // Reset tab title so SortableTabItem falls back to folder name.
         onTitleChangeRef.current?.('New Chat');
@@ -1168,15 +1143,6 @@ export default function TabProvider({
                         }),
                     };
                 }
-            }
-
-            // Capture completed text for auto-title generation (skip if already attempted)
-            if (!autoTitleAttemptedRef.current && status === 'completed' && finalMsg.role === 'assistant' && Array.isArray(finalMsg.content)) {
-                const textParts = finalMsg.content
-                    .filter((b): b is ContentBlock & { type: 'text' } => b.type === 'text')
-                    .map(b => b.text)
-                    .join('');
-                lastCompletedTextRef.current = textParts;
             }
 
             // Side effect inside updater — technically impure, but safe because:
@@ -1950,42 +1916,25 @@ export default function TabProvider({
                     duration_ms: completePayload?.duration_ms ?? 0,
                 });
 
-                // Auto-title: collect QA round, fire after 3+ rounds
-                // Shift from FIFO queue to correctly pair sends with completions (handles queued sends)
-                // #245 gate: SDK / openai-bridge surface upstream 4xx/5xx errors as
-                // assistant text + terminate the turn with terminal_reason='aborted_streaming'.
-                // Treating those as good rounds let title-gen name sessions after the error
-                // string ("API Error: 400 ..."). shouldRecordTurnForTitle accepts only
-                // 'completed' + undefined (external runtimes don't emit the field).
-                const completedUserText = pendingUserMessagesRef.current.shift();
-                const titleEligible = shouldRecordTurnForTitle(completePayload?.terminal_reason);
-                if (!autoTitleAttemptedRef.current && currentSessionIdRef.current && completedUserText && titleEligible) {
-                    // Record this completed QA round (truncate both sides to 200 chars)
-                    titleRoundsRef.current.push({
-                        user: completedUserText.slice(0, 200),
-                        assistant: lastCompletedTextRef.current.slice(0, 200),
-                    });
+                // Auto-title generation is backend-owned (#296) — the sidecar
+                // triggers it off this same turn-success signal and pushes the
+                // result via `chat:session-title-changed` (handled below).
 
-                    // Trigger AI title generation once we have enough rounds
-                    if (titleRoundsRef.current.length >= AUTO_TITLE_MIN_ROUNDS) {
-                        autoTitleAttemptedRef.current = true;
-                        const sid = currentSessionIdRef.current;
-                        const rounds = [...titleRoundsRef.current];
-                        const model = completePayload?.model || lastModelRef.current || '';
-                        const pEnv = lastProviderEnvRef.current;
-                        // Fire-and-forget — guard against session switch during async call
-                        generateSessionTitle(postJson, sid, rounds, model, pEnv)
-                            .then(r => {
-                                if (r?.success && r.title && currentSessionIdRef.current === sid) {
-                                    onTitleChangeRef.current?.(r.title);
-                                    // Backend already persisted — notify history/task center to refetch
-                                    window.dispatchEvent(new CustomEvent(CUSTOM_EVENTS.SESSION_TITLE_CHANGED));
-                                }
-                            })
-                            .catch(() => {});
-                    }
+                break;
+            }
+
+            case 'chat:session-title-changed': {
+                // #296 — backend Title Service applied an AI title for a session.
+                // This event reaches only this session's sidecar (Tab-scoped SSE),
+                // so a payload sessionId match means it's THIS tab's session.
+                const titlePayload = data as { sessionId?: string; title?: string } | null;
+                if (titlePayload?.title && titlePayload.sessionId
+                    && titlePayload.sessionId === currentSessionIdRef.current) {
+                    onTitleChangeRef.current?.(titlePayload.title);
                 }
-
+                // Refresh the session-list surfaces (history dropdown / task center),
+                // which re-read titles from disk where the backend already persisted.
+                window.dispatchEvent(new CustomEvent(CUSTOM_EVENTS.SESSION_TITLE_CHANGED));
                 break;
             }
 
@@ -1998,8 +1947,6 @@ export default function TabProvider({
                     setSessionState('idle');  // Reset session state to idle
                     setSystemStatus(null);  // Clear system status when user stops response
                 });
-                // Discard incomplete round from title tracking — stopped response is not a valid QA pair
-                pendingUserMessagesRef.current.shift();
                 // Clear stop timeout since we received confirmation
                 if (stopTimeoutRef.current) {
                     clearTimeout(stopTimeoutRef.current);
@@ -2028,8 +1975,6 @@ export default function TabProvider({
                     setSessionState('idle');  // Reset session state to idle on error
                     setSystemStatus(null);  // Clear system status on error
                 });
-                // Discard incomplete round from title tracking — errored response is not a valid QA pair
-                pendingUserMessagesRef.current.shift();
                 // Clear stop timeout on error too
                 if (stopTimeoutRef.current) {
                     clearTimeout(stopTimeoutRef.current);
@@ -2666,9 +2611,13 @@ export default function TabProvider({
             }
 
             case 'config:changed': {
-                // Admin CLI modified config — notify global ConfigProvider to refresh
+                // Admin CLI modified config — notify global ConfigProvider to refresh.
+                // Routes through `notifyConfigChanged` so the event detail stays
+                // payload-free (issue #303 review-by-codex follow-up: a window-
+                // level CustomEvent observable by any renderer listener must not
+                // carry providerApiKeys / mcpServerEnv).
                 console.log('[TabProvider] config:changed via Admin CLI', data);
-                window.dispatchEvent(new CustomEvent('myagents:config-changed', { detail: data }));
+                notifyConfigChanged('sse:config:changed');
                 break;
             }
 
@@ -2688,7 +2637,9 @@ export default function TabProvider({
                 // pick up the install/toggle without needing a manual
                 // refresh. Without this the Chat tool menu shows "no
                 // plugins" even after the user just enabled 13 of them.
-                window.dispatchEvent(new CustomEvent('myagents:config-changed', { detail: data }));
+                // Routes through `notifyConfigChanged` for the same secret-
+                // leakage reason as the `config:changed` case above.
+                notifyConfigChanged('sse:plugins:changed');
                 break;
             }
 
@@ -3012,13 +2963,6 @@ export default function TabProvider({
         // while the new stream renders (and chat:message-complete no longer wipes it
         // since that caused the external-runtime bug).
         setLastTerminalReason(null);
-
-        // Capture user message for auto-title generation (FIFO queue for queued sends)
-        if (!autoTitleAttemptedRef.current) {
-            pendingUserMessagesRef.current.push(trimmed);
-        }
-        lastModelRef.current = model;
-        lastProviderEnvRef.current = providerEnv ? { baseUrl: providerEnv.baseUrl, apiKey: providerEnv.apiKey, authType: providerEnv.authType, apiProtocol: providerEnv.apiProtocol, maxOutputTokens: providerEnv.maxOutputTokens, maxOutputTokensParamName: providerEnv.maxOutputTokensParamName, upstreamFormat: providerEnv.upstreamFormat, modelAliases: providerEnv.modelAliases } : undefined;
 
         // Store attachments for merging with SSE replay
         if (hasImages) {
@@ -3361,70 +3305,11 @@ export default function TabProvider({
                 };
             }
 
-            // Reset auto-title state when switching sessions
-            // Skip auto-title only if already has an AI-generated or user-renamed title
-            autoTitleAttemptedRef.current = response.session.titleSource === 'auto'
-                || response.session.titleSource === 'user';
-            pendingUserMessagesRef.current = [];
-            lastCompletedTextRef.current = '';
-            lastProviderEnvRef.current = undefined;
-            lastModelRef.current = undefined;
-
-            // Reconstruct completed QA rounds from loaded history so new messages
-            // continue the count. A session with 2 loaded rounds + 1 new round = 3 → triggers title.
-            if (!autoTitleAttemptedRef.current) {
-                const rounds: Array<{ user: string; assistant: string }> = [];
-                for (let i = 0; i < loadedMessages.length - 1; i++) {
-                    const msg = loadedMessages[i];
-                    const next = loadedMessages[i + 1];
-                    if (msg.role === 'user' && next.role === 'assistant') {
-                        const userText = typeof msg.content === 'string' ? msg.content
-                            : msg.content.filter(b => b.type === 'text').map(b => (b as { text?: string }).text || '').join('');
-                        // Skip system-injected messages
-                        if (userText.includes('<HEARTBEAT>') || userText.includes('<MEMORY_UPDATE>') || userText.startsWith('<system-reminder>')) {
-                            i++;
-                            continue;
-                        }
-                        const assistantText = typeof next.content === 'string' ? next.content
-                            : next.content.filter(b => b.type === 'text').map(b => (b as { text?: string }).text || '').join('');
-                        // #245 reconstruction-path gate: messages persisted from a
-                        // prior session don't carry SDK terminal_reason, so we
-                        // can't use shouldRecordTurnForTitle here. Fall back to
-                        // pattern matching on the assistant text — a turn that
-                        // produced "API Error: 400 …" / "[Error]: …" / etc. as
-                        // its only text content is an upstream-error round that
-                        // must not seed title-gen, exactly like the live-flow
-                        // gate at message-complete. The cleanTitle backstop in
-                        // title-generator catches LLM echoes but cannot catch
-                        // LLM paraphrases ("API 400 渠道限制") of error inputs,
-                        // so we drop the bad rounds at the source.
-                        if (isLikelyErrorTitle(assistantText)) {
-                            i++;
-                            continue;
-                        }
-                        rounds.push({ user: userText.slice(0, 200), assistant: assistantText.slice(0, 200) });
-                        i++; // skip the assistant message
-                    }
-                }
-                titleRoundsRef.current = rounds;
-                // If loaded history already has enough rounds, trigger immediately
-                if (rounds.length >= AUTO_TITLE_MIN_ROUNDS) {
-                    autoTitleAttemptedRef.current = true;
-                    const sid = targetSessionId;
-                    const model = lastModelRef.current || '';
-                    const pEnv = lastProviderEnvRef.current;
-                    generateSessionTitle(postJson, sid, [...rounds], model, pEnv)
-                        .then(r => {
-                            if (r?.success && r.title && currentSessionIdRef.current === sid) {
-                                onTitleChangeRef.current?.(r.title);
-                                window.dispatchEvent(new CustomEvent(CUSTOM_EVENTS.SESSION_TITLE_CHANGED));
-                            }
-                        })
-                        .catch(() => {});
-                }
-            } else {
-                titleRoundsRef.current = [];
-            }
+            // Auto-title generation is backend-owned (#296): if this loaded
+            // session still lacks an AI title, the sidecar will generate one off
+            // its next successful turn (reading rounds from the persisted
+            // transcript) and push it via `chat:session-title-changed`. The
+            // frontend no longer reconstructs rounds here.
 
             // Clear current state and load new messages
             seenIdsRef.current.clear();

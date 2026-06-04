@@ -61,7 +61,7 @@ import { CC_MODELS, CC_PERMISSION_MODES, CODEX_PERMISSION_MODES, GEMINI_PERMISSI
 import type { RuntimeType, RuntimeDetections, RuntimeConfig } from '../../shared/types/runtime';
 import type { InitialMessage } from '@/types/tab';
 import { shouldAutoSendInitialMessage } from '@/utils/initialMessageAutoSend';
-import { resolveBuiltinPermissionMode, isPinnedProviderUnavailable, shouldResetModelOnProviderChange } from '@/utils/optionResolve';
+import { resolveBuiltinPermissionMode, isPinnedProviderUnavailable, shouldResetModelOnProviderChange, shouldSkipSnapshotWrite } from '@/utils/optionResolve';
 // CronTaskConfig type is used via useCronTask hook
 
 import type { RichDocKind } from '../../shared/fileTypes';
@@ -1479,8 +1479,27 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
       }
     };
     loadMcpConfig();
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- Only reload when agent/project MCP config changes
-  }, [currentAgent?.mcpEnabledServers, currentProject?.mcpEnabledServers]);
+    // Re-fires on:
+    //  - workspace MCP toggles (currentAgent/currentProject.mcpEnabledServers)
+    //  - global enable/disable (config.mcpEnabledServers) — covers Settings
+    //    toggling a server on/off globally
+    //  - env / args / server-definition edits (config.mcpServerEnv /
+    //    mcpServerArgs / mcpServers) — issue #303: when the user adds
+    //    MINERU_API_KEY via Settings (which writes config.mcpServerEnv only,
+    //    not workspace-level mcpEnabledServers), ConfigProvider re-loads on
+    //    CONFIG_CHANGED_EVENT → `config` becomes a new reference → this effect
+    //    fires → /api/mcp/set re-pushes the merged server list so the
+    //    sidecar's currentMcpServers picks up the env on its next pre-warm
+    //    fingerprint diff.
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- apiPost / fileService are stable refs we deliberately exclude
+  }, [
+    currentAgent?.mcpEnabledServers,
+    currentProject?.mcpEnabledServers,
+    config?.mcpEnabledServers,
+    config?.mcpServerEnv,
+    config?.mcpServerArgs,
+    config?.mcpServers,
+  ]);
 
   // Load enabled agents and sync to backend
   const loadAndSyncAgents = useCallback(async () => {
@@ -1562,10 +1581,32 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
   // snapshot and live-follow the agent; UI changes there patch the agent as before.
   const isOwnedSession = !!sessionMeta?.configSnapshotAt;
 
+  // #305 — gate for *whether to write the session snapshot* on UI config changes.
+  // Distinct from `isOwnedSession`, which is "is the session currently locked":
+  //   - sessionMeta loaded as IM → live-follow, NEVER touch snapshot.
+  //   - sessionMeta loaded as owned/legacy → write snapshot (legacy auto-migrates).
+  //   - sessionMeta still loading (null) → assume Desktop/owned (the overwhelmingly
+  //     common case for Tab) and write snapshot. The PATCH endpoint stamps
+  //     configSnapshotAt on first snapshot write so subsequent reads see "owned".
+  //     This closes the loadSession race where any model/permission change made
+  //     before sessionMeta hydrates (50–500ms+ on Windows / slow disks) silently
+  //     bypassed the snapshot write — leaving sessions.json at its creation-time
+  //     values and reverting the user's choice on tab reopen.
+  // Server PATCH /sessions/:id has a defensive IM-source guard that ignores
+  // snapshot field writes if the existing session is IM-sourced, in case the
+  // sessionMeta-null window catches an IM-origin tab.
+  const skipSnapshotWrite = shouldSkipSnapshotWrite({
+    sessionMetaSource: sessionMeta?.source ?? null,
+    sessionMetaConfigSnapshotAt: sessionMeta?.configSnapshotAt ?? null,
+    sessionMetaLoaded: !!sessionMeta,
+  });
+
   // v0.1.69 T17: legacy pre-snapshot session — session exists but has no snapshot,
   // and not IM-sourced (IM is live-follow by design, not a legacy artifact). These
   // sessions live-follow the agent, so edits to the agent mutate this session's
   // effective config. Show an "unlocked" indicator so the user understands why.
+  // (Note: after #305 these sessions auto-migrate to owned on first UI config
+  // change; the indicator only shows until the user touches a config knob.)
   const isSessionUnlocked = !!sessionMeta
     && !sessionMeta.configSnapshotAt
     && !isImSource(sessionMeta.source);
@@ -1633,7 +1674,11 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
       },
       patchProject,
       patchAgentConfig,
-      patchSnapshot: isOwnedSession ? patchSnapshot : undefined,
+      // #305: skip snapshot writes only when sessionMeta is loaded as IM-sourced.
+      // For owned / legacy / sessionMeta-still-loading sessions, write the snapshot
+      // so the user's in-Tab change actually persists across tab reopen. (See
+      // `skipSnapshotWrite` comment above for the loadSession-race rationale.)
+      patchSnapshot: skipSnapshotWrite ? undefined : patchSnapshot,
       // Cross-review: Chat's MCP toggle previously did its own
       // `apiPost('/api/mcp/set')` AFTER the helper, leaving the helper's
       // `pushMcpToSidecar` plumbing dead-code. Wire it through so the
@@ -1661,7 +1706,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
       toastRef.current.warning('配置未能完全保存，重启后可能恢复旧值');
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps -- narrowed deps; persistInputOptionChange is a pure import, runtimeConfig accessed via currentAgent ref, apiPost is stable from TabContext
-  }, [isOwnedSession, currentProject?.id, currentProject?.agentId, isExternalRuntime, currentRuntime, currentAgent?.runtimeConfig, patchSnapshot, patchProject]);
+  }, [skipSnapshotWrite, currentProject?.id, currentProject?.agentId, isExternalRuntime, currentRuntime, currentAgent?.runtimeConfig, patchSnapshot, patchProject]);
 
   // Handle workspace MCP toggle — Tab UI edits dual-write:
   // (1) session snapshot so THIS session uses the new tool set immediately (owned sessions only

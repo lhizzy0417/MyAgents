@@ -9,10 +9,21 @@ import { join } from 'path';
 import { existsSync, readFileSync } from 'fs';
 import { execFileSync, execSync } from 'child_process';
 import { query } from '@anthropic-ai/claude-agent-sdk';
-import { resolveClaudeCodeCli, buildClaudeSessionEnv, startOneShotBridge } from './agent-session';
+import { resolveClaudeCodeCli, buildClaudeSessionEnv, startOneShotBridge, getSidecarPort } from './agent-session';
 import { applyContextWindowSuffix } from './utils/model-capabilities';
 import { ensureDirSync } from './utils/fs-utils';
-import { getLastBridgeError } from './openai-bridge';
+import { getLastBridgeError, getProxyForUrl } from './openai-bridge';
+import {
+  probeOpenAiProviderViaBridge,
+  probeAnthropicProviderDirect,
+  classifyOpenAiProbeStatus,
+  composeVerifyFailureDetail,
+  verifyTimeoutMessage,
+  summarizeProbeOutcome,
+  parseProviderError,
+  type VerifyError,
+  type ProbeOutcome,
+} from './provider-probe';
 // Subscription types (keep in sync with src/renderer/types/subscription.ts)
 export interface SubscriptionInfo {
   accountUuid?: string;
@@ -27,7 +38,9 @@ export interface SubscriptionStatus {
   info?: SubscriptionInfo;
 }
 
-// Error message parser for subscription verification
+// Error message parser for subscription verification.
+// `parseProviderError` + `VerifyError` now live in the pure `provider-probe`
+// module so the 402/balance bucketing is unit-tested without importing the SDK.
 function parseSubscriptionError(errorText: string, originalText?: string): VerifyError {
   const raw = (originalText ?? errorText).slice(0, 300) || undefined;
   const lower = errorText.toLowerCase();
@@ -39,32 +52,6 @@ function parseSubscriptionError(errorText: string, originalText?: string): Verif
     return { error: '请求频率限制，请稍后再试', detail: raw };
   } else if (lower.includes('network') || lower.includes('connect')) {
     return { error: '网络连接失败', detail: raw };
-  }
-  return { error: errorText.slice(0, 100) || '验证失败', detail: raw };
-}
-
-// Structured error result with human-friendly summary + raw detail for diagnosis
-interface VerifyError {
-  error: string;
-  detail?: string;
-}
-
-// Error message parser for provider API key verification
-// Returns { error (human-friendly), detail (raw) } so the frontend can show both.
-// `errorText` may be lowercased by caller; `originalText` preserves original casing for detail.
-function parseProviderError(errorText: string, originalText?: string): VerifyError {
-  const raw = (originalText ?? errorText).slice(0, 300) || undefined;
-  const lower = errorText.toLowerCase();
-  if (lower.includes('authentication') || lower.includes('unauthorized') || lower.includes('401')) {
-    return { error: 'API Key 无效或已过期', detail: raw };
-  } else if (lower.includes('forbidden') || lower.includes('403')) {
-    return { error: '访问被拒绝，请检查 API Key 权限', detail: raw };
-  } else if (lower.includes('rate limit') || lower.includes('429')) {
-    return { error: '请求频率限制，请稍后再试', detail: raw };
-  } else if (lower.includes('network') || lower.includes('connect') || lower.includes('econnrefused')) {
-    return { error: '网络连接失败，请检查 Base URL', detail: raw };
-  } else if (lower.includes('not found') || lower.includes('404')) {
-    return { error: '模型不存在或 API 地址错误', detail: raw };
   }
   return { error: errorText.slice(0, 100) || '验证失败', detail: raw };
 }
@@ -88,11 +75,91 @@ async function verifyViaSdk(
      * provider can't leak its error into this one's timeout message.
      */
     upstreamBaseUrlForDiagnostics?: string;
+    /**
+     * Provider context for the always-present `detail` (PRD 0.2.30 P0). When
+     * `baseUrl` is set the timeout/no-result copy switches to the honest
+     * "supplier didn't respond" wording instead of the misleading
+     * "check your network". Absent for subscription verify.
+     */
+    detailContext?: { baseUrl?: string; apiProtocol?: string };
+    /**
+     * Anthropic Layer-1 diagnostic (PRD 0.2.30 P1). Started CONCURRENTLY with
+     * the SDK (so it never extends the 30s timeout) and consumed only by the
+     * timeout / no-result branches to enrich `detail` with the provider's real
+     * status+body. Diagnostic-only: it never flips the verdict. Absent for
+     * OpenAI (covered by the authoritative pre-probe) and subscription. The
+     * passed signal is aborted once verify settles so a still-in-flight probe
+     * (fast-success case) doesn't outlive the call.
+     */
+    diagnostic?: (signal: AbortSignal) => Promise<ProbeOutcome | undefined>;
   },
 ): Promise<{ success: boolean; error?: string; detail?: string }> {
   const TIMEOUT_MS = 30000;
   const startTime = Date.now();
   const stderrMessages: string[] = [];
+
+  // Kick off the diagnostic in parallel with the SDK. It has its own ≤15s cap
+  // (withAbortSignal) so it's resolved well before the 30s timeout — the
+  // timeout branch reads it without blocking. `diagController` cancels it when
+  // verify settles first (e.g. fast success) so it never leaks past the call.
+  const diagController = new AbortController();
+  const diagnosticPromise = opts.diagnostic
+    ? opts.diagnostic(diagController.signal).catch(() => undefined)
+    : undefined;
+
+  // Compose the structured failure result shared by the timeout + no-result
+  // branches: gather bridge signals (strong/weak), consume the already-running
+  // diagnostic (started concurrently above), and build an always-present
+  // `detail` via the pure composers.
+  const buildTimeoutLikeFailure = async (
+    reason: 'timeout' | 'no_result',
+  ): Promise<{ success: false; error: string; detail: string }> => {
+    // Bridge errors are ONLY meaningful for OpenAI providers (the only path that
+    // routes through the bridge). Subscription / direct-Anthropic providers don't
+    // touch the bridge, so any in-window bridge error there belongs to a DIFFERENT
+    // concurrent session — never surface it (matches the original gating).
+    let scopedBridgeError: string | undefined;
+    let weakBridgeError: string | undefined;
+    const expectedBase = opts.upstreamBaseUrlForDiagnostics;
+    if (expectedBase) {
+      const bridgeErr = getLastBridgeError();
+      if (bridgeErr && bridgeErr.timestamp >= startTime) {
+        const normalizedBase = expectedBase.replace(/\/+$/, '');
+        const urlMatches = bridgeErr.upstreamUrl === normalizedBase
+          || bridgeErr.upstreamUrl.startsWith(normalizedBase + '/');
+        // Strong match (URL + window) → authoritative. In-window but URL-mismatch
+        // → weak signal (could be a `.../v1` vs `.../v11` capture miss, G class).
+        if (urlMatches) scopedBridgeError = bridgeErr.message;
+        else weakBridgeError = bridgeErr.message;
+      }
+    }
+
+    // Consume the already-running diagnostic (started at call entry). It's
+    // resolved by now (≤15s cap, the timeout is 30s), so this never blocks.
+    let diagnostic: string | undefined;
+    if (diagnosticPromise) {
+      const summary = summarizeProbeOutcome(await diagnosticPromise);
+      if (summary) diagnostic = `${summary}（诊断探测，可能与 SDK 实际出网存在代理差异）`;
+    }
+
+    const detail = composeVerifyFailureDetail({
+      baseUrl: opts.detailContext?.baseUrl,
+      model: opts.model,
+      apiProtocol: opts.detailContext?.apiProtocol,
+      elapsedMs: Date.now() - startTime,
+      stderr: stderrMessages,
+      scopedBridgeError,
+      weakBridgeError,
+      diagnostic,
+    });
+    const error = verifyTimeoutMessage({
+      reason,
+      hasProviderContext: !!opts.detailContext?.baseUrl,
+      scopedBridgeError,
+      timeoutMs: TIMEOUT_MS,
+    });
+    return { success: false, error, detail };
+  };
   // Collect the first real API error seen during the verify window.
   // If the SDK retries internally (e.g. 429) and our timeout fires first,
   // we use this instead of the generic "验证超时" message.
@@ -156,41 +223,19 @@ async function verifyViaSdk(
     let timeoutId: ReturnType<typeof setTimeout> | undefined;
     const timeoutPromise = new Promise<{ success: false; error: string; detail?: string }>((resolve) => {
       timeoutId = setTimeout(() => {
-        // Priority: real API error collected > bridge connect failure > stderr > generic timeout
+        // Priority: real API error collected (already has detail) > composed
+        // failure (honest copy + always-present detail: bridge signal, lazy
+        // diagnostic, baseUrl/model/elapsed/stderr). See buildTimeoutLikeFailure.
         if (firstAuthError) {
           console.log(`[${logPrefix}] timeout but have auth error collected, using it`);
           resolve({ success: false, error: firstAuthError.error, detail: firstAuthError.detail });
           return;
         }
-        // OpenAI-bridge connect failures (TLS rejection, socket closed, proxy interception, …)
-        // never reach the SDK as `assistant.error` — the SDK sees our 502 and retries until the
-        // outer timeout fires. Inspect the bridge's last-error ref and surface the real reason
-        // ONLY when we can prove the error belongs to this verify:
-        //   (1) caller supplied its real upstream baseUrl (opt-in — subscription / direct
-        //       Anthropic paths don't pass it because they aren't bridge-routed; staying silent
-        //       there avoids leaking unrelated concurrent bridge traffic into their timeout);
-        //   (2) bridge-error timestamp is inside our verify window;
-        //   (3) bridge-error upstreamUrl matches ours at a path boundary (exact match OR
-        //       startsWith baseUrl+'/...'), so neighboring prefixes like `.../v1` vs `.../v11/...`
-        //       don't cross-match across providers on the same host.
-        // Purely informational transparency — nothing about retry or success logic changes.
-        const expectedBase = opts.upstreamBaseUrlForDiagnostics;
-        if (expectedBase) {
-          const bridgeErr = getLastBridgeError();
-          const normalizedBase = expectedBase.replace(/\/+$/, '');
-          const urlMatches = !!bridgeErr
-            && (bridgeErr.upstreamUrl === normalizedBase
-              || bridgeErr.upstreamUrl.startsWith(normalizedBase + '/'));
-          if (bridgeErr && bridgeErr.timestamp >= startTime && urlMatches) {
-            console.log(`[${logPrefix}] timeout with bridge error in window: ${bridgeErr.message}`);
-            resolve({ success: false, error: `无法连接到供应商：${bridgeErr.message}` });
-            return;
-          }
-        }
-        const stderrHint = stderrMessages.length > 0
-          ? ` (stderr: ${stderrMessages.join('; ').slice(0, 200)})`
-          : '';
-        resolve({ success: false, error: `验证超时，请检查网络连接${stderrHint}` });
+        void (async () => {
+          const failure = await buildTimeoutLikeFailure('timeout');
+          console.log(`[${logPrefix}] timeout → ${failure.error}`);
+          resolve(failure);
+        })();
       }, TIMEOUT_MS);
     });
     // Cleanup helper: terminate SDK subprocess regardless of race outcome.
@@ -261,10 +306,9 @@ async function verifyViaSdk(
         }
       }
 
-      const stderrHint = stderrMessages.length > 0
-        ? `: ${stderrMessages.join('; ').slice(0, 200)}`
-        : '';
-      return { success: false, error: `验证未返回结果${stderrHint}` };
+      // Stream ended without a terminal result — compose the same honest,
+      // always-detailed failure as the timeout branch (no more bare string).
+      return await buildTimeoutLikeFailure('no_result');
     })();
 
     try {
@@ -272,8 +316,12 @@ async function verifyViaSdk(
     } finally {
       if (timeoutId) clearTimeout(timeoutId);
       cleanupQuery();
+      // Cancel a still-in-flight diagnostic (e.g. fast-success path) so it
+      // never outlives the verify call.
+      diagController.abort();
     }
   } catch (error) {
+    diagController.abort();
     const errorMsg = error instanceof Error ? error.message : String(error);
     console.error(`[${logPrefix}] SDK exception: ${errorMsg}`);
     const parsed = parseError(errorMsg);
@@ -314,6 +362,38 @@ export async function verifyProviderViaSdk(
     maxOutputTokensParamName,
     upstreamFormat,
   };
+  // Layer 1 (PRD 0.2.30) — OpenAI providers only: an AUTHORITATIVE probe through
+  // the same one-shot bridge. It reads the bridge-translated upstream status and
+  // short-circuits ONLY on a shape-independent definite failure (401/403/404/429
+  // + 402 quota-remap) — surfacing the provider's real reason in ≤15s instead of
+  // the 30s SDK timeout. 400 (request-shape / direct-402→400), 502 (ambiguous
+  // connect-vs-transient), 2xx and hangs are inconclusive → fall through to the
+  // unchanged SDK path, so this can only improve, never regress. See
+  // classifyOpenAiProbeStatus for why 400/502 are intentionally excluded.
+  if (apiProtocol === 'openai') {
+    const probe = await probeOpenAiProviderViaBridge({
+      providerEnv,
+      model,
+      sidecarPort: getSidecarPort(),
+      startOneShotBridge,
+    });
+    const shortCircuit = probe.status !== undefined
+      && classifyOpenAiProbeStatus(probe.status) === 'definite-fail';
+    if (shortCircuit) {
+      const text = probe.body || `HTTP ${probe.status}`;
+      const parsed = parseProviderError(text.toLowerCase(), text);
+      const detail = composeVerifyFailureDetail({
+        baseUrl,
+        model,
+        apiProtocol,
+        diagnostic: summarizeProbeOutcome(probe),
+      });
+      console.log(`[provider/verify] OpenAI Layer-1 short-circuit: HTTP ${probe.status} → ${parsed.error}`);
+      return { success: false, error: parsed.error, detail };
+    }
+    console.log(`[provider/verify] OpenAI Layer-1 inconclusive (${summarizeProbeOutcome(probe) ?? 'no response'}) → SDK verify`);
+  }
+
   // Only OpenAI-protocol providers route through the bridge. Anthropic-protocol
   // providers (and subscription) hit their baseUrl directly — no token needed.
   const bridge = apiProtocol === 'openai'
@@ -340,6 +420,16 @@ export async function verifyProviderViaSdk(
       // in the window belongs to some OTHER concurrent session, not us. See
       // verifyViaSdk.opts.upstreamBaseUrlForDiagnostics docstring.
       upstreamBaseUrlForDiagnostics: apiProtocol === 'openai' ? baseUrl : undefined,
+      detailContext: { baseUrl, apiProtocol: apiProtocol ?? 'anthropic' },
+      // Anthropic-protocol only: a DIAGNOSTIC-ONLY direct probe. Started
+      // CONCURRENTLY with the SDK at call entry (verifyViaSdk), but CONSUMED
+      // only by the timeout/no-result branch to enrich `detail` with the
+      // provider's real status+body. Never flips the verdict (Node undici ≠ SDK
+      // native binary on proxy semantics). OpenAI is already covered by the
+      // authoritative pre-probe.
+      diagnostic: apiProtocol === 'openai'
+        ? undefined
+        : (signal) => probeAnthropicProviderDirect({ providerEnv, model, getProxyForUrl, signal }),
     });
   } finally {
     bridge?.release();

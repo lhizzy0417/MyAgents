@@ -23,15 +23,17 @@ import WriteTool from './tools/WriteTool';
 import CronTaskCard from './scheduled-tasks/CronTaskCard';
 
 /**
- * Tools whose specialized component already renders attachments internally.
- * ToolUse skips the outer ToolAttachmentGallery for these to avoid duplicate
- * image rendering. PRD 0.2.15 Review B5.
+ * Tools whose specialized component renders its OWN media (so ToolUse skips the
+ * outer ToolAttachmentGallery to avoid duplicate rendering). PRD 0.2.15 Review B5.
  *
- * Currently: GeminiImageTool consumes attachments inside its `parseToolResult`
- * code path (it renders via filePath text bridge today; once it migrates to
- * the attachments API in v0.2.16+, both readers will hit the same renderer).
+ * PRD 0.2.30 — emptied: builtin edge-tts/gemini-image now emit first-class
+ * `attachments[]`, and their specialized cards are attachment-aware (they only
+ * render embedded media as a legacy fallback when a result carries no
+ * attachments). With attachments present the gallery owns the media; with none
+ * present there are no attachments to gate, so `showGallery` is false either way
+ * and there's no double-render. Kept as an extension point for future tools.
  */
-const TOOLS_THAT_OWN_GALLERY_PREFIXES = ['mcp__gemini-image__'];
+const TOOLS_THAT_OWN_GALLERY_PREFIXES: string[] = [];
 
 function ownsAttachmentGallery(toolName: string): boolean {
   return TOOLS_THAT_OWN_GALLERY_PREFIXES.some(p => toolName.startsWith(p));

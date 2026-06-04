@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState, useRef, useTransition, memo } from 'react';
+import { useCallback, useEffect, useState, useRef, memo } from 'react';
 import { arrayMove } from '@dnd-kit/sortable';
 
 import {
@@ -37,6 +37,7 @@ import { type Tab, type InitialMessage, createNewTab, getFolderName, MAX_TABS } 
 import { buildRestoredTabs, saveOpenTabs, hydratePersistedState, pickDurableOverride } from '@/utils/tabPersistence';
 import { persistOpenTabsDurable, loadAndClearOpenTabsDurable, clearOpenTabsDurable } from '@/utils/tabPersistenceDurable';
 import { tabContentKind, isRestoreAbandoned } from '@/utils/tabContentKind';
+import { runAfterNextPaint } from '@/utils/afterPaint';
 import type { ImageAttachment } from '@/components/SimpleChatInput';
 import { getAllCronTasks, getTabCronTask, updateCronTaskTab } from '@/api/cronTaskClient';
 import { type CronRecoverySummaryPayload, type CronTaskRecoveredPayload, CRON_EVENTS } from '@/types/cronEvents';
@@ -107,8 +108,10 @@ interface TabContentProps {
    * Launcher: BrandSection + SimpleChatInput + selectors + RecentTasks +
    * WorkspaceCards) does NOT mount inside the synchronous click commit —
    * that mount is what janked the "+" / Cmd+T action. handleNewTab clears
-   * the flag inside startTransition so React mounts the real content on a
-   * time-sliced concurrent render that doesn't block the main thread.
+   * the flag right after the placeholder paints (runAfterNextPaint), so React
+   * mounts the real content in a prompt normal-priority commit off the click
+   * frame. (NOT a low-priority transition — that gets starved by background
+   * tabs' SSE/poll updates → 1-2s blank; see openNewTabDeferred.)
    */
   isDeferredMount: boolean;
   settingsInitialSection: string | undefined;
@@ -165,7 +168,8 @@ export const MemoizedTabContent = memo(function TabContent({
       {kind === 'deferred' ? (
         // One-frame placeholder: paper-colored fill so the just-activated
         // tab paints instantly with no flash, while the real subtree mounts
-        // on the following transition render (see handleNewTab).
+        // on the next normal-priority commit (runAfterNextPaint; see
+        // openNewTabDeferred).
         <div className="h-full w-full bg-[var(--paper)]" />
       ) : kind === 'launcher' ? (
         <Launcher
@@ -405,19 +409,29 @@ export default function App() {
   // renders only a placeholder (see MemoizedTabContent), so clicking "+" /
   // Cmd+T does not synchronously mount the heavy Launcher subtree in the
   // click commit. handleNewTab adds the id urgently (instant chip + active
-  // highlight) then clears it inside startTransition, letting React mount
-  // the real content on a non-blocking, time-sliced concurrent render.
-  const [, startNewTabTransition] = useTransition();
+  // highlight) then clears it AFTER the placeholder paints (runAfterNextPaint),
+  // so React mounts the real content in a prompt normal-priority commit.
   const [deferredMountTabIds, setDeferredMountTabIds] = useState<Set<string>>(() => new Set());
 
   // Single source of truth for opening a NEW tab whose view mounts a large
   // renderer-only subtree (Launcher / Settings / TaskCenter). It appends and
   // activates the tab in the urgent commit — so the chip + active highlight
-  // paint instantly with only a cheap placeholder as content — then clears
-  // the deferral inside a transition, letting React mount the heavy subtree on
-  // a non-blocking, time-sliced concurrent render. This keeps the open action
-  // from janking the frame regardless of how heavy the view is (e.g. the
-  // 5.8k-line Settings tree). The urgent commit stays trivial by construction.
+  // paint instantly with only a cheap placeholder as content — then clears the
+  // deferral once the placeholder has painted, letting React mount the heavy
+  // subtree. This keeps the open action from janking the click frame regardless
+  // of how heavy the view is (e.g. the 5.8k-line Settings tree).
+  //
+  // WHY runAfterNextPaint and NOT startTransition (the "新建 tab 黄屏" fix):
+  // the reveal used to live inside a useTransition, i.e. at LOW priority. Every
+  // still-mounted background Tab keeps firing NORMAL-priority state updates
+  // (SSE token deltas, session-state polling, task notifications); a
+  // low-priority transition gets repeatedly interrupted/restarted by that churn
+  // and could stay pending for 1-2s, leaving the full-screen paper placeholder
+  // on screen the whole time. A normal-priority commit scheduled right after
+  // the placeholder paints is not starvable and reveals the content promptly —
+  // the click already got its feedback from the placeholder, so the one-shot
+  // mount runs off the click frame. See utils/afterPaint.ts for the double-rAF
+  // rationale.
   //
   // NOT for Chat / session opens (handleLaunchProject / fork / switch): those
   // await a Sidecar and wire up SSE before the Chat is usable, so their mount
@@ -431,7 +445,7 @@ export default function App() {
     });
     setTabs((prev) => [...prev, newTab]);
     setActiveTabId(newTab.id);
-    startNewTabTransition(() => {
+    runAfterNextPaint(() => {
       setDeferredMountTabIds((prev) => {
         if (!prev.has(newTab.id)) return prev;
         const next = new Set(prev);
@@ -439,7 +453,7 @@ export default function App() {
         return next;
       });
     });
-  }, [startNewTabTransition]);
+  }, []);
 
   // Analytics Active Context — propagate active tab's sessionId/tabId so that
   // downstream track() calls auto-inject these into params (see analytics/tracker.ts).

@@ -5,7 +5,12 @@ import {
   isPlanModeInEffect,
   PLAN_MODE_READONLY_TOOLS,
   PLAN_MODE_HOST_INTERACTION_TOOLS,
+  applyPermissionModeSelection,
+  computePlanExitState,
+  computeRestoredPlanState,
+  PLAN_EXIT_FALLBACK_MODE,
 } from './plan-mode-gate';
+import type { PlanModeMirror } from './plan-mode-gate';
 
 describe('shouldBlockToolInPlanMode (#295 plan-mode hard gate)', () => {
   it('never blocks outside plan mode', () => {
@@ -85,5 +90,114 @@ describe('planModeDenyMessage', () => {
     expect(msg).toContain('Bash');
     expect(msg).toContain('ExitPlanMode');
     expect(msg).toContain('Plan');
+  });
+});
+
+describe('plan-mode capture/restore invariant (UI-toggle ExitPlanMode deadlock)', () => {
+  describe('applyPermissionModeSelection', () => {
+    it('captures the prior mode when entering plan from a non-plan mode (the missing UI-toggle capture)', () => {
+      expect(applyPermissionModeSelection('auto', null, 'plan')).toEqual({
+        permissionMode: 'plan',
+        prePlanPermissionMode: 'auto',
+      });
+      expect(applyPermissionModeSelection('fullAgency', null, 'plan')).toEqual({
+        permissionMode: 'plan',
+        prePlanPermissionMode: 'fullAgency',
+      });
+    });
+
+    it('does NOT overwrite the capture when re-entering plan while already in plan (anti-poison)', () => {
+      // The model re-entered plan to "fix" the stuck state. This must keep the
+      // original restore target and never set it to 'plan' (which previously made
+      // the deadlock permanent — exiting would have restored back to 'plan').
+      expect(applyPermissionModeSelection('plan', 'auto', 'plan')).toEqual({
+        permissionMode: 'plan',
+        prePlanPermissionMode: 'auto',
+      });
+      // even with no prior capture, re-entering plan must not invent 'plan' as the target
+      expect(applyPermissionModeSelection('plan', null, 'plan')).toEqual({
+        permissionMode: 'plan',
+        prePlanPermissionMode: null,
+      });
+    });
+
+    it('clears the capture when selecting a concrete non-plan mode (explicit user choice)', () => {
+      expect(applyPermissionModeSelection('plan', 'auto', 'fullAgency')).toEqual({
+        permissionMode: 'fullAgency',
+        prePlanPermissionMode: null,
+      });
+      expect(applyPermissionModeSelection('auto', null, 'fullAgency')).toEqual({
+        permissionMode: 'fullAgency',
+        prePlanPermissionMode: null,
+      });
+    });
+  });
+
+  describe('computePlanExitState', () => {
+    it('restores the captured prior mode', () => {
+      expect(computePlanExitState('auto')).toEqual({ permissionMode: 'auto', prePlanPermissionMode: null });
+      expect(computePlanExitState('fullAgency')).toEqual({ permissionMode: 'fullAgency', prePlanPermissionMode: null });
+    });
+
+    it('falls back to a non-plan mode when nothing was captured — the core fix for the no-op exit deadlock', () => {
+      // The exact UI-toggle / disk-restore case: plan entered without a captured
+      // prior mode. Exit must STILL leave plan (previously a no-op → stuck).
+      expect(computePlanExitState(null)).toEqual({
+        permissionMode: PLAN_EXIT_FALLBACK_MODE,
+        prePlanPermissionMode: null,
+      });
+      expect(PLAN_EXIT_FALLBACK_MODE).not.toBe('plan');
+    });
+
+    it('never restores back into plan even if the capture was poisoned to plan', () => {
+      expect(computePlanExitState('plan')).toEqual({
+        permissionMode: PLAN_EXIT_FALLBACK_MODE,
+        prePlanPermissionMode: null,
+      });
+    });
+  });
+
+  it('end-to-end: UI-toggle into plan, then ExitPlanMode approval, leaves plan and unblocks writes', () => {
+    // 1. user toggles auto -> plan via the bottom selector (setSessionPermissionMode)
+    let mirror = applyPermissionModeSelection('auto', null, 'plan');
+    expect(mirror).toEqual({ permissionMode: 'plan', prePlanPermissionMode: 'auto' });
+    // hard gate blocks writes while parked in plan
+    expect(shouldBlockToolInPlanMode('Write', mirror.permissionMode)).toBe(true);
+    // 2. AI calls ExitPlanMode, user approves -> must exit plan (previously a no-op)
+    mirror = computePlanExitState(mirror.prePlanPermissionMode);
+    expect(mirror.permissionMode).toBe('auto');
+    expect(mirror.prePlanPermissionMode).toBeNull();
+    // 3. the hard gate now sees a non-plan mirror -> writes flow
+    expect(shouldBlockToolInPlanMode('Write', mirror.permissionMode)).toBe(false);
+  });
+
+  describe('computeRestoredPlanState (session switch / disk restore must not leak prior prePlan)', () => {
+    it('adopts the restored mode and ALWAYS clears prePlanPermissionMode', () => {
+      expect(computeRestoredPlanState('plan')).toEqual({ permissionMode: 'plan', prePlanPermissionMode: null });
+      expect(computeRestoredPlanState('auto')).toEqual({ permissionMode: 'auto', prePlanPermissionMode: null });
+      expect(computeRestoredPlanState('fullAgency')).toEqual({ permissionMode: 'fullAgency', prePlanPermissionMode: null });
+    });
+
+    it('regression: stale prePlan from a prior session does NOT survive a restore (codex catch)', () => {
+      // Session A left a capture; switching to Session B (saved in plan) must NOT
+      // carry A's mode as B's restore target — B exits plan to the 'auto' fallback.
+      const restored = computeRestoredPlanState('plan'); // B saved in plan, prior prePlan was e.g. 'fullAgency'
+      expect(restored.prePlanPermissionMode).toBeNull();
+      const exited = computePlanExitState(restored.prePlanPermissionMode);
+      expect(exited.permissionMode).toBe(PLAN_EXIT_FALLBACK_MODE); // 'auto', NOT the prior session's mode
+    });
+  });
+
+  it('end-to-end: re-entering plan to "fix it" no longer permanently locks the session', () => {
+    // Reproduce the screenshot: parked in plan with no capture (e.g. disk restore),
+    // then the model re-enters plan, then exits.
+    let mirror: PlanModeMirror = { permissionMode: 'plan', prePlanPermissionMode: null };
+    // model re-enters plan (this used to poison prePlan to 'plan')
+    mirror = applyPermissionModeSelection(mirror.permissionMode, mirror.prePlanPermissionMode, 'plan');
+    expect(mirror.prePlanPermissionMode).not.toBe('plan');
+    // exit still escapes plan
+    mirror = computePlanExitState(mirror.prePlanPermissionMode);
+    expect(mirror.permissionMode).not.toBe('plan');
+    expect(shouldBlockToolInPlanMode('Bash', mirror.permissionMode)).toBe(false);
   });
 });

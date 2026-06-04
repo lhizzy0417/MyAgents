@@ -639,7 +639,11 @@ try {
 
         $targetDir = "src-tauri\target\x86_64-pc-windows-msvc\release"
         $nsisDir = "$targetDir\bundle\nsis"
-        $exePath = "$targetDir\MyAgents.exe"
+        # Cargo package name is `myagents` (lowercase), so Tauri's main binary is
+        # myagents.exe — NOT MyAgents.exe (that's only the productName / shortcut).
+        # The old MyAgents.exe path worked by luck on case-insensitive NTFS; use the
+        # real name so this stays correct on case-sensitive filesystems too.
+        $exePath = "$targetDir\myagents.exe"
 
         if (Test-Path $exePath) {
             $portableDir = Join-Path $targetDir "portable"
@@ -676,7 +680,7 @@ try {
             Write-Host "  OK - 便携版 ZIP: $zipName" -ForegroundColor Green
         }
         else {
-            Write-Host "  警告: 未找到 MyAgents.exe，跳过便携版创建" -ForegroundColor Yellow
+            Write-Host "  警告: 未找到 myagents.exe，跳过便携版创建" -ForegroundColor Yellow
         }
         Write-Host ""
     }

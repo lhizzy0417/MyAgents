@@ -2,7 +2,9 @@ import { describe, expect, it } from 'vitest';
 
 import {
   describeTerminalReason,
+  isAbortedTerminalReason,
   shouldRecordTurnForTitle,
+  shouldTitleCompletedTurn,
   shouldSurfaceTerminalReason,
 } from './terminalReason';
 
@@ -61,6 +63,35 @@ describe('shouldSurfaceTerminalReason', () => {
   });
 });
 
+describe('isAbortedTerminalReason — #307 abort detection', () => {
+  it('returns true ONLY for aborted_* reasons (incl. future ones)', () => {
+    expect(isAbortedTerminalReason('aborted_streaming')).toBe(true);
+    expect(isAbortedTerminalReason('aborted_tools')).toBe(true);
+    expect(isAbortedTerminalReason('aborted_init')).toBe(true); // future-proof prefix match
+  });
+
+  it('returns FALSE for missing / non-string input — the #307 trap', () => {
+    // This is why shouldSurfaceTerminalReason() CANNOT be reused as an abort
+    // predicate: it returns false for missing reasons too, which would wrongly
+    // suppress legitimate non-abort errors (third-party 4xx/5xx) that carry no
+    // terminal_reason. isAbortedTerminalReason must NOT classify "missing" as abort.
+    expect(isAbortedTerminalReason(undefined)).toBe(false);
+    expect(isAbortedTerminalReason(null)).toBe(false);
+    expect(isAbortedTerminalReason('')).toBe(false);
+    expect(isAbortedTerminalReason(42)).toBe(false);
+    expect(isAbortedTerminalReason({})).toBe(false);
+  });
+
+  it('returns false for completed and every non-abort reason', () => {
+    expect(isAbortedTerminalReason('completed')).toBe(false);
+    expect(isAbortedTerminalReason('prompt_too_long')).toBe(false);
+    expect(isAbortedTerminalReason('blocking_limit')).toBe(false);
+    expect(isAbortedTerminalReason('model_error')).toBe(false);
+    expect(isAbortedTerminalReason('max_turns')).toBe(false);
+    expect(isAbortedTerminalReason('some_future_reason')).toBe(false);
+  });
+});
+
 describe('shouldRecordTurnForTitle — #245 round-acceptance gate', () => {
   it('accepts completed (the only "good" SDK terminal_reason)', () => {
     expect(shouldRecordTurnForTitle('completed')).toBe(true);
@@ -107,5 +138,27 @@ describe('shouldRecordTurnForTitle — #245 round-acceptance gate', () => {
     expect(shouldRecordTurnForTitle(42)).toBe(true);
     expect(shouldRecordTurnForTitle({})).toBe(true);
     expect(shouldRecordTurnForTitle(false)).toBe(true);
+  });
+});
+
+describe('shouldTitleCompletedTurn — builtin #296 auto-title success gate', () => {
+  it('titles a clean successful turn', () => {
+    expect(shouldTitleCompletedTurn(false, 'completed')).toBe(true);
+    // external runtimes / SDK paths that omit terminal_reason are still titleable
+    expect(shouldTitleCompletedTurn(false, undefined)).toBe(true);
+    expect(shouldTitleCompletedTurn(false, '')).toBe(true);
+  });
+
+  it('does NOT title an is_error turn even if the terminal_reason looks completed (#245 family)', () => {
+    // The builtin result branch is reached by is_error results carrying visible
+    // assistant text; those must never seed a title.
+    expect(shouldTitleCompletedTurn(true, 'completed')).toBe(false);
+    expect(shouldTitleCompletedTurn(true, undefined)).toBe(false);
+  });
+
+  it('does NOT title aborted / truncated / errored terminal reasons', () => {
+    for (const reason of ['aborted_streaming', 'aborted_tools', 'max_turns', 'model_error', 'prompt_too_long']) {
+      expect(shouldTitleCompletedTurn(false, reason)).toBe(false);
+    }
   });
 });

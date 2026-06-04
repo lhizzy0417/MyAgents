@@ -8,6 +8,7 @@ import {
   resolveLauncherProvider,
   shouldDegradedLoad,
   shouldResetModelOnProviderChange,
+  shouldSkipSnapshotWrite,
 } from './optionResolve';
 
 describe('isPinnedProviderUnavailable (#300)', () => {
@@ -306,6 +307,103 @@ describe('session-load transition classification (#255)', () => {
       wasPendingSession: false,
       isPendingSession: false,
       isResetSessionBirth: true,
+    })).toBe(false);
+  });
+});
+
+describe('shouldSkipSnapshotWrite (#305)', () => {
+  // The bug: pre-#305 used `isOwnedSession = !!sessionMeta?.configSnapshotAt` to gate
+  // the snapshot write. That returned "skip" both for IM sessions (correct, live-follow)
+  // AND for the sessionMeta-still-loading window (wrong — Desktop tab raced loadSession),
+  // silently dropping the user's model/permission change from sessions.json. The new
+  // gate flips that: skip ONLY when sessionMeta is loaded AND is a PURE-IM session
+  // (IM-shaped source AND no configSnapshotAt — desktop-handover sessions keep the
+  // snapshot writeable).
+
+  it('writes snapshot when sessionMeta is still loading (loadSession in flight)', () => {
+    // This is the reported #305 race: Windows + slow disk, user reaches model picker
+    // before TabProvider.loadSession resolves; sessionMeta is still null.
+    expect(shouldSkipSnapshotWrite({
+      sessionMetaSource: null,
+      sessionMetaConfigSnapshotAt: null,
+      sessionMetaLoaded: false,
+    })).toBe(false);
+  });
+
+  it('writes snapshot for a loaded Desktop session', () => {
+    expect(shouldSkipSnapshotWrite({
+      sessionMetaSource: 'desktop',
+      sessionMetaConfigSnapshotAt: '2026-06-04T00:00:00.000Z',
+      sessionMetaLoaded: true,
+    })).toBe(false);
+  });
+
+  it('writes snapshot for a loaded legacy session with no source (auto-migrates)', () => {
+    // Pre-v0.1.69 sessions had no `source` field. The PATCH endpoint stamps
+    // configSnapshotAt on first snapshot write, lazily promoting them to owned.
+    expect(shouldSkipSnapshotWrite({
+      sessionMetaSource: undefined,
+      sessionMetaConfigSnapshotAt: null,
+      sessionMetaLoaded: true,
+    })).toBe(false);
+  });
+
+  it('skips snapshot for a PURE-IM private session (live-follow contract)', () => {
+    expect(shouldSkipSnapshotWrite({
+      sessionMetaSource: 'feishu_private',
+      sessionMetaConfigSnapshotAt: null,
+      sessionMetaLoaded: true,
+    })).toBe(true);
+  });
+
+  it('skips snapshot for a PURE-IM group session', () => {
+    expect(shouldSkipSnapshotWrite({
+      sessionMetaSource: 'dingtalk_group',
+      sessionMetaConfigSnapshotAt: null,
+      sessionMetaLoaded: true,
+    })).toBe(true);
+  });
+
+  it('skips snapshot for OpenClaw channel sources following the *_private/_group convention', () => {
+    expect(shouldSkipSnapshotWrite({
+      sessionMetaSource: 'discord_group',
+      sessionMetaConfigSnapshotAt: null,
+      sessionMetaLoaded: true,
+    })).toBe(true);
+    expect(shouldSkipSnapshotWrite({
+      sessionMetaSource: 'wechat_private',
+      sessionMetaConfigSnapshotAt: null,
+      sessionMetaLoaded: true,
+    })).toBe(true);
+  });
+
+  it('writes snapshot for a desktop-to-IM handover session (PRD 0.2.14: snapshot survives handover)', () => {
+    // Codex caught this in the dual-review pass: a desktop session handed over
+    // to an IM channel acquires an IM-shaped `source` but keeps its
+    // configSnapshotAt. The IM bridge then resolves "desktop-handover snapshot
+    // wins" on turn delivery (server/index.ts ~8593). If the Tab edits this
+    // session's model/permission, we MUST write the snapshot — otherwise the
+    // IM turn keeps using the old frozen values.
+    expect(shouldSkipSnapshotWrite({
+      sessionMetaSource: 'feishu_private',
+      sessionMetaConfigSnapshotAt: '2026-06-04T00:00:00.000Z',
+      sessionMetaLoaded: true,
+    })).toBe(false);
+    // Same for other IM platforms.
+    expect(shouldSkipSnapshotWrite({
+      sessionMetaSource: 'dingtalk_group',
+      sessionMetaConfigSnapshotAt: '2026-06-04T00:00:00.000Z',
+      sessionMetaLoaded: true,
+    })).toBe(false);
+  });
+
+  it('writes snapshot for an unknown non-IM-shaped source (defensive default)', () => {
+    // A future source like 'cron' or 'api' that doesn't follow the IM convention
+    // should default to "write" — IM detection is opt-in by suffix.
+    expect(shouldSkipSnapshotWrite({
+      sessionMetaSource: 'cron',
+      sessionMetaConfigSnapshotAt: null,
+      sessionMetaLoaded: true,
     })).toBe(false);
   });
 });

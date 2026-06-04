@@ -211,7 +211,7 @@ src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/
 
 **便携版 ZIP**：
 
-- [ ] 解压后直接运行 `MyAgents.exe`
+- [ ] 解压后直接运行 `myagents.exe`（Cargo 包名是小写，主二进制即 `myagents.exe`）
 
 ### 四、应用功能测试
 
@@ -223,7 +223,7 @@ src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/
 
 **验证 Sidecar**：
 ```powershell
-Get-Process | Where-Object { $_.ProcessName -eq "bun" }
+Get-Process | Where-Object { $_.ProcessName -eq "node" }
 ```
 
 **核心功能**：
@@ -240,7 +240,7 @@ Get-Process | Where-Object { $_.ProcessName -eq "bun" }
 
 **验证进程清理**（关闭应用后执行）：
 ```powershell
-Get-Process | Where-Object { $_.ProcessName -eq "bun" }
+Get-Process | Where-Object { $_.ProcessName -eq "node" }
 # 应该返回空
 ```
 

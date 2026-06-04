@@ -41,6 +41,11 @@ export interface SessionMetadata {
     lastMessagePreview?: string;
     /** How the title was set: default (first message truncation), auto (AI-generated), user (manually renamed) */
     titleSource?: 'default' | 'auto' | 'user';
+    /** #296 — number of auto-title GENERATION attempts made for this session.
+     *  Bounds retries (MAX_TITLE_GEN_ATTEMPTS): a session whose title-gen keeps
+     *  failing won't re-fire on every subsequent turn. Absent = 0. Only the
+     *  backend Title Service writes this. */
+    titleGenAttempts?: number;
     /** Fork source info — consumed on first session startup, then cleared */
     forkFrom?: {
         sourceSessionId: string;  // Source session's SDK session ID (for resume)

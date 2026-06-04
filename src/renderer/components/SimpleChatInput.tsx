@@ -269,6 +269,15 @@ interface FileSearchResult {
   type: 'file' | 'dir';
 }
 
+function getFileSearchParentPath(path: string, name: string): string {
+  const normalized = path.replace(/\\/g, '/');
+  const suffix = `/${name}`;
+  if (normalized.endsWith(suffix)) {
+    return normalized.slice(0, -suffix.length) || '工作区根目录';
+  }
+  return normalized === name ? '工作区根目录' : normalized;
+}
+
 const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputProps>(function SimpleChatInput({
   value: externalValue,
   onChange: _externalOnChange,
@@ -1776,7 +1785,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
               placement="top-start"
               offset={8}
               closeOnEscape={false}
-              className="w-96 max-h-80 flex flex-col"
+              className="w-[34rem] max-w-[calc(100vw-2rem)] max-h-80 flex flex-col"
             >
               {/* Tabs header */}
               <div className="flex shrink-0 items-center gap-1 border-b border-[var(--line-subtle)] bg-[var(--paper)] p-1">
@@ -1816,34 +1825,46 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                       未找到文件
                     </div>
                   ) : (
-                    fileSearchResults.map((file, idx) => (
-                      <div
-                        key={file.path}
-                        className={`flex items-center gap-2 px-3 py-2 cursor-pointer text-sm ${
-                          idx === selectedFileIndex
-                            ? 'bg-[var(--accent)]/10 text-[var(--ink)]'
-                            : 'text-[var(--ink-muted)] hover:bg-[var(--hover-bg)]'
-                        }`}
-                        onClick={() => {
-                          if (atPosition !== null) {
-                            const before = inputValue.slice(0, atPosition);
-                            // `??` (not `||`) so a legitimate caret-at-start
-                            // position (`selectionStart === 0`) doesn't get
-                            // overwritten by the synthetic fallback.
-                            const after = inputValue.slice(
-                              textareaRef.current?.selectionStart
-                              ?? atPosition + fileSearchQuery.length + 1,
-                            );
-                            setInputValue(`${before}@${file.path} ${after}`);
-                            setShowFileSearch(false);
-                            setAtPosition(null);
-                          }
-                        }}
-                      >
-                        <FileText className="h-4 w-4 flex-shrink-0" />
-                        <span className="truncate">{file.path}</span>
-                      </div>
-                    ))
+                    fileSearchResults.map((file, idx) => {
+                      const isSelected = idx === selectedFileIndex;
+                      const parentPath = getFileSearchParentPath(file.path, file.name);
+                      return (
+                        <div
+                          key={file.path}
+                          className={`grid cursor-pointer grid-cols-[auto_minmax(8rem,1fr)_minmax(10rem,1.35fr)] items-center gap-2 px-3 py-2 text-sm ${
+                            isSelected
+                              ? 'bg-[var(--accent)]/10'
+                              : 'hover:bg-[var(--hover-bg)]'
+                          }`}
+                          onClick={() => {
+                            if (atPosition !== null) {
+                              const before = inputValue.slice(0, atPosition);
+                              // `??` (not `||`) so a legitimate caret-at-start
+                              // position (`selectionStart === 0`) doesn't get
+                              // overwritten by the synthetic fallback.
+                              const after = inputValue.slice(
+                                textareaRef.current?.selectionStart
+                                ?? atPosition + fileSearchQuery.length + 1,
+                              );
+                              setInputValue(`${before}@${file.path} ${after}`);
+                              setShowFileSearch(false);
+                              setAtPosition(null);
+                            }
+                          }}
+                        >
+                          <FileText className={`h-4 w-4 flex-shrink-0 ${isSelected ? 'text-[var(--accent)]' : 'text-[var(--ink-muted)]/80'}`} />
+                          <span className={`min-w-0 truncate font-medium ${isSelected ? 'text-[var(--ink)]' : 'text-[var(--ink-secondary)]'}`}>
+                            {file.name}
+                          </span>
+                          <span
+                            className="min-w-0 truncate text-right text-xs text-[var(--ink-muted)]/70"
+                            title={file.path}
+                          >
+                            {parentPath}
+                          </span>
+                        </div>
+                      );
+                    })
                   )
                 ) : (
                   // Thought tab

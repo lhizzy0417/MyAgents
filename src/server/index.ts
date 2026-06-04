@@ -110,6 +110,7 @@ import { scanAgents, readWorkspaceConfig, writeWorkspaceConfig, loadEnabledAgent
 import type { AgentFrontmatter, AgentMeta, AgentWorkspaceConfig } from '../shared/agentTypes';
 import type { McpServerDefinition, BackgroundAgentPermissionMode } from '../shared/config-types';
 import { ensureDirSync, ensureDir, isDirEntry } from './utils/fs-utils';
+import { shouldDropSnapshotPatchOnImSession } from './utils/im-source';
 import {
   setCronTaskContext,
   clearCronTaskContext,
@@ -613,6 +614,7 @@ import {
   getCurrentBoundSessionId,
   popLastUserMessageForRetry,
 } from './runtimes/external-session';
+import { installAutoTitleHook } from './session-title-service';
 import type { ImagePayload } from './runtimes/types';
 import { VALID_RUNTIMES, resolveCronPermissionMode, getMaxPermissionForRuntime } from '../shared/types/runtime';
 import type { RuntimeConfig, RuntimeType } from '../shared/types/runtime';
@@ -4054,6 +4056,21 @@ async function main() {
 
         // Snapshot fields: null → clear (undefined in stored JSON); value → set.
         // `undefined` in stored metadata is how the resolver recognizes "fall back to agent".
+        //
+        // #305 defensive IM-source guard: PURE-IM (live-follow) sessions MUST NOT
+        // acquire snapshot fields — by design each IM turn re-resolves
+        // `agent + channel.overrides` (see `snapshotForImSession` which captures
+        // only `runtime`). Drop snapshot fields if the existing session is
+        // IM-sourced AND has no configSnapshotAt yet.
+        //
+        // Exception: PRD 0.2.14 desktop-to-IM handover sessions have IM-shaped
+        // source AND configSnapshotAt (the desktop-creation snapshot survives
+        // the handover; IM delivery reads "snapshot wins" — see resolveImTurn
+        // around line 8593). Those sessions remain owned: a Tab editing them
+        // SHOULD update the snapshot, and we must NOT drop the PATCH payload.
+        const existingMeta = getSessionMetadata(sessionId);
+        const isPureImSession = shouldDropSnapshotPatchOnImSession(existingMeta);
+
         const snapshotKeys = [
           'model',
           'permissionMode',
@@ -4062,11 +4079,22 @@ async function main() {
           'providerEnvJson',
         ] as const;
         let wroteSnapshotField = false;
+        let droppedImSnapshotField = false;
         for (const key of snapshotKeys) {
           const v = payload[key];
           if (v === undefined) continue;
+          if (isPureImSession) {
+            droppedImSnapshotField = true;
+            continue;
+          }
           updates[key] = v === null ? undefined : v;
           wroteSnapshotField = true;
+        }
+        if (droppedImSnapshotField) {
+          console.warn(
+            `[sessions] PATCH ${sessionId}: dropped snapshot fields on IM-sourced session ` +
+            `(source=${existingMeta?.source}) — IM sessions live-follow the agent.`,
+          );
         }
 
         // Stamp configSnapshotAt on the first snapshot write (lazy migration).
@@ -4220,42 +4248,23 @@ async function main() {
           return jsonResponse({ success: false, skipped: true });
         }
 
-        // Runtime-aware dispatch: builtin uses the Claude Agent SDK path with
-        // provider-env; external runtimes (CC/Codex/Gemini) spawn a fresh
-        // short-lived CLI process of the same runtime so the title respects the
-        // session's actual model + CLI auth. See title-generator.ts for rationale.
+        // Manual / external trigger. Delegates to the backend Title Service core
+        // (runtime-aware dispatch + TOCTOU re-check + persist + broadcast), the
+        // SAME path the post-turn auto trigger uses — see session-title-service.ts.
+        // Runtime is derived from session state; model/providerEnv from the request.
+        // External runtimes ignore providerEnv (CLI-owned auth) and take agentDir
+        // as workspace so Gemini/Codex inherit project context.
         const activeRuntime = getActiveRuntimeType();
-        const { generateTitle, generateTitleExternal } = await import('./title-generator');
-        let title: string | null;
-        if (activeRuntime === 'builtin') {
-          title = await generateTitle(
-            rounds,
-            payload.model || '',
-            payload.providerEnv,
-          );
-        } else {
-          // External runtimes don't need providerEnv — auth is CLI-owned
-          // (claude login / codex login / gemini OAuth). workspacePath comes
-          // from session metadata so Gemini/Codex inherit project context.
-          title = await generateTitleExternal(
-            rounds,
-            activeRuntime,
-            payload.model || '',
-            meta.agentDir,
-          );
-        }
-
-        if (title) {
-          // Re-check titleSource before writing to prevent TOCTOU race with user rename
-          const currentMeta = getSessionMetadata(payload.sessionId);
-          if (currentMeta?.titleSource === 'user') {
-            return jsonResponse({ success: false, skipped: true });
-          }
-          await updateSessionMetadata(payload.sessionId, { title, titleSource: 'auto' } as Parameters<typeof updateSessionMetadata>[1]);
-          return jsonResponse({ success: true, title });
-        }
-
-        return jsonResponse({ success: false });
+        const { generateAndApplyTitle } = await import('./session-title-service');
+        const title = await generateAndApplyTitle(
+          payload.sessionId,
+          rounds,
+          activeRuntime,
+          payload.model || '',
+          payload.providerEnv,
+          meta.agentDir,
+        );
+        return title ? jsonResponse({ success: true, title }) : jsonResponse({ success: false });
       }
 
       // ============= END SESSION API =============
@@ -9574,6 +9583,10 @@ description: >
       setDeferredInitPhase(currentInitPhase);
       seedBundledSkills();
       console.log('[startup] seedBundledSkills done');
+
+      // #296 — install the backend auto-title trigger into the turn-hooks slot
+      // BEFORE any turn can complete (initializeAgent / pre-warm run below).
+      installAutoTitleHook();
 
       ensurePluginsDirs();
 

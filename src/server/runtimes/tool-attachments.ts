@@ -88,6 +88,10 @@ function mimeToExt(mimeType: string): string {
   const subtype = mimeType.split('/')[1]?.split('+')[0] || 'bin';
   if (subtype === 'jpeg') return 'jpg';
   if (subtype === 'svg') return 'svg';
+  // `audio/mpeg` → `.mp3` (not `.mpeg`) so the OS associates the file with an
+  // audio player for the attachment "open with default app" action (PRD 0.2.30).
+  if (subtype === 'mpeg' && mimeType.startsWith('audio/')) return 'mp3';
+  if (subtype === 'mp4' && mimeType.startsWith('audio/')) return 'm4a';
   return subtype;
 }
 
