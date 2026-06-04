@@ -1479,8 +1479,27 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
       }
     };
     loadMcpConfig();
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- Only reload when agent/project MCP config changes
-  }, [currentAgent?.mcpEnabledServers, currentProject?.mcpEnabledServers]);
+    // Re-fires on:
+    //  - workspace MCP toggles (currentAgent/currentProject.mcpEnabledServers)
+    //  - global enable/disable (config.mcpEnabledServers) — covers Settings
+    //    toggling a server on/off globally
+    //  - env / args / server-definition edits (config.mcpServerEnv /
+    //    mcpServerArgs / mcpServers) — issue #303: when the user adds
+    //    MINERU_API_KEY via Settings (which writes config.mcpServerEnv only,
+    //    not workspace-level mcpEnabledServers), ConfigProvider re-loads on
+    //    CONFIG_CHANGED_EVENT → `config` becomes a new reference → this effect
+    //    fires → /api/mcp/set re-pushes the merged server list so the
+    //    sidecar's currentMcpServers picks up the env on its next pre-warm
+    //    fingerprint diff.
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- apiPost / fileService are stable refs we deliberately exclude
+  }, [
+    currentAgent?.mcpEnabledServers,
+    currentProject?.mcpEnabledServers,
+    config?.mcpEnabledServers,
+    config?.mcpServerEnv,
+    config?.mcpServerArgs,
+    config?.mcpServers,
+  ]);
 
   // Load enabled agents and sync to backend
   const loadAndSyncAgents = useCallback(async () => {

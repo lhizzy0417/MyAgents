@@ -17,6 +17,7 @@ import { track, consumePendingSurface, setPendingSurface, hashAgentNameSync } fr
 import type { Surface } from '@/analytics';
 import { useConfigData } from '@/config/useConfigData';
 import { getAgentByWorkspacePath } from '@/config/services/agentConfigService';
+import { notifyConfigChanged } from '@/config/services/appConfigService';
 import { normalizeRuntime, resolveEffectiveRuntime } from '@/utils/sessionOpenPlan';
 import type { RuntimeType } from '@/../shared/types/runtime';
 import { generateSessionTitle } from '@/api/sessionClient';
@@ -2666,9 +2667,13 @@ export default function TabProvider({
             }
 
             case 'config:changed': {
-                // Admin CLI modified config — notify global ConfigProvider to refresh
+                // Admin CLI modified config — notify global ConfigProvider to refresh.
+                // Routes through `notifyConfigChanged` so the event detail stays
+                // payload-free (issue #303 review-by-codex follow-up: a window-
+                // level CustomEvent observable by any renderer listener must not
+                // carry providerApiKeys / mcpServerEnv).
                 console.log('[TabProvider] config:changed via Admin CLI', data);
-                window.dispatchEvent(new CustomEvent('myagents:config-changed', { detail: data }));
+                notifyConfigChanged('sse:config:changed');
                 break;
             }
 
@@ -2688,7 +2693,9 @@ export default function TabProvider({
                 // pick up the install/toggle without needing a manual
                 // refresh. Without this the Chat tool menu shows "no
                 // plugins" even after the user just enabled 13 of them.
-                window.dispatchEvent(new CustomEvent('myagents:config-changed', { detail: data }));
+                // Routes through `notifyConfigChanged` for the same secret-
+                // leakage reason as the `config:changed` case above.
+                notifyConfigChanged('sse:plugins:changed');
                 break;
             }
 
