@@ -20,7 +20,7 @@ import { modelAliasEnvChangesForModel, resolveSessionModelAliases, type ModelAli
 import { deriveReloadResumeAnchor, resolveEffectiveResumeAt } from './utils/rewind-anchor';
 import { buildForkUuidRemap, remapStoredSdkUuids } from './utils/fork-remap';
 import { decideInFlightActionOnResult } from './utils/inflight-terminal';
-import { shouldBlockToolInPlanMode, planModeDenyMessage, isPlanModeInEffect, PLAN_MODE_READONLY_TOOLS, PLAN_MODE_HOST_INTERACTION_TOOLS } from './utils/plan-mode-gate';
+import { shouldBlockToolInPlanMode, planModeDenyMessage, isPlanModeInEffect, PLAN_MODE_READONLY_TOOLS, PLAN_MODE_HOST_INTERACTION_TOOLS, applyPermissionModeSelection, computePlanExitState, computeRestoredPlanState } from './utils/plan-mode-gate';
 import { isEmptySuccessfulSdkResult, isRecoveredAssistantMessageError } from './utils/sdk-turn-outcome';
 import { InactivityWatchdog } from './utils/inactivity-watchdog';
 import { WATCHDOG_RESUME_REMINDER, planWatchdogAutoResume, shouldAdoptPendingContinueIntoScheduledAutoResume, shouldConsumePendingContinueAfterAbort, shouldDeferPendingContinueToScheduledAutoResume, shouldPrependWatchdogAutoResume } from './utils/watchdog-auto-resume';
@@ -2161,25 +2161,35 @@ export function getSessionPermissionMode(): PermissionMode {
 export function setSessionPermissionMode(mode: PermissionMode): void {
   if (mode === currentPermissionMode) return;
   const oldMode = currentPermissionMode;
-  currentPermissionMode = mode;
-  console.log(`[agent] session permission mode set: ${oldMode} -> ${mode}`);
+  const oldPrePlan = prePlanPermissionMode;
+  // Route through the shared transition so the UI toggle keeps the plan
+  // capture/restore invariant: switching INTO plan captures the prior mode so a
+  // later ExitPlanMode has something to restore. Before this, the UI toggle set
+  // currentPermissionMode='plan' WITHOUT touching prePlanPermissionMode, so
+  // ExitPlanMode approval was a no-op and the hard gate stayed engaged — the
+  // session was stuck in plan until the user hand-switched to fullAgency.
+  const next = applyPermissionModeSelection(currentPermissionMode, prePlanPermissionMode, mode);
+  currentPermissionMode = next.permissionMode;
+  prePlanPermissionMode = next.prePlanPermissionMode;
+  console.log(`[agent] session permission mode set: ${oldMode} -> ${currentPermissionMode} (prePlan=${prePlanPermissionMode ?? 'none'})`);
 
   // Apply permission mode change to SDK subprocess immediately (same as setSessionModel).
   // Without this, the SDK subprocess stays in the old mode until the next message
   // triggers applySessionConfig(). Critical for plan mode: user switches to plan in UI
   // but SDK keeps auto → canUseTool may be skipped → tools execute unchecked.
   if (querySession) {
-    const sdkMode = mapToSdkPermissionMode(mode);
+    const sdkMode = mapToSdkPermissionMode(currentPermissionMode);
     querySession.setPermissionMode(sdkMode).catch(err => {
       console.error('[agent] failed to apply permission mode to running session:', err);
-      // Rollback: restore old mode and notify frontend to undo
+      // Rollback: restore old mode + capture and notify frontend to undo
       currentPermissionMode = oldMode;
+      prePlanPermissionMode = oldPrePlan;
       broadcast('chat:permission-mode-changed', { permissionMode: oldMode });
     });
   }
 
   // Notify frontend of the mode change so UI stays in sync
-  broadcast('chat:permission-mode-changed', { permissionMode: mode });
+  broadcast('chat:permission-mode-changed', { permissionMode: currentPermissionMode });
 }
 
 /**
@@ -3334,12 +3344,18 @@ export function handleExitPlanModeResponse(
     return false;
   }
   pendingExitPlanMode.delete(requestId);
-  // Restore currentPermissionMode so applySessionConfig won't override SDK's internal state
-  if (approved && prePlanPermissionMode) {
-    currentPermissionMode = prePlanPermissionMode;
-    prePlanPermissionMode = null;
+  // Restore currentPermissionMode so the hard gate + applySessionConfig stop
+  // treating the session as plan. Runs on ANY approval (no longer gated on
+  // prePlanPermissionMode): computePlanExitState falls back to a concrete
+  // non-plan mode when nothing was captured, so exiting plan can never be a
+  // no-op — that no-op was the deadlock when plan was entered via the UI toggle
+  // (or restored from disk) without a captured prior mode.
+  if (approved) {
+    const next = computePlanExitState(prePlanPermissionMode);
+    currentPermissionMode = next.permissionMode;
+    prePlanPermissionMode = next.prePlanPermissionMode;
     console.debug(`[ExitPlanMode] Restored currentPermissionMode to: ${currentPermissionMode}`);
-    // Notify frontend that mode changed (plan → auto/custom/etc.)
+    // Notify frontend that mode changed (plan → auto/fullAgency)
     broadcast('chat:permission-mode-changed', { permissionMode: currentPermissionMode });
   }
   const trimmed = feedback?.trim();
@@ -3399,10 +3415,15 @@ export function handleEnterPlanModeResponse(requestId: string, approved: boolean
     return false;
   }
   pendingEnterPlanMode.delete(requestId);
-  // Sync currentPermissionMode so applySessionConfig won't override SDK's plan mode
+  // Sync currentPermissionMode so applySessionConfig won't override SDK's plan mode.
+  // Route through the shared transition: it captures the prior mode, but if we're
+  // ALREADY in plan it preserves the existing capture instead of overwriting it
+  // with 'plan' (re-entering plan to "fix" a stuck state must not poison the
+  // restore target — that previously made the deadlock permanent).
   if (approved) {
-    prePlanPermissionMode = currentPermissionMode;
-    currentPermissionMode = 'plan';
+    const next = applyPermissionModeSelection(currentPermissionMode, prePlanPermissionMode, 'plan');
+    currentPermissionMode = next.permissionMode;
+    prePlanPermissionMode = next.prePlanPermissionMode;
     console.debug(`[EnterPlanMode] Saved prePlanPermissionMode=${prePlanPermissionMode}, switched to plan`);
     broadcast('chat:permission-mode-changed', { permissionMode: 'plan' });
   }
@@ -6139,9 +6160,16 @@ export async function initializeAgent(
         currentModel = resolved.model;
         console.log(`[agent] self-resolved model: ${resolved.model}`);
       }
-      if (resolved.permissionMode && !isExternalRuntime(getCurrentRuntimeType()) && resolved.permissionMode !== currentPermissionMode) {
-        currentPermissionMode = resolved.permissionMode as PermissionMode;
-        console.log(`[agent] self-resolved permissionMode: ${resolved.permissionMode}`);
+      if (resolved.permissionMode && !isExternalRuntime(getCurrentRuntimeType())) {
+        if (resolved.permissionMode !== currentPermissionMode) {
+          console.log(`[agent] self-resolved permissionMode: ${resolved.permissionMode}`);
+        }
+        // Restored mode is authoritative session state; drop any prePlanPermissionMode
+        // carried from a prior session/context so a later ExitPlanMode / SDK-status exit
+        // can't "restore" the wrong session's mode (codex review). See computeRestoredPlanState.
+        const restored = computeRestoredPlanState(resolved.permissionMode as PermissionMode);
+        currentPermissionMode = restored.permissionMode;
+        prePlanPermissionMode = restored.prePlanPermissionMode;
       }
     } catch (error) {
       // Self-resolution failure is non-fatal — fall back to external sync (Rust sync_ai_config)
@@ -6271,9 +6299,17 @@ export async function switchToSession(targetSessionId: string): Promise<boolean>
     try {
       const { resolveWorkspaceConfig } = await import('./utils/admin-config');
       const resolved = resolveWorkspaceConfig(agentDir, sessionMeta, { includeMcp: false });
-      if (resolved.permissionMode && resolved.permissionMode !== currentPermissionMode) {
-        currentPermissionMode = resolved.permissionMode as PermissionMode;
-        console.log(`[agent] switchToSession: restored permissionMode=${resolved.permissionMode}`);
+      if (resolved.permissionMode) {
+        if (resolved.permissionMode !== currentPermissionMode) {
+          console.log(`[agent] switchToSession: restored permissionMode=${resolved.permissionMode}`);
+        }
+        // prePlanPermissionMode belonged to the PREVIOUS session — reset on switch so a
+        // later ExitPlanMode / SDK-status exit restores THIS session's fallback, not the
+        // prior session's mode (codex review). Safe: switchToSession early-returns when
+        // targetSessionId === sessionId, so this never drops the current session's capture.
+        const restored = computeRestoredPlanState(resolved.permissionMode as PermissionMode);
+        currentPermissionMode = restored.permissionMode;
+        prePlanPermissionMode = restored.prePlanPermissionMode;
       }
       // #300: also restore model + provider env from the TARGET session's snapshot.
       // Previously only permissionMode was restored, so the pre-warm scheduled below
@@ -6323,14 +6359,17 @@ async function applySessionConfig(newModel?: string, newPermissionMode?: Permiss
     const sdkMode = mapToSdkPermissionMode(newPermissionMode);
     try {
       await querySession.setPermissionMode(sdkMode);
-      currentPermissionMode = newPermissionMode;
-      // If currently in plan mode (prePlanPermissionMode is set), update the saved mode
-      // so that exiting plan mode restores the user's LATEST choice, not the stale one.
-      if (prePlanPermissionMode) {
-        prePlanPermissionMode = newPermissionMode;
-        console.log(`[agent] updated prePlanPermissionMode to: ${newPermissionMode}`);
-      }
-      console.log(`[agent] runtime permission mode switched to: ${newPermissionMode} (SDK: ${sdkMode})`);
+      // Route through the shared transition so a config-driven switch keeps the
+      // plan capture/restore invariant: switching INTO plan captures the prior
+      // mode (so ExitPlanMode can restore it), switching to a non-plan mode
+      // clears the capture. Previously this set currentPermissionMode directly
+      // and only refreshed prePlanPermissionMode when it was already set — so a
+      // config path that entered plan from a non-plan mode never captured one
+      // (same deadlock class as the UI toggle).
+      const next = applyPermissionModeSelection(currentPermissionMode, prePlanPermissionMode, newPermissionMode);
+      currentPermissionMode = next.permissionMode;
+      prePlanPermissionMode = next.prePlanPermissionMode;
+      console.log(`[agent] runtime permission mode switched to: ${currentPermissionMode} (SDK: ${sdkMode}, prePlan=${prePlanPermissionMode ?? 'none'})`);
     } catch (error) {
       console.error('[agent] failed to set permission mode:', error);
     }
@@ -6801,12 +6840,14 @@ export async function enqueueUserMessage(
   if (!isSessionBusy) {
     await applySessionConfig(model, permissionMode);
 
-    // Update local tracking even if SDK call is skipped (e.g., first message before pre-warm)
+    // Update local tracking even if SDK call is skipped (e.g., first message before pre-warm).
+    // Same shared transition as applySessionConfig so a first-message payload of
+    // 'plan' captures the prior mode instead of leaving the restore target empty.
     if (permissionMode && permissionMode !== currentPermissionMode) {
-      currentPermissionMode = permissionMode;
-      // Keep prePlanPermissionMode in sync (same as applySessionConfig)
-      if (prePlanPermissionMode) prePlanPermissionMode = permissionMode;
-      if (isDebugMode) console.log(`[agent] permission mode set to: ${permissionMode}`);
+      const next = applyPermissionModeSelection(currentPermissionMode, prePlanPermissionMode, permissionMode);
+      currentPermissionMode = next.permissionMode;
+      prePlanPermissionMode = next.prePlanPermissionMode;
+      if (isDebugMode) console.log(`[agent] permission mode set to: ${currentPermissionMode} (prePlan=${prePlanPermissionMode ?? 'none'})`);
     }
     if (model && model !== currentModel) {
       currentModel = model;
@@ -6820,10 +6861,10 @@ export async function enqueueUserMessage(
     // the "config locked while streaming" contract. canUseTool() reads currentPermissionMode
     // live (line ~4081), so updating it mid-turn would change permission behavior unexpectedly.
     if (permissionMode && permissionMode !== currentPermissionMode) {
-      currentPermissionMode = permissionMode;
-      // Keep prePlanPermissionMode in sync (same as !isSessionBusy branch)
-      if (prePlanPermissionMode) prePlanPermissionMode = permissionMode;
-      if (isDebugMode) console.log(`[agent] permission mode staged for restart: ${permissionMode}`);
+      const next = applyPermissionModeSelection(currentPermissionMode, prePlanPermissionMode, permissionMode);
+      currentPermissionMode = next.permissionMode;
+      prePlanPermissionMode = next.prePlanPermissionMode;
+      if (isDebugMode) console.log(`[agent] permission mode staged for restart: ${currentPermissionMode} (prePlan=${prePlanPermissionMode ?? 'none'})`);
     }
     if (model && model !== currentModel) {
       currentModel = model;
@@ -9423,17 +9464,23 @@ async function startStreamingSession(preWarm = false): Promise<void> {
         console.log(`[agent] System status: ${statusResult.status}`);
         broadcast('chat:system-status', { status: statusResult.status });
 
-        // Detect SDK-initiated plan mode changes (EnterPlanMode is auto-allowed by SDK)
+        // Detect SDK-initiated plan mode changes (EnterPlanMode is auto-allowed by SDK).
+        // Both branches go through the shared transition so the prePlanPermissionMode
+        // capture/restore invariant matches the UI-toggle / ExitPlanMode paths.
         if (statusResult.permissionMode === 'plan' && currentPermissionMode !== 'plan') {
-          prePlanPermissionMode = currentPermissionMode;
-          currentPermissionMode = 'plan';
+          const next = applyPermissionModeSelection(currentPermissionMode, prePlanPermissionMode, 'plan');
+          currentPermissionMode = next.permissionMode;
+          prePlanPermissionMode = next.prePlanPermissionMode;
           broadcast('enter-plan-mode:request', { requestId: `sdk_auto_${Date.now()}`, autoApproved: true });
           broadcast('chat:permission-mode-changed', { permissionMode: 'plan' });
           console.log(`[agent] SDK auto-entered plan mode, saved prePlanPermissionMode=${prePlanPermissionMode}`);
         } else if (statusResult.permissionMode && statusResult.permissionMode !== 'plan' && prePlanPermissionMode) {
-          // SDK exited plan mode (e.g. after ExitPlanMode approval)
-          currentPermissionMode = prePlanPermissionMode;
-          prePlanPermissionMode = null;
+          // SDK exited plan mode (e.g. after ExitPlanMode approval). Gate stays on
+          // prePlanPermissionMode (truthy) to avoid acting during the optimistic
+          // setPermissionMode window; computePlanExitState never restores to 'plan'.
+          const next = computePlanExitState(prePlanPermissionMode);
+          currentPermissionMode = next.permissionMode;
+          prePlanPermissionMode = next.prePlanPermissionMode;
           broadcast('chat:permission-mode-changed', { permissionMode: currentPermissionMode });
           console.log(`[agent] SDK exited plan mode, restored currentPermissionMode=${currentPermissionMode}`);
         }

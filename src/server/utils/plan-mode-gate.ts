@@ -48,6 +48,18 @@
  * drift apart.
  */
 
+import type { PermissionMode } from '../../shared/config-types';
+
+/**
+ * The live permission-mode union the sidecar mirror uses. agent-session.ts
+ * carries a legacy `'custom'` member in its own `PermissionMode` union; include
+ * it here so this leaf module accepts the sidecar's value WITHOUT importing
+ * agent-session.ts (that would be a circular dependency). Structurally identical
+ * to agent-session.ts's type, so the two are mutually assignable. Only the
+ * `'plan'` literal is load-bearing for the transitions below.
+ */
+export type PlanCapablePermissionMode = PermissionMode | 'custom';
+
 /**
  * Tools auto-allowed in plan mode: read-only file/codebase inspection only.
  * Mirrors `getPermissionRules('plan').allowedTools` (agent-session.ts consumes
@@ -118,4 +130,99 @@ export function planModeDenyMessage(toolName: string): string {
     `当前处于 Plan（规划）模式，禁止执行写操作或有副作用的工具（本次被拦截：${toolName}）。` +
     `请先完成调研与规划，再用 ExitPlanMode 工具提交方案供用户审批；获批退出 Plan 模式后才能执行写操作。`
   );
+}
+
+// ---------------------------------------------------------------------------
+// Plan-mode entry/exit mirror transitions (pure core).
+//
+// The sidecar keeps two module globals (agent-session.ts): `currentPermissionMode`
+// (the live mode the hard gate above reads) and `prePlanPermissionMode` (the mode
+// to RESTORE when plan exits). Keeping the second consistent across every way plan
+// can be entered/exited is the bug this section fixes — see computePlanExitState.
+// ---------------------------------------------------------------------------
+
+/**
+ * Non-plan mode the session falls back to when exiting plan with no captured
+ * prior mode. 'auto' (acceptEdits) is the safe middle ground — writes auto-accept
+ * but it never silently grants fullAgency.
+ */
+export const PLAN_EXIT_FALLBACK_MODE: PlanCapablePermissionMode = 'auto';
+
+/**
+ * Result of a plan-mode mirror transition: the new live mode plus the mode to
+ * restore when plan next exits (`null` when the session is not parked in plan).
+ */
+export type PlanModeMirror = {
+  permissionMode: PlanCapablePermissionMode;
+  prePlanPermissionMode: PlanCapablePermissionMode | null;
+};
+
+/**
+ * Compute the (currentPermissionMode, prePlanPermissionMode) pair after an
+ * EXPLICIT mode selection — the UI toggle (`setSessionPermissionMode`), an
+ * EnterPlanMode approval, or the SDK auto-entering plan.
+ *
+ * Invariant this centralizes (it was previously open-coded at each site and
+ * drifted): whenever the live mode is 'plan', `prePlanPermissionMode` holds the
+ * mode to restore on exit. Therefore:
+ *   - Entering plan FROM a non-plan mode captures that mode. (The UI-toggle path
+ *     forgot to do this, so ExitPlanMode approval had nothing to restore → the
+ *     deadlock in the bug report.)
+ *   - Re-entering plan while ALREADY in plan keeps the existing capture — it must
+ *     NOT overwrite it with 'plan'. (The deadlock got WORSE when the model
+ *     re-entered plan to "fix the state anomaly": that captured 'plan' as the
+ *     restore target, so even a later ExitPlanMode would have restored to 'plan'.)
+ *   - Selecting any non-plan mode is an explicit user choice → clears the capture.
+ */
+export function applyPermissionModeSelection(
+  current: PlanCapablePermissionMode,
+  savedPre: PlanCapablePermissionMode | null,
+  next: PlanCapablePermissionMode,
+): PlanModeMirror {
+  if (next === 'plan') {
+    return {
+      permissionMode: 'plan',
+      prePlanPermissionMode: current === 'plan' ? savedPre : current,
+    };
+  }
+  return { permissionMode: next, prePlanPermissionMode: null };
+}
+
+/**
+ * Compute the mirror state when EXITING plan (ExitPlanMode approval, or the SDK
+ * reporting it left plan). Restores the captured prior mode, falling back to
+ * PLAN_EXIT_FALLBACK_MODE when nothing valid was captured.
+ *
+ * Why the fallback is load-bearing — the root cause of this bug: plan mode can be
+ * entered via paths that never captured a prior mode (the UI toggle before this
+ * fix; a session restored from disk already in plan). With the old
+ * `if (prePlanPermissionMode)` guard, ExitPlanMode approval was then a NO-OP — the
+ * live mirror stayed 'plan', the fail-closed hard gate kept denying every write,
+ * and the model was stuck (its Bash-heredoc / re-enter-plan workarounds all hit
+ * the same gate) until the user hand-switched to fullAgency. Falling back to a
+ * concrete non-plan mode guarantees exiting plan ALWAYS leaves plan. 'plan' is
+ * also rejected as a restore target (belt-and-suspenders against a poisoned
+ * capture) so the mirror can never resolve back into plan.
+ */
+export function computePlanExitState(savedPre: PlanCapablePermissionMode | null): PlanModeMirror {
+  const restored = savedPre && savedPre !== 'plan' ? savedPre : PLAN_EXIT_FALLBACK_MODE;
+  return { permissionMode: restored, prePlanPermissionMode: null };
+}
+
+/**
+ * Compute the mirror state when RESTORING a session's saved permission mode —
+ * disk self-resolve at init, or `switchToSession`. The restored mode is the new
+ * session's authoritative live mode, and `prePlanPermissionMode` MUST be dropped:
+ * it is bookkeeping that belonged to the PRIOR session/context.
+ *
+ * Why (codex review catch): without clearing it, a stale `prePlanPermissionMode`
+ * from the previous session survives the switch. If the restored session is in
+ * plan, ExitPlanMode would restore the prior session's mode instead of the 'auto'
+ * fallback; if it's non-plan, the SDK-status exit branch (gated on a truthy
+ * `prePlanPermissionMode`) could later "restore" the wrong mode and silently
+ * change permissions. A restored plan session has no captured prior, so
+ * computePlanExitState falls back to PLAN_EXIT_FALLBACK_MODE on exit.
+ */
+export function computeRestoredPlanState(resolvedMode: PlanCapablePermissionMode): PlanModeMirror {
+  return { permissionMode: resolvedMode, prePlanPermissionMode: null };
 }
