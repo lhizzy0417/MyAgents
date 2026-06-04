@@ -77,6 +77,8 @@ import { trackServer } from './analytics';
 import { getCurrentRuntimeType, isExternalRuntime } from './runtimes/factory';
 import { resolveLastRealUserMessagePreview } from './utils/session-message-preview';
 import type { ImagePayload } from './runtimes/types';
+import { buildBuiltinMediaAttachments } from './runtimes/builtin-media-attachments';
+import type { ToolAttachment } from '../shared/types/tool-attachment';
 import { imEventBus, type ImEventType } from './utils/im-event-bus';
 import { imRequestRegistry } from './utils/im-request-registry';
 import { mirrorIfChannelBound, type MirrorImage } from './utils/im-mirror';
@@ -428,6 +430,10 @@ type ToolUseState = {
   subagentCalls?: SubagentToolCall[];
   /** Gemini thinking models: opaque signature that must be round-tripped on tool calls */
   thought_signature?: string;
+  /** PRD 0.2.30 — rich-media produced by a builtin media tool (edge-tts audio /
+   *  gemini-image image), normalized into the same first-class attachment channel
+   *  as the Codex runtime. Persisted with the block; rendered via ToolAttachmentGallery. */
+  attachments?: ToolAttachment[];
 };
 
 type SubagentToolCall = {
@@ -5463,6 +5469,42 @@ function appendToolResultContent(toolUseId: string, content: string, isError?: b
   return next;
 }
 
+/**
+ * PRD 0.2.30 — for builtin media tools (edge-tts audio / gemini-image image),
+ * normalize the just-completed tool result into `ToolAttachment[]`, set them on
+ * the persisted tool block, and return them so the caller can include them in
+ * the `chat:tool-result-complete` broadcast. No-op (returns undefined) for any
+ * non-media tool. Idempotent — if the block already carries attachments (e.g.
+ * the result surfaced via a second delivery path), the existing set is reused
+ * without re-saving to disk.
+ *
+ * Synchronous save is fine here: the file already exists on disk and the
+ * trusted-root copy is a cheap base64 round-trip; gating to two tool names
+ * keeps every other tool result on the zero-cost path.
+ */
+async function attachBuiltinMediaIfAny(
+  toolUseId: string,
+  contentStr: string,
+): Promise<ToolAttachment[] | undefined> {
+  const toolBlock = findToolBlockById(toolUseId);
+  if (!toolBlock) return undefined;
+  if (toolBlock.tool.attachments && toolBlock.tool.attachments.length > 0) {
+    return toolBlock.tool.attachments;
+  }
+  try {
+    const attachments = await buildBuiltinMediaAttachments(toolBlock.tool.name, contentStr, {
+      sessionId,
+      toolUseId,
+    });
+    if (attachments.length === 0) return undefined;
+    toolBlock.tool.attachments = attachments;
+    return attachments;
+  } catch (err) {
+    console.warn('[agent] builtin media attachment failed:', err instanceof Error ? err.message : String(err));
+    return undefined;
+  }
+}
+
 function formatAssistantContent(content: unknown): string {
   if (!content) {
     return '';
@@ -10017,9 +10059,12 @@ async function startStreamingSession(preWarm = false): Promise<void> {
               } else {
                 // Top-level tool result (e.g., WebSearch without parent)
                 const stripped = strippedToolResultIds.has(toolResultBlock.tool_use_id) || isPlaywrightTool(toolResultBlock.tool_use_id);
+                // PRD 0.2.30 — builtin media tools (edge-tts / gemini-image) → first-class attachments.
+                const attachments = await attachBuiltinMediaIfAny(toolResultBlock.tool_use_id, contentStr);
                 broadcast('chat:tool-result-complete', {
                   toolUseId: toolResultBlock.tool_use_id,
-                  content: stripped ? PLAYWRIGHT_RESULT_SENTINEL : contentStr
+                  content: stripped ? PLAYWRIGHT_RESULT_SENTINEL : contentStr,
+                  ...(attachments ? { attachments } : {}),
                 });
                 inFlightToolCount = Math.max(0, inFlightToolCount - 1);
               }
@@ -10152,10 +10197,16 @@ async function startStreamingSession(preWarm = false): Promise<void> {
                 });
               } else {
                 const stripped = strippedToolResultIds.has(toolResultBlock.tool_use_id) || isPlaywrightTool(toolResultBlock.tool_use_id);
+                // PRD 0.2.30 — builtin media tools (edge-tts / gemini-image) → first-class attachments.
+                // Idempotent with Site A; only one delivery path fires per tool result.
+                const attachments = toolResultBlock.is_error
+                  ? undefined
+                  : await attachBuiltinMediaIfAny(toolResultBlock.tool_use_id, contentStr);
                 broadcast('chat:tool-result-complete', {
                   toolUseId: toolResultBlock.tool_use_id,
                   content: stripped ? PLAYWRIGHT_RESULT_SENTINEL : contentStr,
-                  isError: toolResultBlock.is_error || false
+                  isError: toolResultBlock.is_error || false,
+                  ...(attachments ? { attachments } : {}),
                 });
                 inFlightToolCount = Math.max(0, inFlightToolCount - 1);
               }

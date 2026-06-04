@@ -288,9 +288,17 @@ attachment。任何触发这种路径的入口视为 bug。
 
 ## 10. 后续 Phase（v0.2.16+）
 
-- **P5 — builtin SDK image content**：`agent-session.ts:8716-8754` 改 array-aware 处理 SDK 返回的
-  `content[]` 中 `type:'image'` ContentBlock，调 `saveToolAttachment` → attachments。完成后老的
-  `gemini-image-tool.ts` filePath 文本协议退役，`TOOLS_THAT_OWN_GALLERY_PREFIXES` 清空
+- **P5（部分完成，PRD 0.2.30）— builtin 媒体接入**：内置 `edge-tts`（音频）/ `gemini-image`（图片）
+  的产物已走 attachments。实现走**结果文本里的 `filePath`** 而非 SDK `content[]` image ContentBlock：
+  `agent-session.ts::attachBuiltinMediaIfAny` 在顶层 `chat:tool-result-complete` 处调
+  `runtimes/builtin-media-attachments.ts`（纯解析 `parseBuiltinMediaToolResult` + base64-copy 进
+  trusted root），attachments 进 broadcast + 持久化到 `ToolUseState.attachments`。前端新增
+  `ToolAudioAttachment`（卡片式播放器 + meta + 「更多」菜单 reveal/open-with-default）；
+  `ToolAttachmentGallery` 补 `audio` case；`EdgeTtsTool`/`GeminiImageTool` 改 attachment-aware
+  （有 attachments → 卡内只留 meta+路径，媒体交 gallery 在对话流就地露出；无 attachments → 旧内嵌渲染
+  legacy fallback）；`TOOLS_THAT_OWN_GALLERY_PREFIXES` 已清空。
+  - **仍未做**：SDK 通用 `content[]` image ContentBlock 的 array-aware 归一化（任意 builtin 工具产图的
+    通用形态）；子 Agent 调用媒体工具的接入；PDF/file 渲染器（仍占位卡）。
 - **Gemini / CC Runtime tool image**：协议层就位，对应 Runtime parseNotification 改造接入
 - **IM Bot 媒体下发**：tool_result 转发链路消费 attachments，把图片送达 Telegram / 飞书 / 微信
 - **GC / size limits**：session 软删除时清理 `~/.myagents/generated/tool-attachments/<sid>/`；

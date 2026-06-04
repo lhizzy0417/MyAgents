@@ -1,10 +1,7 @@
-import { useRef, useCallback } from 'react';
-import { Play, Square } from 'lucide-react';
-import { track } from '@/analytics';
 import type { ToolUseSimple } from '@/types/chat';
 import { CollapsibleTool } from './CollapsibleTool';
 import { ToolHeader, unwrapMcpResult } from './utils';
-import { useAudioPlayer } from '@/hooks/useAudioPlayer';
+import AudioPlayerBar from './AudioPlayerBar';
 
 interface EdgeTtsToolProps {
   tool: ToolUseSimple;
@@ -65,116 +62,18 @@ function parseToolResult(result: string | undefined): {
   };
 }
 
-function formatTime(sec: number): string {
-  if (!sec || !isFinite(sec)) return '0:00';
-  const m = Math.floor(sec / 60);
-  const s = Math.floor(sec % 60);
-  return `${m}:${s.toString().padStart(2, '0')}`;
-}
-
-/** Compact audio player bar with seekable progress */
-function AudioPlayerBar({ filePath }: { filePath: string }) {
-  const { isActive, toggle, progress, duration, seek } = useAudioPlayer(filePath);
-  const trackedRef = useRef(false);
-  const trackRef = useRef<HTMLDivElement>(null);
-  const draggingRef = useRef(false);
-
-  // Track first play
-  const handleToggle = useCallback(() => {
-    if (!isActive && !trackedRef.current) {
-      track('tts_play', {});
-      trackedRef.current = true;
-    }
-    toggle();
-  }, [isActive, toggle]);
-
-  const displayProgress = isActive && duration > 0 ? progress / duration : 0;
-
-  // Seek to position from mouse/pointer event
-  const seekFromEvent = useCallback((clientX: number) => {
-    const el = trackRef.current;
-    if (!el || !isActive || duration <= 0) return;
-    const rect = el.getBoundingClientRect();
-    const ratio = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
-    seek(ratio * duration);
-  }, [isActive, duration, seek]);
-
-  // Click to seek
-  const handleTrackClick = useCallback((e: React.MouseEvent) => {
-    seekFromEvent(e.clientX);
-  }, [seekFromEvent]);
-
-  // Drag to seek
-  const handlePointerDown = useCallback((e: React.PointerEvent) => {
-    if (!isActive || duration <= 0) return;
-    e.preventDefault();
-    draggingRef.current = true;
-    (e.target as HTMLElement).setPointerCapture(e.pointerId);
-    seekFromEvent(e.clientX);
-  }, [isActive, duration, seekFromEvent]);
-
-  const handlePointerMove = useCallback((e: React.PointerEvent) => {
-    if (!draggingRef.current) return;
-    seekFromEvent(e.clientX);
-  }, [seekFromEvent]);
-
-  const handlePointerUp = useCallback(() => {
-    draggingRef.current = false;
-  }, []);
-
-  return (
-    <div className="flex items-center gap-2.5 rounded-lg bg-[var(--paper-inset)] px-3 py-2 max-w-[400px]">
-      {/* Play/Stop button */}
-      <button
-        type="button"
-        onClick={handleToggle}
-        className="flex size-7 shrink-0 items-center justify-center rounded-full bg-[var(--accent)] text-white transition-colors hover:bg-[var(--accent-warm-hover)]"
-      >
-        {isActive
-          ? <Square className="size-2.5 fill-current" />
-          : <Play className="size-3 fill-current ml-0.5" />
-        }
-      </button>
-
-      {/* Seekable progress bar */}
-      <div className="flex flex-1 items-center gap-2">
-        <div
-          ref={trackRef}
-          className={`relative h-1.5 flex-1 rounded-full bg-[var(--line)] ${isActive ? 'cursor-pointer' : ''}`}
-          onClick={handleTrackClick}
-          onPointerDown={handlePointerDown}
-          onPointerMove={handlePointerMove}
-          onPointerUp={handlePointerUp}
-          onPointerCancel={handlePointerUp}
-        >
-          {/* Filled portion */}
-          <div
-            className="absolute inset-y-0 left-0 rounded-full bg-[var(--accent)]"
-            // eslint-disable-next-line react-hooks/refs -- draggingRef read during render is intentional: transition must be instant while dragging to avoid lag
-            style={{ width: `${displayProgress * 100}%`, transition: draggingRef.current ? 'none' : 'width 200ms' }}
-          />
-          {/* Thumb knob — only when active */}
-          {isActive && (
-            <div
-              className="absolute top-1/2 -translate-y-1/2 size-3 rounded-full bg-[var(--accent)] shadow-sm ring-2 ring-white/80"
-              style={{ left: `calc(${displayProgress * 100}% - 6px)` }}
-            />
-          )}
-        </div>
-        <span className="text-[10px] tabular-nums text-[var(--ink-muted)] shrink-0">
-          {isActive ? formatTime(progress) : '0:00'} / {isActive && duration > 0 ? formatTime(duration) : '--:--'}
-        </span>
-      </div>
-    </div>
-  );
-}
-
 export default function EdgeTtsTool({ tool }: EdgeTtsToolProps) {
   const parsed = parseToolResult(tool.result);
 
   const isListVoices = tool.name.includes('list_voices');
   const toolLabel = isListVoices ? '查询语音' : '语音合成';
   const isGenerating = !tool.result;
+
+  // PRD 0.2.30 — when the audio is surfaced via the first-class attachment
+  // pipeline (ToolAttachmentGallery renders the player in-flow below this card),
+  // the card keeps meta + file path only. Older history results carry no
+  // attachments → keep the embedded player as a legacy fallback.
+  const hasAttachments = (tool.attachments?.length ?? 0) > 0;
 
   const collapsedContent = (
     <div className="flex items-center gap-1.5">
@@ -231,8 +130,9 @@ export default function EdgeTtsTool({ tool }: EdgeTtsToolProps) {
         </div>
       )}
 
-      {/* Audio player */}
-      {parsed.filePath && !parsed.error && (
+      {/* Audio player — legacy fallback only (no attachments). New results play
+          in-flow via ToolAttachmentGallery → ToolAudioAttachment below the card. */}
+      {parsed.filePath && !parsed.error && !hasAttachments && (
         <div className="mt-2">
           <AudioPlayerBar filePath={parsed.filePath} />
         </div>
@@ -247,6 +147,7 @@ export default function EdgeTtsTool({ tool }: EdgeTtsToolProps) {
           {parsed.rate && parsed.rate !== '0%' && <div>语速: {parsed.rate}</div>}
           {parsed.volume && parsed.volume !== '0%' && <div>音量: {parsed.volume}</div>}
           {parsed.pitch && parsed.pitch !== '+0Hz' && <div>音调: {parsed.pitch}</div>}
+          <div className="font-mono opacity-60 break-all">文件: {parsed.filePath}</div>
         </div>
       )}
 

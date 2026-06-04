@@ -247,6 +247,10 @@ export interface WorkspaceFileService {
    *  non-system drive (issue #125 follow-up — Windows workspaces on `D:\`).
    *  Credential blacklist still applies. */
   openPathExternal(args: { fullPath: string; workspace?: string | null }): Promise<void>;
+  /** [workspace-free] Open an absolute path with the OS default app (hand off like
+   *  `open <path>`). Same safety surface as `openPathExternal` (home/tmp prefix +
+   *  credential blacklist). Used by the audio attachment "more" menu (PRD 0.2.30). */
+  openPathWithDefault(args: { fullPath: string; workspace?: string | null }): Promise<void>;
   /** [requires workspace] Batch existence check — input order is preserved in the returned map. */
   checkPaths(args: { paths: string[] }): Promise<CheckPathsResult>;
   /** [requires workspace] Read a workspace file as a Blob URL (for `<img src=...>`
@@ -519,6 +523,18 @@ export function useWorkspaceFileService(workspacePath: string | null): Workspace
     [invokeIfTauri],
   );
 
+  const openPathWithDefault: WorkspaceFileService['openPathWithDefault'] = useCallback(
+    async ({ fullPath, workspace }) => {
+      // No workspace required — absolute path. Mirrors openPathExternal but hands
+      // off to the OS default app (cmd_open_path_with_default → spawn_default_open).
+      await invokeIfTauri<void>('cmd_open_path_with_default', {
+        fullPath,
+        workspace: workspace?.trim() || null,
+      });
+    },
+    [invokeIfTauri],
+  );
+
   const checkPaths: WorkspaceFileService['checkPaths'] = useCallback(
     async ({ paths }) => {
       const ws = requireWorkspace();
@@ -635,6 +651,7 @@ export function useWorkspaceFileService(workspacePath: string | null): Workspace
       openInFinder,
       openWithDefault,
       openPathExternal,
+      openPathWithDefault,
       checkPaths,
       readFileAsBlobUrl,
       saveFile,
@@ -666,6 +683,7 @@ export function useWorkspaceFileService(workspacePath: string | null): Workspace
       openInFinder,
       openWithDefault,
       openPathExternal,
+      openPathWithDefault,
       checkPaths,
       readFileAsBlobUrl,
       saveFile,

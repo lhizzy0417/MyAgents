@@ -9,6 +9,7 @@
  */
 
 import ToolImageAttachment from './ToolImageAttachment';
+import ToolAudioAttachment from './ToolAudioAttachment';
 import type { ToolAttachment } from '../../../shared/types/tool-attachment';
 
 interface Props {
@@ -25,7 +26,10 @@ export default function ToolAttachmentGallery({ attachments }: Props) {
         switch (a.kind) {
           case 'image':
             return <ToolImageAttachment key={key} attachment={a} />;
-          // PRD 0.2.15 leaves audio/pdf/file as placeholders for v0.2.16+.
+          // PRD 0.2.30 — audio renders a card-style player in the conversation flow.
+          case 'audio':
+            return <ToolAudioAttachment key={key} attachment={a} />;
+          // PRD 0.2.15 leaves pdf/file as placeholders for a later phase.
           // Until then they render as a minimal file card so the user still
           // sees that *something* was produced.
           default:
