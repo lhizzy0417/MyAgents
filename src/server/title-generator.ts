@@ -8,8 +8,9 @@
  *                Model, CLI auth, etc. are inherited from the active runtime
  *                so Gemini/Codex sessions no longer fall back to Anthropic SDK.
  *
- * Always single-turn; never persists the title session. Timing: triggered
- * after 3+ QA rounds (frontend shows truncated first message for 1–2 rounds).
+ * Always single-turn; never persists the title session. Timing: the backend
+ * Title Service triggers this after AUTO_TITLE_MIN_ROUNDS (2) completed QA rounds;
+ * before that the session shows the default truncated-first-message title.
  */
 
 import { randomUUID } from 'crypto';

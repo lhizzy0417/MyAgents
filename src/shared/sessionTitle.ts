@@ -94,7 +94,7 @@ export function deriveSessionTitle(rawMessage: string | null | undefined, maxLen
 // ─────────────────────────────────────────────────────────────────────────────
 
 /** Minimum number of completed, titleable QA rounds before auto-title fires. */
-export const AUTO_TITLE_MIN_ROUNDS = 3;
+export const AUTO_TITLE_MIN_ROUNDS = 2;
 
 /**
  * Upper bound on a session's user-message count past which we stop *attempting*
