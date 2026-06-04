@@ -110,6 +110,7 @@ import { scanAgents, readWorkspaceConfig, writeWorkspaceConfig, loadEnabledAgent
 import type { AgentFrontmatter, AgentMeta, AgentWorkspaceConfig } from '../shared/agentTypes';
 import type { McpServerDefinition, BackgroundAgentPermissionMode } from '../shared/config-types';
 import { ensureDirSync, ensureDir, isDirEntry } from './utils/fs-utils';
+import { shouldDropSnapshotPatchOnImSession } from './utils/im-source';
 import {
   setCronTaskContext,
   clearCronTaskContext,
@@ -4054,6 +4055,21 @@ async function main() {
 
         // Snapshot fields: null → clear (undefined in stored JSON); value → set.
         // `undefined` in stored metadata is how the resolver recognizes "fall back to agent".
+        //
+        // #305 defensive IM-source guard: PURE-IM (live-follow) sessions MUST NOT
+        // acquire snapshot fields — by design each IM turn re-resolves
+        // `agent + channel.overrides` (see `snapshotForImSession` which captures
+        // only `runtime`). Drop snapshot fields if the existing session is
+        // IM-sourced AND has no configSnapshotAt yet.
+        //
+        // Exception: PRD 0.2.14 desktop-to-IM handover sessions have IM-shaped
+        // source AND configSnapshotAt (the desktop-creation snapshot survives
+        // the handover; IM delivery reads "snapshot wins" — see resolveImTurn
+        // around line 8593). Those sessions remain owned: a Tab editing them
+        // SHOULD update the snapshot, and we must NOT drop the PATCH payload.
+        const existingMeta = getSessionMetadata(sessionId);
+        const isPureImSession = shouldDropSnapshotPatchOnImSession(existingMeta);
+
         const snapshotKeys = [
           'model',
           'permissionMode',
@@ -4062,11 +4078,22 @@ async function main() {
           'providerEnvJson',
         ] as const;
         let wroteSnapshotField = false;
+        let droppedImSnapshotField = false;
         for (const key of snapshotKeys) {
           const v = payload[key];
           if (v === undefined) continue;
+          if (isPureImSession) {
+            droppedImSnapshotField = true;
+            continue;
+          }
           updates[key] = v === null ? undefined : v;
           wroteSnapshotField = true;
+        }
+        if (droppedImSnapshotField) {
+          console.warn(
+            `[sessions] PATCH ${sessionId}: dropped snapshot fields on IM-sourced session ` +
+            `(source=${existingMeta?.source}) — IM sessions live-follow the agent.`,
+          );
         }
 
         // Stamp configSnapshotAt on the first snapshot write (lazy migration).

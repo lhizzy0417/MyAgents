@@ -170,17 +170,26 @@ export async function updateSession(
         providerEnvJson?: string | null;
     }
 ): Promise<SessionMetadata | null> {
-    try {
-        const result = await apiFetch(`/sessions/${sessionId}`, {
-            method: 'PATCH',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(updates),
-        });
-        const data = await result.json() as { success: boolean; session: SessionMetadata };
-        return data.session ?? null;
-    } catch {
-        return null;
+    // #305: throw on HTTP / JSON failure instead of returning null.
+    // Pre-fix: catch-all → null → callers treated persistence failures as
+    // "session not found" silently, and `persistInputOptionChange` swallowed
+    // them as success. Now `patchSnapshot` rejects on real failure so the
+    // toast warning "配置未能完全保存" actually fires for the user.
+    const result = await apiFetch(`/sessions/${sessionId}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(updates),
+    });
+    if (!result.ok) {
+        // 404 ("Session not found") is the one legitimate null — race where
+        // the session was deleted out from under us. Other status codes are
+        // real failures the caller needs to know about.
+        if (result.status === 404) return null;
+        const body = await result.text().catch(() => '');
+        throw new Error(`PATCH /sessions/${sessionId} failed: HTTP ${result.status} ${body.slice(0, 200)}`);
     }
+    const data = await result.json() as { success: boolean; session: SessionMetadata };
+    return data.session ?? null;
 }
 
 /**
