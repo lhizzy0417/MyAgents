@@ -17,6 +17,8 @@ import type { Task } from '../../shared/types/task';
 import type { AgentConfig } from '../../shared/types/agent';
 import type { AgentStatusMap } from '@/hooks/useAgentStatuses';
 import { extractPlatformDisplay } from '@/utils/taskCenterUtils';
+import { perfMark } from '@/utils/perfMark';
+import { readTaskCenterCache, writeTaskCenterCache, decideTaskCenterMount, markSessionDeleted, isSessionDeleted } from '@/hooks/taskCenterCache';
 import { CUSTOM_EVENTS } from '../../shared/constants';
 
 // ===== Types =====
@@ -81,13 +83,20 @@ async function safeTaskList(): Promise<Task[]> {
 }
 
 export function useTaskCenterData({ isActive }: UseTaskCenterDataOptions): TaskCenterData {
-    const [sessions, setSessions] = useState<SessionMetadata[]>([]);
-    const [cronTasks, setCronTasks] = useState<CronTask[]>([]);
-    const [tasks, setTasks] = useState<Task[]>([]);
-    const [backgroundSessionIds, setBackgroundSessionIds] = useState<string[]>([]);
-    const [agentStatuses, setAgentStatuses] = useState<AgentStatusMap>({});
-    const [agents, setAgents] = useState<AgentConfig[]>([]);
-    const [isLoading, setIsLoading] = useState(true);
+    // SWR: decide once at mount what to do given the module cache. Cache hit →
+    // seed state instantly (no spinner) and revalidate silently; cache miss →
+    // start empty and do the loud first load. See taskCenterCache.ts.
+    const [mountDecision] = useState(() =>
+        decideTaskCenterMount(readTaskCenterCache(), Date.now(), TASK_CENTER_FRESHNESS_TTL_MS));
+
+    const [sessions, setSessions] = useState<SessionMetadata[]>(() =>
+        (mountDecision.seedData?.sessions ?? []).filter(s => !isSessionDeleted(s.id)));
+    const [cronTasks, setCronTasks] = useState<CronTask[]>(() => mountDecision.seedData?.cronTasks ?? []);
+    const [tasks, setTasks] = useState<Task[]>(() => mountDecision.seedData?.tasks ?? []);
+    const [backgroundSessionIds, setBackgroundSessionIds] = useState<string[]>(() => mountDecision.seedData?.backgroundSessionIds ?? []);
+    const [agentStatuses, setAgentStatuses] = useState<AgentStatusMap>(() => mountDecision.seedData?.agentStatuses ?? {});
+    const [agents, setAgents] = useState<AgentConfig[]>(() => mountDecision.seedData?.agents ?? []);
+    const [isLoading, setIsLoading] = useState(mountDecision.initialLoading);
     const [error, setError] = useState<string | null>(null);
     const isMountedRef = useRef(true);
     const retryTimeoutRef = useRef<NodeJS.Timeout | null>(null);
@@ -130,9 +139,11 @@ export function useTaskCenterData({ isActive }: UseTaskCenterDataOptions): TaskC
     }, []);
 
     const filterDeletedSessions = useCallback((data: SessionMetadata[]) => {
-        const deletedSessionIds = deletedSessionIdsRef.current;
-        if (deletedSessionIds.size === 0) return data;
-        return data.filter(session => !deletedSessionIds.has(session.id));
+        // Filter both this instance's pending deletes AND the shared module-level
+        // tombstones (a session deleted in a sibling Launcher tab), so a transient
+        // backend re-return cannot resurrect it here or in the module cache.
+        const instance = deletedSessionIdsRef.current;
+        return data.filter(session => !instance.has(session.id) && !isSessionDeleted(session.id));
     }, []);
 
     const fetchData = useCallback(async (retryCount = 0, silent = false) => {
@@ -141,33 +152,59 @@ export function useTaskCenterData({ isActive }: UseTaskCenterDataOptions): TaskC
         if (!silent) setError(null);
 
         try {
+            // Track swallowed per-source failures. A PARTIAL failure (e.g. cron
+            // load fails while sessions succeed) must NOT be written to the cache
+            // as if it were real empty data — that would seed an empty section
+            // into the next tab and the fresh-window would skip revalidation.
+            // (getSessions has no fallback: it rejects → outer catch → no write.)
+            let degraded = false;
             const agentStatusPromise = isTauriEnvironment()
                 ? import('@tauri-apps/api/core')
                     .then(({ invoke }) => invoke<AgentStatusMap>('cmd_all_agents_status'))
-                    .catch(() => ({} as AgentStatusMap))
+                    .catch(() => { degraded = true; return {} as AgentStatusMap; })
                 : Promise.resolve({} as AgentStatusMap);
 
             const [sessionsData, cronData, newTasks, bgSessions, agentStatusResult, appConfig] = await Promise.all([
                 getSessions(),
-                getAllCronTasks().catch(() => [] as CronTask[]),
+                getAllCronTasks().catch(() => { degraded = true; return [] as CronTask[]; }),
                 safeTaskList(),
-                getBackgroundSessions().catch(() => [] as string[]),
+                getBackgroundSessions().catch(() => { degraded = true; return [] as string[]; }),
                 agentStatusPromise,
-                loadAppConfig().catch(() => null),
+                loadAppConfig().catch(() => { degraded = true; return null; }),
             ]);
 
             if (!isMountedRef.current) return;
 
-            if (isLatestRequest('sessions', requestSeq)) {
-                setSessions(sortSessionsByLastActive(filterDeletedSessions(sessionsData)));
-            }
+            const displaySessions = sortSessionsByLastActive(filterDeletedSessions(sessionsData));
+            const fetchedAgents = appConfig?.agents ?? [];
+            if (isLatestRequest('sessions', requestSeq)) setSessions(displaySessions);
             if (isLatestRequest('cronTasks', requestSeq)) setCronTasks(cronData);
             if (isLatestRequest('tasks', requestSeq)) setTasks(newTasks);
             if (isLatestRequest('backgroundSessions', requestSeq)) setBackgroundSessionIds(bgSessions);
             if (isLatestRequest('agentStatuses', requestSeq)) setAgentStatuses(agentStatusResult);
-            setAgents(appConfig?.agents ?? []);
+            setAgents(fetchedAgents);
             markFetched('all');
             setError(null);
+            perfMark('taskcenter:data-ready');
+
+            // The SINGLE cache-write site (there is no write-back effect). Only a
+            // complete, current full-fetch snapshot is cached: skip on any
+            // swallowed failure (`degraded`) and on a superseded request. A
+            // cache-hit mount that skips revalidation never reaches here, so it
+            // can never re-stamp the freshness window (no stale-forever loop).
+            if (!degraded && isLatestRequest('all', requestSeq)) {
+                writeTaskCenterCache(
+                    {
+                        sessions: displaySessions,
+                        cronTasks: cronData,
+                        tasks: newTasks,
+                        backgroundSessionIds: bgSessions,
+                        agentStatuses: agentStatusResult,
+                        agents: fetchedAgents,
+                    },
+                    Date.now(),
+                );
+            }
         } catch (err) {
             if (!isMountedRef.current) return;
             console.error('[useTaskCenterData] Failed to load data:', err);
@@ -293,10 +330,15 @@ export function useTaskCenterData({ isActive }: UseTaskCenterDataOptions): TaskC
         }, delayMs);
     }, [refreshAgentStatusNow]);
 
-    // Initial fetch
+    // Initial fetch — SWR: on a cache hit the state is already seeded, so any
+    // fetch here is a background revalidate (silent); a fresh cache skips it
+    // entirely (rapid tab opening). A cache miss does the loud first load.
     useEffect(() => {
         isMountedRef.current = true;
-        void fetchData(0);
+        perfMark(mountDecision.seedData ? 'taskcenter:mount:cache-hit' : 'taskcenter:mount:cache-miss');
+        if (mountDecision.revalidate) {
+            void fetchData(0, mountDecision.silent);
+        }
         return () => {
             isMountedRef.current = false;
             if (retryTimeoutRef.current) clearTimeout(retryTimeoutRef.current);
@@ -305,7 +347,7 @@ export function useTaskCenterData({ isActive }: UseTaskCenterDataOptions): TaskC
             if (cronRefreshTimerRef.current) clearTimeout(cronRefreshTimerRef.current);
             if (backgroundRefreshTimerRef.current) clearTimeout(backgroundRefreshTimerRef.current);
         };
-    }, [fetchData]);
+    }, [fetchData, mountDecision]);
 
     // Refresh on tab activation (inactive → active transition)
     const prevIsActiveRef = useRef(isActive);
@@ -480,6 +522,7 @@ export function useTaskCenterData({ isActive }: UseTaskCenterDataOptions): TaskC
             if (!success) return false;
 
             deletedSessionIdsRef.current.add(sessionId);
+            markSessionDeleted(sessionId); // shared tombstone — survives into the module cache + sibling tabs
             setSessions(prev => prev.filter(s => s.id !== sessionId));
 
             try {
