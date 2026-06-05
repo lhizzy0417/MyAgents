@@ -34,8 +34,9 @@ import {
   type Project,
 } from '@/config/types';
 import { type Tab, type InitialMessage, createNewTab, getFolderName, MAX_TABS } from '@/types/tab';
-import { buildRestoredTabs, saveOpenTabs, hydratePersistedState, pickDurableOverride } from '@/utils/tabPersistence';
+import { buildRestoredTabs, saveOpenTabs, hydratePersistedState, pickDurableOverride, shouldOfferRestore, planRestoreTabs } from '@/utils/tabPersistence';
 import { persistOpenTabsDurable, loadAndClearOpenTabsDurable, clearOpenTabsDurable } from '@/utils/tabPersistenceDurable';
+import { consumeCleanExitMarker } from '@/utils/lastExitMarker';
 import { tabContentKind, isRestoreAbandoned } from '@/utils/tabContentKind';
 import { runAfterNextPaint } from '@/utils/afterPaint';
 import type { ImageAttachment } from '@/components/SimpleChatInput';
@@ -303,18 +304,24 @@ export default function App() {
 
   // Multi-tab state.
   //
-  // Restore previously-open chat tabs after a restart / update (Issue #232).
-  // buildRestoredTabs() reads localStorage and hydrates them flagged
-  // `restoreState:'cold'` — they render as lightweight tab chrome only, with NO
-  // TabProvider / sidecar / SSE, until first activation (see activateRestoredTab
-  // + MemoizedTabContent). Falls back to a fresh launcher tab when nothing is
-  // stored. Validation that each session/workspace still exists happens lazily
-  // at activation (canRestoreSession), decoupled from global sidecar readiness.
-  const [restoredInitialState] = useState(() => buildRestoredTabs());
-  const [tabs, setTabs] = useState<Tab[]>(() => restoredInitialState?.tabs ?? [createNewTab()]);
-  const [activeTabId, setActiveTabId] = useState<string | null>(
-    () => restoredInitialState?.activeTabId ?? tabs[0]?.id ?? null,
-  );
+  // Startup behaviour (Issue #309): boot is ALWAYS a clean new launcher — we no
+  // longer auto-restore the previous session. Restoring is opt-in via the
+  // title-bar "恢复对话" pill, surfaced only when the last exit was NOT a
+  // deliberate quit (i.e. a crash or an update-restart — see the boot-decision
+  // effect below). `buildRestoredTabs()` still runs synchronously here to
+  // CAPTURE the prior session's restorable tabs BEFORE the post-commit persist
+  // effect overwrites localStorage with this fresh launcher; the captured set
+  // becomes the pill's restore candidate, hydrated `restoreState:'cold'` (no
+  // TabProvider / sidecar until first activation — see MemoizedTabContent).
+  const [restoreCandidate] = useState(() => buildRestoredTabs());
+  const [tabs, setTabs] = useState<Tab[]>(() => [createNewTab()]);
+  const [activeTabId, setActiveTabId] = useState<string | null>(() => tabs[0]?.id ?? null);
+
+  // "恢复对话" pill (Issue #309). `restorePillCount > 0` shows it; the resolved
+  // candidate is held in a ref (NOT localStorage — the persist effect clears
+  // that on the fresh boot) so the user can still restore after starting work.
+  const restoreCandidateRef = useRef<{ tabs: Tab[]; activeTabId: string | null } | null>(null);
+  const [restorePillCount, setRestorePillCount] = useState(0);
 
   // Refs for stable callback access (avoids re-creating callbacks when tabs/activeTabId change)
   const tabsRef = useRef(tabs);
@@ -359,51 +366,62 @@ export default function App() {
     };
   }, [flushOpenTabsNow]);
 
-  // Durable-handoff recovery (Issue #232 hardening). localStorage is the primary
-  // restore source (read synchronously above for instant first paint), but its
-  // asynchronous WebView disk-flush can be lost to the abrupt update-restart
-  // exit (NSIS exit(0) / relaunch()). handleRestartAndUpdate fsyncs a durable
-  // ~/.myagents/open-tabs.json backstop right before that exit; here we CONSUME
-  // it on boot (read-then-delete) and adopt it ONLY when the localStorage read
-  // came up EMPTY (pickDurableOverride) — the exact case that produces the
-  // reported "no tabs at all" symptom.
-  //
-  // Deliberately NOT a full "durable always wins": when localStorage DID restore
-  // we trust it. In the rare partial-loss window (localStorage flushed an older
-  // snapshot but lost the final setItem before the abrupt exit) this restores a
-  // tab set that is one structural change stale — e.g. a tab closed in the last
-  // sub-second before clicking 重启更新 may reappear. That residue is accepted:
-  // adopting durable unconditionally would re-mount + re-activate the healthy
-  // boot path on EVERY update, which is a far worse, ever-present cost than a
-  // rare one-tab discrepancy. (Codex review — known, bounded limitation.)
-  //
-  // Guards: the ref keeps it single-shot under StrictMode's double-invoke (the
-  // file is deleted on read, so a second pass is a no-op anyway); and we only
-  // adopt while the tab list is still the pristine boot list — if the user opened
-  // or switched a tab during the async read, their live state wins.
-  const durableHandoffConsumedRef = useRef(false);
+  // Boot startup-behaviour decision (Issue #309). Boot already rendered a fresh
+  // launcher (no auto-restore); here we decide whether to OFFER restoring the
+  // previous session via the title-bar pill, by the EXIT REASON:
+  //   - Resolve the snapshot: the synchronous localStorage capture
+  //     (restoreCandidate) wins; the fsync durable backstop — written by
+  //     handleRestartAndUpdate right before the abrupt update-restart, where the
+  //     async WebView localStorage flush can be lost — fills in when the local
+  //     read came up EMPTY (pickDurableOverride).
+  //   - Read the Rust clean-exit marker: PRESENT means the user deliberately
+  //     quit (Cmd+Q / Dock / tray) → boot fresh, no pill. ABSENT means a crash
+  //     or an update-restart → offer to restore (preserves the #232 intent as an
+  //     opt-in, kills the #309 "stop force-restoring my session" complaint).
+  // Single-shot under StrictMode via the ref; loadAndClearOpenTabsDurable +
+  // consumeCleanExitMarker both delete on read, so a second pass is a no-op.
+  const bootDecisionRef = useRef(false);
   useEffect(() => {
-    if (durableHandoffConsumedRef.current) return;
-    durableHandoffConsumedRef.current = true;
+    if (bootDecisionRef.current) return;
+    bootDecisionRef.current = true;
     void (async () => {
       const durable = await loadAndClearOpenTabsDurable();
-      const override = pickDurableOverride(restoredInitialState != null, durable);
-      if (!override) return;
-      // We only adopt onto the pristine empty-boot fallback (one launcher tab).
-      // If the user opened/switched a tab during the async read — or anything
-      // else replaced that lone launcher — their live state wins, so bail rather
-      // than clobber it. (Content check, not reference: a no-op setTabs must not
-      // produce a false negative that defeats recovery.)
-      const live = tabsRef.current;
-      if (live.length !== 1 || live[0]?.view !== 'launcher') return;
-      const { tabs: recovered, activeTabId: recoveredActive } = hydratePersistedState(override);
-      console.warn(
-        `[App] localStorage tab restore was empty; recovered ${recovered.length} tab(s) from durable backstop`,
-      );
-      setTabs(recovered);
-      setActiveTabId(recoveredActive ?? recovered[0]?.id ?? null);
+      const override = pickDurableOverride(restoreCandidate != null, durable);
+      const candidate = override ? hydratePersistedState(override) : restoreCandidate;
+      const lastExitWasClean = await consumeCleanExitMarker();
+      if (candidate && shouldOfferRestore(lastExitWasClean, candidate.tabs.length)) {
+        restoreCandidateRef.current = candidate;
+        setRestorePillCount(candidate.tabs.length);
+      }
     })();
-  }, [restoredInitialState]);
+  }, [restoreCandidate]);
+
+  // "恢复对话" pill — restore the previous session on click. Replaces a still-
+  // pristine lone launcher; otherwise APPENDS (deduped by sessionId, capped at
+  // MAX_TABS) so it never disturbs work the user already started this session.
+  // Restored tabs are "cold" (hydratePersistedState) — no sidecar until the user
+  // actually activates one.
+  const handleRestoreLastSession = useCallback(() => {
+    const candidate = restoreCandidateRef.current;
+    setRestorePillCount(0);
+    restoreCandidateRef.current = null;
+    if (!candidate || candidate.tabs.length === 0) return;
+    // planRestoreTabs computes the merged list AND the surviving active id from
+    // the same merge, so the active tab is always present in the list (no
+    // divergent-base setState — see the helper's doc). Plan against the live
+    // tabs via the ref to avoid a stale closure.
+    const plan = planRestoreTabs(tabsRef.current, candidate);
+    if (!plan) return;
+    track('restore_last_session', { count: candidate.tabs.length });
+    setTabs(plan.tabs);
+    setActiveTabId(plan.activeTabId);
+  }, []);
+
+  // ✕ on the pill — dismiss without restoring (don't nag again this session).
+  const handleDismissRestore = useCallback(() => {
+    setRestorePillCount(0);
+    restoreCandidateRef.current = null;
+  }, []);
 
   // Deferred-mount set for freshly created tabs. A tab whose id is in here
   // renders only a placeholder (see MemoizedTabContent), so clicking "+" /
@@ -2772,6 +2790,9 @@ export default function App() {
         updateInstalling={updateInstalling}
         updatePreparing={updatePreparing}
         onRestartAndUpdate={() => void handleRestartAndUpdate()}
+        restoreCount={restorePillCount}
+        onRestoreSession={handleRestoreLastSession}
+        onDismissRestore={handleDismissRestore}
       >
         <TabBar
           tabs={tabs}

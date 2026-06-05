@@ -740,6 +740,11 @@ pub async fn check_and_download_update(app: AppHandle) -> Result<bool, String> {
 #[tauri::command]
 pub fn restart_app(app: AppHandle) {
     logger::info(&app, "[Updater] Restarting application to apply update...");
+    // `restart()` fires RunEvent::ExitRequested with code == RESTART_EXIT_CODE
+    // (or, on the main thread, exits directly without firing it). Either way the
+    // ExitRequested handler does NOT record a clean-exit marker for that code,
+    // so the next boot offers to restore the session (Issue #309 / #232) — no
+    // flag needed here.
     app.restart();
 }
 

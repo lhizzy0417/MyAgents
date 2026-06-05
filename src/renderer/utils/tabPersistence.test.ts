@@ -5,6 +5,9 @@ import {
     deserializeTabs,
     hydratePersistedState,
     pickDurableOverride,
+    parseCleanMarker,
+    shouldOfferRestore,
+    planRestoreTabs,
     type PersistedTabState,
 } from './tabPersistence';
 import { MAX_TABS, type Tab } from '@/types/tab';
@@ -216,5 +219,85 @@ describe('pickDurableOverride', () => {
 
     it('returns null when the durable snapshot has no tabs', () => {
         expect(pickDurableOverride(false, { version: 1, tabs: [], activeTabId: null })).toBeNull();
+    });
+});
+
+describe('parseCleanMarker (Issue #309 — clean-exit marker)', () => {
+    it('returns true only for a well-formed { clean: true }', () => {
+        expect(parseCleanMarker('{"clean":true}')).toBe(true);
+        expect(parseCleanMarker('{ "clean": true, "extra": 1 }')).toBe(true);
+    });
+
+    it('treats absent / malformed / non-true as NOT a clean quit (offer restore)', () => {
+        expect(parseCleanMarker(null)).toBe(false);
+        expect(parseCleanMarker('')).toBe(false);
+        expect(parseCleanMarker('not json')).toBe(false);
+        expect(parseCleanMarker('{"clean":false}')).toBe(false);
+        expect(parseCleanMarker('{"clean":"true"}')).toBe(false); // string, not boolean
+        expect(parseCleanMarker('{}')).toBe(false);
+        expect(parseCleanMarker('true')).toBe(false); // not an object
+        expect(parseCleanMarker('null')).toBe(false);
+    });
+});
+
+describe('shouldOfferRestore (Issue #309 — startup behaviour)', () => {
+    it('offers restore after a non-clean exit with restorable tabs', () => {
+        expect(shouldOfferRestore(false, 3)).toBe(true);
+        expect(shouldOfferRestore(false, 1)).toBe(true);
+    });
+
+    it('never offers after a deliberate (clean) quit, even with tabs', () => {
+        expect(shouldOfferRestore(true, 3)).toBe(false);
+        expect(shouldOfferRestore(true, 0)).toBe(false);
+    });
+
+    it('never offers when there is nothing to restore', () => {
+        expect(shouldOfferRestore(false, 0)).toBe(false);
+    });
+});
+
+describe('planRestoreTabs (Issue #309 — pill restore merge)', () => {
+    const launcher: Tab = { id: 'launch-1', agentDir: null, sessionId: null, view: 'launcher', title: 'New Tab' };
+    function cold(id: string, session: string): Tab {
+        return { id, agentDir: '/ws/a', sessionId: session, view: 'chat', title: id, restoreState: 'cold' };
+    }
+    const candidate = {
+        tabs: [cold('r1', 's-1'), cold('r2', 's-2'), cold('r3', 's-3')],
+        activeTabId: 'r2',
+    };
+
+    it('replaces a pristine lone launcher and keeps the candidate active tab', () => {
+        const plan = planRestoreTabs([launcher], candidate);
+        expect(plan).not.toBeNull();
+        expect(plan!.tabs.map(t => t.id)).toEqual(['r1', 'r2', 'r3']);
+        expect(plan!.activeTabId).toBe('r2');
+    });
+
+    it('appends (not replaces) when real work is already open, deduped by sessionId', () => {
+        const open: Tab = { id: 'open-1', agentDir: '/ws/b', sessionId: 's-2', view: 'chat', title: 'Open' };
+        const plan = planRestoreTabs([open], candidate);
+        // s-2 already open → r2 dropped; r1 + r3 appended after the live tab.
+        expect(plan!.tabs.map(t => t.id)).toEqual(['open-1', 'r1', 'r3']);
+        // candidate active (r2) was deduped out → falls back to first restored in list.
+        expect(plan!.activeTabId).toBe('r1');
+    });
+
+    it('never lets activeTabId point outside the list when the cap slices it off', () => {
+        const open: Tab = { id: 'open-1', agentDir: '/ws/b', sessionId: 's-x', view: 'chat', title: 'Open' };
+        // maxTabs=2: base [open-1] + r1 → r2/r3 (incl. active r2) sliced off.
+        const plan = planRestoreTabs([open], candidate, 2);
+        expect(plan!.tabs.map(t => t.id)).toEqual(['open-1', 'r1']);
+        expect(plan!.tabs.some(t => t.id === plan!.activeTabId)).toBe(true);
+        expect(plan!.activeTabId).toBe('r1');
+    });
+
+    it('returns null when there is nothing to restore', () => {
+        expect(planRestoreTabs([launcher], { tabs: [], activeTabId: null })).toBeNull();
+    });
+
+    it('returns null when every candidate tab is already open (all deduped)', () => {
+        const open: Tab = { id: 'open-1', agentDir: '/ws/b', sessionId: 's-1', view: 'chat', title: 'Open' };
+        // single candidate, already open, base is not a pristine launcher → nothing to add.
+        expect(planRestoreTabs([open], { tabs: [cold('r1', 's-1')], activeTabId: 'r1' })).toBeNull();
     });
 });

@@ -123,6 +123,7 @@ export type EventName =
   // 功能使用
   | 'tab_new'
   | 'tab_close'
+  | 'restore_last_session'
   | 'settings_open'
   | 'workspace_open'
   | 'workspace_create'

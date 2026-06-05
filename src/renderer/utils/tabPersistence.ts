@@ -224,3 +224,69 @@ export function pickDurableOverride(
     if (!durable || durable.tabs.length === 0) return null;
     return durable;
 }
+
+/** Parse the Rust-written clean-exit marker (`~/.myagents/last-exit.json`).
+ *  Returns true ONLY for a well-formed `{ "clean": true }`; anything else
+ *  (absent → null, malformed, `clean:false`) is treated as NOT a clean quit so
+ *  the boot offers to restore. See `lastExitMarker.ts`. */
+export function parseCleanMarker(raw: string | null): boolean {
+    if (!raw) return false;
+    try {
+        const v = JSON.parse(raw) as unknown;
+        return typeof v === 'object' && v !== null && (v as { clean?: unknown }).clean === true;
+    } catch {
+        return false;
+    }
+}
+
+/** Decide whether to surface the "restore last session" pill on boot (Issue
+ *  #309). We offer restore ONLY when the last exit was NOT a deliberate user
+ *  quit (i.e. a crash or an update-restart) AND there is a non-empty restorable
+ *  snapshot. A clean quit means the user chose to end their session → boot
+ *  fresh, no nag. Pure + unit-tested; the title-bar pill and the App boot
+ *  effect share this single predicate. */
+export function shouldOfferRestore(lastExitWasClean: boolean, restorableTabCount: number): boolean {
+    return !lastExitWasClean && restorableTabCount > 0;
+}
+
+/** Plan how clicking the "恢复对话" pill (Issue #309) merges the previous
+ *  session into the currently-open tabs. Replaces a still-pristine lone launcher
+ *  (the boot default); otherwise APPENDS the candidate tabs — de-duped by
+ *  sessionId against what's already open and capped at MAX_TABS — so it never
+ *  disturbs work the user already started.
+ *
+ *  Crucially the merged list AND the surviving `activeTabId` are computed from
+ *  the SAME merge: the active id is the candidate's active tab if it survived
+ *  the dedup + cap, else the first restored tab still in the list, else the last
+ *  tab. This avoids the "two same-render setState from divergent bases" bug
+ *  (App computing setActiveTabId independently of the setTabs reducer would let
+ *  the active id point at a tab that got sliced/deduped out → blank content).
+ *  Returns null when there is nothing to restore. Pure + unit-tested. */
+export function planRestoreTabs(
+    prev: Tab[],
+    candidate: { tabs: Tab[]; activeTabId: string | null },
+    maxTabs: number = MAX_TABS,
+): { tabs: Tab[]; activeTabId: string } | null {
+    if (candidate.tabs.length === 0) return null;
+    const onlyPristineLauncher =
+        prev.length === 1 && prev[0]?.view === 'launcher' && !prev[0]?.sessionId;
+    const base = onlyPristineLauncher ? [] : prev;
+    const openSessions = new Set(base.map((t) => t.sessionId).filter(Boolean));
+    const toAdd = candidate.tabs.filter((t) => t.sessionId && !openSessions.has(t.sessionId));
+    if (toAdd.length === 0) return null; // everything is already open — nothing to bring back
+
+    const tabs = [...base, ...toAdd].slice(0, maxTabs);
+    const addedIds = new Set(toAdd.map((t) => t.id));
+    // If the cap left no room for ANY restored tab (base already at maxTabs),
+    // the restore would be a visual no-op → signal "nothing happened".
+    if (!tabs.some((t) => addedIds.has(t.id))) return null;
+
+    const inList = (id: string | null | undefined): id is string =>
+        id != null && tabs.some((t) => t.id === id);
+    // Active id from the SAME merge: candidate's active if it survived dedup+cap,
+    // else the first restored tab still in the list (guaranteed to exist), else
+    // the last tab. Never points outside `tabs`.
+    const firstRestoredInList = tabs.find((t) => addedIds.has(t.id))!.id;
+    const activeTabId = inList(candidate.activeTabId) ? candidate.activeTabId : firstRestoredInList;
+    return { tabs, activeTabId };
+}

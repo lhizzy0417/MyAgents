@@ -23,6 +23,61 @@ use std::path::PathBuf;
 
 use crate::{ulog_error, ulog_info, ulog_warn};
 
+const LAST_EXIT_FILE: &str = "last-exit.json";
+
+/// Record that the app exited cleanly — i.e. the user deliberately quit
+/// (Cmd+Q / Dock / tray "Exit"), as opposed to an update-restart or a crash.
+///
+/// Called from the single `RunEvent::ExitRequested` chokepoint. `is_restart`
+/// MUST be `code == Some(tauri::RESTART_EXIT_CODE)` from that event: Tauri fires
+/// ExitRequested with that exit code for BOTH update paths — the plugin-process
+/// `relaunch()` (`request_restart`) AND `AppHandle::restart` — so gating on it
+/// structurally covers every restart without a flag any call site could forget.
+/// A deliberate quit carries `code: None` (Cmd+Q / Dock) or `Some(0)` (tray
+/// `app.exit(0)`), neither of which equals `RESTART_EXIT_CODE`.
+///
+/// The renderer reads-and-clears the marker on boot (`consumeCleanExitMarker` in
+/// `lastExitMarker.ts`): present ⇒ "user quit on purpose → boot fresh"; absent
+/// (crash, or update-restart suppressed here) ⇒ "offer to restore last session"
+/// via the title-bar pill (Issue #309).
+///
+/// Best-effort with `sync_all` so it survives the imminent process exit. A lost
+/// write only costs a dismissable restore pill on the next launch — the safe
+/// failure direction.
+pub fn record_clean_exit(is_restart: bool) {
+    let Some(dir) = myagents_data_dir() else { return };
+    match write_clean_exit_marker(&dir, is_restart) {
+        Ok(true) => ulog_info!("[app-lock] Clean-exit marker recorded"),
+        Ok(false) => {} // update-restart: intentionally no marker
+        Err(e) => ulog_warn!("[app-lock] Failed to record clean-exit marker: {}", e),
+    }
+}
+
+/// Testable core of [`record_clean_exit`]. Writes `{ "clean": true }` to
+/// `<dir>/last-exit.json` and returns `Ok(true)`, UNLESS `is_restart` is set
+/// (update-restart) in which case it writes nothing and returns `Ok(false)` —
+/// leaving the marker absent so the next boot offers to restore the session.
+fn write_clean_exit_marker(dir: &std::path::Path, is_restart: bool) -> std::io::Result<bool> {
+    let path = dir.join(LAST_EXIT_FILE);
+    if is_restart {
+        // Update-restart: write nothing AND clear any pre-existing marker, so a
+        // stale `{"clean":true}` (e.g. one the renderer failed to delete on a
+        // prior boot) can't survive to mask this update → the next boot must see
+        // "absent" and offer restore. Ignore NotFound (the common case).
+        match fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e),
+        }
+        return Ok(false);
+    }
+    use std::io::Write;
+    let mut f = fs::File::create(&path)?;
+    f.write_all(br#"{"clean":true}"#)?;
+    f.sync_all()?;
+    Ok(true)
+}
+
 /// Outcome of [`acquire_lock`] — encodes whether a prior MyAgents instance
 /// existed on this machine when we started.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -182,4 +237,43 @@ fn kill_pid(pid: u32) {
     let _ = crate::process_cmd::new("taskkill")
         .args(["/F", "/T", "/PID", &pid.to_string()])
         .output();
+}
+
+#[cfg(test)]
+mod clean_exit_tests {
+    use super::{write_clean_exit_marker, LAST_EXIT_FILE};
+
+    // A deliberate quit (is_restart=false) writes the exact marker the renderer's
+    // parseCleanMarker accepts — `{"clean":true}` — so the next boot suppresses
+    // the restore pill (Issue #309).
+    #[test]
+    fn deliberate_quit_writes_clean_marker() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let wrote = write_clean_exit_marker(dir.path(), false).expect("write");
+        assert!(wrote);
+        let body = std::fs::read_to_string(dir.path().join(LAST_EXIT_FILE)).expect("read");
+        assert_eq!(body, r#"{"clean":true}"#);
+    }
+
+    // An update-restart (is_restart=true) writes NOTHING, leaving the marker
+    // absent so the next boot offers to restore (preserves the #232 intent).
+    #[test]
+    fn update_restart_writes_no_marker() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let wrote = write_clean_exit_marker(dir.path(), true).expect("noop");
+        assert!(!wrote);
+        assert!(!dir.path().join(LAST_EXIT_FILE).exists());
+    }
+
+    // An update-restart also CLEARS a pre-existing marker (e.g. one the renderer
+    // failed to delete on a prior boot), so a stale `{"clean":true}` can't
+    // survive to mask the update → next boot must offer restore.
+    #[test]
+    fn update_restart_clears_stale_marker() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join(LAST_EXIT_FILE), r#"{"clean":true}"#).expect("seed");
+        let wrote = write_clean_exit_marker(dir.path(), true).expect("clear");
+        assert!(!wrote);
+        assert!(!dir.path().join(LAST_EXIT_FILE).exists());
+    }
 }

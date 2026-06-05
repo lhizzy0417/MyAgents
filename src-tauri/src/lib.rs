@@ -1058,11 +1058,20 @@ pub fn run() {
     app.run(move |_app_handle, event| {
         match event {
             // Handle app exit events (Cmd+Q, Dock right-click quit, etc.)
-            tauri::RunEvent::ExitRequested { .. } => {
+            tauri::RunEvent::ExitRequested { code, .. } => {
                 // Only cleanup once (Relaxed is sufficient for simple flag)
                 use std::sync::atomic::Ordering::Relaxed;
                 if !cleanup_done_for_exit.swap(true, Relaxed) {
                     ulog_info!("[App] Exit requested (Cmd+Q or Dock quit), cleaning up sidecars...");
+                    // Record a deliberate-quit marker so the next boot starts
+                    // fresh instead of restoring the session (Issue #309), UNLESS
+                    // this is an update-restart. Both update paths — plugin
+                    // `relaunch()` and `AppHandle::restart` — fire ExitRequested
+                    // with `code == RESTART_EXIT_CODE`; a deliberate quit carries
+                    // `None` (Cmd+Q / Dock) or `Some(0)` (tray "Exit"). Gating on
+                    // the code keeps "offer restore after an update" working on
+                    // every platform/path without a forgettable flag.
+                    app_dirs::record_clean_exit(code == Some(tauri::RESTART_EXIT_CODE));
                     im::signal_all_agents_shutdown(&agent_state_for_exit);
                     im::signal_all_bots_shutdown(&im_state_for_exit);
                     let _ = stop_all_sidecars(&sidecar_state_for_exit);
