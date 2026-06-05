@@ -20,6 +20,7 @@ mod macos_arrow_filter;
 #[cfg(target_os = "macos")]
 mod macos_traffic_light;
 pub mod management_api;
+pub mod perf_trace;
 pub mod process_cleanup;
 pub mod process_cmd;
 mod proxy_config;

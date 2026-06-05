@@ -65,6 +65,7 @@ async function streamUploadToFile(file: File, destination: string): Promise<void
 import { basename, dirname, isAbsolute, join, relative, resolve, extname, sep } from 'path';
 import { tmpdir, homedir } from 'os';
 import { randomUUID } from 'crypto';
+import { elapsedMs, emitPerfTrace, nowMs } from './utils/perf-trace';
 // adm-zip lazy-loaded at its one call site below (/api/skill/upload with zip
 // content) — saves ~30ms of module-init cost when users never upload skills.
 import {
@@ -9533,10 +9534,28 @@ description: >
   // Pattern 4: track which phase is running so /health/ready can report
   // {phase: 'migration' | 'skill-seed' | 'sdk-init' | ...} on failure.
   let currentInitPhase = 'startup';
+  const deferredInitStarted = nowMs();
+  let initPhaseStarted = deferredInitStarted;
+  const emitDeferredPhaseDone = (phase: string) => {
+    emitPerfTrace({
+      trace: 'sidecar_boot',
+      phase: 'deferred_init_phase_done',
+      durationMs: elapsedMs(initPhaseStarted),
+      status: 'ok',
+      detail: { phase, port },
+    });
+  };
+  emitPerfTrace({
+    trace: 'sidecar_boot',
+    phase: 'deferred_init_start',
+    status: 'ok',
+    detail: { port, sessionId: initialSessionId ?? 'new' },
+  });
   (async () => {
     try {
       currentInitPhase = 'cleanup';
       setDeferredInitPhase(currentInitPhase);
+      initPhaseStarted = nowMs();
       // Unified retention sweep (#121) — replaces v0.2.7's split between
       // cleanupOldLogs (per-session) + cleanupOldUnifiedLogs (unified). One
       // policy module covers age cutoff, byte budget, and the recent-data
@@ -9578,9 +9597,11 @@ description: >
       } catch (err) {
         console.warn('[migration] runtimeConfig scrub failed (non-fatal):', err instanceof Error ? err.message : String(err));
       }
+      emitDeferredPhaseDone('cleanup');
 
       currentInitPhase = 'skill-seed';
       setDeferredInitPhase(currentInitPhase);
+      initPhaseStarted = nowMs();
       seedBundledSkills();
       console.log('[startup] seedBundledSkills done');
 
@@ -9589,20 +9610,27 @@ description: >
       installAutoTitleHook();
 
       ensurePluginsDirs();
+      emitDeferredPhaseDone('skill-seed');
 
       currentInitPhase = 'socks-bridge';
       setDeferredInitPhase(currentInitPhase);
+      initPhaseStarted = nowMs();
       await initSocksBridgeFromEnv();
+      emitDeferredPhaseDone('socks-bridge');
 
       currentInitPhase = 'sdk-init';
       setDeferredInitPhase(currentInitPhase);
+      initPhaseStarted = nowMs();
       await initializeAgent(currentAgentDir, initialPrompt, initialSessionId, { preWarmDisabled: noPreWarm });
       console.log('[startup] initializeAgent done');
+      emitDeferredPhaseDone('sdk-init');
 
       if (shouldUseExternalRuntime() && initialSessionId) {
         currentInitPhase = 'external-runtime-restore';
         setDeferredInitPhase(currentInitPhase);
+        initPhaseStarted = nowMs();
         restoreExternalSessionState(initialSessionId, currentAgentDir, { type: 'desktop' });
+        emitDeferredPhaseDone('external-runtime-restore');
       }
 
       // ── Sidecar Boot Banner: single-line for AI grep ──
@@ -9622,9 +9650,27 @@ description: >
 
       markDeferredInitReady();
       resolveDeferredInit();
+      emitPerfTrace({
+        trace: 'sidecar_boot',
+        phase: 'deferred_init_done',
+        durationMs: elapsedMs(deferredInitStarted),
+        status: 'ok',
+        detail: { port, sessionId: initialSessionId ?? 'new' },
+      });
     } catch (err) {
       console.error('[startup] Deferred init failed:', err);
       console.warn(`[health-state] Deferred init failed in phase=${currentInitPhase}: ${err instanceof Error ? err.message : String(err)}`);
+      emitPerfTrace({
+        trace: 'sidecar_boot',
+        phase: 'deferred_init_failed',
+        durationMs: elapsedMs(deferredInitStarted),
+        status: 'error',
+        detail: {
+          phase: currentInitPhase,
+          port,
+          error: err instanceof Error ? err.message : String(err),
+        },
+      });
       // Pattern 4: capture the phase for /health/ready's structured 503.
       // retryable=false until we have a real re-runner (TODO above).
       markDeferredInitFailed(currentInitPhase, err, false);

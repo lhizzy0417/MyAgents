@@ -1,10 +1,12 @@
 //! Session index — reads sessions.json + JSONL files, builds/queries Tantivy index.
 
 use std::collections::HashSet;
-use std::fs;
+use std::fs::{self, File};
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex as StdMutex;
 
+use crate::perf_trace::{elapsed_ms, emit_perf_trace, trace_start, PerfTrace, PerfTraceName};
 use crate::ulog_warn;
 use crate::utils::bom::strip_bom;
 
@@ -62,7 +64,8 @@ impl SessionIndex {
             // Remove contents but keep directory.
             if let Ok(entries) = fs::read_dir(&index_dir) {
                 for entry in entries.flatten() {
-                    let _ = fs::remove_file(entry.path()).or_else(|_| fs::remove_dir_all(entry.path()));
+                    let _ =
+                        fs::remove_file(entry.path()).or_else(|_| fs::remove_dir_all(entry.path()));
                 }
             }
         }
@@ -82,9 +85,10 @@ impl SessionIndex {
         // Register Chinese tokenizer. MUST happen before creating the writer
         // so docs are tokenized with jieba at index time (tantivy snapshots
         // the tokenizer manager when the writer is created).
-        index
-            .tokenizers()
-            .register(tokenizer::TOKENIZER_NAME, tokenizer::build_chinese_tokenizer());
+        index.tokenizers().register(
+            tokenizer::TOKENIZER_NAME,
+            tokenizer::build_chinese_tokenizer(),
+        );
 
         // 50MB writer heap — sufficient for desktop usage.
         //
@@ -102,9 +106,9 @@ impl SessionIndex {
                         "[search] Recovered from stale Tantivy writer lock at {:?}",
                         lock_path
                     );
-                    index
-                        .writer(50_000_000)
-                        .map_err(|e| format!("Failed to create index writer after lock recovery: {}", e))?
+                    index.writer(50_000_000).map_err(|e| {
+                        format!("Failed to create index writer after lock recovery: {}", e)
+                    })?
                 } else {
                     return Err(format!("Failed to create index writer: {}", first_err));
                 }
@@ -130,7 +134,10 @@ impl SessionIndex {
     /// `<index_dir>/offsets/<sessionId>.offset`. `0` means "never indexed
     /// before" (or sidecar missing).
     fn read_session_offset(&self, session_id: &str) -> u64 {
-        let path = self.index_dir.join("offsets").join(format!("{}.offset", session_id));
+        let path = self
+            .index_dir
+            .join("offsets")
+            .join(format!("{}.offset", session_id));
         match fs::read_to_string(&path) {
             Ok(s) => s.trim().parse::<u64>().unwrap_or(0),
             Err(_) => 0,
@@ -150,7 +157,10 @@ impl SessionIndex {
     /// Drop the per-session offset sidecar. Used when a full rebuild is
     /// performed (delete + reindex) so future appends start fresh.
     fn drop_session_offset(&self, session_id: &str) {
-        let path = self.index_dir.join("offsets").join(format!("{}.offset", session_id));
+        let path = self
+            .index_dir
+            .join("offsets")
+            .join(format!("{}.offset", session_id));
         let _ = fs::remove_file(&path);
     }
 
@@ -207,7 +217,9 @@ impl SessionIndex {
                 .commit()
                 .map_err(|e| format!("Failed to commit session index: {}", e))?;
             drop(writer);
-            self.reader.reload().map_err(|e| format!("Failed to reload reader: {}", e))?;
+            self.reader
+                .reload()
+                .map_err(|e| format!("Failed to reload reader: {}", e))?;
         }
 
         Ok(count)
@@ -241,7 +253,12 @@ impl SessionIndex {
                 // the cheap path: update the title doc only.
                 return self.update_session_title_only(session_id, sessions_dir);
             }
-            return self.append_session_messages(session_id, sessions_dir, saved_offset, current_size);
+            return self.append_session_messages(
+                session_id,
+                sessions_dir,
+                saved_offset,
+                current_size,
+            );
         }
 
         // Fall back to full rebuild (corrupt offset, rewind, first index).
@@ -256,6 +273,7 @@ impl SessionIndex {
     /// Full delete-and-rebuild path. Reserved for first index, rewind, and
     /// recovery from a corrupted offset sidecar.
     fn full_reindex_session(&self, session_id: &str, sessions_dir: &Path) -> Result<(), String> {
+        let trace_started = trace_start();
         let mut writer = self
             .writer
             .lock()
@@ -269,18 +287,31 @@ impl SessionIndex {
         let data_dir = sessions_dir.parent().unwrap_or(Path::new("."));
         let sessions_file = data_dir.join("sessions.json");
         if let Ok(content) = fs::read_to_string(&sessions_file) {
-            if let Ok(sessions) = serde_json::from_str::<Vec<serde_json::Value>>(strip_bom(&content)) {
-                if let Some(meta) = sessions.iter().find(|s| {
-                    s.get("id").and_then(|v| v.as_str()) == Some(session_id)
-                }) {
+            if let Ok(sessions) =
+                serde_json::from_str::<Vec<serde_json::Value>>(strip_bom(&content))
+            {
+                if let Some(meta) = sessions
+                    .iter()
+                    .find(|s| s.get("id").and_then(|v| v.as_str()) == Some(session_id))
+                {
                     index_single_session(&mut writer, &self.fields, meta, sessions_dir)?;
                 }
             }
         }
 
-        writer.commit().map_err(|e| format!("commit failed: {}", e))?;
+        writer
+            .commit()
+            .map_err(|e| format!("commit failed: {}", e))?;
         drop(writer);
-        self.reader.reload().map_err(|e| format!("reload failed: {}", e))?;
+        self.reader
+            .reload()
+            .map_err(|e| format!("reload failed: {}", e))?;
+        emit_perf_trace(
+            PerfTrace::new(PerfTraceName::StorageIo, "search_reindex_full")
+                .duration_ms(elapsed_ms(trace_started))
+                .session_id(Some(session_id))
+                .status("ok"),
+        );
         Ok(())
     }
 
@@ -298,23 +329,28 @@ impl SessionIndex {
         from: u64,
         to: u64,
     ) -> Result<(), String> {
+        let trace_started = trace_start();
         let jsonl_path = sessions_dir.join(format!("{}.jsonl", session_id));
-        let bytes = match fs::read(&jsonl_path) {
-            Ok(b) => b,
-            Err(e) => return Err(format!("read jsonl failed: {}", e)),
-        };
-        let to = to.min(bytes.len() as u64);
+        let to = to.min(jsonl_path.metadata().map(|m| m.len()).unwrap_or(to));
         if from >= to {
             return Ok(());
         }
-        let slice = &bytes[from as usize..to as usize];
-        let chunk = match std::str::from_utf8(slice) {
+        let bytes = read_jsonl_range(&jsonl_path, from, to)?;
+        let chunk = match std::str::from_utf8(&bytes) {
             Ok(s) => s,
             Err(_) => {
                 // Multi-byte split right at `from` — fall back to full rebuild.
                 self.drop_session_offset(session_id);
                 self.full_reindex_session(session_id, sessions_dir)?;
-                self.write_session_offset(session_id, bytes.len() as u64);
+                self.write_session_offset(session_id, to);
+                emit_perf_trace(
+                    PerfTrace::new(PerfTraceName::StorageIo, "search_reindex_incremental")
+                        .duration_ms(elapsed_ms(trace_started))
+                        .session_id(Some(session_id))
+                        .size_bytes(to.saturating_sub(from))
+                        .status("ok")
+                        .detail("reason", "utf8_boundary_fallback_full_reindex"),
+                );
                 return Ok(());
             }
         };
@@ -326,15 +362,22 @@ impl SessionIndex {
         let meta_raw = fs::read_to_string(&sessions_file).unwrap_or_default();
         let sessions_json: Vec<serde_json::Value> =
             serde_json::from_str(strip_bom(&meta_raw)).unwrap_or_default();
-        let meta = match sessions_json.iter().find(|s| {
-            s.get("id").and_then(|v| v.as_str()) == Some(session_id)
-        }) {
+        let meta = match sessions_json
+            .iter()
+            .find(|s| s.get("id").and_then(|v| v.as_str()) == Some(session_id))
+        {
             Some(m) => m.clone(),
             None => return Ok(()), // session not in metadata yet — skip
         };
-        let title = meta.get("title").and_then(|v| v.as_str()).unwrap_or("(无标题)");
+        let title = meta
+            .get("title")
+            .and_then(|v| v.as_str())
+            .unwrap_or("(无标题)");
         let agent_dir = meta.get("agentDir").and_then(|v| v.as_str()).unwrap_or("");
-        let last_active_at = meta.get("lastActiveAt").and_then(|v| v.as_str()).unwrap_or("");
+        let last_active_at = meta
+            .get("lastActiveAt")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
         let source = meta
             .get("source")
             .and_then(|v| v.as_str())
@@ -345,26 +388,85 @@ impl SessionIndex {
             .and_then(|v| v.as_u64())
             .unwrap_or(0);
 
+        if self
+            .indexed_title_for_session(session_id)
+            .as_deref()
+            .is_some_and(|indexed_title| indexed_title != title)
+        {
+            self.drop_session_offset(session_id);
+            self.full_reindex_session(session_id, sessions_dir)?;
+            self.write_session_offset(session_id, to);
+            emit_perf_trace(
+                PerfTrace::new(PerfTraceName::StorageIo, "search_reindex_incremental")
+                    .duration_ms(elapsed_ms(trace_started))
+                    .session_id(Some(session_id))
+                    .size_bytes(to.saturating_sub(from))
+                    .status("ok")
+                    .detail("reason", "title_changed_full_reindex"),
+            );
+            return Ok(());
+        }
+
         let mut writer = self
             .writer
             .lock()
             .map_err(|e| format!("writer mutex poisoned: {}", e))?;
 
         let f = &self.fields;
-        for line in chunk.lines() {
-            let line = line.trim();
+        writer.delete_term(Term::from_field_text(
+            f.message_id,
+            &format!("{}_title", session_id),
+        ));
+        let _ = writer.add_document(doc!(
+            f.session_id => session_id,
+            f.message_id => format!("{}_title", session_id),
+            f.agent_dir => agent_dir,
+            f.role => "title",
+            f.title => title,
+            f.content => title,
+            f.timestamp => last_active_at,
+            f.last_active_at => last_active_at,
+            f.source => source,
+            f.message_count => message_count,
+        ));
+
+        let mut indexed_count = 0u64;
+        let mut next_offset = from;
+        let mut cursor = 0u64;
+        let mut blocked_reason: Option<&'static str> = None;
+        for segment in chunk.split_inclusive('\n') {
+            let segment_len = segment.len() as u64;
+            if !segment.ends_with('\n') {
+                blocked_reason = Some("partial_line");
+                break;
+            }
+            let line_end_offset = from + cursor + segment_len;
+            cursor += segment_len;
+
+            let line = segment.trim();
             if line.is_empty() {
+                next_offset = line_end_offset;
                 continue;
             }
             let msg: serde_json::Value = match serde_json::from_str(line) {
                 Ok(v) => v,
-                Err(_) => continue,
+                Err(e) => {
+                    blocked_reason = Some("json_parse_error");
+                    ulog_warn!(
+                        "[search] incremental parse failed for session {} at offset {}: {}",
+                        session_id,
+                        from + cursor.saturating_sub(segment_len),
+                        e
+                    );
+                    break;
+                }
             };
             let role = msg.get("role").and_then(|v| v.as_str()).unwrap_or("");
             let msg_id = msg.get("id").and_then(|v| v.as_str()).unwrap_or("");
             let timestamp = msg.get("timestamp").and_then(|v| v.as_str()).unwrap_or("");
             let text = extract_text_content(&msg);
             if text.is_empty() {
+                next_offset = line_end_offset;
                 continue;
             }
             let _ = writer.add_document(doc!(
@@ -379,13 +481,34 @@ impl SessionIndex {
                 f.source => source,
                 f.message_count => message_count,
             ));
+            indexed_count += 1;
+            next_offset = line_end_offset;
         }
 
-        writer.commit().map_err(|e| format!("commit failed: {}", e))?;
+        writer
+            .commit()
+            .map_err(|e| format!("commit failed: {}", e))?;
         drop(writer);
-        self.reader.reload().map_err(|e| format!("reload failed: {}", e))?;
+        self.reader
+            .reload()
+            .map_err(|e| format!("reload failed: {}", e))?;
         // Persist new offset only after a successful commit.
-        self.write_session_offset(session_id, to);
+        if next_offset > from {
+            self.write_session_offset(session_id, next_offset);
+        }
+        emit_perf_trace(
+            PerfTrace::new(PerfTraceName::StorageIo, "search_reindex_incremental")
+                .duration_ms(elapsed_ms(trace_started))
+                .session_id(Some(session_id))
+                .size_bytes(next_offset.saturating_sub(from))
+                .count(indexed_count)
+                .status(if blocked_reason.is_some() {
+                    "skipped"
+                } else {
+                    "ok"
+                })
+                .detail("blocked_reason", blocked_reason.unwrap_or("none")),
+        );
         Ok(())
     }
 
@@ -402,18 +525,28 @@ impl SessionIndex {
         let meta_raw = fs::read_to_string(&sessions_file).unwrap_or_default();
         let sessions_json: Vec<serde_json::Value> =
             serde_json::from_str(strip_bom(&meta_raw)).unwrap_or_default();
-        let meta = match sessions_json.iter().find(|s| {
-            s.get("id").and_then(|v| v.as_str()) == Some(session_id)
-        }) {
+        let meta = match sessions_json
+            .iter()
+            .find(|s| s.get("id").and_then(|v| v.as_str()) == Some(session_id))
+        {
             Some(m) => m.clone(),
             None => return Ok(()),
         };
 
         let f = &self.fields;
-        let title = meta.get("title").and_then(|v| v.as_str()).unwrap_or("(无标题)");
+        let title = meta
+            .get("title")
+            .and_then(|v| v.as_str())
+            .unwrap_or("(无标题)");
         let agent_dir = meta.get("agentDir").and_then(|v| v.as_str()).unwrap_or("");
-        let last_active_at = meta.get("lastActiveAt").and_then(|v| v.as_str()).unwrap_or("");
-        let source = meta.get("source").and_then(|v| v.as_str()).unwrap_or("desktop");
+        let last_active_at = meta
+            .get("lastActiveAt")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let source = meta
+            .get("source")
+            .and_then(|v| v.as_str())
+            .unwrap_or("desktop");
         let message_count = meta
             .get("stats")
             .and_then(|s| s.get("messageCount"))
@@ -442,9 +575,13 @@ impl SessionIndex {
             f.source => source,
             f.message_count => message_count,
         ));
-        writer.commit().map_err(|e| format!("commit failed: {}", e))?;
+        writer
+            .commit()
+            .map_err(|e| format!("commit failed: {}", e))?;
         drop(writer);
-        self.reader.reload().map_err(|e| format!("reload failed: {}", e))?;
+        self.reader
+            .reload()
+            .map_err(|e| format!("reload failed: {}", e))?;
         Ok(())
     }
 
@@ -456,9 +593,13 @@ impl SessionIndex {
             .map_err(|e| format!("writer mutex poisoned: {}", e))?;
         let term = Term::from_field_text(self.fields.session_id, session_id);
         writer.delete_term(term);
-        writer.commit().map_err(|e| format!("commit failed: {}", e))?;
+        writer
+            .commit()
+            .map_err(|e| format!("commit failed: {}", e))?;
         drop(writer);
-        self.reader.reload().map_err(|e| format!("reload failed: {}", e))?;
+        self.reader
+            .reload()
+            .map_err(|e| format!("reload failed: {}", e))?;
         // Pattern 3 §D.4 — drop the offset sidecar so a re-created session
         // with the same id starts indexing from byte 0.
         self.drop_session_offset(session_id);
@@ -565,7 +706,8 @@ impl SessionIndex {
 
         // Use a term query to find all "title" role docs (one per session)
         let role_term = Term::from_field_text(self.fields.role, "title");
-        let query = tantivy::query::TermQuery::new(role_term, tantivy::schema::IndexRecordOption::Basic);
+        let query =
+            tantivy::query::TermQuery::new(role_term, tantivy::schema::IndexRecordOption::Basic);
 
         if let Ok(docs) = searcher.search(&query, &TopDocs::with_limit(100_000)) {
             for (_score, addr) in docs {
@@ -580,6 +722,36 @@ impl SessionIndex {
 
         ids
     }
+
+    fn indexed_title_for_session(&self, session_id: &str) -> Option<String> {
+        let searcher = self.reader.searcher();
+        let title_doc_id = format!("{}_title", session_id);
+        let term = Term::from_field_text(self.fields.message_id, &title_doc_id);
+        let query = tantivy::query::TermQuery::new(term, tantivy::schema::IndexRecordOption::Basic);
+        let docs = searcher.search(&query, &TopDocs::with_limit(1)).ok()?;
+        let (_score, addr) = docs.first().copied()?;
+        let doc = searcher.doc::<tantivy::TantivyDocument>(addr).ok()?;
+        Some(get_text_field(&doc, self.fields.title))
+    }
+}
+
+/// Read exactly the JSONL byte range needed for an incremental index pass.
+/// This keeps append-only reindexing O(delta) instead of reading the full
+/// session transcript on every watcher tick.
+fn read_jsonl_range(path: &Path, from: u64, to: u64) -> Result<Vec<u8>, String> {
+    if from >= to {
+        return Ok(Vec::new());
+    }
+
+    let mut file = File::open(path).map_err(|e| format!("open jsonl failed: {}", e))?;
+    file.seek(SeekFrom::Start(from))
+        .map_err(|e| format!("seek jsonl failed: {}", e))?;
+
+    let mut bytes = Vec::with_capacity((to - from).min(1024 * 1024) as usize);
+    file.take(to - from)
+        .read_to_end(&mut bytes)
+        .map_err(|e| format!("read jsonl range failed: {}", e))?;
+    Ok(bytes)
 }
 
 /// Index a single session into the provided writer: its title (as a "title"
@@ -907,4 +1079,202 @@ fn find_highlights_in_str(haystack: &str, query_lower: &str) -> Vec<[usize; 2]> 
             [byte_to_utf16(haystack, s), byte_to_utf16(haystack, e)]
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    use std::fs::{self, OpenOptions};
+    use std::io::Write;
+
+    fn write_session_metadata_with_title(data_dir: &Path, session_id: &str, title: &str) {
+        let sessions = json!([
+            {
+                "id": session_id,
+                "title": title,
+                "agentDir": "/tmp/myagents-test-agent",
+                "lastActiveAt": "2026-06-06T00:00:00.000Z",
+                "source": "desktop",
+                "stats": { "messageCount": 2 }
+            }
+        ]);
+        fs::write(data_dir.join("sessions.json"), sessions.to_string()).unwrap();
+    }
+
+    fn write_session_metadata(data_dir: &Path, session_id: &str) {
+        write_session_metadata_with_title(data_dir, session_id, "Search Tail Read Contract");
+    }
+
+    fn message_line(id: &str, content: &str) -> String {
+        format!(
+            "{}\n",
+            json!({
+                "id": id,
+                "role": "user",
+                "timestamp": "2026-06-06T00:00:00.000Z",
+                "content": content
+            })
+        )
+    }
+
+    #[test]
+    fn read_jsonl_range_returns_requested_bytes() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("session.jsonl");
+        fs::write(&path, b"alpha\nbeta\ngamma\n").unwrap();
+
+        let from = b"alpha\n".len() as u64;
+        let to = from + b"beta\n".len() as u64;
+        let bytes = read_jsonl_range(&path, from, to).unwrap();
+
+        assert_eq!(bytes, b"beta\n");
+    }
+
+    #[test]
+    fn read_jsonl_range_empty_when_from_reaches_to() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("session.jsonl");
+        fs::write(&path, b"alpha\n").unwrap();
+
+        assert!(read_jsonl_range(&path, 6, 6).unwrap().is_empty());
+        assert!(read_jsonl_range(&path, 7, 6).unwrap().is_empty());
+    }
+
+    #[test]
+    fn incremental_reindex_tail_reads_and_indexes_appended_message() {
+        let temp = tempfile::tempdir().unwrap();
+        let data_dir = temp.path().join("data");
+        let sessions_dir = data_dir.join("sessions");
+        fs::create_dir_all(&sessions_dir).unwrap();
+        let session_id = "tail-read-session";
+        write_session_metadata(&data_dir, session_id);
+
+        let jsonl_path = sessions_dir.join(format!("{}.jsonl", session_id));
+        fs::write(
+            &jsonl_path,
+            message_line("m1", "firstunique searchable text"),
+        )
+        .unwrap();
+
+        let index = SessionIndex::new(temp.path().join("index")).unwrap();
+        index.reindex_session(session_id, &sessions_dir).unwrap();
+        let initial_offset = index.read_session_offset(session_id);
+        assert!(initial_offset > 0);
+
+        let mut file = OpenOptions::new().append(true).open(&jsonl_path).unwrap();
+        file.write_all(message_line("m2", "secondunique appended text").as_bytes())
+            .unwrap();
+
+        index.reindex_session(session_id, &sessions_dir).unwrap();
+
+        let updated_offset = index.read_session_offset(session_id);
+        assert!(updated_offset > initial_offset);
+        let result = index.search("secondunique", 10).unwrap();
+        assert_eq!(result.total_count, 1);
+        assert_eq!(result.hits[0].session_id, session_id);
+    }
+
+    #[test]
+    fn incremental_reindex_does_not_advance_offset_past_partial_line() {
+        let temp = tempfile::tempdir().unwrap();
+        let data_dir = temp.path().join("data");
+        let sessions_dir = data_dir.join("sessions");
+        fs::create_dir_all(&sessions_dir).unwrap();
+        let session_id = "partial-line-session";
+        write_session_metadata(&data_dir, session_id);
+
+        let jsonl_path = sessions_dir.join(format!("{}.jsonl", session_id));
+        let first = message_line("m1", "stable indexed text");
+        fs::write(&jsonl_path, &first).unwrap();
+
+        let index = SessionIndex::new(temp.path().join("index")).unwrap();
+        index.reindex_session(session_id, &sessions_dir).unwrap();
+        let stable_offset = index.read_session_offset(session_id);
+
+        let partial = json!({
+            "id": "m2",
+            "role": "user",
+            "timestamp": "2026-06-06T00:00:00.000Z",
+            "content": "latercompleted searchable text"
+        })
+        .to_string();
+        let mut file = OpenOptions::new().append(true).open(&jsonl_path).unwrap();
+        file.write_all(partial.as_bytes()).unwrap();
+        drop(file);
+
+        index.reindex_session(session_id, &sessions_dir).unwrap();
+        assert_eq!(index.read_session_offset(session_id), stable_offset);
+        assert_eq!(index.search("latercompleted", 10).unwrap().total_count, 0);
+
+        let mut file = OpenOptions::new().append(true).open(&jsonl_path).unwrap();
+        file.write_all(b"\n").unwrap();
+        drop(file);
+
+        index.reindex_session(session_id, &sessions_dir).unwrap();
+        assert!(index.read_session_offset(session_id) > stable_offset);
+        let result = index.search("latercompleted", 10).unwrap();
+        assert_eq!(result.total_count, 1);
+        assert_eq!(result.hits[0].session_id, session_id);
+    }
+
+    #[test]
+    fn incremental_reindex_refreshes_title_when_metadata_changes_with_append() {
+        let temp = tempfile::tempdir().unwrap();
+        let data_dir = temp.path().join("data");
+        let sessions_dir = data_dir.join("sessions");
+        fs::create_dir_all(&sessions_dir).unwrap();
+        let session_id = "title-refresh-session";
+        write_session_metadata_with_title(&data_dir, session_id, "oldtitleunique");
+
+        let jsonl_path = sessions_dir.join(format!("{}.jsonl", session_id));
+        fs::write(&jsonl_path, message_line("m1", "first body text")).unwrap();
+
+        let index = SessionIndex::new(temp.path().join("index")).unwrap();
+        index.reindex_session(session_id, &sessions_dir).unwrap();
+
+        write_session_metadata_with_title(&data_dir, session_id, "newtitleunique");
+        let mut file = OpenOptions::new().append(true).open(&jsonl_path).unwrap();
+        file.write_all(message_line("m2", "appended title refresh body").as_bytes())
+            .unwrap();
+
+        index.reindex_session(session_id, &sessions_dir).unwrap();
+
+        assert_eq!(index.search("newtitleunique", 10).unwrap().total_count, 1);
+        assert_eq!(index.search("oldtitleunique", 10).unwrap().total_count, 0);
+    }
+
+    #[test]
+    fn incremental_reindex_utf8_split_falls_back_to_full_rebuild() {
+        let temp = tempfile::tempdir().unwrap();
+        let data_dir = temp.path().join("data");
+        let sessions_dir = data_dir.join("sessions");
+        fs::create_dir_all(&sessions_dir).unwrap();
+        let session_id = "utf8-fallback-session";
+        write_session_metadata(&data_dir, session_id);
+
+        let jsonl_path = sessions_dir.join(format!("{}.jsonl", session_id));
+        let content = format!(
+            "{}{}",
+            message_line("m1", "prefix 多字节内容"),
+            message_line("m2", "boundaryunique recovered text")
+        );
+        fs::write(&jsonl_path, &content).unwrap();
+
+        let bytes = fs::read(&jsonl_path).unwrap();
+        let split_offset = bytes
+            .windows("多".len())
+            .position(|window| window == "多".as_bytes())
+            .map(|pos| pos as u64 + 1)
+            .unwrap();
+
+        let index = SessionIndex::new(temp.path().join("index")).unwrap();
+        index.write_session_offset(session_id, split_offset);
+        index.reindex_session(session_id, &sessions_dir).unwrap();
+
+        assert_eq!(index.read_session_offset(session_id), bytes.len() as u64);
+        let result = index.search("boundaryunique", 10).unwrap();
+        assert_eq!(result.total_count, 1);
+        assert_eq!(result.hits[0].session_id, session_id);
+    }
 }

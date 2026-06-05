@@ -23,6 +23,8 @@ import { createSessionMetadata, generateSessionTitle } from './types/session';
 import { stripBom } from '../shared/utils';
 import { ensureDirSync } from './utils/fs-utils';
 import { withFileLock } from './utils/file-lock';
+import { countNonEmptyJsonlLines } from './utils/jsonl-line-count';
+import { elapsedMs, emitPerfTrace, nowMs } from './utils/perf-trace';
 
 const MYAGENTS_DIR = join(homedir(), '.myagents');
 const SESSIONS_FILE = join(MYAGENTS_DIR, 'sessions.json');
@@ -47,10 +49,33 @@ const lineCountCache = new Map<string, number>();
 function getCachedLineCount(sessionId: string, filePath: string): number {
     const cached = lineCountCache.get(sessionId);
     if (cached !== undefined) {
+        emitPerfTrace({
+            trace: 'storage_io',
+            phase: 'line_count_cache_hit',
+            sessionId,
+            count: cached,
+            status: 'ok',
+        });
         return cached;
     }
     // Cold start: read from file
+    const start = nowMs();
     const count = countLinesFromFile(filePath);
+    let sizeBytes: number | undefined;
+    try {
+        sizeBytes = existsSync(filePath) ? statSync(filePath).size : 0;
+    } catch {
+        sizeBytes = undefined;
+    }
+    emitPerfTrace({
+        trace: 'storage_io',
+        phase: 'line_count_cache_miss',
+        sessionId,
+        durationMs: elapsedMs(start),
+        sizeBytes,
+        count,
+        status: 'ok',
+    });
     lineCountCache.set(sessionId, count);
     return count;
 }
@@ -115,8 +140,16 @@ async function withSessionFileLock<T>(sessionId: string, fn: () => Promise<T>): 
  * rename() is atomic on POSIX (macOS/Linux) and near-atomic on Windows (NTFS MoveFileEx).
  */
 function atomicWriteSessionsFile(content: string): void {
+    const start = nowMs();
     writeFileSync(SESSIONS_TMP_FILE, content, 'utf-8');
     renameSync(SESSIONS_TMP_FILE, SESSIONS_FILE);
+    emitPerfTrace({
+        trace: 'storage_io',
+        phase: 'sessions_metadata_write',
+        durationMs: elapsedMs(start),
+        sizeBytes: Buffer.byteLength(content, 'utf-8'),
+        status: 'ok',
+    });
 }
 
 /**
@@ -166,15 +199,7 @@ function getLegacySessionFilePath(sessionId: string): string {
  * Count lines in a JSONL file by reading the file (internal, use getCachedLineCount for performance)
  */
 function countLinesFromFile(filePath: string): number {
-    if (!existsSync(filePath)) {
-        return 0;
-    }
-    try {
-        const content = readFileSync(filePath, 'utf-8');
-        return content.split('\n').filter(line => line.trim()).length;
-    } catch {
-        return 0;
-    }
+    return countNonEmptyJsonlLines(filePath);
 }
 
 /**
@@ -441,7 +466,17 @@ export async function appendSessionMessage(sessionId: string, message: SessionMe
     try {
         await withSessionFileLock(sessionId, async () => {
             const line = JSON.stringify(message) + '\n';
+            const start = nowMs();
             appendFileSync(filePath, line, 'utf-8');
+            emitPerfTrace({
+                trace: 'storage_io',
+                phase: 'session_jsonl_append',
+                sessionId,
+                durationMs: elapsedMs(start),
+                sizeBytes: Buffer.byteLength(line, 'utf-8'),
+                count: 1,
+                status: 'ok',
+            });
         });
     } catch (error) {
         console.error('[SessionStore] Failed to append message:', error);
@@ -505,7 +540,17 @@ export async function saveSessionMessages(
                 }
                 console.log(`[SessionStore] Intentional truncation: messages.length=${messages.length} < existingCount=${existingCount}, rewriting JSONL for session ${sessionId}`);
                 const fullContent = messages.map(msg => JSON.stringify(msg)).join('\n') + (messages.length > 0 ? '\n' : '');
+                const rewriteStart = nowMs();
                 writeFileSync(filePath, fullContent, 'utf-8');
+                emitPerfTrace({
+                    trace: 'storage_io',
+                    phase: 'session_jsonl_rewrite',
+                    sessionId,
+                    durationMs: elapsedMs(rewriteStart),
+                    sizeBytes: Buffer.byteLength(fullContent, 'utf-8'),
+                    count: messages.length,
+                    status: 'ok',
+                });
                 lineCountCache.set(sessionId, messages.length);
 
                 // Recalculate full stats after rewrite
@@ -529,7 +574,17 @@ export async function saveSessionMessages(
             if (newMessages.length > 0) {
                 // Append to JSONL file under the per-session lock acquired above.
                 const linesToAppend = newMessages.map(msg => JSON.stringify(msg)).join('\n') + '\n';
+                const appendStart = nowMs();
                 appendFileSync(filePath, linesToAppend, 'utf-8');
+                emitPerfTrace({
+                    trace: 'storage_io',
+                    phase: 'session_jsonl_append',
+                    sessionId,
+                    durationMs: elapsedMs(appendStart),
+                    sizeBytes: Buffer.byteLength(linesToAppend, 'utf-8'),
+                    count: newMessages.length,
+                    status: 'ok',
+                });
                 incrementLineCount(sessionId, newMessages.length);
                 console.log(`[SessionStore] Appended ${newMessages.length} new messages (total: ${messages.length})`);
 
@@ -717,4 +772,3 @@ export function saveAttachment(
 export function getAttachmentPath(relativePath: string): string {
     return join(ATTACHMENTS_DIR, relativePath);
 }
-

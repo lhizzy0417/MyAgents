@@ -76,6 +76,7 @@ import { isAbortedTerminalReason, shouldTitleCompletedTurn } from '../shared/ter
 import { trackServer } from './analytics';
 import { getCurrentRuntimeType, isExternalRuntime } from './runtimes/factory';
 import { resolveLastRealUserMessagePreview } from './utils/session-message-preview';
+import { elapsedMs, emitPerfTrace, nowMs } from './utils/perf-trace';
 import type { ImagePayload } from './runtimes/types';
 import { buildBuiltinMediaAttachments } from './runtimes/builtin-media-attachments';
 import type { ToolAttachment } from '../shared/types/tool-attachment';
@@ -1545,6 +1546,12 @@ let currentTurnUsage = {
 let currentTurnStartTime: number | null = null;
 // Tool count for current turn
 let currentTurnToolCount = 0;
+let builtinTurnTraceId = '';
+let builtinTurnTraceStartMs = 0;
+let builtinTurnTraceSessionId = '';
+let builtinTurnTraceRequestId: string | undefined;
+let builtinFirstDeltaTraceEmitted = false;
+const builtinToolTraceStarts = new Map<string, number>();
 // Whether the current turn produced any visible assistant text output
 let currentTurnHasOutput = false;
 // SDK assistant messages can carry a provisional .error even when the final
@@ -1653,6 +1660,100 @@ function resetTurnUsage(): void {
   currentTurnTextBlocks.length = 0;
   // Note: currentTurnInboxMeta is NOT reset here — it's bound on dequeue
   // (generator yield) and cleared at result handler / abort path.
+}
+
+type BuiltinTurnTraceSnapshot = {
+  turnId: string;
+  startMs: number;
+  sessionId: string;
+  requestId?: string;
+};
+
+function snapshotBuiltinTurnTrace(): BuiltinTurnTraceSnapshot | null {
+  if (!builtinTurnTraceId || !builtinTurnTraceStartMs) return null;
+  return {
+    turnId: builtinTurnTraceId,
+    startMs: builtinTurnTraceStartMs,
+    sessionId: builtinTurnTraceSessionId || sessionId,
+    requestId: builtinTurnTraceRequestId,
+  };
+}
+
+function beginBuiltinTurnTrace(source: string, turnId: string, requestId?: string): void {
+  builtinTurnTraceId = turnId;
+  builtinTurnTraceStartMs = nowMs();
+  builtinTurnTraceSessionId = sessionId;
+  builtinTurnTraceRequestId = requestId;
+  builtinFirstDeltaTraceEmitted = false;
+  builtinToolTraceStarts.clear();
+  emitBuiltinTurnTrace('turn_start', {
+    status: 'ok',
+    detail: { source },
+  });
+}
+
+function emitBuiltinTurnTrace(
+  phase: string,
+  options: {
+    status?: 'ok' | 'error' | 'timeout' | 'skipped';
+    durationMs?: number;
+    sizeBytes?: number;
+    count?: number;
+    detail?: Record<string, string | number | boolean | null | undefined>;
+  } = {},
+  snapshot: BuiltinTurnTraceSnapshot | null = snapshotBuiltinTurnTrace(),
+): void {
+  if (!snapshot) return;
+  emitPerfTrace({
+    trace: 'turn',
+    phase,
+    durationMs: options.durationMs ?? elapsedMs(snapshot.startMs),
+    sessionId: snapshot.sessionId || undefined,
+    requestId: snapshot.requestId,
+    turnId: snapshot.turnId,
+    runtime: 'builtin',
+    status: options.status ?? 'ok',
+    sizeBytes: options.sizeBytes,
+    count: options.count,
+    detail: options.detail,
+  });
+}
+
+function emitBuiltinFirstDeltaTrace(delta: string): void {
+  if (builtinFirstDeltaTraceEmitted || !builtinTurnTraceId) return;
+  builtinFirstDeltaTraceEmitted = true;
+  emitBuiltinTurnTrace('first_delta', {
+    sizeBytes: Buffer.byteLength(delta, 'utf8'),
+  });
+}
+
+function emitBuiltinToolStartTrace(toolUseId: string, toolName: string, isSubAgent = false): void {
+  if (!builtinTurnTraceId) return;
+  builtinToolTraceStarts.set(toolUseId, nowMs());
+  emitBuiltinTurnTrace('tool_start', {
+    detail: { toolUseId, toolName, subAgent: isSubAgent },
+  });
+}
+
+function emitBuiltinToolEndTrace(toolUseId: string, isError?: boolean): void {
+  if (!builtinTurnTraceId) return;
+  const started = builtinToolTraceStarts.get(toolUseId);
+  builtinToolTraceStarts.delete(toolUseId);
+  emitBuiltinTurnTrace('tool_end', {
+    status: isError ? 'error' : 'ok',
+    durationMs: started ? elapsedMs(started) : undefined,
+    detail: { toolUseId },
+  });
+}
+
+function clearBuiltinTurnTrace(snapshot: BuiltinTurnTraceSnapshot | null = snapshotBuiltinTurnTrace()): void {
+  if (snapshot && snapshot.turnId !== builtinTurnTraceId) return;
+  builtinTurnTraceId = '';
+  builtinTurnTraceStartMs = 0;
+  builtinTurnTraceSessionId = '';
+  builtinTurnTraceRequestId = undefined;
+  builtinFirstDeltaTraceEmitted = false;
+  builtinToolTraceStarts.clear();
 }
 
 // ===== MCP Configuration =====
@@ -4761,6 +4862,7 @@ function handleToolUseStart(tool: {
   streamIndex: number;
   thought_signature?: string;
 }): void {
+  emitBuiltinToolStartTrace(tool.id, tool.name);
   // No mid-turn flush: see handleThinkingStart for rationale.
   const message = ensureAssistantMessage();
   const contentArray = ensureContentArray(message);
@@ -4795,6 +4897,7 @@ function handleServerToolUseStart(tool: {
   input: Record<string, unknown>;
   streamIndex: number;
 }): void {
+  emitBuiltinToolStartTrace(tool.id, tool.name);
   // No mid-turn flush: see handleThinkingStart for rationale.
   const message = ensureAssistantMessage();
   const contentArray = ensureContentArray(message);
@@ -4820,6 +4923,7 @@ function handleSubagentToolUseStart(
     thought_signature?: string;
   }
 ): void {
+  emitBuiltinToolStartTrace(tool.id, tool.name, true);
   const parentTool = findToolBlockById(parentToolUseId);
   if (!parentTool) {
     return;
@@ -4991,6 +5095,7 @@ function handleToolResultStart(toolUseId: string, content: string, isError: bool
 }
 
 function handleToolResultComplete(toolUseId: string, content: string, isError?: boolean): void {
+  emitBuiltinToolEndTrace(toolUseId, isError);
   if (handleSubagentToolResultComplete(toolUseId, content, isError)) {
     return;
   }
@@ -5174,6 +5279,10 @@ function handleMessageComplete(): void {
   // swallowed inside SessionStore writers; surfacing them here would be no-op.
   // #296: capture the promise into `lastTurnEndPersist` so the post-turn auto-title
   // hook can fire AFTER this turn is durable on disk (still fire-and-forget here).
+  const persistTrace = snapshotBuiltinTurnTrace();
+  const persistTraceStarted = nowMs();
+  const persistTraceToolCount = currentTurnToolCount;
+  const persistTraceMessageCount = messages.length;
   lastTurnEndPersist = persistMessagesToStorage({
     inputTokens: currentTurnUsage.inputTokens,
     outputTokens: currentTurnUsage.outputTokens,
@@ -5181,7 +5290,26 @@ function handleMessageComplete(): void {
     cacheCreationTokens: currentTurnUsage.cacheCreationTokens || undefined,
     model: currentTurnUsage.model,
     modelUsage: currentTurnUsage.modelUsage,
-  }, currentTurnToolCount, durationMs).catch(err => console.error('[agent] persistMessagesToStorage failed:', err));
+  }, currentTurnToolCount, durationMs)
+    .then(() => {
+      emitBuiltinTurnTrace('persist_done', {
+        durationMs: elapsedMs(persistTraceStarted),
+        status: 'ok',
+        count: persistTraceMessageCount,
+        detail: { toolCount: persistTraceToolCount },
+      }, persistTrace);
+      clearBuiltinTurnTrace(persistTrace);
+    })
+    .catch(err => {
+      emitBuiltinTurnTrace('persist_done', {
+        durationMs: elapsedMs(persistTraceStarted),
+        status: 'error',
+        count: persistTraceMessageCount,
+        detail: { toolCount: persistTraceToolCount },
+      }, persistTrace);
+      clearBuiltinTurnTrace(persistTrace);
+      console.error('[agent] persistMessagesToStorage failed:', err);
+    });
 
   // (v0.2.12 Codex review fix v3 #2 follow-up) Re-arm streaming flag for
   // the queued fallback case AFTER all teardown has run, so endTurnAbort
@@ -5195,6 +5323,11 @@ function handleMessageComplete(): void {
 
 function handleMessageStopped(): void {
   isStreamingMessage = false;
+  const stoppedTrace = snapshotBuiltinTurnTrace();
+  emitBuiltinTurnTrace('final', {
+    status: 'error',
+    detail: { source: 'message_stopped' },
+  }, stoppedTrace);
   // (v0.2.12 Codex review fix #2) On interrupt/abort the in-flight queue
   // item is dropped — broadcast queue:cancelled so the frontend can
   // clear the pill. See handleMessageComplete for the matching
@@ -5241,6 +5374,7 @@ function handleMessageStopped(): void {
   if (!lastMessage || lastMessage.role !== 'assistant' || typeof lastMessage.content === 'string') {
     // Persist even if no assistant message (fire-and-forget — async lock).
     void persistMessagesToStorage().catch(err => console.error('[agent] persistMessagesToStorage failed:', err));
+    clearBuiltinTurnTrace(stoppedTrace);
     return;
   }
   lastMessage.content = lastMessage.content.map((block) => {
@@ -5256,10 +5390,16 @@ function handleMessageStopped(): void {
   });
   // Persist after processing message (fire-and-forget — async lock).
   void persistMessagesToStorage().catch(err => console.error('[agent] persistMessagesToStorage failed:', err));
+  clearBuiltinTurnTrace(stoppedTrace);
 }
 
 function handleMessageError(error: string): void {
   isStreamingMessage = false;
+  const errorTrace = snapshotBuiltinTurnTrace();
+  emitBuiltinTurnTrace('final', {
+    status: 'error',
+    detail: { source: 'message_error', error },
+  }, errorTrace);
   // (v0.2.12 Codex review fix #2) Drop the in-flight item on error and
   // surface queue:cancelled — see handleMessageStopped for rationale.
   if (inFlightToCliId !== null) {
@@ -5299,6 +5439,7 @@ function handleMessageError(error: string): void {
 
   if (isExpectedTermination) {
     console.log('[agent] Skipping error persistence for expected termination:', error);
+    clearBuiltinTurnTrace(errorTrace);
     return;
   }
 
@@ -5310,6 +5451,7 @@ function handleMessageError(error: string): void {
   });
   // Persist error message (fire-and-forget — async lock).
   void persistMessagesToStorage().catch(err => console.error('[agent] persistMessagesToStorage failed:', err));
+  clearBuiltinTurnTrace(errorTrace);
 }
 
 function findToolBlockById(toolUseId: string): { tool: ToolUseState } | null {
@@ -6736,6 +6878,20 @@ export async function enqueueUserMessage(
     || messageQueue.length > 0
     || pendingMidTurnQueue.length > 0
     || promotedItemInFlight;
+  emitPerfTrace({
+    trace: 'turn',
+    phase: 'enqueue',
+    sessionId: sessionId || undefined,
+    requestId,
+    runtime: 'builtin',
+    status: 'ok',
+    sizeBytes: Buffer.byteLength(trimmed, 'utf8'),
+    detail: {
+      busy: isSessionBusy,
+      source: metadata?.source ?? 'desktop',
+      hasImages: !!hasImages,
+    },
+  });
 
   // Reset turn usage tracking — only for direct (non-queued) messages.
   // For queued messages, this is done in messageGenerator when the item is yielded,
@@ -9695,6 +9851,7 @@ async function startStreamingSession(preWarm = false): Promise<void> {
                 // Filter out decorative text from third-party APIs before broadcasting
                 const decorativeCheck = checkDecorativeToolText(streamEvent.delta.text);
                 if (!decorativeCheck.filtered) {
+                  emitBuiltinFirstDeltaTrace(streamEvent.delta.text);
                   // Handler first: appendTextChunk → ensureAssistantMessage() may flush
                   // pendingMidTurnQueue. Broadcast after so frontend splits before new content.
                   appendTextChunk(streamEvent.delta.text);
@@ -10481,6 +10638,7 @@ async function startStreamingSession(preWarm = false): Promise<void> {
             // Non-error result text that wasn't captured by streaming or assistant handler
             // (safety net — should rarely trigger after the assistant handler fix above)
             console.warn('[agent] SDK non-error result with no streamed output, showing as message:', resultText);
+            emitBuiltinFirstDeltaTrace(resultText);
             // Handler first (same pattern as streamed text path)
             appendTextChunk(resultText);
             broadcast('chat:message-chunk', resultText);
@@ -10517,6 +10675,16 @@ async function startStreamingSession(preWarm = false): Promise<void> {
         if (recoveredAssistantMessageError && currentTurnLastAssistantMessageError) {
           console.log('[agent] SDK assistant message error recovered by successful result:', currentTurnLastAssistantMessageError);
         }
+        emitBuiltinTurnTrace('final', {
+          status: resultMessage.is_error || emptySuccessfulResult ? 'error' : 'ok',
+          durationMs,
+          count: currentTurnToolCount,
+          detail: {
+            terminalReason: resultMessage.terminal_reason ?? 'completed',
+            hasOutput: currentTurnHasOutput,
+            emptySuccessfulResult,
+          },
+        });
 
         // Find the last assistant message's sdkUuid to piggyback on message-complete.
         // This avoids the ID mismatch problem: frontend streaming messages use Date.now()
@@ -11176,11 +11344,14 @@ async function* messageGenerator(): AsyncGenerator<SDKUserMessage> {
     // (or the turn-end fallback in handleMessageComplete) when the CLI
     // confirms AI saw the message. Until then they live as an "in-flight"
     // pill in the frontend queue panel.
+    let traceTurnId = item.id;
+    const traceSource = item.wasQueued ? 'queued' : 'direct';
     if (!item.wasQueued) {
       resetTurnUsage();
       currentTurnStartTime = Date.now();
       if (sessionId) beginTurnAbort(sessionId);
       const turnId = randomUUID().replace(/-/g, '').slice(0, 8);
+      traceTurnId = turnId;
       setAmbientLogContext(sessionId, { turnId, sessionId });
     } else if (inFlightToCliId === null) {
       // (v0.2.12 Codex review fix #1) wasQueued item arrived without an
@@ -11211,6 +11382,7 @@ async function* messageGenerator(): AsyncGenerator<SDKUserMessage> {
       });
       console.log(`[messageGenerator] Recovery path: wasQueued item ${item.id} adopted as in-flight (rescue or messageQueue push)`);
     }
+    beginBuiltinTurnTrace(traceSource, traceTurnId, item.requestId);
 
     isStreamingMessage = true;
     // Pattern B+G: push this user message's requestId onto the FIFO queue.

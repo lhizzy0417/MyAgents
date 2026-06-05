@@ -49,6 +49,8 @@ import {
   estimatedContextTokensFromMessages,
   observedContextTokens,
 } from './external-watchdog-policy';
+import { elapsedMs, emitPerfTrace, nowMs } from '../utils/perf-trace';
+import { queryRuntimeModelsSingleFlight } from './runtime-model-singleflight';
 
 // ─── Module state ───
 
@@ -92,6 +94,14 @@ let lastPersistedRuntimeUsageTotals: MessageUsage | null = null;
 let allSessionMessages: SessionMessage[] = [];
 let currentAssistantText = '';  // Accumulate streaming text for the current assistant message (also used by getLastExternalAssistantText)
 let currentTurnStartTime = 0;
+let externalTurnSeq = 0;
+let currentTurnTraceId = '';
+let currentTurnTraceSessionId = '';
+let currentTurnTraceRequestId: string | undefined;
+let currentTurnTraceRuntime = '';
+let currentTurnTraceStartMs = 0;
+let firstDeltaTraceEmitted = false;
+const activeToolTraceStarts = new Map<string, number>();
 
 // ─── Structured content block accumulation ───
 // Mirrors the builtin runtime's ContentBlock[] pattern so that session history
@@ -759,6 +769,93 @@ function clearWatchdog(): void {
 function recordRuntimeActivity(): void {
   if (currentTurnStartTime === 0 || turnCompleted) return;
   resetWatchdog();
+}
+
+function beginExternalTurnTrace(
+  source: string,
+  sessionId = lastSessionId,
+  requestId: string | undefined = activeRequestId || undefined,
+  runtime = getCurrentRuntimeType(),
+): void {
+  externalTurnSeq += 1;
+  currentTurnTraceId = `external-${Date.now()}-${externalTurnSeq}`;
+  currentTurnTraceSessionId = sessionId;
+  currentTurnTraceRequestId = requestId;
+  currentTurnTraceRuntime = runtime;
+  currentTurnTraceStartMs = nowMs();
+  firstDeltaTraceEmitted = false;
+  activeToolTraceStarts.clear();
+  emitPerfTrace({
+    trace: 'turn',
+    phase: 'turn_start',
+    sessionId: currentTurnTraceSessionId || lastSessionId || undefined,
+    requestId: currentTurnTraceRequestId,
+    turnId: currentTurnTraceId,
+    runtime: currentTurnTraceRuntime,
+    status: 'ok',
+    detail: { source },
+  });
+}
+
+function emitExternalTurnTrace(
+  phase: string,
+  options: {
+    status?: 'ok' | 'error' | 'timeout' | 'skipped';
+    durationMs?: number;
+    sizeBytes?: number;
+    count?: number;
+    detail?: Record<string, string | number | boolean | null | undefined>;
+  } = {},
+): void {
+  if (!currentTurnTraceId) return;
+  emitPerfTrace({
+    trace: 'turn',
+    phase,
+    durationMs: options.durationMs ?? (currentTurnTraceStartMs ? elapsedMs(currentTurnTraceStartMs) : undefined),
+    sessionId: currentTurnTraceSessionId || lastSessionId || undefined,
+    requestId: currentTurnTraceRequestId,
+    turnId: currentTurnTraceId,
+    runtime: currentTurnTraceRuntime || getCurrentRuntimeType(),
+    status: options.status ?? 'ok',
+    sizeBytes: options.sizeBytes,
+    count: options.count,
+    detail: options.detail,
+  });
+}
+
+function emitExternalFirstDeltaTrace(delta: string): void {
+  if (firstDeltaTraceEmitted || !currentTurnTraceId) return;
+  firstDeltaTraceEmitted = true;
+  emitExternalTurnTrace('first_delta', { sizeBytes: Buffer.byteLength(delta, 'utf8') });
+}
+
+function emitExternalToolStartTrace(toolUseId: string, toolName: string, isSubAgent = false): void {
+  if (!currentTurnTraceId) return;
+  activeToolTraceStarts.set(toolUseId, nowMs());
+  emitExternalTurnTrace('tool_start', {
+    detail: { toolUseId, toolName, subAgent: isSubAgent },
+  });
+}
+
+function emitExternalToolEndTrace(toolUseId: string, isError?: boolean): void {
+  if (!currentTurnTraceId) return;
+  const started = activeToolTraceStarts.get(toolUseId);
+  activeToolTraceStarts.delete(toolUseId);
+  emitExternalTurnTrace('tool_end', {
+    status: isError ? 'error' : 'ok',
+    durationMs: started ? elapsedMs(started) : undefined,
+    detail: { toolUseId },
+  });
+}
+
+function clearExternalTurnTrace(): void {
+  currentTurnTraceId = '';
+  currentTurnTraceSessionId = '';
+  currentTurnTraceRequestId = undefined;
+  currentTurnTraceRuntime = '';
+  currentTurnTraceStartMs = 0;
+  firstDeltaTraceEmitted = false;
+  activeToolTraceStarts.clear();
 }
 
 // ─── Turn outcome tracking (stale text protection for cron/heartbeat) ───
@@ -1516,6 +1613,7 @@ async function _doStartExternalSession(options: {
     seedTurnWatchdogEstimate();
     resetWatchdog();
     currentTurnStartTime = Date.now();
+    beginExternalTurnTrace('external_start_initial_message', options.sessionId);
 
     // Persist user message immediately (crash safety — don't wait for turn_complete).
     // Append-only: allSessionMessages only grows here, so forbid the shrink-rewrite
@@ -1750,6 +1848,21 @@ export async function sendExternalMessage(
   if (context?.requestId) {
     activeRequestId = context.requestId;
   }
+  emitPerfTrace({
+    trace: 'turn',
+    phase: 'enqueue',
+    sessionId: context?.sessionId || lastSessionId || undefined,
+    requestId: context?.requestId || activeRequestId || undefined,
+    runtime: getCurrentRuntimeType(),
+    status: 'ok',
+    sizeBytes: Buffer.byteLength(text, 'utf8'),
+    count: hasImages ? images?.length : 0,
+    detail: {
+      source: context?.scenario.type ?? lastScenario.type,
+      hasImages: Boolean(hasImages),
+      preBroadcasted: Boolean(preBroadcasted),
+    },
+  });
 
   // Case 1: No previous session — start fresh
   if (!lastRuntimeSessionId && !isRunning) {
@@ -1832,6 +1945,7 @@ export async function sendExternalMessage(
     seedTurnWatchdogEstimate();
     resetWatchdog();  // Start watchdog for this turn (Case 3 bypasses startExternalSession)
     currentTurnStartTime = Date.now();
+    beginExternalTurnTrace('external_send_message', lastSessionId);
 
     // First real user turn clears the pre-warm marker. Also strip it from the
     // cached system_init payload so SSE reconnect replay reflects the current
@@ -2130,6 +2244,17 @@ export async function cancelExternalImRequest(
 export async function stopExternalSession(): Promise<boolean> {
   clearWatchdog();
   if (!activeProcess || !activeRuntime) return false;
+  const stopStarted = nowMs();
+  const runtimeType = activeRuntime.type;
+  const pid = activeProcess.pid;
+  emitPerfTrace({
+    trace: 'runtime',
+    phase: 'stop_start',
+    runtime: runtimeType,
+    sessionId: lastSessionId || undefined,
+    status: 'ok',
+    detail: { pid },
+  });
   // #307: mark this teardown as intentional BEFORE killing the process, so the
   // session_complete the kill triggers is recognized as an abort (not a failure)
   // and its error banner is suppressed. Set before the await — the exit handler
@@ -2137,14 +2262,32 @@ export async function stopExternalSession(): Promise<boolean> {
   userRequestedExternalStop = true;
   try {
     await activeRuntime.stopSession(activeProcess);
+    emitPerfTrace({
+      trace: 'runtime',
+      phase: 'stop_done',
+      durationMs: elapsedMs(stopStarted),
+      runtime: runtimeType,
+      sessionId: lastSessionId || undefined,
+      status: 'ok',
+      detail: { pid },
+    });
     return true;
   } catch (err) {
     console.error('[external-session] Error stopping session:', err);
+    emitPerfTrace({
+      trace: 'runtime',
+      phase: 'stop_escalated',
+      durationMs: elapsedMs(stopStarted),
+      runtime: runtimeType,
+      sessionId: lastSessionId || undefined,
+      status: 'error',
+      detail: { pid, error: err instanceof Error ? err.message : String(err) },
+    });
     // Pattern 1 P0-1 fix #11: previously fell through to a single
     // SIGTERM-default kill that could hang indefinitely. Now bound the
     // shutdown via killWithEscalation: 2s graceful → 1s hard → orphan log.
     const proc = activeProcess;
-    void killWithEscalation(
+    const killResult = await killWithEscalation(
       {
         pid: proc.pid,
         exited: proc.exited,
@@ -2166,6 +2309,21 @@ export async function stopExternalSession(): Promise<boolean> {
         },
       },
     );
+    emitPerfTrace({
+      trace: 'runtime',
+      phase: 'stop_fallback_done',
+      durationMs: elapsedMs(stopStarted),
+      runtime: runtimeType,
+      sessionId: lastSessionId || undefined,
+      status: killResult.exited ? 'ok' : 'error',
+      detail: {
+        pid,
+        exited: killResult.exited,
+        signalUsed: killResult.signalUsed ?? null,
+        orphanRisk: killResult.orphanRisk,
+        killElapsedMs: killResult.elapsedMs,
+      },
+    });
     return true;
   } finally {
     activeProcess = null;
@@ -2199,6 +2357,11 @@ export async function stopExternalSession(): Promise<boolean> {
     // items that nothing will ever drain (no turn is running) → the session wedges.
     clearExternalQueueWithCancellation();
     setExternalSessionState('idle');
+    emitExternalTurnTrace('final', {
+      status: 'error',
+      detail: { source: 'stop_external_session' },
+    });
+    clearExternalTurnTrace();
   }
 }
 
@@ -2317,13 +2480,38 @@ export async function prewarmExternalSession(options: {
   permissionMode?: string;
 }): Promise<{ prewarmed: boolean; reason?: string }> {
   const runtimeType = getCurrentRuntimeType();
+  const start = nowMs();
+  emitPerfTrace({
+    trace: 'runtime',
+    phase: 'prewarm_start',
+    runtime: runtimeType,
+    sessionId: options.sessionId,
+  });
   // Only Gemini and Codex run as persistent JSON-RPC processes — pre-warming
   // CC's `-p` mode is wasted because the process exits after each turn.
   if (runtimeType !== 'gemini' && runtimeType !== 'codex') {
+    emitPerfTrace({
+      trace: 'runtime',
+      phase: 'prewarm_skipped',
+      runtime: runtimeType,
+      sessionId: options.sessionId,
+      durationMs: elapsedMs(start),
+      status: 'skipped',
+      detail: { reason: 'not_persistent' },
+    });
     return { prewarmed: false, reason: `Pre-warm not applicable for runtime=${runtimeType}` };
   }
   // Already warm (from previous pre-warm or live session) — no-op.
   if (isExternalSessionActive() || isRunning || startingPromise) {
+    emitPerfTrace({
+      trace: 'runtime',
+      phase: 'prewarm_skipped',
+      runtime: runtimeType,
+      sessionId: options.sessionId,
+      durationMs: elapsedMs(start),
+      status: 'skipped',
+      detail: { reason: 'already_active_or_starting' },
+    });
     return { prewarmed: false, reason: 'Session already active or starting' };
   }
 
@@ -2334,6 +2522,15 @@ export async function prewarmExternalSession(options: {
   // authoritative source (SessionStore) and closes the race-window hole.
   const meta = getSessionMetadata(options.sessionId);
   if (meta?.runtime && meta.runtime !== runtimeType) {
+    emitPerfTrace({
+      trace: 'runtime',
+      phase: 'prewarm_skipped',
+      runtime: runtimeType,
+      sessionId: options.sessionId,
+      durationMs: elapsedMs(start),
+      status: 'skipped',
+      detail: { reason: 'runtime_mismatch' },
+    });
     return { prewarmed: false, reason: `Session runtime mismatch: persisted=${meta.runtime}, current=${runtimeType}` };
   }
 
@@ -2356,14 +2553,35 @@ export async function prewarmExternalSession(options: {
 
   console.log(`[external-session] Pre-warming ${runtimeType} for session ${options.sessionId}${resumeSessionId ? ` (resume=${resumeSessionId})` : ' (fresh)'} permissionMode=${effectivePermissionMode ?? '(default)'}${meta?.permissionMode && meta.permissionMode !== options.permissionMode ? ` (snapshot override; caller sent ${options.permissionMode ?? '(none)'})` : ''}`);
 
-  await startExternalSession({
+  try {
+    await startExternalSession({
+      sessionId: options.sessionId,
+      workspacePath: options.workspacePath,
+      // initialMessage intentionally omitted — this is the pre-warm signal
+      model: options.model,
+      permissionMode: effectivePermissionMode,
+      scenario: options.scenario,
+      resumeSessionId,
+    });
+  } catch (error) {
+    emitPerfTrace({
+      trace: 'runtime',
+      phase: 'prewarm_done',
+      runtime: runtimeType,
+      sessionId: options.sessionId,
+      durationMs: elapsedMs(start),
+      status: 'error',
+    });
+    throw error;
+  }
+
+  emitPerfTrace({
+    trace: 'runtime',
+    phase: 'prewarm_done',
+    runtime: runtimeType,
     sessionId: options.sessionId,
-    workspacePath: options.workspacePath,
-    // initialMessage intentionally omitted — this is the pre-warm signal
-    model: options.model,
-    permissionMode: effectivePermissionMode,
-    scenario: options.scenario,
-    resumeSessionId,
+    durationMs: elapsedMs(start),
+    status: 'ok',
   });
 
   return { prewarmed: true };
@@ -2375,8 +2593,10 @@ export async function prewarmExternalSession(options: {
 export async function queryRuntimeModels(runtimeType: RuntimeType): Promise<unknown[]> {
   if (runtimeType === 'builtin') return [];
   try {
-    const runtime = getExternalRuntime(runtimeType);
-    return await runtime.queryModels();
+    return await queryRuntimeModelsSingleFlight(runtimeType, async () => {
+      const runtime = getExternalRuntime(runtimeType);
+      return await runtime.queryModels();
+    });
   } catch (err) {
     console.error(`[external-session] Failed to query models for ${runtimeType}:`, err);
     return [];
@@ -2423,6 +2643,8 @@ async function persistTurnResult(): Promise<void> {
   const turnInboxMeta = currentTurnInboxMeta;
   currentTurnInboxMeta = null;
   const turnAttachmentHints = currentTurnAttachmentHints.splice(0);
+  const persistTraceStarted = nowMs();
+  let persistFailed = false;
 
   // PRD 0.2.18 Session Inbox — capture turn text BEFORE resetTurnAccumulators()
   // wipes it (cross-review CC + Architecture: the original impl read
@@ -2498,9 +2720,16 @@ async function persistTurnResult(): Promise<void> {
           runtimeUsageTotals: lastPersistedRuntimeUsageTotals ?? undefined,
         });
       } catch (err) {
+        persistFailed = true;
         console.error('[external-session] Failed to save session messages:', err);
       }
     }
+    emitExternalTurnTrace('persist_done', {
+      durationMs: elapsedMs(persistTraceStarted),
+      status: persistFailed ? 'error' : 'ok',
+      count: allSessionMessages.length,
+      detail: { toolCount: turnToolCount },
+    });
 
     broadcast('chat:message-complete', {
       ...(usageData ? {
@@ -2580,6 +2809,7 @@ async function persistTurnResult(): Promise<void> {
     // send the next queued desktop message. Deferred to the next macrotask so queue:started
     // never races chat:message-complete / chat:status idle on the SSE wire.
     setTimeout(() => drainExternalQueueAfterTurn(), 0);
+    clearExternalTurnTrace();
   }
 }
 
@@ -2670,6 +2900,7 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
       if (appendSubagentTraceDelta(event, 'AgentMessage')) {
         break;
       }
+      emitExternalFirstDeltaTrace(event.text);
       broadcast('chat:message-chunk', event.text);
       currentAssistantText += event.text;
       pendingTextBuffer += event.text;
@@ -2733,6 +2964,7 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
       break;
 
     case 'tool_use_start':
+      emitExternalToolStartTrace(event.toolUseId, event.toolName, !!event.subAgent);
       // PRD 0.2.27 — sub-agent tool nests under its spawn card. If the parent
       // card is still streaming, the call is cached and attached when the parent
       // tool_use block is finalized; known sub-agent events never render flat.
@@ -2835,6 +3067,7 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
 
     case 'tool_result':
       {
+        emitExternalToolEndTrace(event.toolUseId, event.isError);
         // PRD 0.2.27 — sub-agent tool result nests under its spawn card. Handled
         // synchronously (no spill/attachments path — matches builtin subagent
         // results which are plain text). Routed by the latched map.
@@ -3114,6 +3347,13 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
       turnCompleted = true;
       lastTurnSucceeded = true;
       clearWatchdog();
+      emitExternalTurnTrace('final', {
+        status: 'ok',
+        detail: {
+          textChars: currentAssistantText.length,
+          blocks: currentContentBlocks.length,
+        },
+      });
       console.log(`[external-session] turn_complete: text=${currentAssistantText.length}chars, blocks=${currentContentBlocks.length}, elapsed=${currentTurnStartTime ? Date.now() - currentTurnStartTime : 0}ms`);
       // Fire-and-forget: handleUnifiedEvent is a sync stream callback; persistTurnResult is async.
       void persistTurnResult().catch((err) => console.error('[external-session] persistTurnResult (turn_complete) failed:', err));
@@ -3163,6 +3403,14 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
         // Only finalize if turn_complete didn't already (Codex emits turn_complete; CC uses session_complete only)
         if (!turnCompleted) {
           lastTurnSucceeded = true;
+          emitExternalTurnTrace('final', {
+            status: 'ok',
+            detail: {
+              textChars: currentAssistantText.length,
+              blocks: currentContentBlocks.length,
+              source: 'session_complete',
+            },
+          });
           // Fire-and-forget: handleUnifiedEvent is a sync stream callback; persistTurnResult is async.
           void persistTurnResult().catch((err) => console.error('[external-session] persistTurnResult (session_complete) failed:', err));
           persistInFlight = true;
@@ -3195,9 +3443,17 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
         if (errorAction === 'ignore-idle') {
           console.log(`[external-session] Ignoring idle-exit "${errorMessage}" — process was between turns; next message will auto-resume`);
         } else if (errorAction === 'suppress-user-stop') {
+          emitExternalTurnTrace('final', {
+            status: 'error',
+            detail: { source: 'user_stop', error: errorMessage },
+          });
           console.log(`[external-session] Suppressing error banner for user-initiated stop (was: "${errorMessage}")`);
           resetTurnAccumulators(); // Prevent stale content leaking into next turn
         } else {
+          emitExternalTurnTrace('final', {
+            status: 'error',
+            detail: { source: 'session_complete', error: errorMessage },
+          });
           broadcast('chat:agent-error', { message: errorMessage });
           broadcast('chat:message-error', errorMessage);
           fireImCallback('error', errorMessage);
@@ -3217,6 +3473,7 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
         // Drain queued desktop messages on a failed turn too, so pills don't stick (the next
         // item resumes a fresh process via sendExternalMessage Case 2 if needed).
         setTimeout(() => drainExternalQueueAfterTurn(), 0);
+        clearExternalTurnTrace();
       }
       // Clean up module state — prevents stuck sessions on CC crash
       isRunning = false;

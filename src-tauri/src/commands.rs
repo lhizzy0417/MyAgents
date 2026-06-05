@@ -4,7 +4,9 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::process::Stdio;
+use std::sync::{Condvar, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 use tauri::{AppHandle, Manager, Runtime, State};
 
 use crate::sidecar::{
@@ -19,6 +21,7 @@ use crate::sidecar::{
     shutdown_for_update,
 };
 use crate::logger;
+use crate::perf_trace::{elapsed_ms, emit_perf_trace, trace_start, PerfTrace, PerfTraceName};
 use crate::{ulog_error, ulog_info, ulog_warn};
 
 const NETWORK_PROBE_USER_AGENT: &str = "MyAgents-Network-Probe/1.0";
@@ -2131,9 +2134,117 @@ pub struct RuntimeDetectionResult {
     pub path: Option<String>,
 }
 
-/// Detect whether external Agent Runtime CLIs are installed
-#[tauri::command]
-pub fn cmd_detect_runtimes() -> HashMap<String, RuntimeDetectionResult> {
+#[derive(Clone)]
+struct RuntimeDetectionCache {
+    detected_at: Instant,
+    results: HashMap<String, RuntimeDetectionResult>,
+}
+
+const RUNTIME_DETECTION_CACHE_TTL: Duration = Duration::from_secs(30);
+const RUNTIME_DETECTION_VERSION_TIMEOUT: Duration = Duration::from_secs(2);
+
+struct RuntimeDetectionState {
+    cache: Option<RuntimeDetectionCache>,
+    in_progress: bool,
+}
+
+struct RuntimeDetectionGate {
+    state: Mutex<RuntimeDetectionState>,
+    done: Condvar,
+}
+
+enum RuntimeDetectionGateDecision {
+    CacheHit(HashMap<String, RuntimeDetectionResult>),
+    JoinInFlight,
+    RunDetection,
+}
+
+static RUNTIME_DETECTION_GATE: OnceLock<RuntimeDetectionGate> = OnceLock::new();
+
+fn should_use_runtime_detection_cache(now: Instant, cached_at: Instant, ttl: Duration) -> bool {
+    now.saturating_duration_since(cached_at) < ttl
+}
+
+fn clone_runtime_detection_cache_results(
+    cache: &RuntimeDetectionCache,
+) -> HashMap<String, RuntimeDetectionResult> {
+    cache.results.clone()
+}
+
+fn runtime_detection_gate() -> &'static RuntimeDetectionGate {
+    RUNTIME_DETECTION_GATE.get_or_init(|| RuntimeDetectionGate {
+        state: Mutex::new(RuntimeDetectionState {
+            cache: None,
+            in_progress: false,
+        }),
+        done: Condvar::new(),
+    })
+}
+
+fn runtime_detection_gate_decision(
+    gate: &RuntimeDetectionGate,
+    now: Instant,
+    ttl: Duration,
+) -> RuntimeDetectionGateDecision {
+    let mut state = match gate.state.lock() {
+        Ok(state) => state,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+
+    if let Some(cache) = state.cache.as_ref() {
+        if should_use_runtime_detection_cache(now, cache.detected_at, ttl) {
+            return RuntimeDetectionGateDecision::CacheHit(clone_runtime_detection_cache_results(cache));
+        }
+    }
+
+    if state.in_progress {
+        RuntimeDetectionGateDecision::JoinInFlight
+    } else {
+        state.in_progress = true;
+        RuntimeDetectionGateDecision::RunDetection
+    }
+}
+
+fn wait_for_runtime_detection_result(
+    gate: &RuntimeDetectionGate,
+) -> HashMap<String, RuntimeDetectionResult> {
+    let mut state = match gate.state.lock() {
+        Ok(state) => state,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+
+    while state.in_progress {
+        state = match gate.done.wait(state) {
+            Ok(state) => state,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+    }
+
+    state
+        .cache
+        .as_ref()
+        .map(clone_runtime_detection_cache_results)
+        .unwrap_or_else(run_runtime_detection)
+}
+
+fn finish_runtime_detection(
+    gate: &RuntimeDetectionGate,
+    detected_at: Instant,
+    results: &HashMap<String, RuntimeDetectionResult>,
+) {
+    let mut state = match gate.state.lock() {
+        Ok(state) => state,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    state.cache = Some(RuntimeDetectionCache {
+        detected_at,
+        results: results.clone(),
+    });
+    state.in_progress = false;
+    gate.done.notify_all();
+}
+
+fn run_runtime_detection() -> HashMap<String, RuntimeDetectionResult> {
     let mut results = HashMap::new();
 
     // Builtin is always available
@@ -2155,22 +2266,56 @@ pub fn cmd_detect_runtimes() -> HashMap<String, RuntimeDetectionResult> {
     results
 }
 
+/// Detect whether external Agent Runtime CLIs are installed
+#[tauri::command]
+pub fn cmd_detect_runtimes() -> HashMap<String, RuntimeDetectionResult> {
+    let now = Instant::now();
+    let gate = runtime_detection_gate();
+    match runtime_detection_gate_decision(gate, now, RUNTIME_DETECTION_CACHE_TTL) {
+        RuntimeDetectionGateDecision::CacheHit(results) => {
+            emit_perf_trace(
+                PerfTrace::new(PerfTraceName::Runtime, "detect_cache_hit")
+                    .status("ok")
+                    .count(results.len() as u64),
+            );
+            return results;
+        }
+        RuntimeDetectionGateDecision::JoinInFlight => {
+            let start = trace_start();
+            emit_perf_trace(PerfTrace::new(PerfTraceName::Runtime, "detect_join"));
+            let results = wait_for_runtime_detection_result(gate);
+            emit_perf_trace(
+                PerfTrace::new(PerfTraceName::Runtime, "detect_join_done")
+                    .duration_ms(elapsed_ms(start))
+                    .status("ok")
+                    .count(results.len() as u64),
+            );
+            return results;
+        }
+        RuntimeDetectionGateDecision::RunDetection => {}
+    }
+
+    let start = trace_start();
+    emit_perf_trace(PerfTrace::new(PerfTraceName::Runtime, "detect_start"));
+
+    let results = run_runtime_detection();
+
+    emit_perf_trace(
+        PerfTrace::new(PerfTraceName::Runtime, "detect_done")
+            .duration_ms(elapsed_ms(start))
+            .status("ok")
+            .count(results.len() as u64),
+    );
+
+    finish_runtime_detection(gate, now, &results);
+
+    results
+}
+
 fn detect_cli(binary_name: &str) -> RuntimeDetectionResult {
     match crate::system_binary::find(binary_name) {
         Some(path) => {
-            // Try to get version — MUST use process_cmd::new() to prevent Windows console flash
-            let version = crate::process_cmd::new(&path)
-                .arg("--version")
-                .output()
-                .ok()
-                .and_then(|output| {
-                    if output.status.success() {
-                        String::from_utf8(output.stdout).ok().map(|s| s.trim().to_string())
-                    } else {
-                        None
-                    }
-                });
-
+            let version = detect_cli_version(&path);
             RuntimeDetectionResult {
                 installed: true,
                 version,
@@ -2182,5 +2327,154 @@ fn detect_cli(binary_name: &str) -> RuntimeDetectionResult {
             version: None,
             path: None,
         },
+    }
+}
+
+fn detect_cli_version(path: &Path) -> Option<String> {
+    // MUST use process_cmd::new() to prevent Windows console flash.
+    let mut cmd = crate::process_cmd::new(path);
+    cmd.arg("--version")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .stdin(Stdio::null());
+    crate::proxy_config::apply_to_subprocess(&mut cmd);
+
+    let start = Instant::now();
+    let mut child = cmd.spawn().ok()?;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                let output = child.wait_with_output().ok()?;
+                if status.success() {
+                    return String::from_utf8(output.stdout).ok().map(|s| s.trim().to_string());
+                }
+                return None;
+            }
+            Ok(None) => {
+                if start.elapsed() >= RUNTIME_DETECTION_VERSION_TIMEOUT {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return None;
+                }
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            Err(_) => return None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod runtime_detection_cache_tests {
+    use super::*;
+
+    #[test]
+    fn runtime_detection_cache_hit_within_ttl() {
+        let cached_at = Instant::now();
+        let now = cached_at + Duration::from_secs(29);
+        assert!(should_use_runtime_detection_cache(
+            now,
+            cached_at,
+            Duration::from_secs(30),
+        ));
+    }
+
+    #[test]
+    fn runtime_detection_cache_miss_after_ttl() {
+        let cached_at = Instant::now();
+        let now = cached_at + Duration::from_secs(30);
+        assert!(!should_use_runtime_detection_cache(
+            now,
+            cached_at,
+            Duration::from_secs(30),
+        ));
+    }
+
+    #[test]
+    fn runtime_detection_cache_returns_clone_not_shared_map() {
+        let mut results = HashMap::new();
+        results.insert(
+            "codex".to_string(),
+            RuntimeDetectionResult {
+                installed: true,
+                version: Some("1".to_string()),
+                path: Some("/bin/codex".to_string()),
+            },
+        );
+        let cache = RuntimeDetectionCache {
+            detected_at: Instant::now(),
+            results,
+        };
+
+        let mut cloned = clone_runtime_detection_cache_results(&cache);
+        cloned.insert(
+            "gemini".to_string(),
+            RuntimeDetectionResult {
+                installed: false,
+                version: None,
+                path: None,
+            },
+        );
+
+        assert!(cache.results.contains_key("codex"));
+        assert!(!cache.results.contains_key("gemini"));
+    }
+
+    fn test_gate() -> RuntimeDetectionGate {
+        RuntimeDetectionGate {
+            state: Mutex::new(RuntimeDetectionState {
+                cache: None,
+                in_progress: false,
+            }),
+            done: Condvar::new(),
+        }
+    }
+
+    fn test_detection_result() -> RuntimeDetectionResult {
+        RuntimeDetectionResult {
+            installed: true,
+            version: Some("1.0.0".to_string()),
+            path: Some("/bin/codex".to_string()),
+        }
+    }
+
+    #[test]
+    fn runtime_detection_gate_first_miss_runs_detection() {
+        let gate = test_gate();
+        match runtime_detection_gate_decision(&gate, Instant::now(), Duration::from_secs(30)) {
+            RuntimeDetectionGateDecision::RunDetection => {}
+            _ => panic!("expected first cold miss to run detection"),
+        }
+        let state = gate.state.lock().unwrap();
+        assert!(state.in_progress);
+    }
+
+    #[test]
+    fn runtime_detection_gate_concurrent_miss_joins_in_flight_detection() {
+        let gate = test_gate();
+        assert!(matches!(
+            runtime_detection_gate_decision(&gate, Instant::now(), Duration::from_secs(30)),
+            RuntimeDetectionGateDecision::RunDetection
+        ));
+        assert!(matches!(
+            runtime_detection_gate_decision(&gate, Instant::now(), Duration::from_secs(30)),
+            RuntimeDetectionGateDecision::JoinInFlight
+        ));
+    }
+
+    #[test]
+    fn runtime_detection_gate_cache_hit_returns_clone() {
+        let gate = test_gate();
+        let mut results = HashMap::new();
+        results.insert("codex".to_string(), test_detection_result());
+        finish_runtime_detection(&gate, Instant::now(), &results);
+
+        match runtime_detection_gate_decision(&gate, Instant::now(), Duration::from_secs(30)) {
+            RuntimeDetectionGateDecision::CacheHit(mut cached) => {
+                cached.remove("codex");
+                let state = gate.state.lock().unwrap();
+                assert!(state.cache.as_ref().unwrap().results.contains_key("codex"));
+            }
+            _ => panic!("expected cache hit"),
+        }
     }
 }

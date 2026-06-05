@@ -18,6 +18,7 @@ use crate::{ulog_info, ulog_warn, ulog_error, ulog_debug};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, Runtime};
 
+use crate::perf_trace::{elapsed_ms, emit_perf_trace, trace_start, PerfTrace, PerfTraceName};
 use crate::proxy_config;
 
 // Ensure file descriptor limit is increased only once (unix only)
@@ -652,6 +653,147 @@ impl RuntimeDriftResult {
     /// Did we observe a runtime drift? (True for both kill outcomes.)
     pub fn is_drift(&self) -> bool {
         matches!(self, Self::KilledAndRemoved | Self::DetectedKeptAlive)
+    }
+}
+
+enum ExistingSidecarReuse {
+    Healthy { port: u16, generation: u64, runtime: String },
+    Starting { port: u16, generation: u64, runtime: String },
+}
+
+fn normalize_runtime_name(runtime: Option<&str>) -> &str {
+    match runtime {
+        Some(runtime) if !runtime.is_empty() => runtime,
+        _ => "builtin",
+    }
+}
+
+fn sidecar_has_non_agent_owner(owners: &HashSet<SidecarOwner>) -> bool {
+    owners.iter().any(|owner| !matches!(owner, SidecarOwner::Agent(_)))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SidecarRemovalEventPolicy {
+    emit_stop: bool,
+    emit_terminal: bool,
+}
+
+fn sidecar_removal_event_policy(owners: &HashSet<SidecarOwner>) -> SidecarRemovalEventPolicy {
+    SidecarRemovalEventPolicy {
+        emit_stop: true,
+        emit_terminal: owners.is_empty(),
+    }
+}
+
+fn decide_runtime_drift_result(
+    sidecar_runtime: Option<&str>,
+    desired_runtime: &str,
+    owners: &HashSet<SidecarOwner>,
+) -> RuntimeDriftResult {
+    let sidecar_runtime = normalize_runtime_name(sidecar_runtime);
+    let desired_runtime = normalize_runtime_name(Some(desired_runtime));
+
+    if sidecar_runtime == desired_runtime {
+        RuntimeDriftResult::NoDrift
+    } else if sidecar_has_non_agent_owner(owners) {
+        RuntimeDriftResult::DetectedKeptAlive
+    } else {
+        RuntimeDriftResult::KilledAndRemoved
+    }
+}
+
+#[cfg(test)]
+mod lifecycle_contract_tests {
+    use super::*;
+    use std::collections::HashSet;
+
+    fn owners(values: Vec<SidecarOwner>) -> HashSet<SidecarOwner> {
+        values.into_iter().collect()
+    }
+
+    #[test]
+    fn runtime_drift_with_tab_and_agent_owner_is_kept_alive() {
+        let owners = owners(vec![
+            SidecarOwner::Tab("tab-a".to_string()),
+            SidecarOwner::Agent("agent-a".to_string()),
+        ]);
+
+        assert_eq!(
+            decide_runtime_drift_result(Some("codex"), "gemini", &owners),
+            RuntimeDriftResult::DetectedKeptAlive
+        );
+    }
+
+    #[test]
+    fn runtime_drift_with_only_agent_owners_is_killable() {
+        let owners = owners(vec![SidecarOwner::Agent("agent-a".to_string())]);
+
+        assert_eq!(
+            decide_runtime_drift_result(Some("codex"), "gemini", &owners),
+            RuntimeDriftResult::KilledAndRemoved
+        );
+    }
+
+    #[test]
+    fn builtin_runtime_names_are_normalized_for_no_drift() {
+        let owners = owners(vec![SidecarOwner::Agent("agent-a".to_string())]);
+
+        assert_eq!(
+            decide_runtime_drift_result(None, "", &owners),
+            RuntimeDriftResult::NoDrift
+        );
+        assert_eq!(
+            decide_runtime_drift_result(None, "builtin", &owners),
+            RuntimeDriftResult::NoDrift
+        );
+    }
+
+    #[test]
+    fn cron_and_background_owners_make_runtime_drift_non_killable() {
+        let cron = owners(vec![SidecarOwner::CronTask("cron-a".to_string())]);
+        let background = owners(vec![SidecarOwner::BackgroundCompletion(
+            "session-a".to_string(),
+        )]);
+
+        assert_eq!(
+            decide_runtime_drift_result(Some("codex"), "gemini", &cron),
+            RuntimeDriftResult::DetectedKeptAlive
+        );
+        assert_eq!(
+            decide_runtime_drift_result(Some("codex"), "gemini", &background),
+            RuntimeDriftResult::DetectedKeptAlive
+        );
+    }
+
+    #[test]
+    fn terminal_removal_requires_no_remaining_owners() {
+        assert_eq!(
+            sidecar_removal_event_policy(&HashSet::new()),
+            SidecarRemovalEventPolicy { emit_stop: true, emit_terminal: true }
+        );
+        assert_eq!(
+            sidecar_removal_event_policy(&owners(vec![SidecarOwner::Tab("tab-a".to_string())])),
+            SidecarRemovalEventPolicy { emit_stop: true, emit_terminal: false }
+        );
+        assert_eq!(
+            sidecar_removal_event_policy(&owners(vec![SidecarOwner::Agent("agent-a".to_string())])),
+            SidecarRemovalEventPolicy { emit_stop: true, emit_terminal: false }
+        );
+    }
+
+    #[test]
+    fn sidecar_generation_is_monotonic_and_not_reused_after_clear() {
+        let mut manager = SidecarManager::new();
+
+        let first = manager.next_generation("session-a");
+        let second = manager.next_generation("session-a");
+        assert!(second > first);
+
+        manager.clear_generation("session-a");
+        assert_eq!(manager.current_generation("session-a"), 0);
+
+        let third = manager.next_generation("session-a");
+        assert!(third > second);
     }
 }
 
@@ -1300,9 +1442,12 @@ impl SidecarManager {
         let gen = self.current_generation(session_id);
         let removed = self.sidecars.remove(session_id);
         if let Some(ref sidecar) = removed {
+            let event_policy = sidecar_removal_event_policy(&sidecar.owners);
             // send() returns Err only when there are no subscribers — fine, we
             // don't require anyone listening for sidecar removal to be valid.
-            let _ = self.stop_events.send((session_id.to_string(), gen));
+            if event_policy.emit_stop {
+                let _ = self.stop_events.send((session_id.to_string(), gen));
+            }
 
             // Terminal = no owners remained. Health monitor only auto-restarts
             // when `is_dead() && !owners.is_empty()` (see `monitor_session_sidecars`
@@ -1311,7 +1456,7 @@ impl SidecarManager {
             // Crash-with-owners stays silent here: the bound Tab keeps its
             // sessionId, and the existing `session-sidecar:restarted` Tauri
             // event drives transparent reconnection in TabProvider.
-            if sidecar.owners.is_empty() {
+            if event_policy.emit_terminal {
                 let _ = self.terminal_events.send((session_id.to_string(), gen));
             }
         }
@@ -1347,31 +1492,25 @@ impl SidecarManager {
         session_id: &str,
         desired_runtime: &str,
     ) -> RuntimeDriftResult {
-        let effective_desired = if desired_runtime.is_empty() {
-            "builtin"
-        } else {
-            desired_runtime
+        let decision = match self.sidecars.get(session_id) {
+            Some(sidecar) => decide_runtime_drift_result(
+                sidecar.runtime.as_deref(),
+                desired_runtime,
+                &sidecar.owners,
+            ),
+            None => RuntimeDriftResult::NoDrift,
         };
-        let (drift, has_non_agent_owner) = match self.sidecars.get(session_id) {
-            Some(sidecar) => {
-                let sidecar_runtime = sidecar.runtime.as_deref().unwrap_or("builtin");
-                let drift = sidecar_runtime != effective_desired;
-                let non_agent = sidecar.owners.iter().any(|o| !matches!(o, SidecarOwner::Agent(_)));
-                (drift, non_agent)
-            }
-            None => (false, false),
-        };
-        if !drift {
-            return RuntimeDriftResult::NoDrift;
+        if decision == RuntimeDriftResult::NoDrift {
+            return decision;
         }
-        if has_non_agent_owner {
+        if decision == RuntimeDriftResult::DetectedKeptAlive {
             ulog_info!(
                 "[sidecar] Runtime drift on session {} detected but kept alive \
                  — non-Agent owner (Tab/Cron/BackgroundCompletion) still attached. \
                  Caller should fork via a fresh session_id.",
                 session_id
             );
-            return RuntimeDriftResult::DetectedKeptAlive;
+            return decision;
         }
         if let Some(sidecar) = self.sidecars.get_mut(session_id) {
             let _ = sidecar.process.kill();
@@ -1384,7 +1523,7 @@ impl SidecarManager {
         // and the peer map will never reference it again, so there's no TOCTOU
         // concern that kept it alive in the normal remove_sidecar path.
         self.sidecar_generations.remove(session_id);
-        RuntimeDriftResult::KilledAndRemoved
+        decision
     }
 
     /// Clear the generation counter for a session.
@@ -3170,6 +3309,15 @@ pub fn ensure_session_sidecar_with_runtime_override<R: Runtime>(
     runtime_override: Option<String>,
 ) -> Result<EnsureSidecarResult, String> {
     ulog_info!("[sidecar] ensure_session_sidecar called for session: {}, owner: {:?}", session_id, owner);
+    let ensure_started = trace_start();
+    let owner_for_trace = format!("{:?}", owner);
+    let requested_runtime_for_trace = normalize_runtime_name(runtime_override.as_deref()).to_string();
+    emit_perf_trace(
+        PerfTrace::new(PerfTraceName::SidecarBoot, "ensure_start")
+            .session_id(Some(session_id))
+            .runtime(Some(&requested_runtime_for_trace))
+            .detail("owner", &owner_for_trace),
+    );
 
     // Ensure file descriptor limit is high enough for Bun
     ensure_high_file_descriptor_limit();
@@ -3218,7 +3366,8 @@ pub fn ensure_session_sidecar_with_runtime_override<R: Runtime>(
     // owners always honor the user's latest runtime choice, including the
     // external → builtin switch direction.
 
-    let existing_sidecar_info: Option<u16> = {
+    let existing_sidecar_info: Option<ExistingSidecarReuse> = {
+        let generation = manager_guard.current_generation(session_id);
         if let Some(sidecar) = manager_guard.sidecars.get_mut(session_id) {
             if sidecar.is_dead() {
                 // Process exited, clean up
@@ -3230,16 +3379,25 @@ pub fn ensure_session_sidecar_with_runtime_override<R: Runtime>(
                 None
             } else if sidecar.is_reusable() {
                 // Healthy — needs HTTP verification outside the lock
-                Some(sidecar.port)
+                Some(ExistingSidecarReuse::Healthy {
+                    port: sidecar.port,
+                    generation,
+                    runtime: normalize_runtime_name(sidecar.runtime.as_deref()).to_string(),
+                })
             } else {
-                // Starting — another thread is doing wait_for_health, just join
+                // Starting — another thread is doing wait_for_health/readiness.
+                // Add the owner now, then wait for /health/ready outside the lock.
                 ulog_info!(
                     "[sidecar] Session {} Sidecar still starting on port {}, adding owner {:?}",
                     session_id, sidecar.port, owner
                 );
                 validate_sidecar_runtime_invariant(session_id, sidecar.runtime.as_deref(), "reuse-starting");
-                sidecar.add_owner(owner);
-                return Ok(EnsureSidecarResult { port: sidecar.port, is_new: false });
+                sidecar.add_owner(owner.clone());
+                Some(ExistingSidecarReuse::Starting {
+                    port: sidecar.port,
+                    generation,
+                    runtime: normalize_runtime_name(sidecar.runtime.as_deref()).to_string(),
+                })
             }
         } else {
             None
@@ -3250,12 +3408,40 @@ pub fn ensure_session_sidecar_with_runtime_override<R: Runtime>(
     // CRITICAL: The lock is dropped during the 2s HTTP check. Another thread (health monitor)
     // can replace the sidecar during this window. We use a generation counter to detect this
     // and avoid accidentally killing the healthy replacement.
-    if let Some(port) = existing_sidecar_info {
-        let pre_gen = manager_guard.current_generation(session_id);
+    if let Some(existing) = existing_sidecar_info {
+        let (port, pre_gen, runtime_for_trace, wait_for_starting) = match existing {
+            ExistingSidecarReuse::Healthy { port, generation, runtime } => {
+                (port, generation, runtime, false)
+            }
+            ExistingSidecarReuse::Starting { port, generation, runtime } => {
+                (port, generation, runtime, true)
+            }
+        };
         drop(manager_guard);
 
-        // Verify HTTP server is actually responsive (not just process alive)
-        let http_healthy = check_sidecar_http_health(port);
+        let check_started = trace_start();
+        emit_perf_trace(
+            PerfTrace::new(PerfTraceName::SidecarBoot, "reuse_check_start")
+                .session_id(Some(session_id))
+                .runtime(Some(&runtime_for_trace))
+                .detail("port", port)
+                .detail("starting", wait_for_starting),
+        );
+        let http_healthy = if wait_for_starting {
+            wait_for_readiness(port, 30).is_ok()
+        } else {
+            // Verify HTTP server is actually responsive (not just process alive)
+            check_sidecar_http_health(port)
+        };
+        emit_perf_trace(
+            PerfTrace::new(PerfTraceName::SidecarBoot, "reuse_check_end")
+                .duration_ms(elapsed_ms(check_started))
+                .session_id(Some(session_id))
+                .runtime(Some(&runtime_for_trace))
+                .status(if http_healthy { "ok" } else { "error" })
+                .detail("port", port)
+                .detail("starting", wait_for_starting),
+        );
 
         // Re-acquire lock after HTTP check
         let mut manager_guard = manager.lock().map_err(|e| e.to_string())?;
@@ -3276,7 +3462,17 @@ pub fn ensure_session_sidecar_with_runtime_override<R: Runtime>(
                         session_id, sidecar.port, sidecar.state
                     );
                     validate_sidecar_runtime_invariant(session_id, sidecar.runtime.as_deref(), "reuse-replacement");
-                    sidecar.add_owner(owner);
+                    sidecar.add_owner(owner.clone());
+                    emit_perf_trace(
+                        PerfTrace::new(PerfTraceName::SidecarBoot, "ensure_done")
+                            .duration_ms(elapsed_ms(ensure_started))
+                            .session_id(Some(session_id))
+                            .runtime(Some(normalize_runtime_name(sidecar.runtime.as_deref())))
+                            .status("ok")
+                            .detail("port", sidecar.port)
+                            .detail("is_new", false)
+                            .detail("reuse", "replacement"),
+                    );
                     return Ok(EnsureSidecarResult {
                         port: sidecar.port,
                         is_new: false,
@@ -3293,7 +3489,40 @@ pub fn ensure_session_sidecar_with_runtime_override<R: Runtime>(
                         session_id, port, owner
                     );
                     validate_sidecar_runtime_invariant(session_id, sidecar.runtime.as_deref(), "reuse-http-healthy");
-                    sidecar.add_owner(owner);
+                    sidecar.add_owner(owner.clone());
+                    emit_perf_trace(
+                        PerfTrace::new(PerfTraceName::SidecarBoot, "ensure_done")
+                            .duration_ms(elapsed_ms(ensure_started))
+                            .session_id(Some(session_id))
+                            .runtime(Some(&runtime_for_trace))
+                            .status("ok")
+                            .detail("port", port)
+                            .detail("is_new", false)
+                            .detail("reuse", if wait_for_starting { "starting-ready" } else { "healthy" }),
+                    );
+                    return Ok(EnsureSidecarResult {
+                        port,
+                        is_new: false,
+                    });
+                }
+                if sidecar.port == port && wait_for_starting {
+                    ulog_info!(
+                        "[sidecar] Session {} starting Sidecar reached readiness on port {}, adding owner {:?}",
+                        session_id, port, owner
+                    );
+                    validate_sidecar_runtime_invariant(session_id, sidecar.runtime.as_deref(), "reuse-starting-ready");
+                    sidecar.state = SidecarState::Healthy;
+                    sidecar.add_owner(owner.clone());
+                    emit_perf_trace(
+                        PerfTrace::new(PerfTraceName::SidecarBoot, "ensure_done")
+                            .duration_ms(elapsed_ms(ensure_started))
+                            .session_id(Some(session_id))
+                            .runtime(Some(&runtime_for_trace))
+                            .status("ok")
+                            .detail("port", port)
+                            .detail("is_new", false)
+                            .detail("reuse", "starting-ready"),
+                    );
                     return Ok(EnsureSidecarResult {
                         port,
                         is_new: false,
@@ -3314,7 +3543,7 @@ pub fn ensure_session_sidecar_with_runtime_override<R: Runtime>(
             manager_guard.remove_sidecar(session_id);
         }
 
-        return create_new_session_sidecar(
+        let result = create_new_session_sidecar(
             app_handle,
             manager,
             session_id,
@@ -3323,10 +3552,22 @@ pub fn ensure_session_sidecar_with_runtime_override<R: Runtime>(
             manager_guard,
             runtime_override.as_deref(),
         );
+        if let Ok(ensure_result) = &result {
+            emit_perf_trace(
+                PerfTrace::new(PerfTraceName::SidecarBoot, "ensure_done")
+                    .duration_ms(elapsed_ms(ensure_started))
+                    .session_id(Some(session_id))
+                    .runtime(Some(&requested_runtime_for_trace))
+                    .status("ok")
+                    .detail("port", ensure_result.port)
+                    .detail("is_new", ensure_result.is_new),
+            );
+        }
+        return result;
     }
 
     // No existing sidecar found, create a new one with the original guard
-    create_new_session_sidecar(
+    let result = create_new_session_sidecar(
         app_handle,
         manager,
         session_id,
@@ -3334,7 +3575,19 @@ pub fn ensure_session_sidecar_with_runtime_override<R: Runtime>(
         owner,
         manager_guard,
         runtime_override.as_deref(),
-    )
+    );
+    if let Ok(ensure_result) = &result {
+        emit_perf_trace(
+            PerfTrace::new(PerfTraceName::SidecarBoot, "ensure_done")
+                .duration_ms(elapsed_ms(ensure_started))
+                .session_id(Some(session_id))
+                .runtime(Some(&requested_runtime_for_trace))
+                .status("ok")
+                .detail("port", ensure_result.port)
+                .detail("is_new", ensure_result.is_new),
+        );
+    }
+    result
 }
 
 /// Helper function to create a new session sidecar
@@ -3348,6 +3601,7 @@ fn create_new_session_sidecar<R: Runtime>(
     mut manager_guard: std::sync::MutexGuard<'_, SidecarManager>,
     runtime_override: Option<&str>,
 ) -> Result<EnsureSidecarResult, String> {
+    let boot_started = trace_start();
 
     // Guard against double-creation: if another thread already created a sidecar for this
     // session (e.g., health monitor raced with frontend), reuse it instead of spawning another.
@@ -3453,6 +3707,7 @@ fn create_new_session_sidecar<R: Runtime>(
     if let Some(runtime) = &resolved_runtime {
         cmd.env("MYAGENTS_RUNTIME", runtime);
     }
+    let runtime_for_trace = normalize_runtime_name(resolved_runtime.as_deref()).to_string();
 
     cmd.stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -3468,10 +3723,32 @@ fn create_new_session_sidecar<R: Runtime>(
     }
 
     // Spawn
+    emit_perf_trace(
+        PerfTrace::new(PerfTraceName::SidecarBoot, "spawn_start")
+            .session_id(Some(session_id))
+            .runtime(Some(&runtime_for_trace))
+            .detail("owner", format!("{:?}", owner)),
+    );
     let mut child = cmd.spawn().map_err(|e| {
         ulog_error!("[sidecar] Failed to spawn SessionSidecar: {}", e);
+        emit_perf_trace(
+            PerfTrace::new(PerfTraceName::SidecarBoot, "spawn_failed")
+                .duration_ms(elapsed_ms(boot_started))
+                .session_id(Some(session_id))
+                .runtime(Some(&runtime_for_trace))
+                .status("error")
+                .detail("error", e.to_string()),
+        );
         format!("Failed to spawn sidecar: {}", e)
     })?;
+    emit_perf_trace(
+        PerfTrace::new(PerfTraceName::SidecarBoot, "spawned")
+            .duration_ms(elapsed_ms(boot_started))
+            .session_id(Some(session_id))
+            .runtime(Some(&runtime_for_trace))
+            .status("ok")
+            .detail("port", port),
+    );
 
     // Capture stdout/stderr → 写入统一日志
     let session_id_clone = session_id.to_string();
@@ -3521,6 +3798,14 @@ fn create_new_session_sidecar<R: Runtime>(
         #[cfg(target_os = "windows")]
         maybe_mark_crashed_node(&status, &node_path);
         let diag = diagnose_immediate_exit(&status, &node_path);
+        emit_perf_trace(
+            PerfTrace::new(PerfTraceName::SidecarBoot, "spawn_immediate_exit")
+                .duration_ms(elapsed_ms(boot_started))
+                .session_id(Some(session_id))
+                .runtime(Some(&runtime_for_trace))
+                .status("error")
+                .detail("status", format!("{:?}", status)),
+        );
         return Err(diag);
     }
 
@@ -3562,13 +3847,32 @@ fn create_new_session_sidecar<R: Runtime>(
     // complete) so renderer-driven session startup gates on actual readiness,
     // not just liveness. Other startup paths (cron / IM bot) keep the looser
     // liveness-only contract — they don't surface a "still warming up" UI.
+    let health_started = trace_start();
     match wait_for_health(port, Some(alive_check)) {
         Ok(()) => {
+            emit_perf_trace(
+                PerfTrace::new(PerfTraceName::SidecarBoot, "tcp_live")
+                    .duration_ms(elapsed_ms(health_started))
+                    .session_id(Some(session_id))
+                    .runtime(Some(&runtime_for_trace))
+                    .status("ok")
+                    .detail("port", port),
+            );
             // Pattern 4: tighten the renderer-driven session sidecar startup
             // to wait for /health/ready as well. 30s timeout matches existing
             // long-running migration / SDK init budgets.
+            let readiness_started = trace_start();
             if let Err(e) = wait_for_readiness(port, 30) {
                 ulog_error!("[sidecar] Session {} /health/ready failed: {}", session_id, e);
+                emit_perf_trace(
+                    PerfTrace::new(PerfTraceName::SidecarBoot, "ready_failed")
+                        .duration_ms(elapsed_ms(readiness_started))
+                        .session_id(Some(session_id))
+                        .runtime(Some(&runtime_for_trace))
+                        .status("error")
+                        .detail("port", port)
+                        .detail("error", &e),
+                );
                 let mut manager_guard = manager.lock().map_err(|_| e.clone())?;
                 let port_matches = manager_guard.sidecars.get(session_id)
                     .map(|s| s.port == port)
@@ -3595,6 +3899,14 @@ fn create_new_session_sidecar<R: Runtime>(
                 "[sidecar] SessionSidecar for session {} is healthy on port {}",
                 session_id, port
             );
+            emit_perf_trace(
+                PerfTrace::new(PerfTraceName::SidecarBoot, "ready_ok")
+                    .duration_ms(elapsed_ms(boot_started))
+                    .session_id(Some(session_id))
+                    .runtime(Some(&runtime_for_trace))
+                    .status("ok")
+                    .detail("port", port),
+            );
             Ok(EnsureSidecarResult {
                 port,
                 is_new: true,
@@ -3602,6 +3914,15 @@ fn create_new_session_sidecar<R: Runtime>(
         }
         Err(e) => {
             ulog_error!("[sidecar] SessionSidecar health check failed: {}", e);
+            emit_perf_trace(
+                PerfTrace::new(PerfTraceName::SidecarBoot, "tcp_live_failed")
+                    .duration_ms(elapsed_ms(health_started))
+                    .session_id(Some(session_id))
+                    .runtime(Some(&runtime_for_trace))
+                    .status("error")
+                    .detail("port", port)
+                    .detail("error", &e),
+            );
             let mut manager_guard = manager.lock().map_err(|_| e.clone())?;
             // Verify port before acting — another thread may have replaced the sidecar
             let port_matches = manager_guard.sidecars.get(session_id)
@@ -4404,11 +4725,22 @@ pub async fn execute_cron_task<R: Runtime>(
         "[sidecar] execute_cron_task called for task {} in workspace {}",
         payload.task_id, workspace_path
     );
+    let cron_started = trace_start();
+    let cron_task_id = payload.task_id.clone();
+    let cron_runtime = normalize_runtime_name(payload.runtime.as_deref()).to_string();
 
     // Require session_id for Session-centric Sidecar
     let session_id = payload.session_id.clone().ok_or_else(|| {
         let err = format!("[sidecar] execute_cron_task requires session_id for task {}", payload.task_id);
         ulog_error!("{}", err);
+        emit_perf_trace(
+            PerfTrace::new(PerfTraceName::BackgroundJob, "cron_execute")
+                .duration_ms(elapsed_ms(cron_started))
+                .runtime(Some(&cron_runtime))
+                .status("error")
+                .detail("taskId", &cron_task_id)
+                .detail("error", &err),
+        );
         err
     })?;
 
@@ -4441,7 +4773,19 @@ pub async fn execute_cron_task<R: Runtime>(
         )
     })
     .await
-    .map_err(|e| format!("spawn_blocking failed: {}", e))?
+    .map_err(|e| {
+        let err = format!("spawn_blocking failed: {}", e);
+        emit_perf_trace(
+            PerfTrace::new(PerfTraceName::BackgroundJob, "cron_execute")
+                .duration_ms(elapsed_ms(cron_started))
+                .session_id(Some(&session_id))
+                .runtime(Some(&cron_runtime))
+                .status("error")
+                .detail("taskId", &cron_task_id)
+                .detail("error", &err),
+        );
+        err
+    })?
     .map_err(|e| {
         ulog_error!("[sidecar] ensure_session_sidecar failed for task {}: {}", payload.task_id, e);
         let _ = app_handle.emit("cron:debug", serde_json::json!({
@@ -4449,10 +4793,20 @@ pub async fn execute_cron_task<R: Runtime>(
             "message": format!("execute_cron_task: ensure_session_sidecar FAILED: {}", e),
             "error": true
         }));
+        emit_perf_trace(
+            PerfTrace::new(PerfTraceName::BackgroundJob, "cron_execute")
+                .duration_ms(elapsed_ms(cron_started))
+                .session_id(Some(&session_id))
+                .runtime(Some(&cron_runtime))
+                .status("error")
+                .detail("taskId", &cron_task_id)
+                .detail("error", &e),
+        );
         e
     })?;
 
     let port = result.port;
+    let sidecar_is_new = result.is_new;
 
     // Emit debug event
     let _ = app_handle.emit("cron:debug", serde_json::json!({
@@ -4537,13 +4891,37 @@ pub async fn execute_cron_task<R: Runtime>(
     // Only deactivate if the task is being stopped or completed.
     // For now, we keep it activated - the cron scheduler should deactivate when task stops.
 
-    let response = response.map_err(|e| format!("[sidecar] HTTP request failed: {}", e))?;
+    let response = response.map_err(|e| {
+        let err = format!("[sidecar] HTTP request failed: {}", e);
+        emit_perf_trace(
+            PerfTrace::new(PerfTraceName::BackgroundJob, "cron_execute")
+                .duration_ms(elapsed_ms(cron_started))
+                .session_id(Some(&session_id))
+                .runtime(Some(&cron_runtime))
+                .status("error")
+                .detail("taskId", &cron_task_id)
+                .detail("error", &err),
+        );
+        err
+    })?;
 
     let status = response.status();
     let body = response
         .text()
         .await
-        .map_err(|e| format!("[sidecar] Failed to read response body: {}", e))?;
+        .map_err(|e| {
+            let err = format!("[sidecar] Failed to read response body: {}", e);
+            emit_perf_trace(
+                PerfTrace::new(PerfTraceName::BackgroundJob, "cron_execute")
+                    .duration_ms(elapsed_ms(cron_started))
+                    .session_id(Some(&session_id))
+                    .runtime(Some(&cron_runtime))
+                    .status("error")
+                    .detail("taskId", &cron_task_id)
+                    .detail("error", &err),
+            );
+            err
+        })?;
 
     ulog_info!(
         "[sidecar] Cron task {} response: status={}, body={}",
@@ -4552,11 +4930,35 @@ pub async fn execute_cron_task<R: Runtime>(
 
     // Parse response
     let result: CronExecuteResponse = serde_json::from_str(&body)
-        .map_err(|e| format!("[sidecar] Failed to parse response JSON: {} (body: {})", e, body))?;
+        .map_err(|e| {
+            let err = format!("[sidecar] Failed to parse response JSON: {} (body: {})", e, body);
+            emit_perf_trace(
+                PerfTrace::new(PerfTraceName::BackgroundJob, "cron_execute")
+                    .duration_ms(elapsed_ms(cron_started))
+                    .session_id(Some(&session_id))
+                    .runtime(Some(&cron_runtime))
+                    .status("error")
+                    .detail("taskId", &cron_task_id)
+                    .detail("statusCode", status.as_u16())
+                    .detail("error", &err),
+            );
+            err
+        })?;
 
     ulog_info!(
         "[sidecar] Cron task {} parsed response: success={}, error={:?}, ai_requested_exit={:?}",
         payload.task_id, result.success, result.error, result.ai_requested_exit
+    );
+    emit_perf_trace(
+        PerfTrace::new(PerfTraceName::BackgroundJob, "cron_execute")
+            .duration_ms(elapsed_ms(cron_started))
+            .session_id(Some(&session_id))
+            .runtime(Some(&cron_runtime))
+            .status(if result.success { "ok" } else { "error" })
+            .detail("taskId", &cron_task_id)
+            .detail("statusCode", status.as_u16())
+            .detail("isNewSidecar", sidecar_is_new)
+            .detail("aiRequestedExit", result.ai_requested_exit.unwrap_or(false)),
     );
 
     Ok(result)

@@ -31,14 +31,21 @@ MyAgents 使用统一日志系统聚合来自三个来源的日志：
 | 来源 | 持久化方式 | 说明 |
 |------|-----------|------|
 | React | 前端 buffer → `/api/unified-log` | 批量发送，500ms debounce |
-| NODE | 服务端 `UnifiedLogger.ts` 直接写入 | 同步写入 |
-| Rust | `logger.rs` 直接写入 | 同步写入，避免循环 |
+| NODE | 服务端 `UnifiedLogger.ts` queue + 100ms flusher | async/bounded writer，队列上限 1000，50MB rotation，overflow 计数告警 |
+| Rust | `logger.rs` bounded mpsc + BufWriter | async/bounded writer，200ms flush，overflow 计数告警；Rust 侧仍直接写文件避免循环 |
 
 Rust 日志直接在 Rust 侧写入文件，而不是通过前端 API，这样可以避免日志循环：
 ```
 ❌ Rust log → 前端 → POST /api/unified-log → Rust proxy 日志 → 新 Rust log → ...
-✅ Rust log → 直接写入文件 (无循环)
+✅ Rust log → logger.rs bounded writer → 直接写入文件 (无循环)
 ```
+
+Node/Rust 日志都不是 per-call 同步写入：
+
+- Node `UnifiedLogger.ts`：in-memory queue、100ms flusher、bounded queue、drop counter、50MB per-file rotation、exit drain。
+- Rust `logger.rs`：bounded mpsc、single writer task、`BufWriter<File>`、200ms flush、drop counter、pre-init sync fallback。
+
+统一日志已有 correlation fields，可直接用于性能 trace 和排障过滤：`sessionId / tabId / ownerId / requestId / turnId / runtime`。
 
 ## 日志类型
 
@@ -56,6 +63,12 @@ export interface LogEntry {
   message: string;
   timestamp: string;  // ISO 8601
   meta?: Record<string, unknown>;
+  sessionId?: string;
+  tabId?: string;
+  ownerId?: string;
+  requestId?: string;
+  turnId?: string;
+  runtime?: string;
 }
 ```
 

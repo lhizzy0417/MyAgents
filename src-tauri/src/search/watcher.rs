@@ -33,6 +33,7 @@ use std::time::Duration;
 
 use notify_debouncer_full::{new_debouncer, notify::RecursiveMode, DebounceEventResult};
 
+use crate::perf_trace::{elapsed_ms, emit_perf_trace, trace_start, PerfTrace, PerfTraceName};
 use crate::utils::bom::strip_bom;
 use crate::{ulog_error, ulog_info, ulog_warn};
 
@@ -118,6 +119,7 @@ fn run_watcher(data_dir: PathBuf, session_index: Arc<SessionIndex>) -> Result<()
                 continue;
             }
         };
+        let trace_started = trace_start();
 
         // Partition paths into per-session deltas. Use a HashSet so repeated
         // events for the same session within one tick collapse to a single
@@ -175,20 +177,34 @@ fn run_watcher(data_dir: PathBuf, session_index: Arc<SessionIndex>) -> Result<()
         // Apply deletes first so a delete+readd sequence within one tick
         // (rare but possible: rename) doesn't leave a dangling delete
         // clobbering a fresh reindex.
+        let deleted_count = deleted.len() as u64;
+        let changed_count = changed.len() as u64;
+        let mut error_count = 0u64;
         for id in deleted {
             // If the session is in both sets the JSONL file is gone — the
             // correct outcome is delete, so drop the stale reindex.
             changed.remove(&id);
             if let Err(e) = session_index.delete_session(&id) {
+                error_count += 1;
                 ulog_warn!("[search] delete_session({}) failed: {}", id, e);
             }
         }
 
         for id in changed {
             if let Err(e) = session_index.reindex_session(&id, &sessions_dir) {
+                error_count += 1;
                 ulog_warn!("[search] reindex_session({}) failed: {}", id, e);
             }
         }
+        emit_perf_trace(
+            PerfTrace::new(PerfTraceName::BackgroundJob, "search_watcher_batch")
+                .duration_ms(elapsed_ms(trace_started))
+                .count(changed_count + deleted_count)
+                .status(if error_count == 0 { "ok" } else { "error" })
+                .detail("changed", changed_count)
+                .detail("deleted", deleted_count)
+                .detail("errors", error_count),
+        );
     }
 
     // The channel only closes when the debouncer is dropped. We explicitly
