@@ -246,9 +246,25 @@ snippet 构建常见 "取匹配位置前后各 N 字符" 的近似切片。裸 `
 |------|------|---------|
 | **Session 搜索 Overlay** | `TaskCenterOverlay.tsx` | Launcher 搜索按钮 → `initialMode='search'` 自动聚焦输入框 |
 | **文件搜索模式** | `DirectoryPanel.tsx` | 侧边栏搜索按钮切换 mode → 用户输入 query → `searchWorkspaceFiles` 立即返回 → 后台 `refreshWorkspaceFileIndex` → 有变化时重搜 |
-| **结果项** | `search/SessionSearchItem.tsx`, `search/FileSearchResults.tsx` | 渲染 hit，点击跳转 session / 预览文件 |
-| **文件跳转定位行** | `FilePreviewModal.tsx` + `MonacoEditor.tsx` | 从 FileSearchResults 传 `initialLineNumber` → `editor.revealLineInCenter()` |
+| **结果项** | `search/SessionSearchItem.tsx`, `search/FileSearchResults.tsx` | 渲染 hit，点击跳转 session / 预览文件 / 在文件目录中展示 |
+| **文件跳转定位行** | `DirectoryPanel.tsx` + `FilePreviewModal.tsx` + `MonacoEditor.tsx` | `FileSearchResults` 触发 `FilePreviewFocusTarget` 事件，已打开 editor 也会重新 `revealLineInCenter()`；`initialLineNumber` 仅保留为兼容字段 |
+| **文件树定位** | `DirectoryPanel.tsx` + `WorkspaceTreeViewport.tsx` | 搜索结果 path-based reveal，逐层展开祖先目录，通过 Virtuoso `scrollToIndex` 滚动并消费 `revealRequest` |
 | **高亮渲染** | `search/SearchHighlight.tsx` | 消费 `[start, end][]` UTF-16 offsets |
+
+## 工作区文件搜索结果导航
+
+搜索结果导航是 **renderer-side 交互协议**，不是 Rust 搜索引擎的一部分。Rust `SearchEngine` 只负责返回 `FileSearchHit` / `FileMatchLine`；预览、行定位、右键菜单、回到文件树均复用现有前端文件系统抽象和目录树，不新增 Sidecar HTTP 端点，也不新增 Rust IPC 命令。
+
+关键不变量：
+
+- **路径归一化**：`DirectoryPanel` 在写入 search UI state 前调用 `normalizeFileSearchHits`，把 Windows `\` 转为 `/`。后续 active target、ancestor 计算、文件树 reveal 都只处理 workspace-relative slash path。
+- **结果菜单 path-based**：搜索结果右键菜单维护独立的 `SearchResultContextMenuState`，菜单固定为 `预览`、`在文件目录中展示`、`打开所在文件夹`，不依赖 `findInTree(...)` 反查已加载 node，也不复用普通文件树的删除 / 重命名等高风险菜单项。
+- **Reveal-in-tree**：`handleRevealSearchResultInTree(path)` 用 `ancestorDirectoryPaths(path)` 逐层 `openPath`，必要时通过现有 `expandDir` 加载目录。目标文件 node 找到后才退出搜索模式、选中节点，并发送 `treeRevealRequest`。
+- **Reveal 请求消费**：`WorkspaceTreeViewport` 在 `rows` 中找到目标 path 后调用 Virtuoso `scrollToIndex({ align: 'center', behavior: 'smooth' })`，随后触发 `onRevealHandled(id)` 清掉请求，避免树重渲染后旧 reveal 回放。
+- **取消语义**：新的 reveal 请求会让旧请求返回 `cancelled`，不弹错误 toast；只有目标确实 missing 才提示 `文件不存在或已删除`。
+- **Preview focus event**：点击搜索命中行会生成 `FilePreviewFocusTarget`。该事件通过 `DirectoryPanel -> Chat/FileActionContext -> FilePreviewModal -> MonacoEditor` 传递。Monaco 侧以 focus target 对象身份去重，而不是只看 `requestId`，所以不同来源不会碰撞，同一行重复点击也能重新定位。
+- **Markdown 源码定位**：Markdown rendered preview 没有稳定源码行号映射。带 search focus target 打开 Markdown 时切到 edit/source Monaco 视图定位，不做 rendered DOM 反推。
+- **展开状态保留**：新 query 首次结果默认展开全部命中文件；同 query 后台 refresh 使用 `mergeExpandedFilesAfterRefresh`，保留用户手动折叠/展开，新增命中文件默认展开，消失文件被移除。
 
 ## 与 Pit-of-Success 模块的关系
 
@@ -274,6 +290,9 @@ snippet 构建常见 "取匹配位置前后各 N 字符" 的近似切片。裸 `
 | Writer 打不开 | `tantivy-writer.lock` 冲突 | 上次进程崩溃留下锁文件 | Session / workspace index writer 创建都会自动清理并重试 |
 | 重启后第一次文件搜索仍冷建 | 文件区显示长时间“搜索中” | 前台 `search` 错误调用了 cold build，或等待正在 cold build 的 workspace slot | `search` 只能用持久 index 或 direct scan fallback；cold build 只能由后台 `refresh_or_create` 触发 |
 | 文件 symlink 指到工作区外 | 搜索结果泄露外部文件片段 | 扫描或读取阶段跟随 symlink | `file_indexer` 扫描和读前都用 `symlink_metadata`，并按 discovery state 二次校验 |
+| 搜索命中同文件不跳转 | 右侧仍停在上一次行号 | 只依赖一次性的 `initialLineNumber` 或 remount editor | 使用 `FilePreviewFocusTarget` 事件驱动已 mount Monaco |
+| 点击“在文件目录中展示”后偶发跳旧文件 | 目录树重渲染时旧 reveal 再次执行 | `revealRequest` 没有被消费清空 | `WorkspaceTreeViewport` 成功 `scrollToIndex` 后调用 `onRevealHandled` |
+| Windows 搜索结果无法在树中定位 | 搜索 hit path 带 `\`，文件树 path 带 `/` | 前端没有在搜索结果入口归一化 path | `normalizeFileSearchHits` 入 state 前统一转 slash path |
 
 ## 相关代码索引
 
@@ -281,5 +300,6 @@ snippet 构建常见 "取匹配位置前后各 N 字符" 的近似切片。裸 `
 - Tauri 注册：`src-tauri/src/lib.rs`（`invoke_handler` + `.setup()` 初始化）
 - 前端 API：`src/renderer/api/searchClient.ts`
 - 前端组件：`src/renderer/components/search/`
+- 搜索导航 helper：`src/renderer/utils/workspaceSearchNavigation.ts`
 - 文件预览跳转：`src/renderer/components/FilePreviewModal.tsx`, `MonacoEditor.tsx`
-- 产品需求：`specs/prd/prd_0.1.65_full_text_search.md`
+- 产品需求：`specs/prd/prd_0.1.65_full_text_search.md`, `specs/prd/prd_0.2.31_workspace_search_result_navigation.md`
