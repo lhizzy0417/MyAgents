@@ -1,14 +1,19 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Virtuoso } from "react-virtuoso";
-import type { Components, ContextProp, ListRange } from "react-virtuoso";
+import type { Components, ContextProp } from "react-virtuoso";
 import type { VirtuosoHandle } from "react-virtuoso";
 
 import { WorkspaceTreeRow } from "./WorkspaceTreeRow";
 import { WorkspaceTreeStickyAncestors } from "./WorkspaceTreeStickyAncestors";
+import {
+  MAX_STICKY_ANCESTOR_DEPTH,
+  resolveStickyAncestors,
+} from "./treeFlatten";
 import type { StickyAncestor, VisibleTreeRow } from "./treeTypes";
 
 interface ViewportContext {
   stickyHeight: number;
+  footerHeight: number;
 }
 
 const TreeHeaderSpacer = memo(function TreeHeaderSpacer({
@@ -20,8 +25,25 @@ const TreeHeaderSpacer = memo(function TreeHeaderSpacer({
   return <div aria-hidden="true" style={{ height: context.stickyHeight }} />;
 });
 
+// Complement of the sticky header. Header + footer always sum to a CONSTANT
+// `MAX_STICKY_ANCESTOR_DEPTH * rowHeight`, so the total scroll-content height
+// never changes as the breadcrumb grows/shrinks. That keeps `maxScroll` fixed,
+// which is what makes the bottom flicker-free (the bottom previously had no
+// scroll slack, so header-height changes perturbed the pinned scroll position).
+// The reserved bottom space also lets the last rows scroll clear of the sticky
+// bar, mirroring an editor's "scroll beyond last line".
+const TreeFooterSpacer = memo(function TreeFooterSpacer({
+  context,
+}: ContextProp<ViewportContext>) {
+  if (context.footerHeight <= 0) {
+    return null;
+  }
+  return <div aria-hidden="true" style={{ height: context.footerHeight }} />;
+});
+
 const TREE_COMPONENTS: Components<VisibleTreeRow, ViewportContext> = {
   Header: TreeHeaderSpacer,
+  Footer: TreeFooterSpacer,
 };
 
 interface WorkspaceTreeViewportProps {
@@ -62,7 +84,6 @@ export const WorkspaceTreeViewport = memo(function WorkspaceTreeViewport({
   onRowDragLeave,
   onScrollTopChange,
 }: WorkspaceTreeViewportProps) {
-  const [firstVisibleIndex, setFirstVisibleIndex] = useState(0);
   const [scrollTop, setScrollTop] = useState(initialScrollTop);
   const [scrollerElement, setScrollerElement] = useState<HTMLElement | null>(
     null,
@@ -97,18 +118,29 @@ export const WorkspaceTreeViewport = memo(function WorkspaceTreeViewport({
     };
   }, [onScrollTopChange, scrollerElement]);
 
+  // Sticky breadcrumb derived purely from the (now stable) scroll position —
+  // never from Virtuoso's rendered range, which is both a feedback variable and
+  // offset from the visual top by the overscan. See `resolveStickyAncestors`.
   const stickyAncestors = useMemo(
-    () => getStickyAncestors(firstVisibleIndex, scrollTop),
-    [firstVisibleIndex, getStickyAncestors, scrollTop],
+    () =>
+      resolveStickyAncestors(
+        scrollTop,
+        rowHeight,
+        MAX_STICKY_ANCESTOR_DEPTH,
+        (firstVisibleIndex) => getStickyAncestors(firstVisibleIndex, scrollTop),
+      ),
+    [getStickyAncestors, rowHeight, scrollTop],
   );
   const context = useMemo<ViewportContext>(
-    () => ({ stickyHeight: stickyAncestors.length * rowHeight }),
+    () => ({
+      stickyHeight: stickyAncestors.length * rowHeight,
+      footerHeight:
+        Math.max(0, MAX_STICKY_ANCESTOR_DEPTH - stickyAncestors.length) *
+        rowHeight,
+    }),
     [rowHeight, stickyAncestors.length],
   );
 
-  const handleRangeChanged = useCallback((range: ListRange) => {
-    setFirstVisibleIndex(range.startIndex);
-  }, []);
   const handleScrollerRef = useCallback((element: HTMLElement | null | Window) => {
     setScrollerElement(element instanceof HTMLElement ? element : null);
   }, []);
@@ -146,7 +178,6 @@ export const WorkspaceTreeViewport = memo(function WorkspaceTreeViewport({
         data={rows}
         fixedItemHeight={rowHeight}
         increaseViewportBy={{ bottom: rowHeight * 8, top: rowHeight * 4 }}
-        rangeChanged={handleRangeChanged}
         scrollerRef={handleScrollerRef}
         itemContent={(_index, row) => (
           <WorkspaceTreeRow

@@ -7,6 +7,7 @@ import {
   buildVisibleRangeSelection,
   buildVisibleTreeRows,
   buildWorkspaceNodeMetaByPath,
+  MAX_STICKY_ANCESTOR_DEPTH,
 } from "./treeFlatten";
 import type { StickyAncestor, WorkspaceTreeNodeMeta } from "./treeTypes";
 
@@ -55,7 +56,7 @@ export function useWorkspaceTreeModel({
   rootChildren,
   loadingPaths,
   selectedPaths,
-  maxStickyDepth = 3,
+  maxStickyDepth = MAX_STICKY_ANCESTOR_DEPTH,
   initialOpenPaths,
 }: UseWorkspaceTreeModelOptions): WorkspaceTreeModel {
   // `new Set(undefined)` is an empty set, so the no-seed case is unchanged.

@@ -106,3 +106,61 @@ export function buildStickyAncestors(
   }
   return ancestors;
 }
+
+/**
+ * Maximum number of stacked sticky-ancestor rows. The viewport reserves a
+ * CONSTANT `MAX_STICKY_ANCESTOR_DEPTH * rowHeight` of scroll space at all times
+ * (sticky header + complementary footer), which is what makes the breadcrumb
+ * flicker-free at the scroll bottom — see `resolveStickyAncestors` and
+ * `WorkspaceTreeViewport`. The model's `buildStickyAncestors` cap MUST use the
+ * same value so header + footer always sum to this constant.
+ */
+export const MAX_STICKY_ANCESTOR_DEPTH = 3;
+
+/**
+ * Resolve the sticky breadcrumb as a PURE FUNCTION of `scrollTop`.
+ *
+ * Why not just feed Virtuoso's reported first-visible index back in: the sticky
+ * header occupies space at the top of the scroll content, so the index of the
+ * first visible data row is itself a function of the header's height — which is
+ * a function of how many ancestors we show. Feeding the rendered index back into
+ * the ancestor count closes a scroll<->layout loop that only settles where there
+ * is free scroll slack; at the very bottom (scroll pinned to max) it oscillates
+ * → the "flicker when scrolled to the bottom" bug.
+ *
+ * The fix is twofold and lives together: (1) the viewport reserves a CONSTANT
+ * total height (header + complementary footer = `maxDepth * rowHeight`) so
+ * `maxScroll` never moves and `scrollTop` is a stable input; (2) this function
+ * derives the breadcrumb from that stable `scrollTop` instead of the rendered
+ * index. The header offsets data rows by `count * rowHeight`, so the first
+ * visible data row is `floor(scrollTop / rowHeight) - count`. That's circular in
+ * `count`, but `count` is bounded by `maxDepth`, so we resolve it by fixed-point
+ * iteration in at most `maxDepth + 1` steps. Even at a depth boundary where no
+ * exact fixed point exists, the final value is a deterministic function of
+ * `scrollTop`, so the result is identical across renders → no oscillation.
+ *
+ * `ancestorsAt(firstVisibleIndex)` is the per-index ancestor walker (the model's
+ * `getStickyAncestors` bound to the current `scrollTop`).
+ */
+export function resolveStickyAncestors(
+  scrollTop: number,
+  rowHeight: number,
+  maxDepth: number,
+  ancestorsAt: (firstVisibleIndex: number) => StickyAncestor[],
+): StickyAncestor[] {
+  if (scrollTop <= 0 || rowHeight <= 0) {
+    return [];
+  }
+  const topUnits = Math.floor(scrollTop / rowHeight);
+  let count = 0;
+  let ancestors: StickyAncestor[] = [];
+  for (let step = 0; step <= maxDepth; step += 1) {
+    const firstVisibleIndex = Math.max(0, topUnits - count);
+    ancestors = ancestorsAt(firstVisibleIndex);
+    if (ancestors.length === count) {
+      return ancestors;
+    }
+    count = ancestors.length;
+  }
+  return ancestors;
+}
