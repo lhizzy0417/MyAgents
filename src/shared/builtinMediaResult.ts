@@ -63,7 +63,11 @@ export function imageMimeFromPath(p: string): string {
  * returned as-is.
  */
 export function unwrapMcpResult(result: string): string {
-  if (!result.startsWith('[')) return result;
+  // Tolerate leading whitespace before the `[` (the pre-refactor server parser
+  // used `trimStart().startsWith('[')`; dropping it would skip parsing for a
+  // result like "\n[...]" — exactly the kind of `??`/`||`-class drift this
+  // unification exists to kill). `JSON.parse` already ignores leading space.
+  if (!result.trimStart().startsWith('[')) return result;
   try {
     const parsed = JSON.parse(result) as unknown[];
     const texts = parsed

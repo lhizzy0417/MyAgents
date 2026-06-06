@@ -16,6 +16,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { MoreHorizontal, FolderOpen, ExternalLink } from 'lucide-react';
 
 import { useWorkspaceFileService } from '@/hooks/useWorkspaceFileService';
+import { useFileAction } from '@/context/FileActionContext';
 import AudioPlayerBar from './AudioPlayerBar';
 import type { ToolAttachment } from '../../../shared/types/tool-attachment';
 
@@ -39,6 +40,14 @@ function formatLabel(mimeType: string): string {
 
 export default function ToolAudioAttachment({ attachment }: Props) {
   const fileService = useWorkspaceFileService(null);
+  // The chat's workspace root. `openPath` (sourcePath) lives under the workspace
+  // (e.g. `<workspace>/myagents_files/...`), which may sit on a non-home drive
+  // (e.g. `/Volumes/work`, `D:\`). Rust `validate_external_open_path` only allows
+  // home/tmp/workspace prefixes, so without threading the workspace the reveal/
+  // open menu silently fails for any workspace outside `~`/`tmp` (PRD 0.2.31 ③
+  // regression). FileActionContext already carries the workspace for the inline
+  // audio play button; reuse it here. (null outside Chat → degrades to home/tmp.)
+  const workspacePath = useFileAction()?.workspacePath ?? null;
   const [menuOpen, setMenuOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
 
@@ -62,21 +71,21 @@ export default function ToolAudioAttachment({ attachment }: Props) {
     setMenuOpen(false);
     if (!openPath) return;
     try {
-      await fileService.openPathExternal({ fullPath: openPath });
+      await fileService.openPathExternal({ fullPath: openPath, workspace: workspacePath });
     } catch (err) {
       console.error('[ToolAudioAttachment] reveal failed:', err);
     }
-  }, [fileService, openPath]);
+  }, [fileService, openPath, workspacePath]);
 
   const openDefault = useCallback(async () => {
     setMenuOpen(false);
     if (!openPath) return;
     try {
-      await fileService.openPathWithDefault({ fullPath: openPath });
+      await fileService.openPathWithDefault({ fullPath: openPath, workspace: workspacePath });
     } catch (err) {
       console.error('[ToolAudioAttachment] open-with-default failed:', err);
     }
-  }, [fileService, openPath]);
+  }, [fileService, openPath, workspacePath]);
 
   // Placeholder (async save in flight — e.g. Codex audio).
   if (attachment.pendingId && !attachment.refPath) {

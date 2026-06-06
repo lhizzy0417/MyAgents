@@ -44,9 +44,18 @@ export function commitHeartbeatIntervalDraft(
     const max = options.max ?? HEARTBEAT_INTERVAL_MAX;
     const trimmed = draft.trim();
     if (trimmed === '') return { kind: 'revert' };
-    const n = Number.parseInt(trimmed, 10);
+    // Parse the FULL numeric value first. `<input type="number">` accepts
+    // scientific notation like "1e9", which `parseInt('1e9', 10)` truncates to
+    // `1` (stops at 'e') — so a "billion" would clamp UP to min(5) instead of
+    // DOWN to max(1440). `Number('1e9')` reads it as 1e9 → clamps to max. Fall
+    // back to parseInt only for trailing-garbage drafts like "45abc" (Number →
+    // NaN) that can't come from a number input but are kept tolerant for paste.
+    let n = Number(trimmed);
+    if (!Number.isFinite(n)) n = Number.parseInt(trimmed, 10);
     if (!Number.isFinite(n)) return { kind: 'revert' };
-    return { kind: 'commit', value: Math.max(min, Math.min(max, n)) };
+    // Floor to integer minutes (the persisted domain) before clamping, so
+    // "45.7" → 45 matches the legacy parseInt behavior.
+    return { kind: 'commit', value: Math.max(min, Math.min(max, Math.floor(n))) };
 }
 
 /**

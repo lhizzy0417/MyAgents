@@ -77,6 +77,17 @@ describe('commitHeartbeatIntervalDraft', () => {
         expect(commitHeartbeatIntervalDraft('45abc')).toEqual({ kind: 'commit', value: 45 });
     });
 
+    it('reads scientific notation as the large number it is and clamps to max (not parseInt-truncated to 1)', () => {
+        // <input type="number"> accepts "1e9"; parseInt('1e9',10)===1 would have
+        // clamped UP to min(5). Number('1e9')===1e9 → clamps DOWN to max(1440).
+        expect(commitHeartbeatIntervalDraft('1e9')).toEqual({
+            kind: 'commit',
+            value: HEARTBEAT_INTERVAL_MAX,
+        });
+        // In-range exponent commits the resolved value (1.5e1 = 15).
+        expect(commitHeartbeatIntervalDraft('1.5e1')).toEqual({ kind: 'commit', value: 15 });
+    });
+
     it('honors custom min/max override', () => {
         expect(commitHeartbeatIntervalDraft('3', { min: 1, max: 10 })).toEqual({
             kind: 'commit',

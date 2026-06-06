@@ -92,12 +92,16 @@
                           │ React state
                           ▼
            ┌──────────────────────────────────────────────────┐
-           │ ToolUse.tsx                                      │
-           │   baseRender = <BashTool|EditTool|...>           │
-           │   showGallery = tool.attachments?.length > 0     │
-           │                 && !ownsGallery(tool.name)       │
-           │   → render: {baseRender}                         │
-           │             {showGallery && <Gallery/>}          │
+           │ Message.tsx (per-BlockGroup hoist, PRD 0.2.30)  │
+           │   for each BlockGroup:                           │
+           │     groupAttachments = group's top-level         │
+           │                        tool.attachments ?? []    │
+           │   → render: {blockGroup tool rows}               │
+           │             {groupAttachments.length &&          │
+           │                <ToolAttachmentGallery/>}         │
+           │   (hoisted OUT of the collapsible ToolUse body   │
+           │    so the card is a standalone, always-visible   │
+           │    in-flow card regardless of fold state)        │
            │                                                  │
            │ ToolAttachmentGallery → ToolImageAttachment      │
            │   useAttachmentUrl(attachment, sessionId)        │
@@ -132,8 +136,12 @@ export interface ToolAttachment {
   /** 相对路径形态 `/api/attachment/tool/<sid>/<tid>/<file>` — 前端运行时拼当前 sidecar baseUrl。
    *  不存绝对 URL：sidecar 端口 dynamic，session resume 后端口已变。 */
   refPath: string;
-  /** 落盘绝对路径，仅 sessionOwner sidecar 写。 */
+  /** 落盘绝对路径（trusted-root 副本），仅 sessionOwner sidecar 写。渲染/重启走它。 */
   savedPath?: string;
+  /** 原始产物路径（PRD 0.2.31）。工具实际写出的原始文件 + 卡片 meta 展示的路径。
+   *  「在文件管理器中显示 / 用默认应用打开」优先用它（让"看到的"="打开的"）；
+   *  因可能在非 home 盘的 workspace 下，open 调用须带 workspace 前缀。仅 builtin 媒体设置。 */
+  sourcePath?: string;
   sizeBytes?: number;
   width?: number;
   height?: number;
@@ -209,20 +217,26 @@ URL 下载额外防 SSRF：
 
 ## 6. 前端归一化原则
 
-`ToolUse.tsx` 在 specialized tool body 渲染**之后**外挂统一 `ToolAttachmentGallery`：
+`Message.tsx` 在每个 BlockGroup 渲染**之后**外挂统一 `ToolAttachmentGallery`，attachments 从该
+group 顶层 tool 的 `tool.attachments` 拉取（PRD 0.2.30）：
 
 ```tsx
-return (
-  <>
-    {baseRender}                                                // BashTool / EditTool / ...
-    {showGallery && <ToolAttachmentGallery attachments={...}/>} // 自动渲染 image/audio/...
-  </>
-);
+{blockGroupToolRows}                                            // BashTool / EditTool / ...
+{groupAttachments.length > 0 &&                                 // group 顶层 tool.attachments
+  <ToolAttachmentGallery attachments={groupAttachments}/>}      // 自动渲染 image/audio/...
 ```
 
-例外：`TOOLS_THAT_OWN_GALLERY_PREFIXES = ['mcp__gemini-image__']`。这条规则是兜底——老
-GeminiImageTool 仍走 filePath 文本协议自渲染图片；外层 Gallery 跳过，避免双重渲染。等 builtin
-runtime (P5) 接入后 GeminiImageTool 也走 attachments，这条 prefix 列表清空，规则自然失效。
+**为什么外挂在 Message.tsx 而非 ToolUse.tsx**（PRD 0.2.30 bug 修复 e46748b9）：早期版本把
+Gallery 渲染在 `ToolUse` 内部，而 `ToolUse` 只在 `ProcessRow` 展开体里挂载——于是工具行折叠时
+卡片完全不可见、展开时只是缩进在工具窗口里，从来不是会话流里的独立卡片。现把 Gallery 上提到
+`Message.tsx`，按 BlockGroup 渲染，成为折叠状态无关的、始终可见的 in-flow 卡片。
+
+子 Agent（Task）的媒体附件挂在 `subagentCalls[]` 上、由 `TaskTool` 渲染，是另一条路径——顶层
+hoist 只拉 group 顶层 `tool.attachments`，不会重复渲染子 Agent 媒体。
+
+> 历史注记：曾有 `TOOLS_THAT_OWN_GALLERY_PREFIXES = ['mcp__gemini-image__']` 兜底规则（老
+> GeminiImageTool 自渲染图片、外层跳过防双渲）。builtin runtime 接入后 GeminiImageTool 已走
+> attachments，该 prefix 列表与配套 `ownsGallery()` 守卫**已整体删除**。
 
 `mergeAttachmentsByPendingId` 防 `chat:tool-result-complete` 重发覆盖已 patched 的 entry —
 identity key 是 `pendingId || refPath`，若 existing 已 resolved（refPath 非空 + 无 pendingId），
@@ -281,7 +295,8 @@ attachment。任何触发这种路径的入口视为 bug。
 | `src/renderer/utils/toolAttachment.ts` | `useAttachmentUrl` hook + `resolveToolAttachmentUrl` |
 | `src/renderer/components/tools/ToolAttachmentGallery.tsx` | 归一化容器 |
 | `src/renderer/components/tools/ToolImageAttachment.tsx` | 单张图片渲染 + placeholder / error 状态 |
-| `src/renderer/components/ToolUse.tsx` | Gallery 外挂 + `TOOLS_THAT_OWN_GALLERY_PREFIXES` |
+| `src/renderer/components/tools/ToolAudioAttachment.tsx` | 单条音频卡片播放器 + meta + 「更多」菜单（reveal / open-with-default，走 `sourcePath` + `useFileAction` workspace） |
+| `src/renderer/components/Message.tsx` | per-BlockGroup Gallery 外挂（PRD 0.2.30，从 ToolUse 上提） |
 | `src/renderer/context/TabProvider.tsx` | SSE 事件处理 + `mergeAttachmentsByPendingId` |
 
 ---

@@ -169,4 +169,12 @@ describe('mime + unwrap helpers', () => {
   it('unwrapMcpResult passes through plain text', () => {
     expect(unwrapMcpResult('语音已生成。')).toBe('语音已生成。');
   });
+  it('unwrapMcpResult unwraps a content array', () => {
+    expect(unwrapMcpResult('[{"type":"text","text":"hi"}]')).toBe('hi');
+  });
+  it('unwrapMcpResult tolerates leading whitespace before the array (no parser drift)', () => {
+    // The pre-refactor server parser used trimStart().startsWith('['); a leading
+    // newline must NOT skip unwrapping.
+    expect(unwrapMcpResult('\n  [{"type":"text","text":"hi"}]')).toBe('hi');
+  });
 });
