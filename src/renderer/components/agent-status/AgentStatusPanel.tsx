@@ -8,6 +8,8 @@ import { memo, useCallback, useEffect, useRef, useState } from 'react';
 
 import type { Message } from '@/types/chat';
 
+import { useTabStateOptional } from '@/context/TabContext';
+
 import { SubagentRunningIcon } from './icons';
 import SubagentSection from './SubagentSection';
 import TodoSection from './TodoSection';
@@ -19,14 +21,25 @@ const FADE_LINGER_MS = 500;
 const FADE_OUT_DELAY_MS = 1500;
 
 interface AgentStatusPanelProps {
-  messages: Message[];
   /** Chat 内容区的 ref，限定 querySelector 作用域（防多 Tab 同 Session DOM 冲突） */
   containerRef: React.RefObject<HTMLElement | null>;
   /** Chat 提供：Virtuoso scrollToIndex + 二阶段 highlight。SubagentRow 透传调用。 */
   onJumpToTool: (toolId: string) => void;
 }
 
-const AgentStatusPanel = memo(function AgentStatusPanel({ messages, containerRef, onJumpToTool }: AgentStatusPanelProps) {
+/** Stable empty fallback if ever rendered outside a TabProvider (in practice
+ *  only Chat mounts this, always inside one). */
+const EMPTY_MESSAGES: Message[] = [];
+
+const AgentStatusPanel = memo(function AgentStatusPanel({ containerRef, onJumpToTool }: AgentStatusPanelProps) {
+  // P3: self-subscribe to messages instead of receiving them as a prop. This
+  // removes the [messages] dependency from Chat's `agentStatusSlot` useMemo, so
+  // the slot element identity stays STABLE during streaming → SimpleChatInput's
+  // React.memo holds and the input no longer re-renders on every streamed token.
+  // This panel still re-renders per commit via the context subscription; its
+  // derived DOM only changes when todos/subagents do (cost absorbed by React).
+  const tab = useTabStateOptional();
+  const messages = tab?.messages ?? EMPTY_MESSAGES;
   const state = useAgentStatusState(messages);
   // hasContent：todos 全部 completed 时视为「已结束」→ 进入 fade-out
   // （对齐 PRD §8.1 #6 验收：「5/5 ☑ 后 1.5s 整段淡出」）

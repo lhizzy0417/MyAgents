@@ -2728,24 +2728,23 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     });
   }, [pauseAutoScroll, virtuosoRef]);
 
-  // PRD 0.2.17 / v0.2.19 — AgentStatusPanel 现在通过 slot 注入 SimpleChatInput，
+  // PRD 0.2.17 / v0.2.19 — AgentStatusPanel 通过 slot 注入 SimpleChatInput，
   // 与 QueuedMessagesPanel 同居一个 flex 行（避免两者撞 z-20 / 同 Y 重叠）。
-  // useMemo 让 slot 元素 identity 在 messages 不变时保持稳定，从而尽量让
-  // SimpleChatInput 的 React.memo 在非流式 Chat 重渲染时仍能跳过。流式期间
-  // messages 高频变化会让 memo 失效，这是已知折中——AgentStatusPanel 内部用
-  // useAgentStatusState 衍生 todos/subagents，最终 DOM 仅在派生态变化时才改，
-  // 渲染成本由 React 协调器吸收。
+  // P3: slot 不再依赖高频的 messages —— AgentStatusPanel 自己从 TabContext
+  // 订阅 messages（见该组件）。这样本 slot 的 useMemo 在流式期间 identity 保持
+  // 稳定，SimpleChatInput 的 React.memo 不再被打穿，输入框在 AI 流式输出时不会
+  // 每 token 重渲染。AgentStatusPanel 内部仍随 commit 重渲染，其 DOM 仅在
+  // 派生 todos/subagents 变化时才改，成本由 React 协调器吸收。
   const agentStatusSlot = useMemo(
     () => isExternalRuntime
       ? undefined
       : (
         <AgentStatusPanel
-          messages={messages}
           containerRef={chatContentRef}
           onJumpToTool={handleJumpToTool}
         />
       ),
-    [isExternalRuntime, messages, handleJumpToTool],
+    [isExternalRuntime, handleJumpToTool],
   );
 
   // Stable callbacks for MessageList (extracted from inline arrows to enable memo)
