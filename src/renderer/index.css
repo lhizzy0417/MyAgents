@@ -1074,3 +1074,7 @@ code {
 .monaco-editor-host {
   padding-right: 16px;
 }
+
+.monaco-editor-host .myagents-monaco-search-focus-line {
+  background-color: var(--accent-warm-subtle) !important;
+}

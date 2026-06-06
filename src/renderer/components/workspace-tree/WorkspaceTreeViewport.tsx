@@ -1,6 +1,7 @@
-import { memo, useCallback, useEffect, useMemo, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Virtuoso } from "react-virtuoso";
 import type { Components, ContextProp, ListRange } from "react-virtuoso";
+import type { VirtuosoHandle } from "react-virtuoso";
 
 import { WorkspaceTreeRow } from "./WorkspaceTreeRow";
 import { WorkspaceTreeStickyAncestors } from "./WorkspaceTreeStickyAncestors";
@@ -30,6 +31,8 @@ interface WorkspaceTreeViewportProps {
   internalDropTarget: string | null;
   activeDragPaths: readonly string[];
   initialScrollTop?: number;
+  revealRequest?: { id: number; path: string } | null;
+  onRevealHandled?: (id: number) => void;
   getStickyAncestors: (
     firstVisibleIndex: number,
     scrollTop: number,
@@ -49,6 +52,8 @@ export const WorkspaceTreeViewport = memo(function WorkspaceTreeViewport({
   internalDropTarget,
   activeDragPaths,
   initialScrollTop = 0,
+  revealRequest = null,
+  onRevealHandled,
   getStickyAncestors,
   onCloseAncestorPath,
   onRowClick,
@@ -62,6 +67,8 @@ export const WorkspaceTreeViewport = memo(function WorkspaceTreeViewport({
   const [scrollerElement, setScrollerElement] = useState<HTMLElement | null>(
     null,
   );
+  const virtuosoRef = useRef<VirtuosoHandle>(null);
+  const lastRevealRequestIdRef = useRef<number | null>(null);
 
   useEffect(() => {
     if (!scrollerElement) {
@@ -106,6 +113,23 @@ export const WorkspaceTreeViewport = memo(function WorkspaceTreeViewport({
     setScrollerElement(element instanceof HTMLElement ? element : null);
   }, []);
 
+  useEffect(() => {
+    if (!revealRequest || lastRevealRequestIdRef.current === revealRequest.id) {
+      return;
+    }
+    const index = rows.findIndex((row) => row.path === revealRequest.path);
+    if (index < 0) {
+      return;
+    }
+    lastRevealRequestIdRef.current = revealRequest.id;
+    virtuosoRef.current?.scrollToIndex({
+      index,
+      align: "center",
+      behavior: "smooth",
+    });
+    onRevealHandled?.(revealRequest.id);
+  }, [onRevealHandled, revealRequest, rows]);
+
   return (
     <>
       <WorkspaceTreeStickyAncestors
@@ -114,6 +138,7 @@ export const WorkspaceTreeViewport = memo(function WorkspaceTreeViewport({
         onClosePath={onCloseAncestorPath}
       />
       <Virtuoso
+        ref={virtuosoRef}
         className="h-full overscroll-none"
         components={TREE_COMPONENTS}
         computeItemKey={(_index, row) => row.path}

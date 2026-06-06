@@ -20,6 +20,7 @@ import tsWorker from 'monaco-editor/esm/vs/language/typescript/ts.worker?worker'
 // CRITICAL: Must import Monaco CSS for styles to work in Vite bundled mode
 import 'monaco-editor/min/vs/editor/editor.main.css';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import type { FilePreviewFocusTarget } from '@/types/filePreview';
 
 // Configure Monaco Environment for bundled workers (required for Tauri CSP)
 self.MonacoEnvironment = {
@@ -71,6 +72,9 @@ interface MonacoEditorProps {
     onSave?: () => void;
     /** Initial line to scroll to and select */
     initialLineNumber?: number;
+    /** Search/file-link navigation target. Unlike initialLineNumber this is an event:
+     *  a new requestId must re-center even when the line number did not change. */
+    focusTarget?: FilePreviewFocusTarget;
     /** When provided, a floating「引用」button appears above any non-empty selection.
      *  Clicking it calls back with the selection's text + 1-based line range, then clears
      *  the selection. When omitted, no quote affordance is rendered (Monaco-side default). */
@@ -92,6 +96,7 @@ export default function MonacoEditor({
     autoFocus = false,
     onSave,
     initialLineNumber,
+    focusTarget,
     onQuote,
     wordWrap = 'on',
 }: MonacoEditorProps) {
@@ -240,6 +245,62 @@ export default function MonacoEditor({
     const editorRef = useRef<monaco.editor.IStandaloneCodeEditor | null>(null);
     const [quoteMenu, setQuoteMenu] = useState<{ x: number; y: number; above: boolean } | null>(null);
     const quoteRafRef = useRef<number | null>(null);
+    const focusDecorationIdsRef = useRef<string[]>([]);
+    const focusClearTimerRef = useRef<number | null>(null);
+    const focusMountTimerRef = useRef<number | null>(null);
+    const focusTargetRef = useRef(focusTarget);
+    const lastAppliedFocusTargetRef = useRef<FilePreviewFocusTarget | null>(null);
+    useEffect(() => { focusTargetRef.current = focusTarget; }, [focusTarget]);
+
+    const clearPendingFocusTimer = useCallback(() => {
+        if (focusMountTimerRef.current !== null) {
+            window.clearTimeout(focusMountTimerRef.current);
+            focusMountTimerRef.current = null;
+        }
+    }, []);
+
+    const clearFocusDecoration = useCallback((editor = editorRef.current) => {
+        if (focusClearTimerRef.current !== null) {
+            window.clearTimeout(focusClearTimerRef.current);
+            focusClearTimerRef.current = null;
+        }
+        if (editor && focusDecorationIdsRef.current.length > 0) {
+            focusDecorationIdsRef.current = editor.deltaDecorations(focusDecorationIdsRef.current, []);
+        } else {
+            focusDecorationIdsRef.current = [];
+        }
+    }, []);
+
+    const applyFocusTarget = useCallback((target: FilePreviewFocusTarget): boolean => {
+        const editor = editorRef.current;
+        const model = editor?.getModel();
+        if (!editor || !model || target.lineNumber < 1) return false;
+
+        const lineNumber = Math.max(1, Math.min(target.lineNumber, model.getLineCount()));
+        const firstHighlight = target.highlights?.[0];
+        const column = firstHighlight
+            ? Math.max(1, Math.min(firstHighlight[0] + 1, model.getLineMaxColumn(lineNumber)))
+            : 1;
+
+        editor.revealLineInCenter(lineNumber);
+        editor.setPosition({ lineNumber, column });
+        clearFocusDecoration(editor);
+        focusDecorationIdsRef.current = editor.deltaDecorations([], [
+            {
+                range: new monaco.Range(lineNumber, 1, lineNumber, 1),
+                options: {
+                    isWholeLine: true,
+                    className: 'myagents-monaco-search-focus-line',
+                },
+            },
+        ]);
+        focusClearTimerRef.current = window.setTimeout(() => {
+            if (editorRef.current === editor) {
+                clearFocusDecoration(editor);
+            }
+        }, 1800);
+        return true;
+    }, [clearFocusDecoration]);
 
     /** Compute viewport coords for the quote menu given a current non-empty selection.
      *  Mirrors SelectionCommentMenu's positioning: anchor at start of selection, prefer
@@ -362,14 +423,26 @@ export default function MonacoEditor({
         // No extra blur handling needed — selection-change covers clearing.
         editor.onDidDispose(() => {
             for (const d of disposables) d.dispose();
+            clearFocusDecoration(editor);
             if (editorRef.current === editor) editorRef.current = null;
         });
 
-        if (initialLineNumber) {
+        const mountFocusTarget =
+            focusTarget ?? (initialLineNumber ? { requestId: -1, lineNumber: initialLineNumber } : undefined);
+        if (mountFocusTarget) {
             // Give it a tiny delay to ensure layout is done
-            setTimeout(() => {
-                editor.revealLineInCenter(initialLineNumber);
-                editor.setPosition({ lineNumber: initialLineNumber, column: 1 });
+            clearPendingFocusTimer();
+            focusMountTimerRef.current = window.setTimeout(() => {
+                focusMountTimerRef.current = null;
+                if (editorRef.current !== editor) return;
+                // A newer navigation event arrived after mount. Do not let this
+                // delayed initial focus pull the user back to an old result.
+                if (focusTargetRef.current && focusTargetRef.current !== mountFocusTarget) return;
+                if (!focusTarget && focusTargetRef.current) return;
+                if (lastAppliedFocusTargetRef.current === mountFocusTarget) return;
+                if (applyFocusTarget(mountFocusTarget)) {
+                    lastAppliedFocusTargetRef.current = mountFocusTarget;
+                }
             }, 50);
         }
 
@@ -377,12 +450,22 @@ export default function MonacoEditor({
             // Use setTimeout to ensure editor is fully ready
             setTimeout(() => editor.focus(), 0);
         }
-    }, [autoFocus, activeTheme, initialLineNumber, scheduleQuoteMenuUpdate]);
+    }, [applyFocusTarget, autoFocus, activeTheme, clearFocusDecoration, clearPendingFocusTimer, focusTarget, initialLineNumber, scheduleQuoteMenuUpdate]);
+
+    useEffect(() => {
+        if (!focusTarget || lastAppliedFocusTargetRef.current === focusTarget) return;
+        clearPendingFocusTimer();
+        if (applyFocusTarget(focusTarget)) {
+            lastAppliedFocusTargetRef.current = focusTarget;
+        }
+    }, [applyFocusTarget, clearPendingFocusTimer, focusTarget]);
 
     // Cancel any pending RAF on unmount to avoid setState-after-unmount warning.
     useEffect(() => () => {
         if (quoteRafRef.current !== null) cancelAnimationFrame(quoteRafRef.current);
-    }, []);
+        clearPendingFocusTimer();
+        clearFocusDecoration();
+    }, [clearFocusDecoration, clearPendingFocusTimer]);
 
     // Defense for `onQuote` flipping defined → undefined mid-session: the JSX render-side
     // guard `{onQuote && quoteMenu && ...}` already hides the stale menu visually, and the
@@ -521,4 +604,3 @@ export default function MonacoEditor({
         </div>
     );
 }
-

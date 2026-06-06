@@ -60,11 +60,24 @@ import type { CapabilityInitialSelect } from '../../shared/skillsTypes';
 import { CC_MODELS, CC_PERMISSION_MODES, CODEX_PERMISSION_MODES, GEMINI_PERMISSION_MODES, getDefaultRuntimePermissionMode, getRuntimePermissionModes, buildRuntimeChangePatch } from '../../shared/types/runtime';
 import type { RuntimeType, RuntimeDetections, RuntimeConfig } from '../../shared/types/runtime';
 import type { InitialMessage } from '@/types/tab';
+import type { FilePreviewFocusTarget } from '@/types/filePreview';
 import { shouldAutoSendInitialMessage } from '@/utils/initialMessageAutoSend';
 import { resolveBuiltinPermissionMode, isPinnedProviderUnavailable, shouldResetModelOnProviderChange, shouldSkipSnapshotWrite } from '@/utils/optionResolve';
 // CronTaskConfig type is used via useCronTask hook
 
 import type { RichDocKind } from '../../shared/fileTypes';
+
+type SplitPreviewFile = {
+  name: string;
+  content: string;
+  size: number;
+  path: string;
+  richDocKind?: RichDocKind;
+  initialEditMode?: boolean;
+  initialLineNumber?: number;
+  focusTarget?: FilePreviewFocusTarget;
+};
+
 // Lazy load FilePreviewModal for split view panel
 const FilePreviewModal = lazy(() => import('@/components/FilePreviewModal'));
 // Lazy load TerminalPanel for embedded terminal
@@ -309,7 +322,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
   // FilePreviewModal opens directly in the editable Monaco view instead of the
   // markdown rendered preview.
   const isSplitViewEnabled = config.experimentalSplitView ?? true;
-  const [splitFile, setSplitFile] = useState<{ name: string; content: string; size: number; path: string; richDocKind?: RichDocKind; initialEditMode?: boolean; initialLineNumber?: number } | null>(null);
+  const [splitFile, setSplitFile] = useState<SplitPreviewFile | null>(null);
   // Clear split panel when feature is turned off (prevents stale split state)
   useEffect(() => { if (!isSplitViewEnabled) setSplitFile(null); }, [isSplitViewEnabled]);
   const [splitRatio, setSplitRatio] = useState(0.5); // 0-1, left panel fraction
@@ -409,11 +422,11 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
   }, 0);
 
   // Fullscreen preview triggered from split panel's "全屏预览" button
-  const [fullscreenPreviewFile, setFullscreenPreviewFile] = useState<{ name: string; content: string; size: number; path: string; richDocKind?: RichDocKind; initialEditMode?: boolean; initialLineNumber?: number } | null>(null);
+  const [fullscreenPreviewFile, setFullscreenPreviewFile] = useState<SplitPreviewFile | null>(null);
 
-  const handleSplitFilePreview = useCallback((file: { name: string; content: string; size: number; path: string; richDocKind?: RichDocKind; initialLineNumber?: number }, options?: { initialEditMode?: boolean }) => {
+  const handleSplitFilePreview = useCallback((file: SplitPreviewFile, options?: { initialEditMode?: boolean }) => {
     const ext = file.name.toLowerCase().split('.').pop();
-    if ((ext === 'html' || ext === 'htm') && isSplitViewEnabled) {
+    if ((ext === 'html' || ext === 'htm') && isSplitViewEnabled && !file.focusTarget) {
       // HTML files → open in embedded browser for live preview
       // Store file metadata so browser toolbar can offer "Edit Source" toggle
       setBrowserSourceFile(file);
@@ -3752,6 +3765,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
                     workspacePath={agentDir}
                     initialEditMode={splitFile.initialEditMode}
                     initialLineNumber={splitFile.initialLineNumber}
+                    focusTarget={splitFile.focusTarget}
                     externalRefreshSignal={toolCompleteCount}
                     onExternalContentUpdated={(updated) => {
                       setSplitFile(prev => prev && prev.path === updated.path
@@ -3874,6 +3888,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
             workspacePath={agentDir}
             initialEditMode={fullscreenPreviewFile.initialEditMode}
             initialLineNumber={fullscreenPreviewFile.initialLineNumber}
+            focusTarget={fullscreenPreviewFile.focusTarget}
             externalRefreshSignal={toolCompleteCount}
             onExternalContentUpdated={(updated) => {
               setFullscreenPreviewFile(prev => prev && prev.path === updated.path

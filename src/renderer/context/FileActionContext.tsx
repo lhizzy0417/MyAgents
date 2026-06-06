@@ -25,6 +25,7 @@ import type { ContextMenuItem } from '@/components/ContextMenu';
 import { useImagePreview } from '@/context/ImagePreviewContext';
 import { useWorkspaceFileService } from '@/hooks/useWorkspaceFileService';
 import { getRichDocKind, isImageFile, isPreviewable, type RichDocKind } from '../../shared/fileTypes';
+import type { FilePreviewFocusTarget } from '@/types/filePreview';
 import { resolveWorkspaceFileLinkTarget } from '@/utils/workspaceFileLinks';
 
 // Lazy load FilePreviewModal (heavy: includes SyntaxHighlighter + Monaco)
@@ -73,6 +74,7 @@ interface FileActionProviderProps {
     path: string;
     richDocKind?: RichDocKind;
     initialLineNumber?: number;
+    focusTarget?: FilePreviewFocusTarget;
   }) => void;
   /** Append `@<path> ` to chat input — wired to FilePreviewModal's「引用文件」button.
    *  Distinct from `onInsertReference` (cursor-insert, no trailing space) — the toolbar
@@ -211,14 +213,26 @@ export function FileActionProvider({ children, workspacePath, onInsertReference,
     path: string;
     richDocKind?: RichDocKind;
     initialLineNumber?: number;
+    focusTarget?: FilePreviewFocusTarget;
     isLoading: boolean;
     error: string | null;
   } | null>(null);
+
+  const previewFocusRequestIdRef = useRef(0);
+
+  const createFocusTarget = useCallback((lineNumber?: number) => {
+    if (!lineNumber) return undefined;
+    return {
+      requestId: ++previewFocusRequestIdRef.current,
+      lineNumber,
+    } satisfies FilePreviewFocusTarget;
+  }, []);
 
   const handlePreview = useCallback((path: string, options?: { initialLineNumber?: number }): boolean => {
     const fileName = path.split(/[/\\]/).pop() ?? path;
     const svc = fileServiceRef.current;
     if (!svc.isAvailable) return false;
+    const focusTarget = createFocusTarget(options?.initialLineNumber);
 
     const richDocKind = getRichDocKind(fileName);
     if (richDocKind) {
@@ -229,6 +243,7 @@ export function FileActionProvider({ children, workspacePath, onInsertReference,
         path,
         richDocKind,
         initialLineNumber: options?.initialLineNumber,
+        focusTarget,
       };
       if (onFilePreviewExternalRef.current) {
         onFilePreviewExternalRef.current(fileData);
@@ -283,6 +298,7 @@ export function FileActionProvider({ children, workspacePath, onInsertReference,
             size: resp.size,
             path,
             initialLineNumber: options?.initialLineNumber,
+            focusTarget,
           });
         } catch (err) {
           if (!isMountedRef.current) return;
@@ -293,6 +309,7 @@ export function FileActionProvider({ children, workspacePath, onInsertReference,
             size: 0,
             path,
             initialLineNumber: options?.initialLineNumber,
+            focusTarget,
             isLoading: false,
             error: err instanceof Error ? err.message : 'Failed to load file',
           });
@@ -308,6 +325,7 @@ export function FileActionProvider({ children, workspacePath, onInsertReference,
       size: 0,
       path,
       initialLineNumber: options?.initialLineNumber,
+      focusTarget,
       isLoading: true,
       error: null,
     });
@@ -323,7 +341,7 @@ export function FileActionProvider({ children, workspacePath, onInsertReference,
       }
     })();
     return true;
-  }, [openImagePreview]);
+  }, [createFocusTarget, openImagePreview]);
 
   const openFileLink = useCallback((href: string): boolean => {
     if (!fileServiceRef.current.isAvailable) return false;
@@ -432,6 +450,7 @@ export function FileActionProvider({ children, workspacePath, onInsertReference,
               // skips the fetch (preview text/code still works).
               workspacePath={workspacePath}
               initialLineNumber={previewFile.initialLineNumber}
+              focusTarget={previewFile.focusTarget}
               onClose={() => setPreviewFile(null)}
               onRenamed={(newPath, newName) => {
                 // Update local preview state so subsequent saves target the new

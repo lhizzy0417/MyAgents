@@ -4,10 +4,15 @@
  */
 
 import { memo } from 'react';
-import { ChevronRight, ChevronDown } from 'lucide-react';
-import type { FileSearchHit } from '@/api/searchClient';
+import { ChevronRight, ChevronDown, LocateFixed } from 'lucide-react';
+import type { FileMatchLine, FileSearchHit } from '@/api/searchClient';
 import SearchHighlight from './SearchHighlight';
 import { getFileIcon } from '@/utils/fileIcons';
+import {
+    isActiveSearchFile,
+    isActiveSearchMatch,
+    type ActiveSearchTarget,
+} from '@/utils/workspaceSearchNavigation';
 
 interface FileSearchResultsProps {
     results: FileSearchHit[];
@@ -15,10 +20,12 @@ interface FileSearchResultsProps {
     isRefreshing: boolean;
     query: string;
     expandedFiles: Set<string>;
+    activeTarget: ActiveSearchTarget | null;
     onToggleFile: (path: string) => void;
-    onFileClick: (path: string) => void;
-    onMatchClick: (path: string, lineNumber: number) => void;
-    onContextMenu: (e: React.MouseEvent, path: string) => void;
+    onFileClick: (hit: FileSearchHit) => void;
+    onRevealInTree: (hit: FileSearchHit) => void;
+    onMatchClick: (hit: FileSearchHit, match: FileMatchLine) => void;
+    onContextMenu: (e: React.MouseEvent, hit: FileSearchHit) => void;
 }
 
 export default memo(function FileSearchResults({
@@ -27,8 +34,10 @@ export default memo(function FileSearchResults({
     isRefreshing,
     query,
     expandedFiles,
+    activeTarget,
     onToggleFile,
-    onFileClick: _onFileClick,
+    onFileClick,
+    onRevealInTree,
     onMatchClick,
     onContextMenu,
 }: FileSearchResultsProps) {
@@ -76,6 +85,7 @@ export default memo(function FileSearchResults({
             <div className="py-2">
                 {results.map((hit) => {
                     const isExpanded = expandedFiles.has(hit.path);
+                    const isActiveFile = isActiveSearchFile(activeTarget, hit.path);
                     const FileIcon = getFileIcon(hit.name);
 
                     // Separate path into dirname and basename for display
@@ -87,24 +97,40 @@ export default memo(function FileSearchResults({
                         <div key={hit.path} className="flex flex-col">
                             {/* File Header Row */}
                             <div
-                                role="button"
+                                role="group"
                                 title={hit.path}
-                                className="group flex h-7 items-center pr-3 pl-2 text-[13px] hover:bg-[var(--hover-bg)] cursor-pointer select-none"
-                                onClick={() => onToggleFile(hit.path)}
+                                className={`group flex h-7 items-center pr-3 pl-2 text-[13px] select-none ${
+                                    isActiveFile ? 'bg-[var(--accent-warm-subtle)]' : 'hover:bg-[var(--hover-bg)]'
+                                }`}
                                 onContextMenu={(e) => {
                                     e.preventDefault();
                                     e.stopPropagation();
-                                    onContextMenu(e, hit.path);
+                                    onContextMenu(e, hit);
                                 }}
                             >
-                                <div className="flex w-5 shrink-0 items-center justify-center text-[var(--ink-muted)]">
+                                <button
+                                    type="button"
+                                    className="flex h-full w-5 shrink-0 items-center justify-center text-[var(--ink-muted)] transition-colors hover:text-[var(--ink)]"
+                                    onClick={(e) => {
+                                        e.stopPropagation();
+                                        onToggleFile(hit.path);
+                                    }}
+                                    aria-label={isExpanded ? '折叠结果' : '展开结果'}
+                                >
                                     {isExpanded ? (
                                         <ChevronDown className="h-4 w-4" />
                                     ) : (
                                         <ChevronRight className="h-4 w-4" />
                                     )}
-                                </div>
-                                <div className="flex h-full items-center gap-1.5 flex-1 min-w-0 pr-2">
+                                </button>
+                                <button
+                                    type="button"
+                                    className="flex h-full min-w-0 flex-1 items-center gap-1.5 pr-2 text-left"
+                                    onClick={(e) => {
+                                        e.stopPropagation();
+                                        onFileClick(hit);
+                                    }}
+                                >
                                     <FileIcon className="h-3.5 w-3.5 shrink-0" />
                                     {/* Basename — never shrinks, full name always visible */}
                                     <span className="shrink-0 text-[var(--ink)]">
@@ -112,7 +138,7 @@ export default memo(function FileSearchResults({
                                             text={basename}
                                             highlights={hit.name.toLowerCase().includes(query.toLowerCase())
                                                 ? [[0, basename.length]] // Very simplified file name highlighting for now
-                                                : []}
+                                            : []}
                                         />
                                     </span>
                                     {/* Dirname — takes remaining space, truncates with ellipsis */}
@@ -121,7 +147,19 @@ export default memo(function FileSearchResults({
                                             {dirname}
                                         </span>
                                     )}
-                                </div>
+                                </button>
+                                <button
+                                    type="button"
+                                    title="在文件目录中展示"
+                                    aria-label="在文件目录中展示"
+                                    className="mr-1 flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-[var(--ink-muted)]/60 opacity-0 transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--accent-warm)] group-hover:opacity-100 focus-visible:opacity-100"
+                                    onClick={(e) => {
+                                        e.stopPropagation();
+                                        onRevealInTree(hit);
+                                    }}
+                                >
+                                    <LocateFixed className="h-3.5 w-3.5" />
+                                </button>
                                 <div className="shrink-0 flex items-center justify-center w-5 h-5 rounded-full bg-[var(--paper-inset)] text-[10px] text-[var(--ink-muted)] font-medium">
                                     {hit.matchCount}
                                 </div>
@@ -130,16 +168,20 @@ export default memo(function FileSearchResults({
                             {/* Match Lines */}
                             {isExpanded && hit.matches.length > 0 && (
                                 <div className="flex flex-col">
-                                    {hit.matches.map((match, idx) => (
+                                    {hit.matches.map((match, idx) => {
+                                        const isActiveMatch = isActiveSearchMatch(activeTarget, hit.path, match.lineNumber);
+                                        return (
                                         <div
                                             key={`${hit.path}-${match.lineNumber}-${idx}`}
                                             role="button"
-                                            className="group flex min-h-6 items-start py-0.5 pr-3 pl-[30px] text-[12px] hover:bg-[var(--hover-bg)] hover:text-[var(--ink)] cursor-pointer text-[var(--ink-secondary)] transition-colors"
-                                            onClick={() => onMatchClick(hit.path, match.lineNumber)}
+                                            className={`group flex min-h-6 items-start py-0.5 pr-3 pl-[30px] text-[12px] hover:text-[var(--ink)] cursor-pointer text-[var(--ink-secondary)] transition-colors ${
+                                                isActiveMatch ? 'bg-[var(--accent-warm-subtle)]' : 'hover:bg-[var(--hover-bg)]'
+                                            }`}
+                                            onClick={() => onMatchClick(hit, match)}
                                             onContextMenu={(e) => {
                                                 e.preventDefault();
                                                 e.stopPropagation();
-                                                onContextMenu(e, hit.path);
+                                                onContextMenu(e, hit);
                                             }}
                                         >
                                             {/* Line number */}
@@ -154,7 +196,8 @@ export default memo(function FileSearchResults({
                                                 />
                                             </div>
                                         </div>
-                                    ))}
+                                        );
+                                    })}
                                     {hit.matchCount > hit.matches.length && (
                                         <div className="pl-[38px] py-1 text-[11px] text-[var(--ink-muted)]/50 italic mb-1">
                                             ... 还有 {hit.matchCount - hit.matches.length} 个结果

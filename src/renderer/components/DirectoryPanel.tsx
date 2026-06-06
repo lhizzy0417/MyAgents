@@ -8,6 +8,7 @@ import {
   FolderOpen,
   FolderPlus,
   GitBranch,
+  LocateFixed,
   NotebookPen,
   Pencil,
   RefreshCw,
@@ -68,13 +69,25 @@ import { type Provider } from "@/config/types";
 import { isDebugMode } from "@/utils/debug";
 import { useWorkspaceChangeSignal } from "@/hooks/useWorkspaceChangeSignal";
 import { shortenPathForDisplay } from "@/utils/pathDetection";
+import { isMarkdownFile } from "@/utils/languageUtils";
 
 import ConfirmDialog from "./ConfirmDialog";
 import ContextMenu, { type ContextMenuItem } from "./ContextMenu";
-import { searchWorkspaceFiles, refreshWorkspaceFileIndex, type FileSearchHit } from "@/api/searchClient";
+import { searchWorkspaceFiles, refreshWorkspaceFileIndex, type FileMatchLine, type FileSearchHit } from "@/api/searchClient";
 import FileSearchResults from "./search/FileSearchResults";
+import type { FilePreviewFocusTarget } from "@/types/filePreview";
+import {
+  activeTargetStillExists,
+  ancestorDirectoryPaths,
+  defaultExpandedFilesForHits,
+  firstMatchLine,
+  mergeExpandedFilesAfterRefresh,
+  normalizeFileSearchHits,
+  type ActiveSearchTarget,
+} from "@/utils/workspaceSearchNavigation";
 
 const SEARCH_REFRESH_DELAY_MS = 250;
+const REVEAL_NODE_WAIT_FRAMES = 180;
 
 function useDebounce<T>(value: T, delay: number): T {
   const [debouncedValue, setDebouncedValue] = useState<T>(value);
@@ -205,6 +218,8 @@ interface DirectoryPanelProps {
       richDocKind?: RichDocKind;
       /** Optional initial line for text/code previews (from search or Markdown file links). */
       initialLineNumber?: number;
+      /** Re-applied preview focus target from workspace search navigation. */
+      focusTarget?: FilePreviewFocusTarget;
     },
     options?: { initialEditMode?: boolean },
   ) => void;
@@ -226,6 +241,8 @@ type FilePreview = {
   richDocKind?: RichDocKind;
   /** Optional initial line for text/code previews (from search or Markdown file links). */
   initialLineNumber?: number;
+  /** Re-applied preview focus target from workspace search navigation. */
+  focusTarget?: FilePreviewFocusTarget;
   /** When set, FilePreviewModal opens in markdown edit mode directly.
    *  Wired by 「新建笔记」 so a fresh empty `note-…md` skips the rendered-
    *  preview empty-state and lands the cursor in Monaco. */
@@ -237,6 +254,12 @@ type ContextMenuState = {
   y: number;
   node: DirectoryTreeNode | null; // null means root directory
   isMultiSelect?: boolean; // true when multiple nodes are selected
+} | null;
+
+type SearchResultContextMenuState = {
+  x: number;
+  y: number;
+  hit: FileSearchHit;
 } | null;
 
 type DialogState = {
@@ -251,6 +274,16 @@ function getFolderName(path: string): string {
   const normalized = path.replace(/\\/g, "/").replace(/\/+$/, "");
   const parts = normalized.split("/");
   return parts[parts.length - 1] || "Workspace";
+}
+
+function waitForTreeFrame(): Promise<void> {
+  return new Promise((resolve) => {
+    if (typeof window !== "undefined" && window.requestAnimationFrame) {
+      window.requestAnimationFrame(() => resolve());
+    } else {
+      setTimeout(resolve, 0);
+    }
+  });
 }
 
 const DirectoryPanel = memo(
@@ -368,11 +401,32 @@ const DirectoryPanel = memo(
     const [isRefreshingSearch, setIsRefreshingSearch] = useState(false);
     const [searchResults, setSearchResults] = useState<FileSearchHit[]>([]);
     const [expandedFiles, setExpandedFiles] = useState<Set<string>>(new Set());
+    const [activeSearchTarget, setActiveSearchTarget] =
+      useState<ActiveSearchTarget | null>(null);
+    const [searchContextMenu, setSearchContextMenu] =
+      useState<SearchResultContextMenuState>(null);
+    const [treeRevealRequest, setTreeRevealRequest] = useState<{
+      id: number;
+      path: string;
+    } | null>(null);
     const searchInputRef = useRef<HTMLInputElement>(null);
     const searchRequestIdRef = useRef(0);
     const searchRefreshRef = useRef<{ workspace: string; promise: Promise<[number, number]> } | null>(null);
+    const searchResultsRef = useRef<FileSearchHit[]>([]);
+    const previewFocusRequestIdRef = useRef(0);
+    const treeRevealRequestIdRef = useRef(0);
 
     const debouncedSearchQuery = useDebounce(searchQuery, 300);
+
+    useEffect(() => {
+      searchResultsRef.current = searchResults;
+    }, [searchResults]);
+
+    useEffect(() => {
+      if (isSearchMode) {
+        setTreeRevealRequest(null);
+      }
+    }, [isSearchMode]);
 
     // Image preview context
     const { openPreview } = useImagePreview();
@@ -405,6 +459,8 @@ const DirectoryPanel = memo(
         searchRefreshRef.current = null;
         setIsSearching(false);
         setIsRefreshingSearch(false);
+        setActiveSearchTarget(null);
+        setSearchContextMenu(null);
         return;
       }
       const query = debouncedSearchQuery.trim();
@@ -413,6 +469,9 @@ const DirectoryPanel = memo(
         setSearchResults([]);
         setIsSearching(false);
         setIsRefreshingSearch(false);
+        setExpandedFiles(new Set());
+        setActiveSearchTarget(null);
+        setSearchContextMenu(null);
         return;
       }
       const requestId = searchRequestIdRef.current + 1;
@@ -422,11 +481,17 @@ const DirectoryPanel = memo(
         setIsRefreshingSearch(false);
         setSearchResults([]);
         setExpandedFiles(new Set());
+        setActiveSearchTarget(null);
+        setSearchContextMenu(null);
         try {
           const result = await searchWorkspaceFiles(query, agentDir);
           if (searchRequestIdRef.current === requestId) {
-            setSearchResults(result.hits);
-            setExpandedFiles(new Set(result.hits.map(h => h.path)));
+            const hits = normalizeFileSearchHits(result.hits);
+            setSearchResults(hits);
+            setExpandedFiles(defaultExpandedFilesForHits(hits));
+            setActiveSearchTarget((prev) =>
+              activeTargetStillExists(prev, hits) ? prev : null,
+            );
           }
         } catch (err) {
           if (searchRequestIdRef.current === requestId) {
@@ -450,8 +515,19 @@ const DirectoryPanel = memo(
           if (changedFiles > 0) {
             const refreshed = await searchWorkspaceFiles(query, agentDir);
             if (searchRequestIdRef.current === requestId) {
-              setSearchResults(refreshed.hits);
-              setExpandedFiles(new Set(refreshed.hits.map(h => h.path)));
+              const previousHits = searchResultsRef.current;
+              const hits = normalizeFileSearchHits(refreshed.hits);
+              setSearchResults(hits);
+              setExpandedFiles((prev) =>
+                mergeExpandedFilesAfterRefresh(
+                  prev,
+                  previousHits,
+                  hits,
+                ),
+              );
+              setActiveSearchTarget((prev) =>
+                activeTargetStillExists(prev, hits) ? prev : null,
+              );
             }
           }
         } catch (err) {
@@ -819,6 +895,69 @@ const DirectoryPanel = memo(
       // once on mount; see WorkspaceTreePersistedState).
       initialOpenPaths: persistedTreeStateRef?.current.openPaths,
     });
+    const nodeMetaByPathRef = useRef(nodeMetaByPath);
+    useEffect(() => {
+      nodeMetaByPathRef.current = nodeMetaByPath;
+    }, [nodeMetaByPath]);
+
+    const waitForNodeMeta = useCallback(
+      async (path: string, requestId: number) => {
+        for (let attempt = 0; attempt < REVEAL_NODE_WAIT_FRAMES; attempt += 1) {
+          if (requestId !== treeRevealRequestIdRef.current) {
+            return { status: "cancelled" as const };
+          }
+          const meta = nodeMetaByPathRef.current.get(path);
+          if (meta) {
+            return { status: "found" as const, meta };
+          }
+          await waitForTreeFrame();
+        }
+        return { status: "missing" as const };
+      },
+      [],
+    );
+
+    const handleRevealSearchResultInTree = useCallback(
+      async (path: string) => {
+        const requestId = ++treeRevealRequestIdRef.current;
+        const ancestors = ancestorDirectoryPaths(path);
+
+        for (const ancestor of ancestors) {
+          const result = await waitForNodeMeta(ancestor, requestId);
+          if (result.status === "cancelled") {
+            return;
+          }
+          if (result.status !== "found" || result.meta.data.type !== "dir") {
+            toast.error("文件不存在或已删除");
+            return;
+          }
+
+          const meta = result.meta;
+          openPath(ancestor);
+          if (meta.data.loaded === false) {
+            await expandDir(ancestor);
+          }
+          await waitForTreeFrame();
+        }
+
+        const targetResult = await waitForNodeMeta(path, requestId);
+        if (targetResult.status === "cancelled") {
+          return;
+        }
+        if (targetResult.status !== "found" || targetResult.meta.data.type !== "file") {
+          toast.error("文件不存在或已删除");
+          return;
+        }
+
+        setIsSearchMode(false);
+        setSearchContextMenu(null);
+        setContextMenu(null);
+        setSelectedNodes([targetResult.meta.data]);
+        lastClickedPathRef.current = path;
+        setTreeRevealRequest({ id: requestId, path });
+      },
+      [expandDir, openPath, toast, waitForNodeMeta],
+    );
     // Bridge: `rawRefresh` (declared above `useWorkspaceTreeModel`) reads
     // expansion state through this ref. Mirror via useEffect so we don't
     // write a ref during render — matches the project's other ref-mirror
@@ -939,31 +1078,82 @@ const DirectoryPanel = memo(
       }
     };
 
-    const handleSearchItemClick = async (path: string, initialLineNumber?: number) => {
-      const myReq = ++previewReqIdRef.current;
-      setIsPreviewLoading(true);
-      try {
-        const payload = await fileService.readPreview({ path });
-        if (myReq !== previewReqIdRef.current) return; // superseded
-        const fileData = { ...payload, path, initialLineNumber };
-        if (onFilePreviewExternal) {
-          onFilePreviewExternal(fileData);
-        } else {
-          setPreview(fileData);
-          setPreviewError(null);
+    const handleSearchItemClick = useCallback(
+      async (path: string, focusTarget?: FilePreviewFocusTarget) => {
+        const myReq = ++previewReqIdRef.current;
+        setIsPreviewLoading(true);
+        try {
+          const payload = await fileService.readPreview({ path });
+          if (myReq !== previewReqIdRef.current) return; // superseded
+          const initialEditMode = !!focusTarget && isMarkdownFile(payload.name);
+          const fileData = {
+            ...payload,
+            path,
+            initialLineNumber: focusTarget?.lineNumber,
+            focusTarget,
+            initialEditMode,
+          };
+          if (onFilePreviewExternal) {
+            onFilePreviewExternal(
+              fileData,
+              initialEditMode ? { initialEditMode: true } : undefined,
+            );
+          } else {
+            setPreview(fileData);
+            setPreviewError(null);
+          }
+        } catch (err) {
+          if (myReq !== previewReqIdRef.current) return; // superseded
+          if (onFilePreviewExternal) {
+            toast.error("文件预览失败");
+          } else {
+            setPreview(null);
+            setPreviewError(
+              err instanceof Error ? err.message : "Failed to preview file.",
+            );
+          }
+        } finally {
+          if (myReq === previewReqIdRef.current) setIsPreviewLoading(false);
         }
-      } catch (err) {
-        if (myReq !== previewReqIdRef.current) return; // superseded
-        if (onFilePreviewExternal) {
-          toast.error("文件预览失败");
+      },
+      [fileService, onFilePreviewExternal, toast],
+    );
+
+    const createSearchFocusTarget = useCallback(
+      (
+        lineNumber: number,
+        highlights?: [number, number][],
+      ): FilePreviewFocusTarget => ({
+        requestId: ++previewFocusRequestIdRef.current,
+        lineNumber,
+        query: debouncedSearchQuery.trim() || undefined,
+        highlights,
+      }),
+      [debouncedSearchQuery],
+    );
+
+    const handlePreviewSearchHit = useCallback(
+      (hit: FileSearchHit, match?: FileMatchLine) => {
+        const targetLine = match?.lineNumber ?? firstMatchLine(hit);
+        if (targetLine) {
+          const focusTarget = createSearchFocusTarget(
+            targetLine,
+            match?.highlights ?? hit.matches[0]?.highlights,
+          );
+          setActiveSearchTarget({
+            kind: "match",
+            path: hit.path,
+            lineNumber: targetLine,
+            requestId: focusTarget.requestId,
+          });
+          void handleSearchItemClick(hit.path, focusTarget);
         } else {
-          setPreview(null);
-          setPreviewError(err instanceof Error ? err.message : "Failed to preview file.");
+          setActiveSearchTarget({ kind: "file", path: hit.path });
+          void handleSearchItemClick(hit.path);
         }
-      } finally {
-        if (myReq === previewReqIdRef.current) setIsPreviewLoading(false);
-      }
-    };
+      },
+      [createSearchFocusTarget, handleSearchItemClick],
+    );
 
     const handleImagePreview = async (node: DirectoryTreeNode) => {
       if (node.type !== "file") return;
@@ -1429,6 +1619,14 @@ const DirectoryPanel = memo(
       }
     };
 
+    const handleOpenSearchResultInFinder = async (path: string) => {
+      try {
+        await fileService.openInFinder({ path });
+      } catch {
+        toast.error("打开所在文件夹失败");
+      }
+    };
+
     const handleOpenWithDefault = async (path: string) => {
       try {
         await fileService.openWithDefault({ path });
@@ -1453,6 +1651,26 @@ const DirectoryPanel = memo(
         .then(() => toast.success(label))
         .catch(() => toast.error("复制失败"));
     };
+
+    const getSearchResultContextMenuItems = (
+      hit: FileSearchHit,
+    ): ContextMenuItem[] => [
+      {
+        label: "预览",
+        icon: <Eye className="h-4 w-4" />,
+        onClick: () => handlePreviewSearchHit(hit),
+      },
+      {
+        label: "在文件目录中展示",
+        icon: <LocateFixed className="h-4 w-4" />,
+        onClick: () => void handleRevealSearchResultInTree(hit.path),
+      },
+      {
+        label: "打开所在文件夹",
+        icon: <FolderOpen className="h-4 w-4" />,
+        onClick: () => void handleOpenSearchResultInFinder(hit.path),
+      },
+    ];
 
     const handleRename = async (oldPath: string, newName: string) => {
       try {
@@ -2117,6 +2335,7 @@ const DirectoryPanel = memo(
                     isRefreshing={isRefreshingSearch}
                     query={debouncedSearchQuery}
                     expandedFiles={expandedFiles}
+                    activeTarget={activeSearchTarget}
                     onToggleFile={(path) => {
                       setExpandedFiles((prev) => {
                         const next = new Set(prev);
@@ -2125,21 +2344,20 @@ const DirectoryPanel = memo(
                         return next;
                       });
                     }}
-                    onFileClick={(path) => handleSearchItemClick(path)}
-                    onMatchClick={(path, line) => handleSearchItemClick(path, line)}
-                    onContextMenu={(e, path) => {
-                      const findInTree = (nodes: DirectoryTreeNode[], p: string): DirectoryTreeNode | null => {
-                        for (const n of nodes) {
-                           if (n.path === p) return n;
-                           if (n.children && n.type === "dir") {
-                               const res = findInTree(n.children, p);
-                               if (res) return res;
-                           }
-                        }
-                        return null;
-                      };
-                      const n = findInTree(directoryInfo?.tree.children || [], path);
-                      if (n) handleContextMenu(e, n);
+                    onFileClick={(hit) => handlePreviewSearchHit(hit)}
+                    onRevealInTree={(hit) => {
+                      void handleRevealSearchResultInTree(hit.path);
+                    }}
+                    onMatchClick={(hit, match) =>
+                      handlePreviewSearchHit(hit, match)
+                    }
+                    onContextMenu={(e, hit) => {
+                      setContextMenu(null);
+                      setSearchContextMenu({
+                        x: e.clientX,
+                        y: e.clientY,
+                        hit,
+                      });
                     }}
                   />
                 ) : (
@@ -2169,6 +2387,12 @@ const DirectoryPanel = memo(
                       internalDropTarget={internalDropTarget}
                       activeDragPaths={activeDragItem?.paths ?? []}
                       initialScrollTop={treeScrollTopRef.current}
+                      revealRequest={treeRevealRequest}
+                      onRevealHandled={(id) => {
+                        setTreeRevealRequest((prev) =>
+                          prev?.id === id ? null : prev,
+                        );
+                      }}
                       getStickyAncestors={getStickyAncestors}
                       onCloseAncestorPath={closePath}
                       onScrollTopChange={(scrollTop) => {
@@ -2340,6 +2564,15 @@ const DirectoryPanel = memo(
           />
         )}
 
+        {searchContextMenu && (
+          <ContextMenu
+            x={searchContextMenu.x}
+            y={searchContextMenu.y}
+            items={getSearchResultContextMenuItems(searchContextMenu.hit)}
+            onClose={() => setSearchContextMenu(null)}
+          />
+        )}
+
         {/* Rename Dialog */}
         {dialog?.type === "rename" && dialog.node && (
           <RenameDialog
@@ -2430,6 +2663,7 @@ const DirectoryPanel = memo(
                 workspacePath={agentDir}
                 initialEditMode={preview?.initialEditMode}
                 initialLineNumber={preview?.initialLineNumber}
+                focusTarget={preview?.focusTarget}
                 externalRefreshSignal={refreshTrigger}
                 onExternalContentUpdated={(updated) => {
                   setPreview((prev) => prev && prev.path === updated.path

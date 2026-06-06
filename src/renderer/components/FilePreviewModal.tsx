@@ -22,6 +22,7 @@ import { useCloseLayer } from '@/hooks/useCloseLayer';
 import { useWorkspaceChangeSignal } from '@/hooks/useWorkspaceChangeSignal';
 import { useWorkspaceFileService } from '@/hooks/useWorkspaceFileService';
 import type { RichDocKind } from '../../shared/fileTypes';
+import type { FilePreviewFocusTarget } from '@/types/filePreview';
 import { getMonacoLanguage, isMarkdownFile } from '@/utils/languageUtils';
 import { shortenPathForDisplay } from '@/utils/pathDetection';
 import { retainFocusOnMouseDown } from '@/utils/focusRetention';
@@ -100,6 +101,8 @@ interface FilePreviewModalProps {
     onSwitchToBrowser?: () => void;
     /** Initial line to scroll to */
     initialLineNumber?: number;
+    /** User navigation target from workspace search/file links. Re-applies when requestId changes. */
+    focusTarget?: FilePreviewFocusTarget;
     /** Parent-driven coarse refresh signal (e.g. AI file-modifying tool completed).
      *  The modal revalidates only the currently open `path` and applies content
      *  in place, preserving the preview/editor surface. */
@@ -358,6 +361,7 @@ export default function FilePreviewModal({
     onFullscreen,
     onSwitchToBrowser,
     initialLineNumber,
+    focusTarget,
     externalRefreshSignal,
     onExternalContentUpdated,
     onQuoteFile,
@@ -461,6 +465,12 @@ export default function FilePreviewModal({
         setExternalUpdatePending(false);
         // eslint-disable-next-line react-hooks/exhaustive-deps -- intentional: only path drives this; initialEditMode is read but does not retrigger
     }, [path]);
+
+    useEffect(() => {
+        if (focusTarget && isMarkdown && canEdit) {
+            setMdViewMode('edit');
+        }
+    }, [canEdit, focusTarget, isMarkdown]);
 
     // Large files: force plaintext to skip tokenization
     const effectiveMonacoLanguage = useMemo(() => {
@@ -1026,6 +1036,7 @@ export default function FilePreviewModal({
                             wordWrap={monacoWordWrap}
                             onSave={handleManualFlush}
                             initialLineNumber={initialLineNumber}
+                            focusTarget={focusTarget}
                             onQuote={monacoQuote}
                         />
                     </div>
@@ -1074,6 +1085,7 @@ export default function FilePreviewModal({
                         readOnly={!isDirectEdit}
                         onSave={isDirectEdit ? handleManualFlush : undefined}
                         initialLineNumber={initialLineNumber}
+                        focusTarget={focusTarget}
                         onQuote={monacoQuote}
                     />
                 </div>
