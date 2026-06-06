@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState, useRef, memo } from 'react';
+import { useCallback, useEffect, useState, useRef, memo, lazy, Suspense } from 'react';
 import { arrayMove } from '@dnd-kit/sortable';
 
 import {
@@ -26,10 +26,30 @@ import { useHelperAgentModelDefaults } from '@/hooks/useHelperAgentModelDefaults
 import { useConfig } from '@/hooks/useConfig';
 import { useThemeEffect } from '@/hooks/useTheme';
 import { useTabSwipeGesture } from '@/hooks/useTabSwipeGesture';
-import Chat from '@/pages/Chat';
-import Launcher from '@/pages/Launcher';
-import Settings from '@/pages/Settings';
-import TaskCenter from '@/pages/TaskCenter';
+import Launcher from '@/pages/Launcher'; // eager: default first view → no cold-start fallback
+// Route-split (P1): heavy / non-initial pages load on demand. lazy-Chat moves the
+// entire markdown/mermaid/katex/syntax-highlighter chain out of the entry chunk
+// (it is reachable only via Chat). Import factories are reused for idle preload
+// (preloadRoutes) so navigation stays instant and no new loading-flash appears.
+const importChat = () => import('@/pages/Chat');
+const importSettings = () => import('@/pages/Settings');
+const importTaskCenter = () => import('@/pages/TaskCenter');
+const Chat = lazy(importChat);
+const Settings = lazy(importSettings);
+const TaskCenter = lazy(importTaskCenter);
+
+/** Layout-compatible Suspense fallback for a lazy page chunk — same paper fill
+ *  as the deferred-mount placeholder, so a chunk-load is never a jarring blank. */
+const PAGE_FALLBACK = <div className="h-full w-full bg-[var(--paper)]" />;
+
+/** Preload the lazy page chunks after first paint, highest-likelihood first
+ *  (Chat carries the markdown chain). Keeps first paint light while making later
+ *  navigation instant — preload is load-bearing for "no new transition". */
+function preloadRoutes(): void {
+    void importChat();
+    void importSettings();
+    void importTaskCenter();
+}
 import {
   type Project,
 } from '@/config/types';
@@ -180,23 +200,27 @@ export const MemoizedTabContent = memo(function TabContent({
           isActive={isActive}
         />
       ) : kind === 'settings' ? (
-        <Settings
-          initialSection={settingsInitialSection}
-          initialMcpId={settingsInitialMcpId}
-          initialSelect={settingsInitialSelect}
-          onSectionChange={onSettingsSectionChange}
-          isActive={isActive}
-          updateReady={updateReady}
-          updateVersion={updateVersion}
-          updateChecking={updateChecking}
-          updateDownloading={updateDownloading}
-          updateInstalling={updateInstalling}
-          updatePreparing={updatePreparing}
-          onCheckForUpdate={onCheckForUpdate}
-          onRestartAndUpdate={onRestartAndUpdate}
-        />
+        <Suspense fallback={PAGE_FALLBACK}>
+          <Settings
+            initialSection={settingsInitialSection}
+            initialMcpId={settingsInitialMcpId}
+            initialSelect={settingsInitialSelect}
+            onSectionChange={onSettingsSectionChange}
+            isActive={isActive}
+            updateReady={updateReady}
+            updateVersion={updateVersion}
+            updateChecking={updateChecking}
+            updateDownloading={updateDownloading}
+            updateInstalling={updateInstalling}
+            updatePreparing={updatePreparing}
+            onCheckForUpdate={onCheckForUpdate}
+            onRestartAndUpdate={onRestartAndUpdate}
+          />
+        </Suspense>
       ) : kind === 'taskcenter' ? (
-        <TaskCenter isActive={isActive} pendingIntent={taskCenterPendingIntent} />
+        <Suspense fallback={PAGE_FALLBACK}>
+          <TaskCenter isActive={isActive} pendingIntent={taskCenterPendingIntent} />
+        </Suspense>
       ) : kind === 'cold' ? (
         // Restored-but-not-yet-activated chat tab (Issue #232). Render only a
         // cheap placeholder — crucially NO TabProvider, so no SSE connect, no
@@ -215,18 +239,20 @@ export const MemoizedTabContent = memo(function TabContent({
           onUnreadChange={(hasUnread) => onUpdateUnread(tab.id, hasUnread)}
           onSessionIdChange={(newSessionId) => onUpdateSessionId(tab.id, newSessionId)}
         >
-          <Chat
-            onBack={onBack}
-            onSwitchSession={(sessionId) => onSwitchSession(tab.id, sessionId)}
-            onNewSession={() => onNewSession(tab.id)}
-            initialMessage={tab.initialMessage}
-            onInitialMessageConsumed={() => onClearInitialMessage(tab.id)}
-            joinedExistingSidecar={tab.joinedExistingSidecar}
-            onJoinedExistingSidecarHandled={() => onClearJoinedExistingSidecar(tab.id)}
-            sessionTitle={tab.title}
-            onRenameSession={(newTitle: string) => onRenameSession(tab.id, newTitle)}
-            onForkSession={(newSessionId: string, agentDir: string, title: string, initialMessage?: string) => onForkSession(tab.id, newSessionId, agentDir, title, initialMessage)}
-          />
+          <Suspense fallback={PAGE_FALLBACK}>
+            <Chat
+              onBack={onBack}
+              onSwitchSession={(sessionId) => onSwitchSession(tab.id, sessionId)}
+              onNewSession={() => onNewSession(tab.id)}
+              initialMessage={tab.initialMessage}
+              onInitialMessageConsumed={() => onClearInitialMessage(tab.id)}
+              joinedExistingSidecar={tab.joinedExistingSidecar}
+              onJoinedExistingSidecarHandled={() => onClearJoinedExistingSidecar(tab.id)}
+              sessionTitle={tab.title}
+              onRenameSession={(newTitle: string) => onRenameSession(tab.id, newTitle)}
+              onForkSession={(newSessionId: string, agentDir: string, title: string, initialMessage?: string) => onForkSession(tab.id, newSessionId, agentDir, title, initialMessage)}
+            />
+          </Suspense>
         </TabProvider>
       )}
     </div>
@@ -285,6 +311,17 @@ export default function App() {
 
   // Apply theme (light/dark/system) to <html> element
   useThemeEffect();
+
+  // P1: after first paint, preload the lazy page chunks at idle so navigating to
+  // Chat/Settings/TaskCenter is instant and never shows a chunk-load flash
+  // (preload is load-bearing — without it the entry-shrink just shifts cost to
+  // first-open). WKWebView may lack requestIdleCallback → setTimeout fallback.
+  useEffect(() => {
+    const ric = (window as unknown as { requestIdleCallback?: (cb: () => void) => number }).requestIdleCallback;
+    if (typeof ric === 'function') { ric(preloadRoutes); return; }
+    const t = setTimeout(preloadRoutes, 1500);
+    return () => clearTimeout(t);
+  }, []);
 
   // Settings initial section state (for deep linking to specific section)
   const [settingsInitialSection, setSettingsInitialSection] = useState<string | undefined>(undefined);

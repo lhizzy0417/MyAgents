@@ -89,8 +89,23 @@ export default defineConfig({
   build: {
     outDir: resolve(__dirname, 'dist'),
     emptyOutDir: true,
-    // Suppress warning about large chunks
-    // index.js is ~2100KB due to heavy visualization libs (mermaid, cytoscape)
-    chunkSizeWarningLimit: 2500
+    // P1: pages are route-split (React.lazy in App.tsx); the markdown / mermaid /
+    // katex / syntax-highlighter chain now lives in the lazy Chat chunk, not the
+    // entry. Limit stays generous because the Chat chunk itself is still large.
+    chunkSizeWarningLimit: 2500,
+    rollupOptions: {
+      output: {
+        // Stable vendor chunk for the React runtime so it caches across app
+        // updates (app code changes every release; React rarely does).
+        manualChunks(id: string) {
+          if (id.includes('node_modules/react-dom') ||
+              id.includes('node_modules/react/') ||
+              id.includes('node_modules/scheduler')) {
+            return 'vendor-react';
+          }
+          return undefined;
+        },
+      },
+    },
   }
 });

@@ -5,7 +5,7 @@
  */
 
 import { FolderPlus, LayoutTemplate, Loader2 } from 'lucide-react';
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, lazy, Suspense } from 'react';
 import { open } from '@tauri-apps/plugin-dialog';
 
 import { track } from '@/analytics';
@@ -14,9 +14,11 @@ import { useToast } from '@/components/Toast';
 import { UnifiedLogsPanel } from '@/components/UnifiedLogsPanel';
 import PathInputDialog from '@/components/PathInputDialog';
 import ConfirmDialog from '@/components/ConfirmDialog';
-import TaskCenterOverlay from '@/components/TaskCenterOverlay';
+// P1: click-opened overlays — lazy so their subtrees (which transitively pull
+// Markdown → mermaid/katex/syntax-highlighter) leave the eager entry chunk.
+const TaskCenterOverlay = lazy(() => import('@/components/TaskCenterOverlay'));
 import { AddWorkspaceMenu, BrandSection, RecentTasks, TemplateLibraryDialog, WorkspaceCard, WorkspaceEditDialog } from '@/components/launcher';
-import WorkspaceConfigPanel from '@/components/WorkspaceConfigPanel';
+const WorkspaceConfigPanel = lazy(() => import('@/components/WorkspaceConfigPanel'));
 import { useConfig } from '@/hooks/useConfig';
 import { useTaskCenterData } from '@/hooks/useTaskCenterData';
 import { type Project, type PermissionMode, type McpServerDefinition, isProviderEnabled } from '@/config/types';
@@ -932,13 +934,15 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
 
             {/* Task Center Overlay */}
             {showOverlay && (
-                <TaskCenterOverlay
-                    projects={visibleProjects}
-                    onOpenTask={handleOverlayOpenTask}
-                    onClose={handleCloseOverlay}
-                    taskCenterData={taskCenterData}
-                    initialMode={overlayMode}
-                />
+                <Suspense fallback={null}>
+                    <TaskCenterOverlay
+                        projects={visibleProjects}
+                        onOpenTask={handleOverlayOpenTask}
+                        onClose={handleCloseOverlay}
+                        taskCenterData={taskCenterData}
+                        initialMode={overlayMode}
+                    />
+                </Suspense>
             )}
 
             {/* Template Library Dialog */}
@@ -961,12 +965,14 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
 
             {/* Agent Config Overlay */}
             {agentOverlay && (
-                <WorkspaceConfigPanel
-                    agentDir={agentOverlay.workspacePath}
-                    onClose={handleCloseAgentOverlay}
-                    initialTab={agentOverlay.initialTab}
-                    onRequestInit={handleRequestInitFromAgentOverlay}
-                />
+                <Suspense fallback={null}>
+                    <WorkspaceConfigPanel
+                        agentDir={agentOverlay.workspacePath}
+                        onClose={handleCloseAgentOverlay}
+                        initialTab={agentOverlay.initialTab}
+                        onRequestInit={handleRequestInitFromAgentOverlay}
+                    />
+                </Suspense>
             )}
         </div>
     );

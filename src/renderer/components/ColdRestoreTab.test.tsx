@@ -79,11 +79,14 @@ describe('cold restored tab', () => {
     expect(screen.queryByTestId('chat')).toBeNull();
   });
 
-  it('mounts TabProvider once restoreState is cleared (activated)', () => {
+  it('mounts TabProvider once restoreState is cleared (activated)', async () => {
     tabProviderSpy.mockClear();
     render(<MemoizedTabContent tab={coldTab({ restoreState: undefined })} isActive {...noopProps} />);
+    // TabProvider (not lazy) mounts synchronously — it's the SSE/sidecar side-effect gate.
     expect(tabProviderSpy).toHaveBeenCalledTimes(1);
     expect(screen.queryByTestId('tab-provider')).not.toBeNull();
-    expect(screen.queryByTestId('chat')).not.toBeNull();
+    // Chat is route-split (React.lazy + Suspense, P1), so it resolves one
+    // microtask after mount — await it rather than asserting synchronously.
+    expect(await screen.findByTestId('chat')).not.toBeNull();
   });
 });
