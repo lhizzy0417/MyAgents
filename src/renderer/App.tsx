@@ -52,7 +52,7 @@ const PAGE_FALLBACK = <div className="h-full w-full bg-[var(--paper)]" />;
 import {
   type Project,
 } from '@/config/types';
-import { type Tab, type InitialMessage, createNewTab, getFolderName, buildChatFlipPatch, MAX_TABS } from '@/types/tab';
+import { type Tab, type InitialMessage, type SidecarConfigDisposition, createNewTab, getFolderName, buildChatFlipPatch, MAX_TABS } from '@/types/tab';
 import { buildRestoredTabs, saveOpenTabs, hydratePersistedState, pickDurableOverride, shouldOfferRestore, planRestoreTabs } from '@/utils/tabPersistence';
 import { persistOpenTabsDurable, loadAndClearOpenTabsDurable, clearOpenTabsDurable } from '@/utils/tabPersistenceDurable';
 import { consumeCleanExitMarker } from '@/utils/lastExitMarker';
@@ -153,7 +153,7 @@ interface TabContentProps {
   onForkSession: (tabId: string, newSessionId: string, agentDir: string, title: string, initialMessage?: string) => void;
   onUpdateSessionId: (tabId: string, newSessionId: string) => Promise<void>;
   onClearInitialMessage: (tabId: string) => void;
-  onClearJoinedExistingSidecar: (tabId: string) => void;
+  onSidecarConfigAdopted: (tabId: string) => void;
   // Settings callbacks
   onSettingsSectionChange: () => void;
   updateReady: boolean;
@@ -176,7 +176,7 @@ export const MemoizedTabContent = memo(function TabContent({
   tab, isActive, isLoading, error, isDeferredMount,
   onLaunchProject, onBack, onSwitchSession, onOpenSessionInNewTab, onNewSession,
   onUpdateGenerating, onUpdateTitle, onUpdateUnread, onRenameSession, onForkSession, onUpdateSessionId, onClearInitialMessage,
-  onClearJoinedExistingSidecar,
+  onSidecarConfigAdopted,
   settingsInitialSection, settingsInitialMcpId, settingsInitialSelect, onSettingsSectionChange,
   updateReady, updateVersion, updateChecking, updateDownloading, updateInstalling, updatePreparing,
   onCheckForUpdate, onRestartAndUpdate,
@@ -249,8 +249,8 @@ export const MemoizedTabContent = memo(function TabContent({
               onNewSession={() => onNewSession(tab.id)}
               initialMessage={tab.initialMessage}
               onInitialMessageConsumed={() => onClearInitialMessage(tab.id)}
-              joinedExistingSidecar={tab.joinedExistingSidecar}
-              onJoinedExistingSidecarHandled={() => onClearJoinedExistingSidecar(tab.id)}
+              sidecarConfigDisposition={tab.sidecarConfigDisposition}
+              onSidecarConfigAdopted={() => onSidecarConfigAdopted(tab.id)}
               sessionTitle={tab.title}
               onRenameSession={(newTitle: string) => onRenameSession(tab.id, newTitle)}
               onForkSession={(newSessionId: string, agentDir: string, title: string, initialMessage?: string) => onForkSession(tab.id, newSessionId, agentDir, title, initialMessage)}
@@ -1293,7 +1293,7 @@ export default function App() {
                   sessionId,
                   view: 'chat',
                   title: project.displayName || getFolderName(project.path),
-                  joinedExistingSidecar: !result.isNew,
+                  sidecarConfigDisposition: result.isNew ? 'push' : 'adopt',
                 }
                 : t
             )
@@ -1380,23 +1380,20 @@ export default function App() {
         setPendingSurface(targetTabId, pendingSurfaceForLaunch);
       }
 
-      // INSTANT-NAV (A1, new session): flip to the chat shell BEFORE awaiting the
-      // sidecar boot. `effectiveSessionId` is a `pending-<tabId>` id (D1: truthy →
-      // TabProvider's SSE connect effect fires and polls getTabServerUrl for the
-      // Healthy port; the Chat shows "AI 启动中" while the sidecar boots). The
-      // `await ensureSessionSidecar` below still runs (D2). Chat mounts immediately
-      // instead of the user staring at the Launcher through the whole cold boot.
+      // INSTANT-NAV: flip to the chat shell BEFORE awaiting the sidecar boot, so the
+      // user lands in Chat instantly (the boot runs under the "AI 启动中" overlay).
+      // `effectiveSessionId` is truthy (D1): a real history id, or a `pending-<tabId>`
+      // for new sessions → TabProvider's SSE connect fires and Chat mounts now.
       //
-      // Phase B — a HISTORY open whose session has NO live sidecar is also safe to
-      // flip instantly: getSessionPort === null ⇒ ensureSessionSidecar will spawn a
-      // FRESH sidecar (result.isNew === true ⇒ joinedExistingSidecar === false),
-      // exactly like a new session, so the early flip's hard-coded
-      // joinedExistingSidecar:false is provably correct (no config-stomping risk).
-      // The planner guarantees Scenario 4 here has no cron activation, and a session
-      // with NO sidecar at all cannot be a join — so null is a sound "fresh" proof.
-      // When a sidecar already exists (running, or a resident entry mid-restart) we
-      // can't prove joinedExistingSidecar without the ensure result, so those keep
-      // the post-ensure flip. (getSessionPort is a cheap presence lookup, not a boot.)
+      // `getSessionPort` is a PAINT-TIMING hint ONLY, never a config-correctness
+      // input: null ⇒ flip instant (no live sidecar to wait on); non-null ⇒ flip
+      // after the (fast) ensure. The actual push-vs-adopt disposition is ALWAYS
+      // decided by the single post-ensure resolver below using the authoritative
+      // `result.isNew` (under the Rust manager lock). So even if getSessionPort is
+      // wrong/raced/IPC-errored, the worst case is a mis-timed flip, never a config
+      // stomp — that is what removed the Phase B TOCTOU. New sessions flip 'push'
+      // immediately (a pending-<tabId> id is provably fresh — no creator can target
+      // it); history flips 'pending' until the resolver runs.
       const instantNav = !sessionId;
       const flipInstant = instantNav || (!!sessionId && (await getSessionPort(sessionId)) === null);
       const flipTitle = project.displayName || getFolderName(project.path);
@@ -1414,14 +1411,19 @@ export default function App() {
           setTabs((prev) =>
             prev.map((t) =>
               t.id === targetTabId
-                // joinedExistingSidecar: false is EXPLICIT (not omitted) — a new
-                // session always spawns a fresh sidecar (not joined). Omitting it
-                // would let buildChatFlipPatch preserve the tab's PRIOR value, and
-                // a reused tab (joined a session → back to launcher → new chat in
-                // the same tab) would keep a stale `true` → Chat skips MCP/agents/
-                // model push + the adoption effect overwrites the user's launcher
-                // selections with the fresh sidecar's disk config (config-stomping).
-                ? buildChatFlipPatch(t, { agentDir: project.path, sessionId: effectiveSessionId, title: flipTitle, initialMessage, joinedExistingSidecar: false })
+                // Disposition: a NEW session (pending-<tabId> id) is provably fresh
+                // — no Rust-side creator can target a pending id — so 'push'. A
+                // HISTORY session flips 'pending': push-vs-adopt is unknown until
+                // ensure resolves (getSessionPort is racy — a cron/IM/restart creator
+                // can spawn between the check and ensure), and the single post-ensure
+                // resolver below decides it from the authoritative result.isNew.
+                // Hard-coding a guess here is exactly the #300/#301 stomp we removed.
+                // initialMessage only on the new-session ('push') branch. A 'pending'
+                // tab must NOT carry one: autoSend gates on initialMessage and its
+                // MCP/plugin pushes are not disposition-gated, so a pending tab with a
+                // message would stomp a soon-to-be-'adopt' sidecar. History opens have
+                // no initialMessage today; this makes the invariant structural.
+                ? buildChatFlipPatch(t, { agentDir: project.path, sessionId: effectiveSessionId, title: flipTitle, initialMessage: instantNav ? initialMessage : undefined, sidecarConfigDisposition: instantNav ? 'push' : 'pending' })
                 : t
             )
           );
@@ -1457,21 +1459,32 @@ export default function App() {
       // Always use effectiveSessionId to ensure session_activations has entry for this Tab
       await activateSession(effectiveSessionId, targetTabId, null, result.port, project.path, false);
 
-      // History via Scenario 4 WITH a live sidecar: flip NOW, after ensure, because
-      // joinedExistingSidecar depends on result.isNew (the session may be joining a
-      // running sidecar). New sessions AND cold history (no live sidecar) already
-      // flipped instantly above, where joinedExistingSidecar is provably false.
+      // SINGLE RESOLVER — the authoritative join-vs-fresh decision comes ONLY from
+      // result.isNew (decided under the Rust manager lock), never from a pre-ensure
+      // prediction. This is what closes the Phase B TOCTOU config-stomp.
+      const resolved: SidecarConfigDisposition = result.isNew ? 'push' : 'adopt';
       if (!flipInstant) {
+        // Non-instant (live/stale history): this IS the first flip, after ensure.
         setTabs((prev) =>
           prev.map((t) =>
             t.id === targetTabId
-              ? buildChatFlipPatch(t, { agentDir: project.path, sessionId: effectiveSessionId, title: flipTitle, initialMessage, joinedExistingSidecar: !result.isNew })
+              ? buildChatFlipPatch(t, { agentDir: project.path, sessionId: effectiveSessionId, title: flipTitle, initialMessage, sidecarConfigDisposition: resolved })
               : t
           )
         );
         if (targetTabId !== activeTabId) {
           setActiveTabId(targetTabId);
         }
+      } else {
+        // Instant path already flipped (and may have auto-sent initialMessage).
+        // Resolve ONLY the disposition — do NOT re-run buildChatFlipPatch, which
+        // would re-attach initialMessage and risk a double-send. 'pending'→push|adopt
+        // for history; for a new session result.isNew is always true → 'push' (no-op).
+        setTabs((prev) =>
+          prev.map((t) =>
+            t.id === targetTabId ? { ...t, sidecarConfigDisposition: resolved } : t
+          )
+        );
       }
       setLoadingTabs((prev) => ({ ...prev, [targetTabId]: false }));
     } catch (err) {
@@ -1500,6 +1513,21 @@ export default function App() {
       // useSessionReady('failed'): Phase A follow-up.)
       toastRef.current.error(`启动失败：${errorMsg}`);
 
+      // Cross-AI review (Critical): an instant flip set the tab to chat + 'pending'
+      // BEFORE this ensure threw. 'pending' has no resolver left now (the post-ensure
+      // step is what threw), so the mounted chat would be WEDGED — neither push nor
+      // adopt ever runs, even if the sidecar later recovers (strictly worse than the
+      // old self-healing 'push', and it breaks the "never leave a chat pending"
+      // invariant). Reset to a terminal 'push' so a later reconnect pushes config.
+      // (The browser-dev branch below additionally flips the view.)
+      setTabs((prev) =>
+        prev.map((t) =>
+          t.id === errorTabId && t.sidecarConfigDisposition === 'pending'
+            ? { ...t, sidecarConfigDisposition: 'push' }
+            : t
+        )
+      );
+
       // In browser dev mode, still allow navigation
       if (isBrowserDevMode()) {
         console.log('[App] Browser mode: continuing despite error');
@@ -1511,6 +1539,8 @@ export default function App() {
                 agentDir: project.path,
                 view: 'chat',
                 title: project.displayName || getFolderName(project.path),
+                // Terminal: ensure failed — never leave a mounted chat 'pending'.
+                sidecarConfigDisposition: 'push' as const,
               }
               : t
           )
@@ -1529,9 +1559,13 @@ export default function App() {
     ));
   }, []);
 
-  const clearJoinedExistingSidecar = useCallback((tabId: string) => {
+  // Called by Chat after it has adopted a joined sidecar's config. Move the tab to
+  // 'push' so the user's SUBSEQUENT in-tab edits push to the sidecar normally (the
+  // adoption is one-shot). Push effects don't replay on adopt→push because they key
+  // on the `configPending` boolean, which stays false across this transition.
+  const markSidecarConfigAdopted = useCallback((tabId: string) => {
     setTabs(prev => prev.map(t =>
-      t.id === tabId ? { ...t, joinedExistingSidecar: undefined } : t
+      t.id === tabId ? { ...t, sidecarConfigDisposition: 'push' } : t
     ));
   }, []);
 
@@ -1563,6 +1597,9 @@ export default function App() {
       sessionId: newSessionId,
       view: 'chat',
       title,
+      // Fork mints a brand-new session id → fresh sidecar (no concurrent creator
+      // can target it) → 'push'. The post-ensure step below confirms it.
+      sidecarConfigDisposition: 'push',
       ...(initialMessage ? { initialMessage: { text: initialMessage } } : {}),
     };
 
@@ -1613,6 +1650,9 @@ export default function App() {
       sessionId,
       view: 'chat',
       title,
+      // Existing session pre-mounted before ensure → 'pending'; the post-ensure
+      // step below resolves push|adopt from result.isNew (no stomp on a join).
+      sidecarConfigDisposition: 'pending',
     };
     setTabs(prev => [...prev, newTab]);
     setLoadingTabs(prev => ({ ...prev, [newTab.id]: true }));
@@ -1641,7 +1681,7 @@ export default function App() {
         await activateSession(sessionId, newTab.id, null, result.port, sessionAgentDir, false);
       }
       setTabs(prev => prev.map(t =>
-        t.id === newTab.id ? { ...t, joinedExistingSidecar: !result.isNew } : t,
+        t.id === newTab.id ? { ...t, sidecarConfigDisposition: result.isNew ? 'push' : 'adopt' } : t,
       ));
       setActiveTabId(newTab.id);
       return true;
@@ -1830,7 +1870,7 @@ export default function App() {
               ? {
                 ...t,
                 sessionId,
-                joinedExistingSidecar: !result.isNew,
+                sidecarConfigDisposition: result.isNew ? 'push' : 'adopt',
                 view: 'chat',
                 agentDir: tabAgentDir,
                 title: currentTab.title || getFolderName(tabAgentDir),
@@ -1881,7 +1921,7 @@ export default function App() {
                 sessionId,
                 view: 'chat',
                 title: currentTabForScenario3.title || getFolderName(currentTabForScenario3.agentDir ?? ''),
-                joinedExistingSidecar: !result.isNew,
+                sidecarConfigDisposition: result.isNew ? 'push' : 'adopt',
               }
               : t
           )
@@ -2029,7 +2069,7 @@ export default function App() {
             ? {
               ...t,
               sessionId,
-              joinedExistingSidecar: joinedExisting,
+              sidecarConfigDisposition: joinedExisting ? 'adopt' : 'push',
               view: 'chat',
               agentDir: tabAgentDir,
               title: currentTabForScenario4.title || getFolderName(tabAgentDir),
@@ -2096,7 +2136,7 @@ export default function App() {
     setTabs((prev) =>
       prev.map((t) =>
         t.id === activeTabId
-          ? { ...t, agentDir: null, sessionId: null, view: 'launcher', title: 'New Tab' }
+          ? { ...t, agentDir: null, sessionId: null, view: 'launcher', title: 'New Tab', sidecarConfigDisposition: 'push' }
           : t
       )
     );
@@ -2143,12 +2183,12 @@ export default function App() {
       await activateSession(pendingSessionId, tabId, null, result.port, currentTab.agentDir, false);
 
       // Update tab state → TabProvider will detect sessionId change and reconnect
-      // Explicitly clear joinedExistingSidecar to prevent stale flag from blocking config sync
+      // Fresh sidecar for the new session → 'push' (overwrites any stale disposition)
       // on the new session (e.g. user clicks "New Session" while still in IM Bot adoption window)
       setTabs((prev) =>
         prev.map((t) =>
           t.id === tabId
-            ? { ...t, sessionId: pendingSessionId, joinedExistingSidecar: undefined }
+            ? { ...t, sessionId: pendingSessionId, sidecarConfigDisposition: 'push' }
             : t
         )
       );
@@ -2251,7 +2291,7 @@ export default function App() {
         // connects SSE and loadSession()s the history from JSONL.
         setTabs((prev) =>
           prev.map((t) =>
-            t.id === tabId ? { ...t, restoreState: undefined, joinedExistingSidecar: joinedExisting } : t,
+            t.id === tabId ? { ...t, restoreState: undefined, sidecarConfigDisposition: joinedExisting ? 'adopt' : 'push' } : t,
           ),
         );
       } catch (err) {
@@ -2380,6 +2420,7 @@ export default function App() {
       sessionId: null,
       view: 'settings',
       title: '设置',
+      sidecarConfigDisposition: 'push',
     };
     openNewTabDeferred(newTab);
 
@@ -2420,6 +2461,7 @@ export default function App() {
       sessionId: null,
       view: 'taskcenter',
       title: '任务中心',
+      sidecarConfigDisposition: 'push',
     };
     openNewTabDeferred(newTab);
   }, [openNewTabDeferred]);
@@ -2682,14 +2724,12 @@ export default function App() {
   // Listen for OPEN_SESSION_IN_NEW_TAB — task center's 任务执行 session list
   // dispatches this to open a historical execution in a fresh chat tab.
   //
-  // Forces a NEW tab unconditionally. An earlier version delegated to
-  // `handleLaunchProject` which falls back to the active tab in its common
-  // Scenario 4 branch — that could silently replace the user's current
-  // chat session if they clicked a row while inside another Chat tab.
-  // We pre-seed a new tab here (mirroring OPEN_AI_DISCUSSION's approach)
-  // so the user always lands in a fresh tab and their active session stays
-  // put. Failures surface as toasts, not silent console.warn — otherwise
-  // the click looks dead and the user has no signal.
+  // Opens the session in a new tab (or jumps to it if already open) via the same
+  // cron-aware plan→spawn path as the in-tab handleOpenSessionInNewTab. An earlier
+  // version pre-seeded a chat tab + handleLaunchProject, which (a) could replace the
+  // active session via Scenario 4, and (b) wiped a cron task's activation when the
+  // pre-seeded session id made the planner pick jump-to-tab→Scenario 4. The
+  // spawn path avoids both.
   useEffect(() => {
     const handler = async (raw: Event) => {
       const event = raw as CustomEvent<{
@@ -2707,32 +2747,33 @@ export default function App() {
         return;
       }
 
-      if (tabsRef.current.length >= MAX_TABS) {
-        toastRef.current?.error(`已达 Tab 上限 (${MAX_TABS})，请先关闭一个 Tab`);
+      // Dedup + cron-aware routing — mirror handleOpenSessionInNewTab (the in-tab
+      // path); do NOT pre-seed + handleLaunchProject. A pre-seeded session id makes
+      // planSessionOpen return jump-to-tab, which the launch flow then routes into
+      // Scenario 4's release + deactivate + activate(taskId:null) → that WIPES a cron
+      // task's activation ownership (cross-AI review, High). spawnTabForExistingSession
+      // owns the disposition (pending → push|adopt from result.isNew), preserves the
+      // cron activation via updateSessionTab when joining a cron-owned sidecar, removes
+      // the tab on failure (no stuck-'pending'), and enforces MAX_TABS internally.
+      const activation = await getSessionActivation(sessionId);
+      const plan = planSessionOpen({
+        tabs: tabsRef.current,
+        targetSessionId: sessionId,
+        multiAgentRuntime: false,
+        targetActivation: activation,
+        currentTabCronRunning: false,
+      });
+      if (plan.type === 'jump-to-tab') {
+        // Already open → switch to it (don't duplicate, don't block on MAX_TABS).
+        setActiveTabId(plan.tabId);
         return;
       }
-
-      // Pre-seed a chat tab with the target session id so the user lands
-      // directly in Chat view, not Launcher. `handleLaunchProject` below
-      // uses `activeTabIdRef.current` as its target; we've just updated
-      // that to the new tab so no existing tab gets hijacked.
-      const newTab = createNewTab();
-      const seeded = {
-        ...newTab,
-        view: 'chat' as const,
-        agentDir: workspace.path,
+      await spawnTabForExistingSession(
         sessionId,
-      };
-      setTabs((prev) => [...prev, seeded]);
-      setActiveTabId(newTab.id);
-      activeTabIdRef.current = newTab.id;
-
-      try {
-        await handleLaunchProject(workspace, sessionId);
-      } catch (err) {
-        console.error('[App] OPEN_SESSION_IN_NEW_TAB failed:', err);
-        toastRef.current?.error('打开 session 失败，请稍后重试');
-      }
+        workspace.path,
+        workspace.displayName || getFolderName(workspace.path),
+        { preserveCronActivation: plan.type === 'attach-existing-sidecar' },
+      );
     };
     window.addEventListener(CUSTOM_EVENTS.OPEN_SESSION_IN_NEW_TAB, handler);
     return () =>
@@ -3030,7 +3071,7 @@ export default function App() {
             onForkSession={handleForkSession}
             onUpdateSessionId={updateTabSessionId}
             onClearInitialMessage={clearInitialMessage}
-            onClearJoinedExistingSidecar={clearJoinedExistingSidecar}
+            onSidecarConfigAdopted={markSidecarConfigAdopted}
             settingsInitialSection={tab.view === 'settings' ? settingsInitialSection : undefined}
             settingsInitialMcpId={tab.view === 'settings' ? settingsInitialMcpId : undefined}
             settingsInitialSelect={tab.view === 'settings' ? settingsInitialSelect : undefined}

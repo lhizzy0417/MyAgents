@@ -60,7 +60,7 @@ import { CUSTOM_EVENTS, isPendingSessionId } from '../../shared/constants';
 import type { CapabilityInitialSelect } from '../../shared/skillsTypes';
 import { CC_MODELS, CC_PERMISSION_MODES, CODEX_PERMISSION_MODES, GEMINI_PERMISSION_MODES, getDefaultRuntimePermissionMode, getRuntimePermissionModes, buildRuntimeChangePatch } from '../../shared/types/runtime';
 import type { RuntimeType, RuntimeDetections, RuntimeConfig } from '../../shared/types/runtime';
-import type { InitialMessage } from '@/types/tab';
+import type { InitialMessage, SidecarConfigDisposition } from '@/types/tab';
 import type { FilePreviewFocusTarget } from '@/types/filePreview';
 import { shouldAutoSendInitialMessage } from '@/utils/initialMessageAutoSend';
 import { resolveBuiltinPermissionMode, isPinnedProviderUnavailable, shouldResetModelOnProviderChange, shouldSkipSnapshotWrite } from '@/utils/optionResolve';
@@ -181,10 +181,13 @@ interface ChatProps {
   initialMessage?: InitialMessage;
   /** Called after initialMessage has been consumed */
   onInitialMessageConsumed?: () => void;
-  /** Tab joined an already-running sidecar (e.g. IM Bot session) — skip config push, adopt sidecar config */
-  joinedExistingSidecar?: boolean;
-  /** Called after sidecar config has been adopted */
-  onJoinedExistingSidecarHandled?: () => void;
+  /** How this chat reconciles config with its sidecar: 'push' (push tab config),
+   *  'adopt' (adopt the live sidecar's config), or 'pending' (instant flip before
+   *  ensure resolved — do NEITHER until the post-ensure resolver decides). See the
+   *  SidecarConfigDisposition type doc. */
+  sidecarConfigDisposition: SidecarConfigDisposition;
+  /** Called after the sidecar's config has been adopted (disposition 'adopt') */
+  onSidecarConfigAdopted?: () => void;
   /** Current session title (from tab state) */
   sessionTitle?: string;
   /** Called when user renames the session */
@@ -193,7 +196,7 @@ interface ChatProps {
   onForkSession?: (newSessionId: string, agentDir: string, title: string, initialMessage?: string) => void;
 }
 
-export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSessionInNewTab, initialMessage, onInitialMessageConsumed, joinedExistingSidecar, onJoinedExistingSidecarHandled, sessionTitle, onRenameSession, onForkSession }: ChatProps) {
+export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSessionInNewTab, initialMessage, onInitialMessageConsumed, sidecarConfigDisposition, onSidecarConfigAdopted, sessionTitle, onRenameSession, onForkSession }: ChatProps) {
   // Get state from TabContext (required - Chat must be inside TabProvider)
   const {
     tabId,
@@ -690,17 +693,27 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
   // it's the recovery hook.
   const prevIsConnectedRef = useRef(isConnected);
 
-  // Track whether we're joining an existing sidecar (e.g. IM Bot session)
-  // When true, mount effects skip config push and adopt sidecar's config instead.
-  const joinedExistingSidecarRef = useRef(joinedExistingSidecar ?? false);
-  joinedExistingSidecarRef.current = joinedExistingSidecar ?? false;
+  // Disposition gate for config reconciliation (replaces joinedExistingSidecar).
+  // configDispositionRef holds the CURRENT value (read at effect-run time); the
+  // derived booleans are for effect deps.
+  // RULE (load-bearing): PUSH/persist effects gate on
+  // `configDispositionRef.current === 'push'` and list `configPending` in deps — so
+  // pending→push re-runs them, but adopt→push (markSidecarConfigAdopted) does NOT
+  // replay (configPending stays false). The ADOPTION effect gates on `isAdopt` and
+  // lists it in deps — so pending→adopt fires it exactly once. While 'pending',
+  // every config write waits; the single post-ensure resolver decides push|adopt.
+  const configDispositionRef = useRef(sidecarConfigDisposition);
+  configDispositionRef.current = sidecarConfigDisposition;
+  const configPending = sidecarConfigDisposition === 'pending';
+  const isAdopt = sidecarConfigDisposition === 'adopt';
 
-  // Sessions whose live sidecar config has been adopted (joined-sidecar flow).
-  // Snapshot sync uses this as a sticky guard: even after `joinedExistingSidecar`
-  // is cleared, persisted sessionMeta must not overwrite the adopted runtime/model/
-  // permission/MCP — the live sidecar is the truth. Race fixed: adoption finishes
-  // and clears the flag before sessionMeta hydration commits, so a flag-only guard
-  // misses the sessionMeta dispatch and reintroduces the "joined sidecar overwrite"
+  // Sessions whose live sidecar config has been adopted (disposition 'adopt' flow).
+  // Snapshot sync uses this as a sticky guard: even after the disposition resolves
+  // from 'adopt' to 'push' (markSidecarConfigAdopted), persisted sessionMeta must not
+  // overwrite the adopted runtime/model/permission/MCP — the live sidecar is the
+  // truth. Race fixed: adoption finishes and flips to 'push' before sessionMeta
+  // hydration commits, so a disposition-only guard misses the sessionMeta dispatch
+  // and reintroduces the "joined sidecar overwrite"
   // class of bug.
   const adoptedSessionRef = useRef<string | null>(null);
 
@@ -855,6 +868,10 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
     if (!multiAgentRuntimeEnabled) return;
     if (currentRuntime !== 'gemini' && currentRuntime !== 'codex') return;
     if (!isActive || !isConnected || !sessionId) return;
+    // Only a 'push' tab prewarms the sidecar with ITS config (model/permission).
+    // 'pending' waits for the post-ensure resolver; 'adopt' must not override the
+    // live sidecar's config. (External-runtime sibling of the MCP/model push gates.)
+    if (configDispositionRef.current !== 'push') return;
     // Cross-runtime sessions are opened in read-only mode until the user
     // confirms a fresh session — don't pre-warm those (the confirmation flow
     // resets sessionId, which retriggers this effect). Mirrors the
@@ -914,7 +931,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
     // the new settings. Re-firing pre-warm on every keystroke-driven option
     // change would thrash the subprocess.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [multiAgentRuntimeEnabled, currentRuntime, isActive, isConnected, sessionId, sessionRuntime, apiPost]);
+  }, [multiAgentRuntimeEnabled, currentRuntime, isActive, isConnected, sessionId, sessionRuntime, apiPost, configPending]);
 
   const runtimeModels = currentRuntime === 'claude-code' ? CC_MODELS
     : currentRuntime === 'codex' ? codexModels
@@ -1498,7 +1515,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
         syncMcpServerNames(servers);
         setGlobalMcpEnabled(enabledIds);
 
-        if (joinedExistingSidecarRef.current) {
+        if (configDispositionRef.current !== 'push') {
           if (isDebugMode()) {
             console.log('[Chat] Skipping MCP push (joined existing sidecar)');
           }
@@ -1559,6 +1576,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
     //    fingerprint diff.
     // eslint-disable-next-line react-hooks/exhaustive-deps -- apiPost / fileService are stable refs we deliberately exclude
   }, [
+    configPending, // re-run when the instant-flip disposition resolves (pending→push)
     isConnected, // re-push MCP when the sidecar becomes reachable (re)connect — see guard above
     currentAgent?.mcpEnabledServers,
     currentProject?.mcpEnabledServers,
@@ -1575,7 +1593,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
       if (response.success && response.agents) {
         setEnabledAgents(response.agents);
         // Skip push when joining existing sidecar to avoid overwriting session config
-        if (joinedExistingSidecarRef.current) {
+        if (configDispositionRef.current !== 'push') {
           if (isDebugMode()) {
             console.log('[Chat] Skipping agents push (joined existing sidecar)');
           }
@@ -1590,7 +1608,12 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
     } catch (err) {
       console.error('[Chat] Failed to load agents:', err);
     }
-  }, [apiGet, apiPost]);
+  // configPending is an INTENTIONAL re-trigger dep (not referenced in the body — the
+  // gate reads configDispositionRef.current): changing the callback identity when the
+  // disposition resolves makes the calling effect re-run loadAndSyncAgents, so a
+  // 'pending'→'push' history open pushes agents even if it skipped during pending.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [apiGet, apiPost, configPending]);
 
   // Load skills/commands for sidebar display.
   // Sources the same Rust scan that SimpleChatInput's slash menu uses so the
@@ -1751,6 +1774,13 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
       // `pushMcpToSidecar` plumbing dead-code. Wire it through so the
       // "single source of truth" promise is real.
       pushMcpToSidecar: async (servers) => {
+        // Defer the live-sidecar push while the disposition is unresolved (instant
+        // flip pre-ensure) — pushing now could stomp a sidecar that resolves to
+        // 'adopt'. The disk dual-write (patchProject/patchSnapshot) still happens, so
+        // on 'push' the mount effect re-pushes the effective set on resolve, and on
+        // 'adopt' the user's choice is persisted for future sessions. Post-resolution
+        // (push OR adopt) a user toggle is explicit intent and DOES reach the sidecar.
+        if (configDispositionRef.current === 'pending') return;
         await apiPost('/api/mcp/set', { servers });
       },
       getAllMcpServers,
@@ -1759,9 +1789,11 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
       // SDK options for the next pre-warm pick up the change immediately,
       // mirroring the MCP push above.
       pushPluginsToSidecar: async (enabledIds) => {
+        if (configDispositionRef.current === 'pending') return; // defer while unresolved; disk write still happens
         await apiPost('/api/cc-plugin/session-enable', { enabledIds });
       },
       pushRuntimeConfigToSidecar: async (runtimeConfig) => {
+        if (configDispositionRef.current === 'pending') return; // defer while unresolved; disk write still happens
         await apiPost('/api/runtime/config', {
           runtime: currentRuntime,
           runtimeConfig,
@@ -1840,7 +1872,10 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
   // Placed AFTER provider change effect so project model takes priority in same render cycle.
   // Skipped when initialMessage is provided (BrandSection path applies its own settings).
   useEffect(() => {
-    if (!currentProject || projectSyncedRef.current || hadInitialMessage.current) return;
+    // While 'pending' (instant flip pre-ensure), wait WITHOUT marking
+    // projectSyncedRef — so this re-runs once the disposition resolves (configPending
+    // is in deps). On 'adopt' the model seed below is gated to 'push' so adoption owns it.
+    if (!currentProject || projectSyncedRef.current || hadInitialMessage.current || configPending) return;
     projectSyncedRef.current = true;
     // AgentConfig is source of truth, Project is fallback for non-agent workspaces
     const effectivePermission = (currentAgent?.permissionMode as PermissionMode | undefined) ?? currentProject.permissionMode ?? config.defaultPermissionMode;
@@ -1860,11 +1895,11 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
     }
     // Skip model override when joining existing sidecar — adoption effect will set the correct model
     const effectiveModel = currentAgent?.model ?? currentProject.model;
-    if (effectiveModel && !joinedExistingSidecarRef.current) {
+    if (effectiveModel && configDispositionRef.current === 'push') {
       setSelectedModel(effectiveModel);
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps -- one-time sync when project first loads
-  }, [currentProject?.id]);
+  }, [currentProject?.id, configPending]);
 
   // v0.1.69: session snapshot → local state (session-first per D7 Option C).
   // Also handles T11 reset-on-session-switch: when switching to an unlocked / IM session
@@ -1873,7 +1908,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
   // PATCH /sessions/:id. React bails on setState when target === current, so no render loop.
   useEffect(() => {
     if (!sessionMeta) return;  // Not loaded yet — keep mount-time defaults
-    if (joinedExistingSidecarRef.current) return;  // Adoption effect handles it
+    if (configDispositionRef.current !== 'push') return;  // Adoption effect handles it
     // Sticky guard: adoption may have already completed and cleared the flag
     // BEFORE this sessionMeta dispatch arrived (loadSession sets sessionMeta after
     // /api/session/config returns). Re-applying persisted snapshot here would
@@ -1908,11 +1943,11 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
     if (providerId) setSelectedProviderId(providerId);
     if (mcp) setWorkspaceMcpEnabled(mcp);
   // eslint-disable-next-line react-hooks/exhaustive-deps -- currentAgent derived from config, listening to its identity would re-fire on unrelated agent changes
-  }, [sessionMeta]);
+  }, [sessionMeta, configPending]);
 
   // 若 selectedModel 不在当前 provider 的 models 中（如模型已被删除），回退到 primaryModel 并更新项目
   useEffect(() => {
-    if (!currentProject || !currentProvider || joinedExistingSidecarRef.current) return;
+    if (!currentProject || !currentProvider || configDispositionRef.current !== 'push') return;
     // #300: `currentProvider` here is the fallback provider, NOT the session's
     // pinned one — the pinned model legitimately isn't in its model list. Without
     // this guard the effect would "heal" the model to the fallback provider's
@@ -1932,7 +1967,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
       }
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps -- only react to specific sub-properties, not full object refs
-  }, [currentProject?.id, currentProvider?.id, currentProvider?.models, currentProvider?.primaryModel, selectedModel, patchProject, pinnedProviderUnavailable]);
+  }, [currentProject?.id, currentProvider?.id, currentProvider?.models, currentProvider?.primaryModel, selectedModel, patchProject, pinnedProviderUnavailable, configPending]);
 
   // Unified model-push effect — single source of truth for `/api/model/set`.
   //
@@ -1995,7 +2030,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
     // user's own state changes (selectedModel/runtimeModel/permission). After
     // adoption clears the flag, the user's later edits SHOULD reach the
     // sidecar — applying a sticky guard here would silently swallow them.
-    if (joinedExistingSidecarRef.current) return;
+    if (configDispositionRef.current !== 'push') return;
 
     const modelToPush = isExternalRuntime ? runtimeModel : selectedModel;
     // External + no explicit pick → defer to runtime's built-in default.
@@ -2010,15 +2045,15 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
       lastPushedModelKeyRef.current = null; // allow retry
     });
   }, [isConnected, sessionRuntime, currentAgent, isExternalRuntime,
-      runtimeModel, selectedModel, sessionId, apiPost]);
+      runtimeModel, selectedModel, sessionId, apiPost, configPending]);
 
   // Adopt sidecar config when joining an existing sidecar (e.g. IM Bot session).
   // Reads the sidecar's current model and applies it to React state so the Tab
   // reflects the session's actual config instead of overwriting it with its own.
-  const onJoinedExistingSidecarHandledRef = useRef(onJoinedExistingSidecarHandled);
-  onJoinedExistingSidecarHandledRef.current = onJoinedExistingSidecarHandled;
+  const onSidecarConfigAdoptedRef = useRef(onSidecarConfigAdopted);
+  onSidecarConfigAdoptedRef.current = onSidecarConfigAdopted;
   useEffect(() => {
-    if (!joinedExistingSidecar) return;
+    if (!isAdopt) return;
     // Capture the session this adoption is for; after the await, sessionId may
     // have advanced (user switched again), and we must not record adoption
     // ownership for a session whose live config we never actually read.
@@ -2071,13 +2106,13 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
         console.error('[Chat] Failed to read sidecar config:', err);
       } finally {
         // Clear the flag whether adoption succeeded or failed
-        onJoinedExistingSidecarHandledRef.current?.();
+        onSidecarConfigAdoptedRef.current?.();
       }
     };
 
     adoptConfig();
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- one-time adoption on mount
-  }, [joinedExistingSidecar]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- one-time adoption when disposition becomes 'adopt'
+  }, [isAdopt]);
 
   const { virtuosoRef, scrollerRef, followEnabledRef, scrollToBottom, pauseAutoScroll, handleAtBottomChange, attachScroller } = useVirtuosoScroll();
 
@@ -2167,7 +2202,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
         setGlobalMcpEnabled(enabledIds);
 
         // Skip MCP push when still in the adoption window (joined existing sidecar)
-        if (joinedExistingSidecarRef.current) {
+        if (configDispositionRef.current !== 'push') {
           if (isDebugMode()) {
             console.log('[Chat] Skipping MCP push on tab activate (joined existing sidecar)');
           }

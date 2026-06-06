@@ -17,9 +17,9 @@ import type { Tab } from '@/types/tab';
  *
  * Intentionally minimal: only the fields a fresh `createNewTab()` would set.
  * `agentDir` is cleared because the Tab returns to launcher view, where the
- * workspace is re-picked. `joinedExistingSidecar` is cleared because the
- * "joined an already-running sidecar" relationship doesn't survive sidecar
- * shutdown. `isGenerating` / `hasUnread` are also cleared: a permanently
+ * workspace is re-picked. `sidecarConfigDisposition` is reset to the benign
+ * launcher default 'push' (the previous push/adopt/pending disposition doesn't
+ * survive sidecar shutdown). `isGenerating` / `hasUnread` are also cleared: a permanently
  * gone sidecar can never fire chat:message-complete, so these UI flags
  * (which TabProvider toggles in response to those events) would otherwise
  * stick on a launcher tab and the user would see a misleading "still
@@ -32,7 +32,10 @@ export function resetTabToLauncher(tab: Tab): Tab {
         sessionId: null,
         view: 'launcher',
         title: 'New Tab',
-        joinedExistingSidecar: undefined,
+        // Back to a launcher tab → benign 'push' default (its next chat flip sets the
+        // real disposition). MUST be explicit: `...tab` would otherwise carry a stale
+        // 'pending'/'adopt' onto a launcher tab.
+        sidecarConfigDisposition: 'push',
         initialMessage: undefined,
         isGenerating: false,
         hasUnread: false,

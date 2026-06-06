@@ -14,6 +14,7 @@ const makeTab = (overrides: Partial<Tab>): Tab => ({
     sessionId: 'sess-1',
     view: 'chat',
     title: 'Project',
+    sidecarConfigDisposition: 'push',
     ...overrides,
 });
 
@@ -24,7 +25,7 @@ describe('resetTabToLauncher', () => {
             sessionId: 'sess-1',
             view: 'chat',
             title: 'X',
-            joinedExistingSidecar: true,
+            sidecarConfigDisposition: 'adopt',
             initialMessage: { text: 'hi' } as Tab['initialMessage'],
         });
         const next = resetTabToLauncher(tab);
@@ -33,7 +34,8 @@ describe('resetTabToLauncher', () => {
         expect(next.sessionId).toBeNull();
         expect(next.view).toBe('launcher');
         expect(next.title).toBe('New Tab');
-        expect(next.joinedExistingSidecar).toBeUndefined();
+        // Stale 'adopt' must reset to the benign launcher default, not carry over.
+        expect(next.sidecarConfigDisposition).toBe('push');
         expect(next.initialMessage).toBeUndefined();
     });
 

@@ -10,6 +10,7 @@ describe('buildChatFlipPatch — chat-flip invariants (instant-nav D1)', () => {
             agentDir: '/ws/a',
             sessionId: 'pending-tab-1',
             title: 'A',
+            sidecarConfigDisposition: 'push',
         });
         expect(patch.view).toBe('chat');
         expect(patch.sessionId).toBe('pending-tab-1');
@@ -21,7 +22,7 @@ describe('buildChatFlipPatch — chat-flip invariants (instant-nav D1)', () => {
     it('preserves unrelated tab fields (id, isGenerating, hasUnread)', () => {
         const patch = buildChatFlipPatch(
             { ...base, isGenerating: true, hasUnread: true },
-            { agentDir: '/ws/a', sessionId: 's1', title: 'A' },
+            { agentDir: '/ws/a', sessionId: 's1', title: 'A', sidecarConfigDisposition: 'push' },
         );
         expect(patch.id).toBe('tab-1');
         expect(patch.isGenerating).toBe(true);
@@ -31,7 +32,7 @@ describe('buildChatFlipPatch — chat-flip invariants (instant-nav D1)', () => {
     it('omits initialMessage when not provided (no undefined clobber)', () => {
         const patch = buildChatFlipPatch(
             { ...base, initialMessage: { text: 'keep' } },
-            { agentDir: '/ws/a', sessionId: 's1', title: 'A' },
+            { agentDir: '/ws/a', sessionId: 's1', title: 'A', sidecarConfigDisposition: 'push' },
         );
         // Not provided → the key is not written, so a prior value survives.
         expect(patch.initialMessage).toEqual({ text: 'keep' });
@@ -43,25 +44,31 @@ describe('buildChatFlipPatch — chat-flip invariants (instant-nav D1)', () => {
             sessionId: 's1',
             title: 'A',
             initialMessage: { text: 'hi' },
+            sidecarConfigDisposition: 'push',
         });
         expect(patch.initialMessage).toEqual({ text: 'hi' });
     });
 
-    it('includes joinedExistingSidecar only when explicitly provided', () => {
-        const withFlag = buildChatFlipPatch(base, { agentDir: '/ws/a', sessionId: 's1', title: 'A', joinedExistingSidecar: true });
-        expect(withFlag.joinedExistingSidecar).toBe(true);
-        const without = buildChatFlipPatch(base, { agentDir: '/ws/a', sessionId: 's1', title: 'A' });
-        expect('joinedExistingSidecar' in without).toBe(false);
+    it('requires and sets sidecarConfigDisposition (push | adopt | pending)', () => {
+        for (const d of ['push', 'adopt', 'pending'] as const) {
+            const patch = buildChatFlipPatch(base, { agentDir: '/ws/a', sessionId: 's1', title: 'A', sidecarConfigDisposition: d });
+            expect(patch.sidecarConfigDisposition).toBe(d);
+        }
     });
 
-    it('explicit joinedExistingSidecar:false overrides a stale prior true (config-stomping guard)', () => {
-        // The new-session instant-nav flip MUST pass `false` (not omit it), or a
-        // reused tab that previously joined a sidecar would keep `true` → Chat
-        // skips MCP/agents/model push + adopts disk config over the user's picks.
+    it('OVERWRITES a stale prior disposition (config-stomping guard)', () => {
+        // A reused tab may carry a prior 'adopt'/'pending'. The flip MUST overwrite it
+        // with the flip's value — otherwise a new-session 'push' flip on a tab that had
+        // adopted a sidecar would wrongly keep 'adopt' → Chat skips MCP/agents/model push
+        // and adopts disk config over the user's picks (#300/#301 config-stomp class).
         const patch = buildChatFlipPatch(
-            { ...base, joinedExistingSidecar: true },
-            { agentDir: '/ws/a', sessionId: 's1', title: 'A', joinedExistingSidecar: false },
+            { ...base, sidecarConfigDisposition: 'adopt' },
+            { agentDir: '/ws/a', sessionId: 's1', title: 'A', sidecarConfigDisposition: 'push' },
         );
-        expect(patch.joinedExistingSidecar).toBe(false);
+        expect(patch.sidecarConfigDisposition).toBe('push');
+    });
+
+    it('createNewTab defaults disposition to push (benign launcher default)', () => {
+        expect(createNewTab().sidecarConfigDisposition).toBe('push');
     });
 });

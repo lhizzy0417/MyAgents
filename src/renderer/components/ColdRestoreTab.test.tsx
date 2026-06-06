@@ -35,6 +35,7 @@ function coldTab(over: Partial<Tab> = {}): Tab {
     view: 'chat',
     title: 'Restored',
     restoreState: 'cold',
+    sidecarConfigDisposition: 'pending',
     ...over,
   };
 }
@@ -58,7 +59,7 @@ const noopProps = {
   onForkSession: vi.fn(),
   onUpdateSessionId: vi.fn(async () => {}),
   onClearInitialMessage: vi.fn(),
-  onClearJoinedExistingSidecar: vi.fn(),
+  onSidecarConfigAdopted: vi.fn(),
   onSettingsSectionChange: vi.fn(),
   updateReady: false,
   updateVersion: null,

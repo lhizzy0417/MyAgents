@@ -71,6 +71,28 @@ export interface InitialMessage {
     cron?: InitialMessageCron;
 }
 
+/**
+ * How a freshly-mounted Chat reconciles config with its session's sidecar.
+ * Replaces the old `joinedExistingSidecar?: boolean`, whose `undefined → ?? false
+ * → push` collapse had no way to express "not decided yet" and silently pushed
+ * config onto sidecars that should have been adopted (the #300/#301 stomp class).
+ *
+ *  - 'push'    — push this tab's config (MCP / agents / model) to the sidecar.
+ *                A fresh sidecar this tab spawned (was `joined === false`).
+ *  - 'adopt'   — adopt the live sidecar's existing config; do NOT push.
+ *                Joined an already-running sidecar (IM / cron / background; was
+ *                `joined === true`).
+ *  - 'pending' — disposition not yet known: the tab flipped to chat BEFORE
+ *                `ensureSessionSidecar` resolved (instant-nav). Chat does NEITHER
+ *                push nor adopt until the single post-ensure resolver sets
+ *                push|adopt from the authoritative `result.isNew`. Makes "flip
+ *                instant without resolving" a typed, safe state — not a stomp.
+ *
+ * Required on Tab so every constructor must choose (compile-enforced pit of
+ * success). Runtime-only — serializeTabs' field whitelist strips it on persist.
+ */
+export type SidecarConfigDisposition = 'pending' | 'push' | 'adopt';
+
 export interface Tab {
     id: string;
     agentDir: string | null;  // null = showing Launcher
@@ -83,7 +105,7 @@ export interface Tab {
     // Note: cronTaskId and sidecarPort are no longer stored in Tab.
     // Sidecar lifecycle is now managed by SidecarManager's Owner model.
     // Use getSessionPort(sessionId) to get the port when needed.
-    joinedExistingSidecar?: boolean;  // Tab joined an already-running sidecar (e.g. IM Bot session)
+    sidecarConfigDisposition: SidecarConfigDisposition;  // push | adopt | pending — see type doc
     /** Runtime-only (never persisted). 'cold' = restored from a previous
      *  session on startup but not yet activated: App renders it as lightweight
      *  tab chrome WITHOUT mounting TabProvider — so no SSE connect, no
@@ -135,6 +157,10 @@ export function createNewTab(): Tab {
         sessionId: null,
         view: 'launcher',
         title: 'New Tab',
+        // A launcher tab carries the benign default; when it flips to chat for a
+        // NEW session the flip sets 'push' explicitly anyway. (Never read while
+        // the tab is a launcher — Chat isn't mounted.)
+        sidecarConfigDisposition: 'push',
     };
 }
 
@@ -160,7 +186,11 @@ export function buildChatFlipPatch(
         sessionId: string; // D1: non-null by type — cannot flip to chat without one
         title: string;
         initialMessage?: InitialMessage;
-        joinedExistingSidecar?: boolean;
+        // Required: every chat flip must declare how config reconciles. 'pending'
+        // for an instant flip whose disposition the post-ensure resolver will set;
+        // 'push'/'adopt' when already known. No default — forcing the choice is the
+        // whole point (the old optional boolean is what let the stomp slip through).
+        sidecarConfigDisposition: SidecarConfigDisposition;
     },
 ): Tab {
     // D1 runtime backstop: `sessionId: string` blocks `null` at compile time but
@@ -178,6 +208,9 @@ export function buildChatFlipPatch(
         // Only attach when provided — undefined must not clobber a prior value
         // mid-launch (matches the existing `...(initialMessage ? {…} : {})` idiom).
         ...(fields.initialMessage ? { initialMessage: fields.initialMessage } : {}),
-        ...(fields.joinedExistingSidecar !== undefined ? { joinedExistingSidecar: fields.joinedExistingSidecar } : {}),
+        // Always set (required) — a chat flip always declares its disposition, and
+        // it must OVERWRITE any stale value from `...tab` (a reused tab may carry a
+        // prior 'adopt'/'pending').
+        sidecarConfigDisposition: fields.sidecarConfigDisposition,
     };
 }

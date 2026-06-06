@@ -25,7 +25,7 @@ const PERSIST_VERSION = 1 as const;
 
 /** The whitelisted, persisted shape of a restorable chat tab. Intentionally a
  *  subset of `Tab` — runtime-only fields (isGenerating / hasUnread /
- *  joinedExistingSidecar / initialMessage / restoreState) are never stored. */
+ *  sidecarConfigDisposition / initialMessage / restoreState) are never stored. */
 export interface PersistedTab {
     id: string;
     agentDir: string; // non-null (launcher tabs filtered out)
@@ -194,6 +194,10 @@ export function hydratePersistedState(state: PersistedTabState): { tabs: Tab[]; 
         view: 'chat',
         title: t.title,
         restoreState: 'cold',
+        // Cold tabs aren't ensured yet and render a placeholder (NOT Chat), so this is
+        // never read by a mounted chat. activateRestoredTab resolves it to push|adopt
+        // (from result.isNew) before clearing restoreState on first activation.
+        sidecarConfigDisposition: 'pending',
     }));
     return { tabs, activeTabId: state.activeTabId };
 }

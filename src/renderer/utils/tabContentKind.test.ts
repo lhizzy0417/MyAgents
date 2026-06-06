@@ -10,6 +10,7 @@ function tab(over: Partial<Tab>): Tab {
         sessionId: 'sid',
         view: 'chat',
         title: 'T',
+        sidecarConfigDisposition: 'push',
         ...over,
     };
 }

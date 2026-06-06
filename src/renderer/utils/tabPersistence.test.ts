@@ -19,6 +19,7 @@ function chatTab(over: Partial<Tab> = {}): Tab {
         sessionId: '11111111-2222-3333-4444-555555555555',
         view: 'chat',
         title: 'Chat A',
+        sidecarConfigDisposition: 'push',
         ...over,
     };
 }
@@ -27,9 +28,9 @@ describe('serializeTabs', () => {
     it('keeps only chat tabs with a real session + workspace', () => {
         const tabs: Tab[] = [
             chatTab({ id: 'a', sessionId: 'sid-a' }),
-            { id: 'b', agentDir: null, sessionId: null, view: 'launcher', title: 'New Tab' },
-            { id: 'c', agentDir: null, sessionId: null, view: 'settings', title: 'Settings' },
-            { id: 'd', agentDir: '/ws/d', sessionId: null, view: 'taskcenter', title: 'Tasks' },
+            { id: 'b', agentDir: null, sessionId: null, view: 'launcher', title: 'New Tab', sidecarConfigDisposition: 'push' },
+            { id: 'c', agentDir: null, sessionId: null, view: 'settings', title: 'Settings', sidecarConfigDisposition: 'push' },
+            { id: 'd', agentDir: '/ws/d', sessionId: null, view: 'taskcenter', title: 'Tasks', sidecarConfigDisposition: 'push' },
             chatTab({ id: 'e', sessionId: 'pending-tab-e' }), // pending → dropped
             chatTab({ id: 'f', agentDir: '', sessionId: 'sid-f' }), // no workspace → dropped
         ];
@@ -44,7 +45,7 @@ describe('serializeTabs', () => {
             sessionId: 'sid-a',
             isGenerating: true,
             hasUnread: true,
-            joinedExistingSidecar: true,
+            sidecarConfigDisposition: 'adopt',
             restoreState: 'cold',
             initialMessage: { text: 'secret draft' },
         });
@@ -79,7 +80,7 @@ describe('serializeTabs', () => {
 
     it('returns null when nothing is restorable', () => {
         const tabs: Tab[] = [
-            { id: 'b', agentDir: null, sessionId: null, view: 'launcher', title: 'New Tab' },
+            { id: 'b', agentDir: null, sessionId: null, view: 'launcher', title: 'New Tab', sidecarConfigDisposition: 'push' },
         ];
         expect(serializeTabs(tabs, 'b')).toBeNull();
     });
@@ -192,8 +193,8 @@ describe('hydratePersistedState', () => {
         const { tabs, activeTabId } = hydratePersistedState(state);
         expect(activeTabId).toBe('b');
         expect(tabs).toEqual([
-            { id: 'a', agentDir: '/ws/a', sessionId: 's-a', view: 'chat', title: 'A', restoreState: 'cold' },
-            { id: 'b', agentDir: '/ws/b', sessionId: 's-b', view: 'chat', title: 'B', restoreState: 'cold' },
+            { id: 'a', agentDir: '/ws/a', sessionId: 's-a', view: 'chat', title: 'A', restoreState: 'cold', sidecarConfigDisposition: 'pending' },
+            { id: 'b', agentDir: '/ws/b', sessionId: 's-b', view: 'chat', title: 'B', restoreState: 'cold', sidecarConfigDisposition: 'pending' },
         ]);
     });
 });
@@ -257,9 +258,9 @@ describe('shouldOfferRestore (Issue #309 — startup behaviour)', () => {
 });
 
 describe('planRestoreTabs (Issue #309 — pill restore merge)', () => {
-    const launcher: Tab = { id: 'launch-1', agentDir: null, sessionId: null, view: 'launcher', title: 'New Tab' };
+    const launcher: Tab = { id: 'launch-1', agentDir: null, sessionId: null, view: 'launcher', title: 'New Tab', sidecarConfigDisposition: 'push' };
     function cold(id: string, session: string): Tab {
-        return { id, agentDir: '/ws/a', sessionId: session, view: 'chat', title: id, restoreState: 'cold' };
+        return { id, agentDir: '/ws/a', sessionId: session, view: 'chat', title: id, restoreState: 'cold', sidecarConfigDisposition: 'pending' };
     }
     const candidate = {
         tabs: [cold('r1', 's-1'), cold('r2', 's-2'), cold('r3', 's-3')],
@@ -274,7 +275,7 @@ describe('planRestoreTabs (Issue #309 — pill restore merge)', () => {
     });
 
     it('appends (not replaces) when real work is already open, deduped by sessionId', () => {
-        const open: Tab = { id: 'open-1', agentDir: '/ws/b', sessionId: 's-2', view: 'chat', title: 'Open' };
+        const open: Tab = { id: 'open-1', agentDir: '/ws/b', sessionId: 's-2', view: 'chat', title: 'Open', sidecarConfigDisposition: 'push' };
         const plan = planRestoreTabs([open], candidate);
         // s-2 already open → r2 dropped; r1 + r3 appended after the live tab.
         expect(plan!.tabs.map(t => t.id)).toEqual(['open-1', 'r1', 'r3']);
@@ -283,7 +284,7 @@ describe('planRestoreTabs (Issue #309 — pill restore merge)', () => {
     });
 
     it('never lets activeTabId point outside the list when the cap slices it off', () => {
-        const open: Tab = { id: 'open-1', agentDir: '/ws/b', sessionId: 's-x', view: 'chat', title: 'Open' };
+        const open: Tab = { id: 'open-1', agentDir: '/ws/b', sessionId: 's-x', view: 'chat', title: 'Open', sidecarConfigDisposition: 'push' };
         // maxTabs=2: base [open-1] + r1 → r2/r3 (incl. active r2) sliced off.
         const plan = planRestoreTabs([open], candidate, 2);
         expect(plan!.tabs.map(t => t.id)).toEqual(['open-1', 'r1']);
@@ -296,7 +297,7 @@ describe('planRestoreTabs (Issue #309 — pill restore merge)', () => {
     });
 
     it('returns null when every candidate tab is already open (all deduped)', () => {
-        const open: Tab = { id: 'open-1', agentDir: '/ws/b', sessionId: 's-1', view: 'chat', title: 'Open' };
+        const open: Tab = { id: 'open-1', agentDir: '/ws/b', sessionId: 's-1', view: 'chat', title: 'Open', sidecarConfigDisposition: 'push' };
         // single candidate, already open, base is not a pristine launcher → nothing to add.
         expect(planRestoreTabs([open], { tabs: [cold('r1', 's-1')], activeTabId: 'r1' })).toBeNull();
     });
