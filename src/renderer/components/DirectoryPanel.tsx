@@ -110,6 +110,7 @@ import {
   applyChildrenMap,
   collectFreshUpdates,
   mergeLazyChildren,
+  treeNodeEqual,
 } from "./workspace-tree/treeMerge";
 import type { VisibleTreeRow } from "./workspace-tree/treeTypes";
 
@@ -675,6 +676,25 @@ const DirectoryPanel = memo(
               ? mergeLazyChildren(data.tree, prev.tree)
               : data.tree;
             const merged = applyChildrenMap(base, updates);
+            // Idempotent commit: most refreshes (fs watcher on a file-content
+            // edit, `.git`/temp churn, a change inside a collapsed subtree, the
+            // 120s poll, a tool-complete bump) leave the *displayed* tree
+            // unchanged even though `dirTree()` returned fresh objects. Keeping
+            // the previous reference when nothing visible changed stops
+            // `visibleRows` / react-virtuoso from reconciling an identical list
+            // — the "frequent flicker" users saw while files were being written.
+            // `DirectoryTreeNode` has no volatile fields, so structural equality
+            // == display equality; the depth-capped `summary` moves with the
+            // skeleton, so when the tree is equal we reuse `prev.tree` (stable
+            // rows) and only refresh the lightweight summary if it shifted.
+            if (prev && treeNodeEqual(prev.tree, merged)) {
+              const summarySame =
+                prev.summary.totalFiles === data.summary.totalFiles &&
+                prev.summary.totalDirs === data.summary.totalDirs &&
+                prev.truncated === data.truncated &&
+                prev.root === data.root;
+              return summarySame ? prev : { ...data, tree: prev.tree };
+            }
             return { ...data, tree: merged };
           });
 

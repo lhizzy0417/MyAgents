@@ -7,6 +7,7 @@ import {
   collectFreshUpdates,
   collectLazyBoundariesInOpenSet,
   mergeLazyChildren,
+  treeNodeEqual,
 } from "./treeMerge";
 
 function dir(
@@ -116,6 +117,85 @@ describe("mergeLazyChildren", () => {
     const merged = mergeLazyChildren(newNode, oldNode);
     expect(merged.loaded).toBe(false);
     expect(merged.children).toBeUndefined();
+  });
+});
+
+describe("treeNodeEqual", () => {
+  it("returns true for two structurally identical trees (the no-op refresh case)", () => {
+    // The flicker root cause: `dirTree()` returns fresh objects every call.
+    // Two scans of an unchanged tree must compare equal so the caller can keep
+    // the previous reference and skip the re-render.
+    const a = dir("/root", [file("/root/x"), dir("/root/d", [file("/root/d/y")])]);
+    const b = dir("/root", [file("/root/x"), dir("/root/d", [file("/root/d/y")])]);
+    expect(a).not.toBe(b);
+    expect(treeNodeEqual(a, b)).toBe(true);
+  });
+
+  it("returns true for the same reference (fast path)", () => {
+    const a = dir("/root", [file("/root/x")]);
+    expect(treeNodeEqual(a, a)).toBe(true);
+  });
+
+  it("returns false when a file is added", () => {
+    const a = dir("/root", [file("/root/x")]);
+    const b = dir("/root", [file("/root/x"), file("/root/new")]);
+    expect(treeNodeEqual(a, b)).toBe(false);
+  });
+
+  it("returns false when a file is removed", () => {
+    const a = dir("/root", [file("/root/x"), file("/root/gone")]);
+    const b = dir("/root", [file("/root/x")]);
+    expect(treeNodeEqual(a, b)).toBe(false);
+  });
+
+  it("returns false when a leaf is renamed (path/name/id differ)", () => {
+    const a = dir("/root", [file("/root/old")]);
+    const b = dir("/root", [file("/root/new")]);
+    expect(treeNodeEqual(a, b)).toBe(false);
+  });
+
+  it("returns false when children are reordered (dirTree sorts deterministically)", () => {
+    const a = dir("/root", [file("/root/a"), file("/root/b")]);
+    const b = dir("/root", [file("/root/b"), file("/root/a")]);
+    expect(treeNodeEqual(a, b)).toBe(false);
+  });
+
+  it("treats loaded:true and loaded:undefined as equal", () => {
+    const a = dir("/a", [file("/a/x")], true);
+    const b = dir("/a", [file("/a/x")], undefined);
+    expect(treeNodeEqual(a, b)).toBe(true);
+  });
+
+  it("returns false when one node is loaded:false and the other is loaded", () => {
+    const a = dir("/a", undefined, false);
+    const b = dir("/a", undefined, true);
+    expect(treeNodeEqual(a, b)).toBe(false);
+  });
+
+  it("returns false when one has a children array and the other has none", () => {
+    // loaded-empty dir ([]) vs unloaded dir (undefined) are different display
+    // states even though both render no rows.
+    const a = dir("/a", [], true);
+    const b = dir("/a", undefined, true);
+    expect(treeNodeEqual(a, b)).toBe(false);
+  });
+
+  it("returns false when a file becomes a dir at the same path", () => {
+    const a = file("/a");
+    const b = dir("/a", [file("/a/child")]);
+    expect(treeNodeEqual(a, b)).toBe(false);
+  });
+
+  it("detects a deeply nested change", () => {
+    const a = dir("/r", [dir("/r/a", [dir("/r/a/b", [file("/r/a/b/leaf")])])]);
+    const b = dir("/r", [dir("/r/a", [dir("/r/a/b", [file("/r/a/b/CHANGED")])])]);
+    expect(treeNodeEqual(a, b)).toBe(false);
+  });
+
+  it("is equal for deeply nested identical trees", () => {
+    const a = dir("/r", [dir("/r/a", [dir("/r/a/b", [file("/r/a/b/leaf")])])]);
+    const b = dir("/r", [dir("/r/a", [dir("/r/a/b", [file("/r/a/b/leaf")])])]);
+    expect(treeNodeEqual(a, b)).toBe(true);
   });
 });
 

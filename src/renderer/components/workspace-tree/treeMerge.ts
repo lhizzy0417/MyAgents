@@ -79,6 +79,57 @@ export function mergeLazyChildren(
 }
 
 /**
+ * Structural equality over the *displayed* tree.
+ *
+ * `DirectoryTreeNode` carries only display fields (`id` / `name` / `path` /
+ * `type` / `children` / `loaded`) — no mtime, size, or content. So two scans
+ * of an unchanged tree are deeply equal here, while any displayed difference
+ * (a file added / removed / renamed, a dir's `loaded` boundary moving, or
+ * children reordering — `cmd_workspace_dir_tree` sorts deterministically) makes
+ * them unequal.
+ *
+ * This makes DirectoryPanel's refresh idempotent. `dirTree()` allocates fresh
+ * objects on every call, and `mergeLazyChildren` returns the *fresh* node when
+ * nothing needed carrying — so a no-op refresh (the fs watcher firing on a
+ * file-content edit, `.git`/temp churn, a change inside a collapsed subtree,
+ * the 120s safety poll, or a tool-complete bump) would otherwise commit a
+ * brand-new `directoryInfo` identity, rebuild `visibleRows`, and force
+ * react-virtuoso to reconcile a byte-identical list — the visible "flicker".
+ * The caller compares the merged tree against the previously-committed one and
+ * keeps the old reference when they're equal, so React bails out entirely.
+ *
+ * `loaded` is normalized: `true` and `undefined` both mean "fully loaded" per
+ * the field's type doc, so they compare equal.
+ */
+export function treeNodeEqual(
+  a: DirectoryTreeNode,
+  b: DirectoryTreeNode,
+): boolean {
+  if (a === b) return true;
+  if (
+    a.path !== b.path ||
+    a.type !== b.type ||
+    a.name !== b.name ||
+    a.id !== b.id
+  ) {
+    return false;
+  }
+  // `true | undefined` both mean "loaded"; only `false` is "not loaded".
+  if ((a.loaded !== false) !== (b.loaded !== false)) return false;
+
+  const ac = a.children;
+  const bc = b.children;
+  if (ac === bc) return true;
+  // One has a children array, the other doesn't (loaded-empty vs unloaded).
+  if (ac === undefined || bc === undefined) return false;
+  if (ac.length !== bc.length) return false;
+  for (let i = 0; i < ac.length; i += 1) {
+    if (!treeNodeEqual(ac[i], bc[i])) return false;
+  }
+  return true;
+}
+
+/**
  * Walk the tree and collect paths of `loaded:false` boundary dirs whose path
  * is in `openPaths`. These are the dirs the user has expanded but the current
  * tree shape doesn't yet have their children — feed them to `dirExpand`.
