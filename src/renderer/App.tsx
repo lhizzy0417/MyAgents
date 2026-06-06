@@ -50,7 +50,7 @@ const PAGE_FALLBACK = <div className="h-full w-full bg-[var(--paper)]" />;
 import {
   type Project,
 } from '@/config/types';
-import { type Tab, type InitialMessage, createNewTab, getFolderName, MAX_TABS } from '@/types/tab';
+import { type Tab, type InitialMessage, createNewTab, getFolderName, buildChatFlipPatch, MAX_TABS } from '@/types/tab';
 import { buildRestoredTabs, saveOpenTabs, hydratePersistedState, pickDurableOverride, shouldOfferRestore, planRestoreTabs } from '@/utils/tabPersistence';
 import { persistOpenTabsDurable, loadAndClearOpenTabsDurable, clearOpenTabsDurable } from '@/utils/tabPersistenceDurable';
 import { consumeCleanExitMarker } from '@/utils/lastExitMarker';
@@ -1368,6 +1368,31 @@ export default function App() {
         setPendingSurface(targetTabId, pendingSurfaceForLaunch);
       }
 
+      // INSTANT-NAV (A1, new session): flip to the chat shell BEFORE awaiting the
+      // sidecar boot. `effectiveSessionId` is a `pending-<tabId>` id (D1: truthy →
+      // TabProvider's SSE connect effect fires and polls getTabServerUrl for the
+      // Healthy port; the Chat shows "AI 启动中" while the sidecar boots). The
+      // `await ensureSessionSidecar` below still runs (D2) — React flushes this
+      // flip during that await, so the Chat mounts immediately instead of the
+      // user staring at the Launcher through the whole cold boot. History opens
+      // reaching Scenario 4 (open-new-tab / stale-jump fallthrough) still flip
+      // AFTER ensure because joinedExistingSidecar depends on result.isNew —
+      // Phase B will make those instant too.
+      const instantNav = !sessionId;
+      const flipTitle = project.displayName || getFolderName(project.path);
+      if (instantNav) {
+        setTabs((prev) =>
+          prev.map((t) =>
+            t.id === targetTabId
+              ? buildChatFlipPatch(t, { agentDir: project.path, sessionId: effectiveSessionId, title: flipTitle, initialMessage })
+              : t
+          )
+        );
+        if (targetTabId !== activeTabId) {
+          setActiveTabId(targetTabId);
+        }
+      }
+
       const result = await ensureSessionSidecar(effectiveSessionId, project.path, 'tab', targetTabId);
       console.log(`[App] Session Sidecar ensured: port=${result.port}, isNew=${result.isNew}`);
 
@@ -1385,28 +1410,20 @@ export default function App() {
       // Always use effectiveSessionId to ensure session_activations has entry for this Tab
       await activateSession(effectiveSessionId, targetTabId, null, result.port, project.path, false);
 
-      // Update tab state with effectiveSessionId (matches the Sidecar's session)
-      // For new sessions, this is "pending-{tabId}" until backend creates the real session
-      setTabs((prev) =>
-        prev.map((t) =>
-          t.id === targetTabId
-            ? {
-              ...t,
-              agentDir: project.path,
-              sessionId: effectiveSessionId,
-              view: 'chat',
-              title: project.displayName || getFolderName(project.path),
-              // Only set initialMessage when explicitly provided (from Launcher send).
-              // Omitting undefined prevents overwriting a prior initialMessage in race conditions.
-              ...(initialMessage ? { initialMessage } : {}),
-              joinedExistingSidecar: !result.isNew,
-            }
-            : t
-        )
-      );
-
-      if (targetTabId !== activeTabId) {
-        setActiveTabId(targetTabId);
+      // History via Scenario 4: flip NOW, after ensure, because
+      // joinedExistingSidecar depends on result.isNew. New-session already
+      // flipped instantly above (it always spawns a fresh sidecar → not joined).
+      if (!instantNav) {
+        setTabs((prev) =>
+          prev.map((t) =>
+            t.id === targetTabId
+              ? buildChatFlipPatch(t, { agentDir: project.path, sessionId: effectiveSessionId, title: flipTitle, initialMessage, joinedExistingSidecar: !result.isNew })
+              : t
+          )
+        );
+        if (targetTabId !== activeTabId) {
+          setActiveTabId(targetTabId);
+        }
       }
       setLoadingTabs((prev) => ({ ...prev, [targetTabId]: false }));
     } catch (err) {
@@ -1426,6 +1443,14 @@ export default function App() {
       // the user stares at a stuck loader. (Codex review WARN-2.)
       const errorTabId = targetTabId !== activeTabId ? targetTabId : activeTabId;
       setTabErrors((prev) => ({ ...prev, [errorTabId]: errorMsg }));
+
+      // A5 (instant-nav): with the early flip the tab may already be on the chat
+      // view, where `tabErrors` isn't surfaced (it only feeds the Launcher's
+      // unused startError) and the startup overlay would otherwise just time out
+      // to a blank chat. A toast makes the boot failure visible regardless of
+      // which view the user is on. (Full in-chat "启动失败 + 重试" via
+      // useSessionReady('failed'): Phase A follow-up.)
+      toastRef.current.error(`启动失败：${errorMsg}`);
 
       // In browser dev mode, still allow navigation
       if (isBrowserDevMode()) {

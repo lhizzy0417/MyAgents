@@ -137,3 +137,38 @@ export function createNewTab(): Tab {
         title: 'New Tab',
     };
 }
+
+/**
+ * Build the tab patch that flips a tab into the **chat** view. Centralizes the
+ * "open chat" shape used by every launch/switch path (App.handleLaunchProject /
+ * handleSwitchSession / spawnTabForExistingSession).
+ *
+ * **D1 (instant-nav) — enforced by the type:** a chat flip MUST carry a truthy
+ * `sessionId` (a real backend id, or a `pending-<tabId>` placeholder). If it
+ * doesn't, TabProvider's session-aware SSE connect effect never fires →
+ * `isConnected` stays false forever → autoSend / model-push / loadSession never
+ * run → the tab is permanently blank. `sessionId: string` (non-null) makes
+ * "flip to chat without a sessionId" a compile error, not a runtime blank tab.
+ */
+export function buildChatFlipPatch(
+    tab: Tab,
+    fields: {
+        agentDir: string;
+        sessionId: string; // D1: non-null by type — cannot flip to chat without one
+        title: string;
+        initialMessage?: InitialMessage;
+        joinedExistingSidecar?: boolean;
+    },
+): Tab {
+    return {
+        ...tab,
+        agentDir: fields.agentDir,
+        sessionId: fields.sessionId,
+        view: 'chat',
+        title: fields.title,
+        // Only attach when provided — undefined must not clobber a prior value
+        // mid-launch (matches the existing `...(initialMessage ? {…} : {})` idiom).
+        ...(fields.initialMessage ? { initialMessage: fields.initialMessage } : {}),
+        ...(fields.joinedExistingSidecar !== undefined ? { joinedExistingSidecar: fields.joinedExistingSidecar } : {}),
+    };
+}
