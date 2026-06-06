@@ -303,6 +303,8 @@ Project (工作区)
     └── Channels: Telegram / Dingtalk / OpenClaw Plugin（飞书/微信/QQ 等）
 ```
 
+**模板默认能力**：工作区文件模板内容与产品级 Agent 默认策略分离。Mino 文件模板来自打包资源/外部模板仓库；MyAgents 在 `WorkspaceTemplate.agentDefaults` 声明产品默认能力。新建 Mino project 会记录 `templateId=mino` / `templateSource=builtin`，随后 `buildAgentForProject()` 生成默认开启的 Agent（heartbeat + memory update），但不自动创建 channel；Rust 仍只在 `agent.enabled && channel.enabled && credentials` 成立时启动 channel/Agent heartbeat。
+
 **适配器：**
 
 | 适配器 | 协议 | 说明 |

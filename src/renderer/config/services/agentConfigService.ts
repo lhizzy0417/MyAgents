@@ -1,6 +1,6 @@
 // Agent config service — CRUD helpers, migration from ImBotConfigs
-import type { AppConfig, Project } from '../types';
-import { getEffectiveModelAliases } from '../types';
+import type { AppConfig, Project, WorkspaceTemplate, WorkspaceTemplateAgentDefaults } from '../types';
+import { getEffectiveModelAliases, PRESET_TEMPLATES } from '../types';
 import type { AgentConfig, ChannelConfig, ChannelOverrides } from '../../../shared/types/agent';
 import type { ImBotConfig } from '../../../shared/types/im';
 import { atomicModifyConfig, loadAppConfig } from './appConfigService';
@@ -33,6 +33,57 @@ export function channelHasCredentials(ch: ChannelConfig): boolean {
 export function getAgentByWorkspacePath(config: AppConfig, workspacePath: string): AgentConfig | undefined {
   const normalized = workspacePath.replace(/\\/g, '/');
   return config.agents?.find(a => a.workspacePath.replace(/\\/g, '/') === normalized);
+}
+
+// ============= Agent Creation Helpers =============
+
+export interface BuildAgentForProjectOptions {
+  agentId?: string;
+  defaultPermissionMode?: string;
+  agentDefaults?: WorkspaceTemplateAgentDefaults;
+  templates?: readonly WorkspaceTemplate[];
+}
+
+function cloneHeartbeatConfig(defaults: WorkspaceTemplateAgentDefaults['heartbeat']) {
+  if (!defaults) return undefined;
+  return {
+    ...defaults,
+    activeHours: defaults.activeHours ? { ...defaults.activeHours } : undefined,
+  };
+}
+
+function cloneMemoryAutoUpdateConfig(defaults: WorkspaceTemplateAgentDefaults['memoryAutoUpdate']) {
+  if (!defaults) return undefined;
+  return { ...defaults };
+}
+
+export function resolveAgentDefaultsForProject(
+  project: Project,
+  templates: readonly WorkspaceTemplate[] = PRESET_TEMPLATES,
+): WorkspaceTemplateAgentDefaults | undefined {
+  if (project.templateSource !== 'builtin' || !project.templateId) return undefined;
+  return templates.find(t => t.isBuiltin && t.id === project.templateId)?.agentDefaults;
+}
+
+export function buildAgentForProject(
+  project: Project,
+  options: BuildAgentForProjectOptions = {},
+): AgentConfig {
+  const agentDefaults = options.agentDefaults ?? resolveAgentDefaultsForProject(project, options.templates);
+  return {
+    id: options.agentId ?? crypto.randomUUID(),
+    name: project.displayName || project.name,
+    icon: project.icon,
+    workspacePath: project.path,
+    enabled: agentDefaults?.enabled ?? false,
+    channels: [],
+    providerId: project.providerId ?? undefined,
+    model: project.model ?? undefined,
+    permissionMode: project.permissionMode || options.defaultPermissionMode || 'plan',
+    mcpEnabledServers: project.mcpEnabledServers,
+    heartbeat: cloneHeartbeatConfig(agentDefaults?.heartbeat),
+    memoryAutoUpdate: cloneMemoryAutoUpdateConfig(agentDefaults?.memoryAutoUpdate),
+  };
 }
 
 // ============= Migration: ImBotConfigs → Agents =============
@@ -190,27 +241,22 @@ export function ensureAllProjectsHaveAgent(
     if (existingByPath) {
       // Fix orphaned reference
       project.agentId = existingByPath.id;
+      if (existingByPath.enabled) {
+        project.isAgent = true;
+      }
       changed = true;
       continue;
     }
 
     // Create basicAgent — AI fields from Project (fallback to defaults)
-    const agentId = crypto.randomUUID();
-    const basicAgent: AgentConfig = {
-      id: agentId,
-      name: project.displayName || project.name,
-      workspacePath: project.path,
-      enabled: false,
-      channels: [],
-      providerId: project.providerId ?? undefined,
-      model: project.model ?? undefined,
-      permissionMode: project.permissionMode || defaultPermissionMode || 'plan',
-      mcpEnabledServers: project.mcpEnabledServers,
-    };
+    const basicAgent = buildAgentForProject(project, { defaultPermissionMode });
 
     agents.push(basicAgent);
-    agentMap.set(agentId, basicAgent);
-    project.agentId = agentId;
+    agentMap.set(basicAgent.id, basicAgent);
+    project.agentId = basicAgent.id;
+    if (basicAgent.enabled) {
+      project.isAgent = true;
+    }
     changed = true;
     createdCount++;
   }

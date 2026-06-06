@@ -1,5 +1,7 @@
 // Provider and permission configuration types
 
+import type { HeartbeatConfig, MemoryAutoUpdateConfig } from './types/im';
+
 /**
  * Permission mode for agent behavior
  */
@@ -300,9 +302,24 @@ export interface Project {
   isAgent?: boolean;
   /** Associated Agent ID when isAgent=true (v0.1.41) */
   agentId?: string;
+  /** Source template ID used when this workspace was created from a template. */
+  templateId?: string;
+  /** Template source. Built-in templates can carry product-level Agent defaults. */
+  templateSource?: WorkspaceTemplateSource;
 }
 
 // ===== Workspace Template Types =====
+
+export type WorkspaceTemplateSource = 'builtin' | 'user';
+
+export interface WorkspaceTemplateAgentDefaults {
+  /** Whether the created workspace's Agent starts in proactive mode. */
+  enabled?: boolean;
+  /** Agent-level heartbeat defaults; channels remain user-created/credential-gated. */
+  heartbeat?: HeartbeatConfig;
+  /** Agent-level memory maintenance defaults. */
+  memoryAutoUpdate?: MemoryAutoUpdateConfig;
+}
 
 /**
  * Workspace template definition
@@ -314,18 +331,38 @@ export interface WorkspaceTemplate {
   icon?: string;        // Phosphor icon ID (e.g. "sparkle") or emoji fallback; defaults to cube icon if absent
   isBuiltin: boolean;   // true = preset template bundled with app
   path?: string;        // User template: absolute path under ~/.myagents/templates/
+  /** Product-level Agent defaults applied when creating a workspace from this template. */
+  agentDefaults?: WorkspaceTemplateAgentDefaults;
 }
+
+export const DEFAULT_BUNDLED_WORKSPACE_TEMPLATE_ID = 'mino';
 
 /**
  * Preset workspace templates bundled with the app
  */
 export const PRESET_TEMPLATES: WorkspaceTemplate[] = [
   {
-    id: 'mino',
+    id: DEFAULT_BUNDLED_WORKSPACE_TEMPLATE_ID,
     name: 'Mino',
     description: '能记忆、会进化的 AI Agent。从 minimal 开始，长成你想要的样子。',
     icon: 'lightning',
     isBuiltin: true,
+    agentDefaults: {
+      enabled: true,
+      heartbeat: {
+        enabled: true,
+        intervalMinutes: 240,
+        ackMaxChars: 300,
+      },
+      memoryAutoUpdate: {
+        enabled: true,
+        intervalHours: 24,
+        queryThreshold: 5,
+        updateWindowStart: '00:00',
+        updateWindowEnd: '06:00',
+        updateWindowTimezone: undefined,
+      },
+    },
   },
 ];
 

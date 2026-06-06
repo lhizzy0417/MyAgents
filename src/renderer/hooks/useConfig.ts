@@ -3,6 +3,7 @@
 // New code should prefer useConfigData() / useConfigActions() directly.
 import { useConfigData } from '@/config/useConfigData';
 import { useConfigActions } from '@/config/useConfigActions';
+import type { AddProjectOptions } from '@/config/ConfigProvider';
 import type {
     AppConfig,
     ModelAliases,
@@ -21,7 +22,7 @@ export interface UseConfigResult {
 
     // Projects
     projects: Project[];
-    addProject: (path: string) => Promise<Project>;
+    addProject: (path: string, options?: AddProjectOptions) => Promise<Project>;
     updateProject: (project: Project) => Promise<void>;
     /** Partially update a project — only merges specified fields, safe against stale React state */
     patchProject: (projectId: string, updates: Partial<Omit<Project, 'id'>>) => Promise<void>;

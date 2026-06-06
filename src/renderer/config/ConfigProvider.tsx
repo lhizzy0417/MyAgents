@@ -7,6 +7,8 @@ import {
     DEFAULT_CONFIG,
     type ModelEntity,
     type Project,
+    type WorkspaceTemplateAgentDefaults,
+    type WorkspaceTemplateSource,
     type ModelAliases,
     type Provider,
     type ProviderVerifyStatus,
@@ -41,7 +43,7 @@ import {
     removeProject as removeProjectService,
     touchProject as touchProjectService,
 } from './services/projectService';
-import { migrateImBotConfigsToAgents, persistAgents, ensureAllProjectsHaveAgent, addAgentConfig } from './services/agentConfigService';
+import { migrateImBotConfigsToAgents, persistAgents, ensureAllProjectsHaveAgent, addAgentConfig, buildAgentForProject } from './services/agentConfigService';
 import { isTauriEnvironment } from '@/utils/browserMock';
 import { listenWithCleanup } from '@/utils/tauriListen';
 
@@ -112,7 +114,7 @@ export interface ConfigActionsValue {
     reload: () => Promise<void>;
     refreshProviderData: () => Promise<void>;
     // Projects
-    addProject: (path: string) => Promise<Project>;
+    addProject: (path: string, options?: AddProjectOptions) => Promise<Project>;
     updateProject: (project: Project) => Promise<void>;
     patchProject: (projectId: string, updates: Partial<Omit<Project, 'id'>>) => Promise<void>;
     removeProject: (projectId: string) => Promise<void>;
@@ -134,6 +136,14 @@ export interface ConfigActionsValue {
     deleteApiKey: (providerId: string) => Promise<void>;
     // Verify status
     saveProviderVerifyStatus: (providerId: string, status: 'valid' | 'invalid', accountEmail?: string) => Promise<void>;
+}
+
+export interface AddProjectOptions {
+    icon?: string;
+    displayName?: string;
+    templateId?: string;
+    templateSource?: WorkspaceTemplateSource;
+    agentDefaults?: WorkspaceTemplateAgentDefaults;
 }
 
 // ============= Contexts =============
@@ -429,26 +439,31 @@ export function ConfigProvider({ children }: { children: React.ReactNode }) {
 
     // --- Projects ---
 
-    const addProject = useCallback(async (path: string) => {
-        const project = await addProjectService(path);
+    const addProject = useCallback(async (path: string, options: AddProjectOptions = {}) => {
+        let project = await addProjectService(path);
+
+        const metadataPatch: Partial<Omit<Project, 'id'>> = {};
+        if (options.icon) metadataPatch.icon = options.icon;
+        if (options.displayName) metadataPatch.displayName = options.displayName;
+        if (options.templateId) metadataPatch.templateId = options.templateId;
+        if (options.templateSource) metadataPatch.templateSource = options.templateSource;
+        if (Object.keys(metadataPatch).length > 0) {
+            const updated = await patchProjectService(project.id, metadataPatch);
+            if (updated) project = updated;
+        }
 
         // Auto-create basicAgent for new projects (or re-opened projects without agentId)
         if (!project.agentId) {
-            const agentId = crypto.randomUUID();
-            const basicAgent = {
-                id: agentId,
-                name: project.name,
-                workspacePath: project.path,
-                enabled: false,
-                channels: [] as import('../../shared/types/agent').ChannelConfig[],
-                permissionMode: config.defaultPermissionMode || 'plan',
-                providerId: project.providerId ?? undefined,
-                model: project.model ?? undefined,
-                mcpEnabledServers: project.mcpEnabledServers,
-            } as import('../../shared/types/agent').AgentConfig;
+            const basicAgent = buildAgentForProject(project, {
+                defaultPermissionMode: config.defaultPermissionMode,
+                agentDefaults: options.agentDefaults,
+            });
             await addAgentConfig(basicAgent);
-            await patchProjectService(project.id, { agentId });
-            project.agentId = agentId;
+            const updated = await patchProjectService(project.id, {
+                agentId: basicAgent.id,
+                ...(basicAgent.enabled ? { isAgent: true } : {}),
+            });
+            project = updated ?? { ...project, agentId: basicAgent.id, ...(basicAgent.enabled ? { isAgent: true } : {}) };
             // Update config state so agent is immediately available
             setConfig(prev => ({ ...prev, agents: [...(prev.agents ?? []), basicAgent] }));
         }

@@ -23,7 +23,7 @@ import { useCloseLayer } from '@/hooks/useCloseLayer';
 import OverlayBackdrop from '@/components/OverlayBackdrop';
 
 interface TemplateLibraryDialogProps {
-    onCreateWorkspace: (path: string, icon?: string, displayName?: string) => Promise<void>;
+    onCreateWorkspace: (path: string, template: WorkspaceTemplate, displayName?: string) => Promise<void>;
     onClose: () => void;
 }
 
@@ -232,7 +232,7 @@ export default memo(function TemplateLibraryDialog({
             }
 
             // displayName = user's project name input (not template name)
-            await onCreateWorkspace(destPath, selectedTemplate.icon, projectName);
+            await onCreateWorkspace(destPath, selectedTemplate, projectName);
             onClose();
         } catch (err) {
             const msg = err instanceof Error ? err.message : String(err);

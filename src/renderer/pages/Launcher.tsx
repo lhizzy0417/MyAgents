@@ -24,7 +24,7 @@ import { AddWorkspaceMenu, BrandSection, RecentTasks, TemplateLibraryDialog, Wor
 const WorkspaceConfigPanel = lazy(() => import('@/components/WorkspaceConfigPanel'));
 import { useConfig } from '@/hooks/useConfig';
 import { useTaskCenterData } from '@/hooks/useTaskCenterData';
-import { type Project, type PermissionMode, type McpServerDefinition, isProviderEnabled } from '@/config/types';
+import { type Project, type PermissionMode, type McpServerDefinition, type WorkspaceTemplate, isProviderEnabled } from '@/config/types';
 import { CUSTOM_EVENTS } from '../../shared/constants';
 import {
     getAllMcpServers,
@@ -711,20 +711,16 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
         }
     };
 
-    const handleCreateFromTemplate = useCallback(async (path: string, icon?: string, displayName?: string) => {
-        const project = await addProject(path);
-        track('workspace_create', { source: icon ? 'template' : 'blank' });
-        const updates: { icon?: string; displayName?: string } = {};
-        if (icon) updates.icon = icon;
-        if (displayName) updates.displayName = displayName;
-        if (Object.keys(updates).length > 0) {
-            try {
-                await patchProject(project.id, updates);
-            } catch (err) {
-                console.warn('[Launcher] Failed to patch template metadata, workspace created without icon/name:', err);
-            }
-        }
-    }, [addProject, patchProject]);
+    const handleCreateFromTemplate = useCallback(async (path: string, template: WorkspaceTemplate, displayName?: string) => {
+        await addProject(path, {
+            icon: template.icon,
+            displayName,
+            templateId: template.id,
+            templateSource: template.isBuiltin ? 'builtin' : 'user',
+            agentDefaults: template.isBuiltin ? template.agentDefaults : undefined,
+        });
+        track('workspace_create', { source: 'template' });
+    }, [addProject]);
 
     const handleEditProject = useCallback(async (projectId: string, updates: { displayName?: string; icon?: string }) => {
         await patchProject(projectId, updates);
