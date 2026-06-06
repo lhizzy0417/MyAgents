@@ -125,6 +125,27 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
         perfMark(RENDERER_PERF_PHASE.tabShellPainted, { surface: 'launcher' });
     }, []);
 
+    // A6 (instant-nav): warm the lazy Chat chunk while the user is on the
+    // Launcher — opening a chat IS the Launcher's purpose, so the Launcher→Chat
+    // flip should never hit a cold lazy chunk (paper Suspense flash). Only Chat,
+    // NOT the whole route graph — a blind preload of every route caused the
+    // WKWebView "preloaded but not used" warning storm removed in c465b2a9.
+    // Idle-scheduled so it never competes with first paint.
+    useEffect(() => {
+        if (!isActive) return;
+        const warm = () => { void import('@/pages/Chat').catch(() => { /* non-fatal: the real lazy() will retry on open */ }); };
+        const w = window as unknown as {
+            requestIdleCallback?: (cb: () => void) => number;
+            cancelIdleCallback?: (id: number) => void;
+        };
+        if (typeof w.requestIdleCallback === 'function') {
+            const id = w.requestIdleCallback(warm);
+            return () => w.cancelIdleCallback?.(id);
+        }
+        const t = setTimeout(warm, 800);
+        return () => clearTimeout(t);
+    }, [isActive]);
+
     // Sync selectedWorkspace when visible projects change (e.g., after first project is added,
     // or after patchProject updates a project's settings from Chat tab)
     useEffect(() => {
