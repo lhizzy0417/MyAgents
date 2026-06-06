@@ -353,6 +353,11 @@ export const PRESET_TEMPLATES: WorkspaceTemplate[] = [
         enabled: true,
         intervalMinutes: 240,
         ackMaxChars: 300,
+        activeHours: {
+          start: '08:00',
+          end: '22:00',
+          timezone: 'Asia/Shanghai',
+        },
       },
       memoryAutoUpdate: {
         enabled: true,

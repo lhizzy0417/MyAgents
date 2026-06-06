@@ -99,6 +99,11 @@ agentDefaults: {
     enabled: true,
     intervalMinutes: 240,
     ackMaxChars: 300,
+    activeHours: {
+      start: '08:00',
+      end: '22:00',
+      timezone: 'Asia/Shanghai',
+    },
   },
   memoryAutoUpdate: {
     enabled: true,
@@ -110,7 +115,7 @@ agentDefaults: {
 }
 ```
 
-选择 4 小时 heartbeat 是为了匹配当前 Mino 实际使用状态，也避免新用户默认看到过高频率的主动检查。Memory Update 默认夜间窗口，且运行时还有 session 活跃度、queryThreshold、`UPDATE_MEMORY.md` 存在性等 gate。
+选择 4 小时 heartbeat 是为了匹配当前 Mino 实际使用状态，也避免新用户默认看到过高频率的主动检查。Heartbeat 默认开启 08:00-22:00 活跃时段，避免深夜主动唤醒；Memory Update 默认夜间窗口，且运行时还有 session 活跃度、queryThreshold、`UPDATE_MEMORY.md` 存在性等 gate。
 
 ### 5.4 Agent 创建收口
 

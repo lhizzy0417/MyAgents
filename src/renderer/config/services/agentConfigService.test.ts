@@ -131,6 +131,11 @@ describe('agentConfigService template Agent defaults', () => {
       memoryAutoUpdate: PRESET_TEMPLATES[0].agentDefaults!.memoryAutoUpdate,
       channels: [],
     });
+    expect(cfg.agents![0].heartbeat?.activeHours).toEqual({
+      start: '08:00',
+      end: '22:00',
+      timezone: 'Asia/Shanghai',
+    });
   });
 
   it('does not overwrite a project that is already linked to an Agent', () => {
