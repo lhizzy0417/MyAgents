@@ -13,15 +13,17 @@
 //! `(rel_path → (mtime_ms, size))` map, and only `delete_term + add_document`
 //! the files that actually changed. Unchanged files are reused in-place.
 //!
-//! First entry still pays the full build cost; subsequent entries pay only
-//! the walk + whatever changed. Files created by the AI between sessions are
-//! picked up on the next mode entry automatically.
+//! Foreground search never pays the full build cost. It uses a valid persisted
+//! index when one is available; otherwise it falls back to a bounded direct scan
+//! of the current filesystem and lets the explicit refresh path build/reconcile
+//! the Tantivy index in the background. Files created by the AI between sessions
+//! are picked up on the next mode entry automatically.
 
 use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, TryLockError};
 
 use crate::{ulog_info, ulog_warn};
 use serde::{Deserialize, Serialize};
@@ -235,10 +237,11 @@ impl FileIndexManager {
             let _ = fs::remove_file(&tmp_path);
             format!("Failed to replace file index manifest: {}", e)
         })?;
-        let _ = fs::write(
+        fs::write(
             index_dir.join(SCHEMA_VERSION_FILE),
             SCHEMA_VERSION.to_string(),
-        );
+        )
+        .map_err(|e| format!("Failed to write file index schema version: {}", e))?;
         Ok(())
     }
 
@@ -380,12 +383,13 @@ impl FileIndexManager {
                 .reload()
                 .map_err(|e| format!("reader reload failed: {}", e))?;
             ws_index.file_states = new_file_states;
-            if let Err(e) = self.persist_manifest(workspace, &ws_index.file_states) {
-                ulog_warn!(
-                    "[search] Failed to persist workspace index manifest after refresh: {}",
-                    e
-                );
-            }
+            self.persist_manifest(workspace, &ws_index.file_states)
+                .map_err(|e| {
+                    format!(
+                        "Failed to persist workspace index manifest after refresh: {}",
+                        e
+                    )
+                })?;
 
             (total, change_count)
         };
@@ -401,8 +405,10 @@ impl FileIndexManager {
         Ok((total, change_count))
     }
 
-    /// Search workspace files. Loads a persisted index on first access, falling
-    /// back to a cold build only when no valid manifest/index is available.
+    /// Search workspace files. Loads a persisted index on first access. If the
+    /// index is missing, stale, or currently being built/refreshed, fall back to
+    /// a bounded direct scan instead of making the foreground query wait for a
+    /// full Tantivy build.
     pub fn search(
         &self,
         query: &str,
@@ -411,15 +417,48 @@ impl FileIndexManager {
         max_matches_per_file: usize,
     ) -> Result<FileSearchResult, String> {
         let start = std::time::Instant::now();
+        let ws_path = Path::new(workspace);
 
         let slot = self.slot_for(workspace)?;
-        let mut slot_guard = slot
-            .lock()
-            .map_err(|e| format!("file index slot mutex poisoned: {}", e))?;
+        let mut slot_guard = match slot.try_lock() {
+            Ok(guard) => guard,
+            Err(TryLockError::WouldBlock) => {
+                ulog_info!(
+                    "[search] Workspace index busy for {}; using direct scan fallback",
+                    workspace
+                );
+                return direct_search_workspace_files(
+                    query,
+                    ws_path,
+                    limit,
+                    max_matches_per_file,
+                    start,
+                );
+            }
+            Err(TryLockError::Poisoned(e)) => {
+                return Err(format!("file index slot mutex poisoned: {}", e));
+            }
+        };
 
-        // Ensure index exists (lazy creation on cache miss).
         if slot_guard.is_none() {
-            *slot_guard = Some(self.load_or_create_index(workspace)?);
+            match self.load_existing_index(workspace)? {
+                Some(index) => {
+                    *slot_guard = Some(index);
+                }
+                None => {
+                    ulog_info!(
+                        "[search] No warm workspace index for {}; using direct scan fallback",
+                        workspace
+                    );
+                    return direct_search_workspace_files(
+                        query,
+                        ws_path,
+                        limit,
+                        max_matches_per_file,
+                        start,
+                    );
+                }
+            }
         }
 
         let ws_index = slot_guard
@@ -489,9 +528,9 @@ impl FileIndexManager {
 
         let (schema, fields) = schema::file_schema();
 
-        // Create a fresh index only when there is no valid persisted workspace
-        // index + manifest to load. Search uses this cold path as a fallback;
-        // normal restarts should open the existing Tantivy directory instead.
+        // Create a fresh index only from the explicit refresh path. Foreground
+        // search uses valid persisted indices or direct-scan fallback so a large
+        // cold workspace cannot keep the UI stuck on "搜索中".
         let index = Index::create_in_dir(&index_dir, schema.clone())
             .or_else(|_| {
                 // If directory exists with incompatible index, recreate
@@ -535,11 +574,6 @@ impl FileIndexManager {
                 ));
                 states.insert(rel_path, state);
             }
-            ulog_info!(
-                "[search] Indexed {} files for workspace: {}",
-                states.len(),
-                workspace
-            );
             states
         } else {
             HashMap::new()
@@ -566,12 +600,19 @@ impl FileIndexManager {
             file_states,
         };
 
-        if let Err(e) = self.persist_manifest(workspace, &workspace_index.file_states) {
-            ulog_warn!(
-                "[search] Failed to persist workspace index manifest after build: {}",
-                e
-            );
-        }
+        self.persist_manifest(workspace, &workspace_index.file_states)
+            .map_err(|e| {
+                format!(
+                    "Failed to persist workspace index manifest after build: {}",
+                    e
+                )
+            })?;
+
+        ulog_info!(
+            "[search] Indexed {} files for workspace: {}",
+            workspace_index.file_states.len(),
+            workspace
+        );
 
         Ok(workspace_index)
     }
@@ -605,7 +646,7 @@ fn walk_dir(root: &Path, dir: &Path, out: &mut HashMap<String, (PathBuf, FileSta
         }
 
         if metadata.is_dir() {
-            if SKIP_DIRS.iter().any(|s| name == *s) || name.starts_with('.') {
+            if should_skip_dir(&name) {
                 continue;
             }
             walk_dir(root, &path, out);
@@ -618,7 +659,7 @@ fn walk_dir(root: &Path, dir: &Path, out: &mut HashMap<String, (PathBuf, FileSta
             .and_then(|e| e.to_str())
             .unwrap_or("")
             .to_lowercase();
-        if BINARY_EXTENSIONS.iter().any(|b| ext == *b) {
+        if is_binary_extension(&ext) {
             continue;
         }
         if name.starts_with('.') {
@@ -640,6 +681,151 @@ fn walk_dir(root: &Path, dir: &Path, out: &mut HashMap<String, (PathBuf, FileSta
             .to_string_lossy()
             .into_owned();
         out.insert(rel, (path, state));
+    }
+}
+
+fn should_skip_dir(name: &str) -> bool {
+    SKIP_DIRS.iter().any(|s| name == *s) || name.starts_with('.')
+}
+
+fn is_binary_extension(ext: &str) -> bool {
+    BINARY_EXTENSIONS.iter().any(|b| ext == *b)
+}
+
+fn direct_search_workspace_files(
+    query: &str,
+    root: &Path,
+    limit: usize,
+    max_matches_per_file: usize,
+    start: std::time::Instant,
+) -> Result<FileSearchResult, String> {
+    if query.trim().is_empty() || limit == 0 || !root.is_dir() {
+        return Ok(FileSearchResult {
+            total_files: 0,
+            total_matches: 0,
+            hits: Vec::new(),
+            query_time_ms: start.elapsed().as_secs_f64() * 1000.0,
+        });
+    }
+
+    let query_lower = query.to_lowercase();
+    let mut hits = Vec::new();
+    let mut total_matches = 0;
+    direct_walk_search(
+        root,
+        root,
+        &query_lower,
+        limit,
+        max_matches_per_file,
+        &mut hits,
+        &mut total_matches,
+    );
+
+    let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
+    ulog_info!(
+        "[search] Direct workspace scan for {:?} in {} -> {} files ({:.1}ms)",
+        query,
+        root.display(),
+        hits.len(),
+        elapsed_ms
+    );
+
+    Ok(FileSearchResult {
+        total_files: hits.len(),
+        total_matches,
+        hits,
+        query_time_ms: elapsed_ms,
+    })
+}
+
+fn direct_walk_search(
+    root: &Path,
+    dir: &Path,
+    query_lower: &str,
+    limit: usize,
+    max_matches_per_file: usize,
+    hits: &mut Vec<FileSearchHit>,
+    total_matches: &mut usize,
+) {
+    if hits.len() >= limit {
+        return;
+    }
+
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(_) => return,
+    };
+    let mut entries: Vec<_> = entries.flatten().collect();
+    entries.sort_by_key(|entry| entry.file_name());
+
+    for entry in entries {
+        if hits.len() >= limit {
+            return;
+        }
+
+        let path = entry.path();
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let metadata = match fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(_) => continue,
+        };
+        if metadata.file_type().is_symlink() {
+            continue;
+        }
+
+        if metadata.is_dir() {
+            if !should_skip_dir(&name) {
+                direct_walk_search(
+                    root,
+                    &path,
+                    query_lower,
+                    limit,
+                    max_matches_per_file,
+                    hits,
+                    total_matches,
+                );
+            }
+            continue;
+        }
+
+        if !metadata.is_file() || metadata.len() > MAX_FILE_SIZE || name.starts_with('.') {
+            continue;
+        }
+
+        let ext = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
+            .to_lowercase();
+        if is_binary_extension(&ext) {
+            continue;
+        }
+
+        let name_matches = name.to_lowercase().contains(query_lower);
+        let state = file_state_from_metadata(&metadata);
+        let content = read_indexable_file(&path, &state);
+        let matches = content
+            .as_deref()
+            .map(|body| find_matching_lines(body, query_lower, max_matches_per_file))
+            .unwrap_or_default();
+
+        if !name_matches && matches.is_empty() {
+            continue;
+        }
+
+        let rel_path = path
+            .strip_prefix(root)
+            .unwrap_or(&path)
+            .to_string_lossy()
+            .into_owned();
+        let match_count = matches.len().max(1);
+        *total_matches += matches.len();
+        hits.push(FileSearchHit {
+            path: rel_path,
+            name,
+            match_count,
+            matches,
+        });
     }
 }
 
@@ -845,6 +1031,48 @@ mod tests {
     }
 
     #[test]
+    fn search_without_persisted_index_uses_direct_scan_without_cold_build() {
+        let temp = tempfile::tempdir().unwrap();
+        let base_dir = temp.path().join("index");
+        let workspace = temp.path().join("workspace");
+        fs::create_dir_all(&workspace).unwrap();
+        fs::write(workspace.join("gaokao.md"), "今天整理高考活动资料\n").unwrap();
+
+        let workspace = workspace_path(&workspace);
+        let manager = FileIndexManager::new(base_dir.clone());
+        let result = manager.search("高考", &workspace, 10, 5).unwrap();
+
+        assert_eq!(result.hits.len(), 1);
+        assert_eq!(result.hits[0].path, "gaokao.md");
+        let index_dir = base_dir.join(simple_hash(&workspace));
+        assert!(
+            !index_dir.join(FILE_INDEX_MANIFEST).exists(),
+            "foreground search must not cold-build the Tantivy index"
+        );
+    }
+
+    #[test]
+    fn search_uses_direct_scan_when_workspace_index_slot_is_busy() {
+        let temp = tempfile::tempdir().unwrap();
+        let base_dir = temp.path().join("index");
+        let workspace = temp.path().join("workspace");
+        fs::create_dir_all(&workspace).unwrap();
+        fs::write(workspace.join("notes.txt"), "busyfallbacktoken line\n").unwrap();
+
+        let workspace = workspace_path(&workspace);
+        let manager = FileIndexManager::new(base_dir);
+        let slot = manager.slot_for(&workspace).unwrap();
+        let _held = slot.lock().unwrap();
+
+        let result = manager
+            .search("busyfallbacktoken", &workspace, 10, 5)
+            .unwrap();
+
+        assert_eq!(result.hits.len(), 1);
+        assert_eq!(result.hits[0].path, "notes.txt");
+    }
+
+    #[test]
     fn loads_persisted_index_before_refreshing_filesystem_changes() {
         let temp = tempfile::tempdir().unwrap();
         let base_dir = temp.path().join("index");
@@ -855,11 +1083,14 @@ mod tests {
 
         let workspace = workspace_path(&workspace);
         let manager = FileIndexManager::new(base_dir.clone());
+        let (total, _changed) = manager.refresh_or_create(&workspace).unwrap();
+        assert_eq!(total, 1);
         let initial = manager.search("originaltoken", &workspace, 10, 5).unwrap();
         assert_eq!(initial.hits.len(), 1);
 
         let index_dir = base_dir.join(simple_hash(&workspace));
         assert!(index_dir.join(FILE_INDEX_MANIFEST).exists());
+        assert!(index_dir.join(SCHEMA_VERSION_FILE).exists());
 
         // Simulate an app restart and an external file edit before the next
         // foreground refresh. The first search should serve the persisted
@@ -871,8 +1102,8 @@ mod tests {
         let stale = manager.search("originaltoken", &workspace, 10, 5).unwrap();
         assert_eq!(stale.hits.len(), 1);
 
-        let (_total, changed) = manager.refresh_or_create(&workspace).unwrap();
-        assert_eq!(changed, 1);
+        let (total, _changed) = manager.refresh_or_create(&workspace).unwrap();
+        assert_eq!(total, 1);
 
         let old = manager.search("originaltoken", &workspace, 10, 5).unwrap();
         assert!(old.hits.is_empty());
@@ -891,6 +1122,8 @@ mod tests {
 
         let workspace = workspace_path(&workspace);
         let manager = FileIndexManager::new(base_dir.clone());
+        let (total, _changed) = manager.refresh_or_create(&workspace).unwrap();
+        assert_eq!(total, 1);
         assert_eq!(
             manager
                 .search("beforetoken", &workspace, 10, 5)
@@ -914,7 +1147,7 @@ mod tests {
     }
 
     #[test]
-    fn invalid_manifest_rebuilds_from_current_filesystem() {
+    fn invalid_manifest_falls_back_to_current_filesystem_scan() {
         let temp = tempfile::tempdir().unwrap();
         let base_dir = temp.path().join("index");
         let workspace = temp.path().join("workspace");
@@ -924,6 +1157,8 @@ mod tests {
 
         let workspace = workspace_path(&workspace);
         let manager = FileIndexManager::new(base_dir.clone());
+        let (total, _changed) = manager.refresh_or_create(&workspace).unwrap();
+        assert_eq!(total, 1);
         assert_eq!(
             manager
                 .search("oldtoken", &workspace, 10, 5)
@@ -943,6 +1178,34 @@ mod tests {
         assert!(old.hits.is_empty());
         let new = manager.search("newtoken", &workspace, 10, 5).unwrap();
         assert_eq!(new.hits.len(), 1);
+    }
+
+    #[test]
+    fn missing_schema_marker_falls_back_to_current_filesystem_scan() {
+        let temp = tempfile::tempdir().unwrap();
+        let base_dir = temp.path().join("index");
+        let workspace = temp.path().join("workspace");
+        fs::create_dir_all(&workspace).unwrap();
+        let file_path = workspace.join("notes.txt");
+        fs::write(&file_path, "indexedtoken").unwrap();
+
+        let workspace = workspace_path(&workspace);
+        let manager = FileIndexManager::new(base_dir.clone());
+        let (total, _changed) = manager.refresh_or_create(&workspace).unwrap();
+        assert_eq!(total, 1);
+        drop(manager);
+
+        let index_dir = base_dir.join(simple_hash(&workspace));
+        fs::remove_file(index_dir.join(SCHEMA_VERSION_FILE)).unwrap();
+        fs::write(&file_path, "freshfilesystemtoken with different size").unwrap();
+
+        let manager = FileIndexManager::new(base_dir);
+        let old = manager.search("indexedtoken", &workspace, 10, 5).unwrap();
+        assert!(old.hits.is_empty());
+        let fresh = manager
+            .search("freshfilesystemtoken", &workspace, 10, 5)
+            .unwrap();
+        assert_eq!(fresh.hits.len(), 1);
     }
 
     #[test]
