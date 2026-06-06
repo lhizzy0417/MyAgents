@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState, useRef, memo, lazy, Suspense } from 'react';
+import { flushSync } from 'react-dom';
 import { arrayMove } from '@dnd-kit/sortable';
 
 import {
@@ -1381,23 +1382,32 @@ export default function App() {
       const instantNav = !sessionId;
       const flipTitle = project.displayName || getFolderName(project.path);
       if (instantNav) {
-        setTabs((prev) =>
-          prev.map((t) =>
-            t.id === targetTabId
-              // joinedExistingSidecar: false is EXPLICIT (not omitted) — a new
-              // session always spawns a fresh sidecar (not joined). Omitting it
-              // would let buildChatFlipPatch preserve the tab's PRIOR value, and
-              // a reused tab (joined a session → back to launcher → new chat in
-              // the same tab) would keep a stale `true` → Chat skips MCP/agents/
-              // model push + the adoption effect overwrites the user's launcher
-              // selections with the fresh sidecar's disk config (config-stomping).
-              ? buildChatFlipPatch(t, { agentDir: project.path, sessionId: effectiveSessionId, title: flipTitle, initialMessage, joinedExistingSidecar: false })
-              : t
-          )
-        );
-        if (targetTabId !== activeTabId) {
-          setActiveTabId(targetTabId);
-        }
+        // flushSync is LOAD-BEARING here, not an optimization. A plain setState
+        // before `await ensureSessionSidecar` does NOT paint early: React batches
+        // this promise-continuation update and coalesces it with the post-ensure
+        // updates, so the chat shell only mounts AFTER the ~780ms sidecar boot
+        // (verified via logs: TabProvider/Chat mount-effects fired only after
+        // ensure_done). flushSync forces a synchronous render+commit of the chat
+        // shell NOW, before we await the cold boot — that IS the instant-nav.
+        flushSync(() => {
+          setTabs((prev) =>
+            prev.map((t) =>
+              t.id === targetTabId
+                // joinedExistingSidecar: false is EXPLICIT (not omitted) — a new
+                // session always spawns a fresh sidecar (not joined). Omitting it
+                // would let buildChatFlipPatch preserve the tab's PRIOR value, and
+                // a reused tab (joined a session → back to launcher → new chat in
+                // the same tab) would keep a stale `true` → Chat skips MCP/agents/
+                // model push + the adoption effect overwrites the user's launcher
+                // selections with the fresh sidecar's disk config (config-stomping).
+                ? buildChatFlipPatch(t, { agentDir: project.path, sessionId: effectiveSessionId, title: flipTitle, initialMessage, joinedExistingSidecar: false })
+                : t
+            )
+          );
+          if (targetTabId !== activeTabId) {
+            setActiveTabId(targetTabId);
+          }
+        });
       }
 
       const result = await ensureSessionSidecar(effectiveSessionId, project.path, 'tab', targetTabId);
