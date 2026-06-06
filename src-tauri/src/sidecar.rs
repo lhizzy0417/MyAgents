@@ -4000,7 +4000,7 @@ pub fn get_session_sidecar_port(
 /// Ensure a Session has a Sidecar running, adding the specified owner
 #[tauri::command]
 #[allow(non_snake_case)]
-pub fn cmd_ensure_session_sidecar(
+pub async fn cmd_ensure_session_sidecar(
     app_handle: AppHandle,
     state: tauri::State<'_, ManagedSidecarManager>,
     sessionId: String,
@@ -4016,7 +4016,25 @@ pub fn cmd_ensure_session_sidecar(
     };
 
     let workspace_path = PathBuf::from(&workspacePath);
-    ensure_session_sidecar(&app_handle, &state, &sessionId, &workspace_path, owner)
+
+    // CRITICAL: this command BLOCKS for the entire cold sidecar boot (~800ms — it
+    // waits for the sidecar's /health/ready). A SYNC `pub fn` Tauri command runs on
+    // the MAIN THREAD, which on macOS is the WKWebView's UI thread — so a sync
+    // version freezes the whole UI for the boot: the Launcher→Chat flip commits in
+    // React but the WebView physically cannot PAINT it until the command returns.
+    // (Measured via a double-rAF `chat_painted` mark: the paint fired ~3ms AFTER
+    // this resolved, i.e. ~800ms after the click — that was the user's
+    // "click → wait → page appears", and it's why every renderer-side fix did
+    // nothing.) Make the command `async` and run the blocking boot on a blocking
+    // thread so the main thread stays free and the WebView paints the flip in the
+    // next frame. Clone the manager Arc out of the State first (the State guard must
+    // not be held across the .await).
+    let manager = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        ensure_session_sidecar(&app_handle, &manager, &sessionId, &workspace_path, owner)
+    })
+    .await
+    .map_err(|e| format!("ensure_session_sidecar blocking task failed: {e:?}"))?
 }
 
 /// Release an owner from a Session's Sidecar

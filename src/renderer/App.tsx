@@ -189,15 +189,11 @@ export const MemoizedTabContent = memo(function TabContent({
       style={isActive ? undefined : { contentVisibility: 'hidden' }}
     >
       {kind === 'deferred' ? (
-        // Paints-instantly placeholder while the real subtree mounts on the next
-        // paint (runAfterNextPaint; see openNewTabDeferred). For a chat FLIP we
-        // paint the boot overlay, not a bare paper fill: paint profiling
-        // (chat_painted double-rAF) showed the heavy Chat mount + its effects +
-        // the sidecar-boot cascade starve the browser's first paint for ~800ms, so
-        // the flip routes through this deferred placeholder
-        // (App.handleLaunchProject) and the user sees an immediate "AI 启动中"
-        // state. New launcher tabs keep the cheap paper fill.
-        tab.view === 'chat' ? <ChatBootOverlay /> : <div className="h-full w-full bg-[var(--paper)]" />
+        // One-frame placeholder: paper-colored fill so the just-activated
+        // tab paints instantly with no flash, while the real subtree mounts
+        // on the next normal-priority commit (runAfterNextPaint; see
+        // openNewTabDeferred).
+        <div className="h-full w-full bg-[var(--paper)]" />
       ) : kind === 'launcher' ? (
         <Launcher
           onLaunchProject={onLaunchProject}
@@ -1421,29 +1417,9 @@ export default function App() {
                 : t
             )
           );
-          // Render the cheap boot overlay (deferred placeholder), NOT the heavy
-          // TabProvider+Chat subtree, in this synchronous commit. Committing the
-          // heavy subtree here is what starved the first paint for ~800ms.
-          setDeferredMountTabIds((prev) => {
-            if (prev.has(targetTabId)) return prev;
-            const next = new Set(prev);
-            next.add(targetTabId);
-            return next;
-          });
           if (targetTabId !== activeTabId) {
             setActiveTabId(targetTabId);
           }
-        });
-        // After the browser paints the cheap overlay, mount the heavy TabProvider+
-        // Chat subtree (Chat's own showStartupOverlay then keeps the loading state
-        // until the session is ready). This is the openNewTabDeferred pattern.
-        runAfterNextPaint(() => {
-          setDeferredMountTabIds((prev) => {
-            if (!prev.has(targetTabId)) return prev;
-            const next = new Set(prev);
-            next.delete(targetTabId);
-            return next;
-          });
         });
         // Measure the actual PAINT (double-rAF fires after the browser paints) vs
         // the flushSync commit above. card_click → chat_painted = the TRUE
