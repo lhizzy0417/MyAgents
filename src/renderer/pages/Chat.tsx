@@ -174,6 +174,8 @@ interface ChatProps {
   onNewSession?: () => Promise<boolean>;
   /** Called when user selects a different session from history - uses Session singleton logic */
   onSwitchSession?: (sessionId: string) => void;
+  /** Called when user opens a history session in a NEW tab (vs. switching the current one) */
+  onOpenSessionInNewTab?: (sessionId: string, title: string) => void;
   /** Initial message from Launcher for auto-send on workspace open */
   initialMessage?: InitialMessage;
   /** Called after initialMessage has been consumed */
@@ -190,7 +192,7 @@ interface ChatProps {
   onForkSession?: (newSessionId: string, agentDir: string, title: string, initialMessage?: string) => void;
 }
 
-export default function Chat({ onBack, onNewSession, onSwitchSession, initialMessage, onInitialMessageConsumed, joinedExistingSidecar, onJoinedExistingSidecarHandled, sessionTitle, onRenameSession, onForkSession }: ChatProps) {
+export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSessionInNewTab, initialMessage, onInitialMessageConsumed, joinedExistingSidecar, onJoinedExistingSidecarHandled, sessionTitle, onRenameSession, onForkSession }: ChatProps) {
   // Get state from TabContext (required - Chat must be inside TabProvider)
   const {
     tabId,
@@ -3266,6 +3268,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
               agentDir={agentDir}
               currentSessionId={sessionId}
               onSelectSession={handleSelectSession}
+              onOpenInNewTab={onOpenSessionInNewTab}
               onDeleteCurrentSession={handleNewSession}
               isOpen={showHistory}
               onClose={() => setShowHistory(false)}

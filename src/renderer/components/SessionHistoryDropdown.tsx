@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState, useMemo } from 'react';
 import { createPortal } from 'react-dom';
-import { BarChart2, Clock, Download, Star, Trash2 } from 'lucide-react';
+import { BarChart2, Clock, Download, Loader2, MoreHorizontal, SquareArrowOutUpRight, Star, Trash2 } from 'lucide-react';
 
 import { deleteSession, getSessions, updateSession, type SessionMetadata } from '@/api/sessionClient';
 import { exportSessionAsMarkdown } from '@/utils/sessionExport';
@@ -21,12 +21,19 @@ import SessionStatsModal from './SessionStatsModal';
 import SessionTagBadge from './SessionTagBadge';
 import Tip from './Tip';
 import { useToast } from './Toast';
+import { MenuItem } from './ui/MenuItem';
 import { Popover } from './ui/Popover';
 
 interface SessionHistoryDropdownProps {
     agentDir: string;
     currentSessionId: string | null;
     onSelectSession: (sessionId: string) => void;
+    /**
+     * Open the session in a NEW tab (vs. onSelectSession which switches the
+     * current tab). When omitted (e.g. the Settings helper inbox, which has no
+     * tab context), the per-row "在新 tab 打开" action is hidden.
+     */
+    onOpenInNewTab?: (sessionId: string, title: string) => void;
     /** Called when the current session is deleted - should reset to "new conversation" state */
     onDeleteCurrentSession: () => void;
     isOpen: boolean;
@@ -43,6 +50,7 @@ export default function SessionHistoryDropdown({
     agentDir,
     currentSessionId,
     onSelectSession,
+    onOpenInNewTab,
     onDeleteCurrentSession,
     isOpen,
     onClose,
@@ -60,6 +68,17 @@ export default function SessionHistoryDropdown({
     const [pendingDelete, setPendingDelete] = useState<{ id: string; title: string } | null>(null);
     // Track delete error for user feedback
     const [deleteError, setDeleteError] = useState<string | null>(null);
+
+    // Per-row "更多" overflow menu: which session's menu is open, and the
+    // anchor element it floats from. The anchor is a plain mutable ref (set on
+    // click) — the Popover re-binds `anchorRef.current` every render, so the
+    // `setMenuSessionId` state flip is what makes it pick up the new element.
+    const [menuSessionId, setMenuSessionId] = useState<string | null>(null);
+    const menuAnchorRef = useRef<HTMLButtonElement | null>(null);
+    const closeMenu = useCallback(() => {
+        setMenuSessionId(null);
+        menuAnchorRef.current = null;
+    }, []);
 
     const onCloseRef = useRef(onClose);
     const statsSessionRef = useRef(statsSession);
@@ -182,6 +201,7 @@ export default function SessionHistoryDropdown({
             setStatsSession(null);
             setPendingDelete(null);
             setDeleteError(null);
+            setMenuSessionId(null);
         };
     }, [isOpen, agentDir]);
 
@@ -238,9 +258,17 @@ export default function SessionHistoryDropdown({
         onClose();
     }, [onClose]);
 
-    const handleDeleteClick = (e: React.MouseEvent, session: SessionMetadata) => {
+    // Open the session in a NEW tab. Closes the history dropdown afterwards:
+    // opening in a new tab switches the active tab, and this dropdown lives in
+    // the (now background) source tab — its body-portaled Popover would
+    // otherwise linger on screen over the freshly-opened tab.
+    const handleOpenInNewTab = (e: React.MouseEvent, session: SessionMetadata) => {
         e.stopPropagation();
-        e.preventDefault();
+        onOpenInNewTab?.(session.id, getSessionDisplayText(session));
+        onClose();
+    };
+
+    const handleDeleteClick = (session: SessionMetadata) => {
         setDeleteError(null); // Clear any previous error
         // Show centered ConfirmDialog (matches launcher RecentTasks UX). The
         // previous inline ✓ / ✗ overlay was buggy: its wrapper div carried both
@@ -289,8 +317,7 @@ export default function SessionHistoryDropdown({
         setPendingDelete(null);
     };
 
-    const handleShowStats = (e: React.MouseEvent, session: SessionMetadata) => {
-        e.stopPropagation();
+    const handleShowStats = (session: SessionMetadata) => {
         setStatsSession({ id: session.id, title: getSessionDisplayText(session) });
     };
 
@@ -300,8 +327,7 @@ export default function SessionHistoryDropdown({
     // final state (Codex round-4).
     const favoriteInFlightRef = useRef<Set<string>>(new Set());
 
-    const handleToggleFavorite = useCallback(async (e: React.MouseEvent, session: SessionMetadata) => {
-        e.stopPropagation();
+    const handleToggleFavorite = useCallback(async (session: SessionMetadata) => {
         if (favoriteInFlightRef.current.has(session.id)) return;
         favoriteInFlightRef.current.add(session.id);
         const next = !session.favorite;
@@ -330,8 +356,7 @@ export default function SessionHistoryDropdown({
     // Export session as .md file — logic lives in utils/sessionExport so
     // the in-Chat session menu (SessionMenuButton) can share it verbatim.
     const [exportingId, setExportingId] = useState<string | null>(null);
-    const handleExport = useCallback(async (e: React.MouseEvent, session: SessionMetadata) => {
-        e.stopPropagation();
+    const handleExport = useCallback(async (session: SessionMetadata) => {
         setExportingId(session.id);
         try {
             const result = await exportSessionAsMarkdown(session.id);
@@ -361,6 +386,23 @@ export default function SessionHistoryDropdown({
 
     // Derive loading state: open but sessions not yet fetched
     const isLoading = sessions === null;
+
+    // Resolve the session whose "更多" menu is open (find-by-id survives the
+    // list mutating under us, e.g. an optimistic favorite toggle). Re-derive
+    // its cron-protection so the menu's delete row matches the row toolbar.
+    const menuSession = menuSessionId ? sessions?.find((s) => s.id === menuSessionId) ?? null : null;
+    const menuCronProtected = menuSession
+        ? (sessionTagsMap.get(menuSession.id) ?? []).some((t) => t.type === 'cron')
+        : false;
+
+    // If a refetch drops the session whose menu is open, fully close the menu
+    // (clear the id + anchor) — otherwise a later refetch that re-adds the id
+    // could reopen the menu against a now-detached/stale anchor element.
+    useEffect(() => {
+        if (menuSessionId && sessions && !sessions.some((s) => s.id === menuSessionId)) {
+            closeMenu();
+        }
+    }, [sessions, menuSessionId, closeMenu]);
 
     return (
         <>
@@ -403,13 +445,17 @@ export default function SessionHistoryDropdown({
                             const hasStats = stats && (stats.messageCount > 0 || stats.totalInputTokens > 0);
                             const totalTokens = (stats?.totalInputTokens ?? 0) + (stats?.totalOutputTokens ?? 0);
 
-                            const cronProtected = tags.some(t => t.type === 'cron');
+                            // Keep this row's toolbar revealed + highlighted while its
+                            // "更多" menu is open, even after the pointer leaves the row.
+                            const menuOpen = menuSessionId === session.id;
                             return (
                                 <div
                                     key={session.id}
                                     className={`group relative cursor-pointer transition-colors ${isCurrent
                                         ? 'bg-[var(--accent)]/10'
-                                        : 'hover:bg-[var(--hover-bg)]'
+                                        : menuOpen
+                                            ? 'bg-[var(--hover-bg)]'
+                                            : 'hover:bg-[var(--hover-bg)]'
                                         }`}
                                     onClick={() => {
                                         if (!isCurrent) {
@@ -454,70 +500,50 @@ export default function SessionHistoryDropdown({
                                         </div>
                                     </div>
 
-                                    {/* Hover overlay — gradient mask + action buttons. Confirm-delete
-                                     *  is now a centered modal (ConfirmDialog at the bottom of this
-                                     *  component), so the overlay only handles the per-row action
-                                     *  toolbar. The previous inline ✓/✗ branch was bug-prone — its
-                                     *  wrapper carried both `pointer-events-none` (the always-on
-                                     *  base) and `pointer-events-auto` (the pending-delete override),
-                                     *  and Tailwind's CSS-source ordering let `none` win, leaving
-                                     *  the "确认" button visible-but-unclickable. */}
-                                    <div className="pointer-events-none absolute inset-y-0 right-0 flex items-center opacity-0 transition-opacity group-hover:pointer-events-auto group-hover:opacity-100">
+                                    {/* Hover overlay — gradient mask + action toolbar. Only the
+                                     *  high-frequency "在新 tab 打开" action stays surfaced; the rest
+                                     *  (收藏 / 导出 / 统计 / 删除) collapse behind the "更多" menu so
+                                     *  the row toolbar stays calm. The overlay is force-revealed while
+                                     *  this row's menu is open so its anchor button doesn't vanish. */}
+                                    <div className={`absolute inset-y-0 right-0 flex items-center transition-opacity ${
+                                        menuOpen
+                                            ? 'pointer-events-auto opacity-100'
+                                            : 'pointer-events-none opacity-0 group-hover:pointer-events-auto group-hover:opacity-100'
+                                    }`}>
                                         <div className="h-full w-10 bg-gradient-to-r from-transparent to-[var(--paper-inset)]" />
                                         <div className="flex h-full items-center gap-1 bg-[var(--paper-inset)] pr-3">
-                                            <Tip label={session.favorite ? '取消收藏' : '收藏'} position="bottom">
-                                                <button
-                                                    aria-label={session.favorite ? '取消收藏' : '收藏'}
-                                                    className={`flex h-7 w-7 items-center justify-center rounded-md transition-colors hover:bg-[var(--paper)] ${
-                                                        session.favorite
-                                                            ? 'text-[var(--accent)]'
-                                                            : 'text-[var(--ink-muted)] hover:text-[var(--ink)]'
-                                                    }`}
-                                                    onClick={(e) => { void handleToggleFavorite(e, session); }}
-                                                >
-                                                    <Star className="h-3.5 w-3.5" fill={session.favorite ? 'currentColor' : 'none'} />
-                                                </button>
-                                            </Tip>
-                                            <Tip label="导出对话内容为 md 文件" position="bottom">
-                                                <button
-                                                    aria-label="导出"
-                                                    className="flex h-7 w-7 items-center justify-center rounded-md text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper)] hover:text-[var(--ink)]"
-                                                    onClick={(e) => { void handleExport(e, session); }}
-                                                    disabled={exportingId === session.id}
-                                                >
-                                                    <Download className="h-3.5 w-3.5" />
-                                                </button>
-                                            </Tip>
-                                            <Tip label="查看统计" position="bottom">
-                                                <button
-                                                    aria-label="查看统计"
-                                                    className="flex h-7 w-7 items-center justify-center rounded-md text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper)] hover:text-[var(--ink)]"
-                                                    onClick={(e) => handleShowStats(e, session)}
-                                                >
-                                                    <BarChart2 className="h-3.5 w-3.5" />
-                                                </button>
-                                            </Tip>
-                                            {cronProtected ? (
-                                                <Tip label="请先停止循环任务后再删除" position="bottom">
+                                            {onOpenInNewTab && (
+                                                <Tip label="在新 tab 打开" position="bottom">
                                                     <button
-                                                        aria-label="删除（请先停止循环任务）"
-                                                        className="flex h-7 w-7 cursor-not-allowed items-center justify-center rounded-md text-[var(--ink-muted)] opacity-40"
-                                                        disabled
+                                                        type="button"
+                                                        aria-label="在新 tab 打开"
+                                                        className="flex h-7 w-7 items-center justify-center rounded-md text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper)] hover:text-[var(--ink)]"
+                                                        onClick={(e) => handleOpenInNewTab(e, session)}
                                                     >
-                                                        <Trash2 className="h-3.5 w-3.5" />
-                                                    </button>
-                                                </Tip>
-                                            ) : (
-                                                <Tip label="删除" position="bottom">
-                                                    <button
-                                                        aria-label="删除"
-                                                        className="flex h-7 w-7 items-center justify-center rounded-md text-[var(--ink-muted)] transition-colors hover:bg-[var(--error-bg)] hover:text-[var(--error)]"
-                                                        onClick={(e) => handleDeleteClick(e, session)}
-                                                    >
-                                                        <Trash2 className="h-3.5 w-3.5" />
+                                                        <SquareArrowOutUpRight className="h-3.5 w-3.5" />
                                                     </button>
                                                 </Tip>
                                             )}
+                                            <Tip label="更多" position="bottom">
+                                                <button
+                                                    type="button"
+                                                    aria-label="更多操作"
+                                                    aria-haspopup="menu"
+                                                    aria-expanded={menuOpen}
+                                                    className={`flex h-7 w-7 items-center justify-center rounded-md transition-colors hover:bg-[var(--paper)] ${
+                                                        menuOpen
+                                                            ? 'bg-[var(--paper)] text-[var(--ink)]'
+                                                            : 'text-[var(--ink-muted)] hover:text-[var(--ink)]'
+                                                    }`}
+                                                    onClick={(e) => {
+                                                        e.stopPropagation();
+                                                        menuAnchorRef.current = e.currentTarget;
+                                                        setMenuSessionId((prev) => (prev === session.id ? null : session.id));
+                                                    }}
+                                                >
+                                                    <MoreHorizontal className="h-4 w-4" />
+                                                </button>
+                                            </Tip>
                                         </div>
                                     </div>
                                 </div>
@@ -525,6 +551,61 @@ export default function SessionHistoryDropdown({
                         })
                     )}
                 </div>
+            </Popover>
+
+            {/* Per-row "更多" overflow menu. Anchored to the clicked row's button
+             *  via `menuAnchorRef`. Default Popover z-index (260) sits above the
+             *  dropdown's own Popover (z-50), and the dropdown's outside-click
+             *  guard walks ancestors and bails on higher z-index, so clicking a
+             *  menu row never collapses the history dropdown behind it. */}
+            <Popover
+                open={isOpen && !!menuSession}
+                onClose={closeMenu}
+                anchorRef={menuAnchorRef}
+                placement="bottom-end"
+                offset={6}
+                className="w-44 py-1"
+            >
+                {menuSession && (
+                    <>
+                        <MenuItem
+                            icon={<Star className="h-3.5 w-3.5" fill={menuSession.favorite ? 'currentColor' : 'none'} />}
+                            label={menuSession.favorite ? '取消收藏' : '收藏对话'}
+                            onClick={() => { closeMenu(); void handleToggleFavorite(menuSession); }}
+                        />
+                        <MenuItem
+                            icon={exportingId === menuSession.id
+                                ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                                : <Download className="h-3.5 w-3.5" />}
+                            label="导出为 md 文件"
+                            onClick={() => { closeMenu(); void handleExport(menuSession); }}
+                            disabled={exportingId === menuSession.id}
+                        />
+                        <MenuItem
+                            icon={<BarChart2 className="h-3.5 w-3.5" />}
+                            label="查看统计"
+                            onClick={() => { closeMenu(); handleShowStats(menuSession); }}
+                        />
+                        <div className="my-1 border-t border-[var(--line-subtle)]" />
+                        {menuCronProtected ? (
+                            <span className="block" title="请先停止循环任务后再删除">
+                                <MenuItem
+                                    icon={<Trash2 className="h-3.5 w-3.5" />}
+                                    label="删除对话"
+                                    disabled
+                                    tone="danger"
+                                />
+                            </span>
+                        ) : (
+                            <MenuItem
+                                icon={<Trash2 className="h-3.5 w-3.5" />}
+                                label="删除对话"
+                                onClick={() => { closeMenu(); handleDeleteClick(menuSession); }}
+                                tone="danger"
+                            />
+                        )}
+                    </>
+                )}
             </Popover>
 
             {/* ConfirmDialog self-portals to document.body, so no outer

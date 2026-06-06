@@ -18,7 +18,7 @@
  * tooltip wording as SessionHistoryDropdown).
  */
 
-import { forwardRef, useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import {
     BarChart2,
@@ -44,6 +44,7 @@ import ConfirmDialog from './ConfirmDialog';
 import SessionStatsModal from './SessionStatsModal';
 import Tip from './Tip';
 import { useToast } from './Toast';
+import { MenuItem } from './ui/MenuItem';
 import { Popover } from './ui/Popover';
 
 const CRON_DELETE_TOOLTIP = '请先停止循环任务后再删除';
@@ -492,43 +493,6 @@ export default function SessionMenuButton({
 // ============================================================================
 // Internal building blocks
 // ============================================================================
-
-interface MenuItemProps {
-    icon: React.ReactNode;
-    label: string;
-    trailing?: React.ReactNode;
-    onClick?: () => void;
-    disabled?: boolean;
-    active?: boolean;
-    tone?: 'default' | 'danger';
-    /** Native browser tooltip — used for the disabled cron-protected delete row. */
-    title?: string;
-}
-
-const MenuItem = forwardRef<HTMLButtonElement, MenuItemProps>(function MenuItem(
-    { icon, label, trailing, onClick, disabled = false, active = false, tone = 'default', title },
-    ref,
-) {
-    const toneClass = tone === 'danger'
-        ? 'text-[var(--error)] hover:bg-[var(--error-bg)]'
-        : 'text-[var(--ink)] hover:bg-[var(--hover-bg)]';
-    return (
-        <button
-            ref={ref}
-            type="button"
-            disabled={disabled}
-            onClick={onClick}
-            title={title}
-            className={`flex w-full items-center gap-2 px-3 py-2 text-left text-[12px] transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${toneClass} ${
-                active ? 'bg-[var(--paper-inset)]' : ''
-            }`}
-        >
-            <span className={tone === 'danger' ? 'text-[var(--error)]' : 'text-[var(--ink-muted)]'}>{icon}</span>
-            <span className="min-w-0 flex-1 truncate">{label}</span>
-            {trailing}
-        </button>
-    );
-});
 
 interface ChannelMenuItemProps {
     candidate: BotChannelCandidate;

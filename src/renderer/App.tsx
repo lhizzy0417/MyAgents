@@ -142,6 +142,7 @@ interface TabContentProps {
   // Chat callbacks
   onBack: () => Promise<void>;
   onSwitchSession: (tabId: string, sessionId: string) => Promise<void>;
+  onOpenSessionInNewTab: (tabId: string, sessionId: string, title: string) => Promise<void>;
   onNewSession: (tabId: string) => Promise<boolean>;
   onUpdateGenerating: (tabId: string, isGenerating: boolean) => void;
   onUpdateTitle: (tabId: string, title: string) => void;
@@ -171,7 +172,7 @@ interface TabContentProps {
 // tab renders a placeholder and never mounts TabProvider.
 export const MemoizedTabContent = memo(function TabContent({
   tab, isActive, isLoading, error, isDeferredMount,
-  onLaunchProject, onBack, onSwitchSession, onNewSession,
+  onLaunchProject, onBack, onSwitchSession, onOpenSessionInNewTab, onNewSession,
   onUpdateGenerating, onUpdateTitle, onUpdateUnread, onRenameSession, onForkSession, onUpdateSessionId, onClearInitialMessage,
   onClearJoinedExistingSidecar,
   settingsInitialSection, settingsInitialMcpId, settingsInitialSelect, onSettingsSectionChange,
@@ -242,6 +243,7 @@ export const MemoizedTabContent = memo(function TabContent({
             <Chat
               onBack={onBack}
               onSwitchSession={(sessionId) => onSwitchSession(tab.id, sessionId)}
+              onOpenSessionInNewTab={(sessionId, title) => onOpenSessionInNewTab(tab.id, sessionId, title)}
               onNewSession={() => onNewSession(tab.id)}
               initialMessage={tab.initialMessage}
               onInitialMessageConsumed={() => onClearInitialMessage(tab.id)}
@@ -1508,6 +1510,129 @@ export default function App() {
   }, []);
 
   /**
+   * Spawn a fresh Tab bound to an EXISTING session, ensure its sidecar, and
+   * register the Tab as an owner. Shared by "在新 tab 打开" (history dropdown)
+   * and the cross-runtime auto-new-tab path in handleSwitchSession (Scenario
+   * 1.5). Returns false (after a toast) when the tab cap is hit. Stable
+   * identity ([] deps — only touches stable setters/refs/imports) so callers
+   * that must stay reference-stable (handleSwitchSession) can depend on it.
+   *
+   * `preserveCronActivation`: when the target session is owned by a running
+   * cron task, the new Tab must be added via `updateSessionTab` (which keeps
+   * the activation record's `task_id` intact) rather than `activateSession`
+   * (which inserts a fresh `{task_id: null}` record and breaks cron ownership
+   * — the exact pitfall documented in planSessionOpen, mirrored from
+   * handleSwitchSession Scenario 2).
+   */
+  const spawnTabForExistingSession = useCallback(async (
+    sessionId: string,
+    sessionAgentDir: string,
+    title: string,
+    opts?: { preserveCronActivation?: boolean },
+  ): Promise<boolean> => {
+    if (tabsRef.current.length >= MAX_TABS) {
+      toastRef.current.error('标签页已达上限，请关闭一个后重试');
+      return false;
+    }
+    const newTab: Tab = {
+      ...createNewTab(),
+      agentDir: sessionAgentDir,
+      sessionId,
+      view: 'chat',
+      title,
+    };
+    setTabs(prev => [...prev, newTab]);
+    setLoadingTabs(prev => ({ ...prev, [newTab.id]: true }));
+    let ownerAcquired = false;
+    try {
+      const result = await ensureSessionSidecar(sessionId, sessionAgentDir, 'tab', newTab.id);
+      ownerAcquired = true;
+      // The sidecar spawn above is the widest await window; if the user closed
+      // this loading tab during it, don't activate a dead tab or point
+      // activeTabId at a non-existent one. Release the owner we just acquired
+      // (the close handler's release may have raced ahead and found none) and
+      // bail before any activation/state commit.
+      if (!tabsRef.current.some(t => t.id === newTab.id)) {
+        await releaseSessionSidecar(sessionId, 'tab', newTab.id).catch(() => {});
+        return false;
+      }
+      if (opts?.preserveCronActivation) {
+        // Cron-owned session: add this Tab as an additional owner without
+        // replacing the activation record, so the cron `task_id` survives.
+        await updateSessionTab(sessionId, newTab.id);
+      } else {
+        // Plain/background session: cancel any background completion AFTER the
+        // Tab is an owner (order matters — releasing BG as the last owner would
+        // stop the sidecar mid-stream; see handleLaunchProject), then activate.
+        await cancelBackgroundCompletion(sessionId);
+        await activateSession(sessionId, newTab.id, null, result.port, sessionAgentDir, false);
+      }
+      setTabs(prev => prev.map(t =>
+        t.id === newTab.id ? { ...t, joinedExistingSidecar: !result.isNew } : t,
+      ));
+      setActiveTabId(newTab.id);
+      return true;
+    } catch (error) {
+      console.error('[App] Failed to open session in new tab:', error);
+      setTabs(prev => prev.filter(t => t.id !== newTab.id));
+      // Release the Tab owner we acquired so a failed activation can't leak a
+      // phantom owner that keeps the (possibly otherwise-ownerless) sidecar
+      // alive forever.
+      if (ownerAcquired) {
+        await releaseSessionSidecar(sessionId, 'tab', newTab.id).catch(() => {});
+      }
+      return false;
+    } finally {
+      setLoadingTabs(prev => ({ ...prev, [newTab.id]: false }));
+    }
+  }, []);
+
+  // Per-session in-flight guard for open-in-new-tab. Without it, a rapid
+  // double-click both observe a `tabsRef.current` that doesn't yet reflect the
+  // first `setTabs`, so planSessionOpen returns non-jump twice → two tabs for
+  // one session (violates Session:Tab 1:1, can exceed MAX_TABS).
+  const openingInNewTabRef = useRef<Set<string>>(new Set());
+
+  /**
+   * Open a history session in a NEW tab (vs. handleSwitchSession which reuses
+   * the current tab). If the session is already open in a tab, jump to it
+   * instead of spawning a duplicate — Session:Tab is 1:1, so two tabs owning
+   * one sidecar would fight over it (mirrors handleSwitchSession's fast path).
+   * The real activation is fetched (not hard-coded null) so a cron-owned
+   * session routes through the activation-preserving attach path.
+   */
+  const handleOpenSessionInNewTab = useCallback(async (tabId: string, sessionId: string, title: string) => {
+    if (openingInNewTabRef.current.has(sessionId)) return;
+    openingInNewTabRef.current.add(sessionId);
+    try {
+      const activation = await getSessionActivation(sessionId);
+      const plan = planSessionOpen({
+        tabs: tabsRef.current,
+        targetSessionId: sessionId,
+        multiAgentRuntime: false,
+        targetActivation: activation,
+        currentTabCronRunning: false,
+      });
+      if (plan.type === 'jump-to-tab') {
+        console.log(`[App] handleOpenSessionInNewTab: Session ${sessionId} already in tab ${plan.tabId}, jumping to it`);
+        setActiveTabId(plan.tabId);
+        return;
+      }
+      const sourceTab = tabsRef.current.find(t => t.id === tabId);
+      const sessionAgentDir = sourceTab?.agentDir;
+      if (!sessionAgentDir) {
+        console.error('[App] Cannot open session in new tab: source tab has no agentDir');
+        return;
+      }
+      await spawnTabForExistingSession(sessionId, sessionAgentDir, title || getFolderName(sessionAgentDir), {
+        preserveCronActivation: plan.type === 'attach-existing-sidecar',
+      });
+    } finally {
+      openingInNewTabRef.current.delete(sessionId);
+    }
+  }, [spawnTabForExistingSession]);
+
+  /**
    * Handle session switch from within Chat (history dropdown)
    * Implements Session singleton with all 4 scenarios
    */
@@ -1578,38 +1703,15 @@ export default function App() {
     // the agent runtime is only the template for future sessions.
     if (plan.type === 'open-new-tab' && plan.reason === 'runtime-mismatch') {
       console.log(`[App] handleSwitchSession Scenario 1.5: Cross-runtime session (session=${plan.targetRuntime}, current=${plan.currentRuntime}), opening in new tab`);
-      if (tabsRef.current.length >= MAX_TABS) {
-        toastRef.current.error('标签页已达上限，请关闭一个后重试');
-        return;
-      }
       if (!currentTab?.agentDir) {
         console.error('[App] Cannot switch: current tab has no agentDir');
         return;
       }
-      const newTab: Tab = {
-        ...createNewTab(),
-        agentDir: currentTab.agentDir,
+      await spawnTabForExistingSession(
         sessionId,
-        view: 'chat',
-        title: currentTab.title || getFolderName(currentTab.agentDir),
-      };
-      setTabs(prev => [...prev, newTab]);
-      setLoadingTabs(prev => ({ ...prev, [newTab.id]: true }));
-      try {
-        const result = await ensureSessionSidecar(sessionId, currentTab.agentDir, 'tab', newTab.id);
-        await activateSession(sessionId, newTab.id, null, result.port, currentTab.agentDir, false);
-        setTabs(prev => prev.map(t =>
-          t.id === newTab.id
-            ? { ...t, joinedExistingSidecar: !result.isNew }
-            : t,
-        ));
-        setActiveTabId(newTab.id);
-      } catch (error) {
-        console.error('[App] Failed to open cross-runtime session in new tab:', error);
-        setTabs(prev => prev.filter(t => t.id !== newTab.id));
-      } finally {
-        setLoadingTabs(prev => ({ ...prev, [newTab.id]: false }));
-      }
+        currentTab.agentDir,
+        currentTab.title || getFolderName(currentTab.agentDir),
+      );
       return;
     }
 
@@ -1866,7 +1968,10 @@ export default function App() {
     } catch (error) {
       console.error('[App] Failed to switch session:', error);
     }
-  }, []);
+    // spawnTabForExistingSession has stable identity ([] deps), so listing it
+    // keeps exhaustive-deps happy without changing handleSwitchSession's own
+    // stability (callers rely on this being reference-stable).
+  }, [spawnTabForExistingSession]);
 
   const handleBackToLauncher = useCallback(async () => {
     const activeTabId = activeTabIdRef.current;
@@ -2843,6 +2948,7 @@ export default function App() {
             onLaunchProject={handleLaunchProject}
             onBack={handleBackToLauncher}
             onSwitchSession={handleSwitchSession}
+            onOpenSessionInNewTab={handleOpenSessionInNewTab}
             onNewSession={handleNewSession}
             onUpdateGenerating={updateTabGenerating}
             onUpdateTitle={updateTabTitle}
