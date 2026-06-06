@@ -1384,15 +1384,23 @@ export default function App() {
       // sidecar boot. `effectiveSessionId` is a `pending-<tabId>` id (D1: truthy →
       // TabProvider's SSE connect effect fires and polls getTabServerUrl for the
       // Healthy port; the Chat shows "AI 启动中" while the sidecar boots). The
-      // `await ensureSessionSidecar` below still runs (D2) — React flushes this
-      // flip during that await, so the Chat mounts immediately instead of the
-      // user staring at the Launcher through the whole cold boot. History opens
-      // reaching Scenario 4 (open-new-tab / stale-jump fallthrough) still flip
-      // AFTER ensure because joinedExistingSidecar depends on result.isNew —
-      // Phase B will make those instant too.
+      // `await ensureSessionSidecar` below still runs (D2). Chat mounts immediately
+      // instead of the user staring at the Launcher through the whole cold boot.
+      //
+      // Phase B — a HISTORY open whose session has NO live sidecar is also safe to
+      // flip instantly: getSessionPort === null ⇒ ensureSessionSidecar will spawn a
+      // FRESH sidecar (result.isNew === true ⇒ joinedExistingSidecar === false),
+      // exactly like a new session, so the early flip's hard-coded
+      // joinedExistingSidecar:false is provably correct (no config-stomping risk).
+      // The planner guarantees Scenario 4 here has no cron activation, and a session
+      // with NO sidecar at all cannot be a join — so null is a sound "fresh" proof.
+      // When a sidecar already exists (running, or a resident entry mid-restart) we
+      // can't prove joinedExistingSidecar without the ensure result, so those keep
+      // the post-ensure flip. (getSessionPort is a cheap presence lookup, not a boot.)
       const instantNav = !sessionId;
+      const flipInstant = instantNav || (!!sessionId && (await getSessionPort(sessionId)) === null);
       const flipTitle = project.displayName || getFolderName(project.path);
-      if (instantNav) {
+      if (flipInstant) {
         perfMark('launch_flip', { tabId: targetTabId });
         console.log(`[App][launch] FLIP(flushSync) target=${targetTabId} active=${activeTabId} (chat shell should paint now)`);
         // flushSync is LOAD-BEARING here, not an optimization. A plain setState
@@ -1449,10 +1457,11 @@ export default function App() {
       // Always use effectiveSessionId to ensure session_activations has entry for this Tab
       await activateSession(effectiveSessionId, targetTabId, null, result.port, project.path, false);
 
-      // History via Scenario 4: flip NOW, after ensure, because
-      // joinedExistingSidecar depends on result.isNew. New-session already
-      // flipped instantly above (it always spawns a fresh sidecar → not joined).
-      if (!instantNav) {
+      // History via Scenario 4 WITH a live sidecar: flip NOW, after ensure, because
+      // joinedExistingSidecar depends on result.isNew (the session may be joining a
+      // running sidecar). New sessions AND cold history (no live sidecar) already
+      // flipped instantly above, where joinedExistingSidecar is provably false.
+      if (!flipInstant) {
         setTabs((prev) =>
           prev.map((t) =>
             t.id === targetTabId

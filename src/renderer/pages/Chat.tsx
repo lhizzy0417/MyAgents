@@ -625,13 +625,16 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
   // Track permission mode before AI-triggered plan mode (for restore on ExitPlanMode)
   const prePlanPermissionModeRef = useRef<PermissionMode | null>(null);
 
-  // Boot overlay — the in-page half of the unified "AI 启动中" loading state. Shown
-  // for any new chat entry: launcher send (initialMessage) OR a workspace-card / new
-  // session still on a pending-<tabId> id. App paints the IDENTICAL ChatBootOverlay
-  // as the deferred-mount placeholder BEFORE this subtree mounts, so the
-  // placeholder → in-page handoff is seamless and the user sees ONE continuous
-  // loading state from the Launcher→Chat flip to session-ready.
-  const [showStartupOverlay, setShowStartupOverlay] = useState(() => !!initialMessage || isPendingSessionId(sessionId));
+  // Boot overlay — the "AI 启动中" loading state shown from the instant a chat is
+  // entered until the session connects. Initialised true on every fresh Chat mount
+  // because every fresh mount is a session that still has to connect (cold sidecar
+  // boot OR join): new session (pending id), workspace-card open, launcher send, AND
+  // a cold history open (real id, instant-flipped before the boot). Dismissed on
+  // connect (see the effect below) — for a session that's already up the connect is
+  // fast, so the overlay is just a brief "connecting" flash. App renders the same
+  // ChatBootOverlay as the lazy-Chat Suspense fallback, so the chunk-load → mount
+  // handoff is seamless: ONE continuous loading state from flip to ready.
+  const [showStartupOverlay, setShowStartupOverlay] = useState(true);
 
   // Time rewind state
   const [rewindTarget, setRewindTarget] = useState<{
