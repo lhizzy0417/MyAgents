@@ -1176,6 +1176,8 @@ export default function App() {
 
     try {
       const activeTab = tabsRef.current.find(t => t.id === activeTabId);
+      perfMark('launch_start', { tabId: activeTabId });
+      console.log(`[App][launch] START active=${activeTabId} view=${activeTab?.view} hasSession=${!!activeTab?.sessionId} target-sessionId=${sessionId ?? 'NEW'}`);
 
       if (sessionId) {
         const cfg = configRef.current;
@@ -1305,9 +1307,17 @@ export default function App() {
         }
       } else {
         // ========================================
-        // New session: current Tab has running cron task
+        // New session: current Tab has running cron task → open in a new tab
         // ========================================
-        const currentTabCronTask = await getTabCronTask(activeTabId);
+        // Only a tab WITH a session can own a running cron task. A launcher /
+        // fresh tab (no sessionId) can't — so skip the getTabCronTask IPC for it.
+        // That await is load-bearing for instant-nav: awaiting it yields to React,
+        // which paints the workspace card's loading spinner BEFORE the flushSync
+        // flip runs — so even with flushSync the user sees a brief card spinner.
+        // Skipping it for the launcher case keeps the whole pre-flip path
+        // synchronous → the flip lands in the same click tick → no spinner.
+        const currentTabCronTask = activeTab?.sessionId ? await getTabCronTask(activeTabId) : null;
+        console.log(`[App][launch] cron-check ${activeTab?.sessionId ? `status=${currentTabCronTask?.status ?? 'none'}` : 'skipped(no-session)'}`);
         if (currentTabCronTask && currentTabCronTask.status === 'running') {
           console.log(`[App] Scenario 3: Current tab ${activeTabId} has running cron task ${currentTabCronTask.id}, creating new tab`);
 
@@ -1382,6 +1392,8 @@ export default function App() {
       const instantNav = !sessionId;
       const flipTitle = project.displayName || getFolderName(project.path);
       if (instantNav) {
+        perfMark('launch_flip', { tabId: targetTabId });
+        console.log(`[App][launch] FLIP(flushSync) target=${targetTabId} active=${activeTabId} (chat shell should paint now)`);
         // flushSync is LOAD-BEARING here, not an optimization. A plain setState
         // before `await ensureSessionSidecar` does NOT paint early: React batches
         // this promise-continuation update and coalesces it with the post-ensure
@@ -1411,6 +1423,7 @@ export default function App() {
       }
 
       const result = await ensureSessionSidecar(effectiveSessionId, project.path, 'tab', targetTabId);
+      perfMark('launch_ensured', { tabId: targetTabId });
       console.log(`[App] Session Sidecar ensured: port=${result.port}, isNew=${result.isNew}`);
 
       // Cancel background completion AFTER Tab is registered as an owner.
