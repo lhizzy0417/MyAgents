@@ -2266,9 +2266,26 @@ fn run_runtime_detection() -> HashMap<String, RuntimeDetectionResult> {
     results
 }
 
-/// Detect whether external Agent Runtime CLIs are installed
+/// Detect whether external Agent Runtime CLIs are installed.
+///
+/// async + spawn_blocking is LOAD-BEARING (not a perf tweak): detection spawns
+/// `<cli> --version` per installed runtime (blocking process spawns — ~hundreds of
+/// ms each for the JS CLIs), and the in-flight-join branch blocks waiting on the
+/// running detection. A sync command runs all of that on the MAIN thread = the
+/// WKWebView UI thread on macOS, freezing the UI ~0.5–1.5s on Launcher/Chat/Settings
+/// mount for multi-runtime users. Same class as cmd_ensure_session_sidecar — see the
+/// CLAUDE.md red-line "同步 Tauri 命令阻塞 → 冻结 WKWebView". The cache /
+/// in-flight-join gate is preserved inside the blocking helper.
 #[tauri::command]
-pub fn cmd_detect_runtimes() -> HashMap<String, RuntimeDetectionResult> {
+pub async fn cmd_detect_runtimes() -> HashMap<String, RuntimeDetectionResult> {
+    tauri::async_runtime::spawn_blocking(detect_runtimes_blocking)
+        .await
+        // spawn_blocking only errors if the task panics — fall back to empty
+        // detections (renderer's default is all-not-installed) rather than crash.
+        .unwrap_or_else(|_| HashMap::new())
+}
+
+fn detect_runtimes_blocking() -> HashMap<String, RuntimeDetectionResult> {
     let now = Instant::now();
     let gate = runtime_detection_gate();
     match runtime_detection_gate_decision(gate, now, RUNTIME_DETECTION_CACHE_TTL) {
