@@ -33,6 +33,14 @@ export async function readLocalFileAsBlobUrl(
 /** Audio extensions we recognize for inline playback (exported for pathDetection reuse) */
 export const AUDIO_EXTENSIONS = new Set(['mp3', 'wav', 'ogg', 'opus', 'webm', 'aac', 'm4a']);
 
+/** mm:ss formatter for playback time (shared by the audio players). */
+export function formatPlaybackTime(sec: number): string {
+  if (!sec || !isFinite(sec)) return '0:00';
+  const m = Math.floor(sec / 60);
+  const s = Math.floor(sec % 60);
+  return `${m}:${s.toString().padStart(2, '0')}`;
+}
+
 /** Check if a file path is an audio file */
 export function isAudioPath(filePath: string): boolean {
   const ext = filePath.split('.').pop()?.toLowerCase();
@@ -171,11 +179,28 @@ export function seekTo(time: number): void {
   }
 }
 
-/** Toggle play/stop for a specific file. Reads internal state — no external dependency needed. */
+/**
+ * Toggle play/pause for a specific file. Reads internal state — no external
+ * dependency needed.
+ *
+ * Pause/resume (not stop) so the position is preserved: a paused audio keeps its
+ * element + blob URL + currentTime, and `state.currentPath` stays set so the UI
+ * can still scrub and show the progress. A *different* file (or a finished one)
+ * starts fresh via playAudio (which tears down any prior audio first).
+ */
 export function toggleAudio(filePath: string): void {
-  if (currentPath === filePath && audio && !audio.paused && !audio.ended) {
-    stopAudio();
-  } else {
-    void playAudio(filePath);
+  if (currentPath === filePath && audio) {
+    if (!audio.paused && !audio.ended) {
+      audio.pause();        // PAUSE — keep element/blob/position
+      notify();
+      return;
+    }
+    if (!audio.ended) {
+      void audio.play().catch(() => { /* resume race; state re-syncs on next event */ });
+      notify();
+      return;
+    }
+    // ended → restart from the beginning
   }
+  void playAudio(filePath);
 }

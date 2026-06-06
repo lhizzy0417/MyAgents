@@ -10,7 +10,7 @@ import { isAudioPath } from '@/utils/audioPlayer';
 import { useAudioPlayer } from '@/hooks/useAudioPlayer';
 import { looksLikeFilePath } from '@/utils/pathDetection';
 import { resolveAgainstWorkspace } from '@/utils/workspaceFileLinks';
-import { Play, Square } from 'lucide-react';
+import { Play, Pause } from 'lucide-react';
 
 interface InlineCodeProps {
     children: React.ReactNode;
@@ -30,19 +30,19 @@ function extractText(node: React.ReactNode): string {
     return '';
 }
 
-/** Inline play/stop button for audio file paths */
+/** Inline play/pause button for audio file paths */
 function AudioPlayButton({ filePath }: { filePath: string }) {
-    const { isActive, toggle } = useAudioPlayer(filePath);
+    const { isPlaying, toggle } = useAudioPlayer(filePath);
 
     return (
         <button
             type="button"
             onClick={(e) => { e.preventDefault(); e.stopPropagation(); toggle(); }}
             className="ml-1 inline-flex size-[18px] shrink-0 items-center justify-center rounded-full bg-[var(--accent)] text-white transition-colors hover:bg-[var(--accent-warm-hover)] align-middle"
-            title={isActive ? '停止播放' : '播放音频'}
+            title={isPlaying ? '暂停' : '播放音频'}
         >
-            {isActive
-                ? <Square className="size-2 fill-current" />
+            {isPlaying
+                ? <Pause className="size-2.5 fill-current" />
                 : <Play className="size-2.5 fill-current ml-px" />
             }
         </button>

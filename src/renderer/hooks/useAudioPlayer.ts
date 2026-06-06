@@ -33,15 +33,28 @@ function getSnapshot(): AudioState {
 /**
  * React hook for audio playback.
  * Returns the global audio state and toggle function for a specific file.
+ *
+ * `isCurrent` = this file is the loaded one (playing OR paused) — progress/
+ * duration are valid and the file is scrubbable. `isPlaying` = actively playing
+ * (vs paused). Keeping the two separate lets a paused player still show its
+ * position and seek, instead of snapping back to 0 (PRD 0.2.31 pause/resume).
  */
 export function useAudioPlayer(filePath: string) {
   const state = useSyncExternalStore(subscribe, getSnapshot);
 
-  const isActive = state.currentPath === filePath && state.playing;
+  const isCurrent = state.currentPath === filePath;
+  const isPlaying = isCurrent && state.playing;
 
-  // toggleAudio/seekTo read internal singleton state, so no dependency on isActive
+  // toggleAudio/seekTo read internal singleton state, so no dependency on play state
   const toggle = useCallback(() => toggleAudio(filePath), [filePath]);
   const seek = useCallback((time: number) => seekTo(time), []);
 
-  return { isActive, progress: isActive ? state.progress : 0, duration: isActive ? state.duration : 0, toggle, seek };
+  return {
+    isCurrent,
+    isPlaying,
+    progress: isCurrent ? state.progress : 0,
+    duration: isCurrent ? state.duration : 0,
+    toggle,
+    seek,
+  };
 }
