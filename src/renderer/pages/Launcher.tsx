@@ -6,6 +6,9 @@
 
 import { FolderPlus, LayoutTemplate, Loader2 } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useRef, useState, lazy, Suspense } from 'react';
+
+import { perfMark } from '@/utils/perfMark';
+import { RENDERER_PERF_PHASE } from '../../shared/perfTrace';
 import { open } from '@tauri-apps/plugin-dialog';
 
 import { track } from '@/analytics';
@@ -115,6 +118,12 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
     const [selectedWorkspace, setSelectedWorkspace] = useState<Project | null>(() =>
         resolveDefaultWorkspace(visibleProjects)
     );
+
+    // P0/P4: mark when the Launcher shell first commits, for the new-tab timeline
+    // (new_tab_reveal → tab_shell_painted → tab_data_ready).
+    useEffect(() => {
+        perfMark(RENDERER_PERF_PHASE.tabShellPainted, { surface: 'launcher' });
+    }, []);
 
     // Sync selectedWorkspace when visible projects change (e.g., after first project is added,
     // or after patchProject updates a project's settings from Chat tab)

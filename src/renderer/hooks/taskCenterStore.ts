@@ -459,6 +459,12 @@ export function __resetTaskCenterStoreForTest(): void {
     started = false;
     lastFullFetchAt = 0;
     seq = 0;
+    cleanupTauriListeners?.();
+    cleanupTauriListeners = null;
     if (intervalTimer) { clearInterval(intervalTimer); intervalTimer = null; }
     if (retryTimer) { clearTimeout(retryTimer); retryTimer = null; }
+    for (const k of Object.keys(refreshTimers)) {
+        if (refreshTimers[k]) { clearTimeout(refreshTimers[k]!); refreshTimers[k] = null; }
+    }
+    for (const k of Object.keys(latestSeqByScope)) delete latestSeqByScope[k as TaskCenterRefreshScope];
 }

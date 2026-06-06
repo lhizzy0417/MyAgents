@@ -59,6 +59,8 @@ import { persistOpenTabsDurable, loadAndClearOpenTabsDurable, clearOpenTabsDurab
 import { consumeCleanExitMarker } from '@/utils/lastExitMarker';
 import { tabContentKind, isRestoreAbandoned } from '@/utils/tabContentKind';
 import { runAfterNextPaint } from '@/utils/afterPaint';
+import { perfMark } from '@/utils/perfMark';
+import { RENDERER_PERF_PHASE } from '../shared/perfTrace';
 import type { ImageAttachment } from '@/components/SimpleChatInput';
 import { getAllCronTasks, getTabCronTask, updateCronTaskTab } from '@/api/cronTaskClient';
 import { type CronRecoverySummaryPayload, type CronTaskRecoveredPayload, CRON_EVENTS } from '@/types/cronEvents';
@@ -492,6 +494,7 @@ export default function App() {
   // await a Sidecar and wire up SSE before the Chat is usable, so their mount
   // cannot be hidden behind a placeholder — they intentionally do not use this.
   const openNewTabDeferred = useCallback((newTab: Tab) => {
+    perfMark(RENDERER_PERF_PHASE.newTabReveal, { tabId: newTab.id }); // P0: new-tab timeline anchor
     setDeferredMountTabIds((prev) => {
       if (prev.has(newTab.id)) return prev;
       const next = new Set(prev);
