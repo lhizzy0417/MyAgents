@@ -3407,10 +3407,12 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
             subtitle="非图片文件将复制到 myagents_files 并自动引用"
           />
 
-          {/* Unified boot overlay — identical to App's deferred-mount placeholder,
-              so the placeholder → in-page handoff is seamless: ONE continuous
-              "AI 启动中" state from the Launcher→Chat flip through the sidecar boot. */}
-          {showStartupOverlay && <ChatBootOverlay />}
+          {/* Unified boot overlay — same component App renders as the lazy-Chat
+              Suspense fallback, so the chunk-load → mount handoff is seamless: ONE
+              continuous "AI 启动中" state from the Launcher→Chat flip through the
+              sidecar boot. Pass `show` (not a conditional render) so the overlay
+              self-manages a soft fade-out on dismiss, revealing the chat underneath. */}
+          <ChatBootOverlay show={showStartupOverlay} />
 
           {/* SDK 0.2.91+ terminal_reason banner. For error-severity reasons that
               already surface via agentError (image_error / model_error), suppress
