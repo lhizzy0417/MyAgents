@@ -3,6 +3,7 @@ import { Virtuoso } from "react-virtuoso";
 import type { Components, ContextProp } from "react-virtuoso";
 import type { VirtuosoHandle } from "react-virtuoso";
 
+import { runAfterNextPaint } from "@/utils/afterPaint";
 import { WorkspaceTreeRow } from "./WorkspaceTreeRow";
 import { WorkspaceTreeStickyAncestors } from "./WorkspaceTreeStickyAncestors";
 import {
@@ -10,6 +11,11 @@ import {
   resolveStickyAncestors,
 } from "./treeFlatten";
 import type { StickyAncestor, VisibleTreeRow } from "./treeTypes";
+
+// Reveal waits this many frames for react-virtuoso's scroller to finish layout
+// before giving up. scrollToIndex no-ops on an unmeasured scroller, which is
+// exactly the state right after the conditional (search→tree) mount.
+const REVEAL_READINESS_MAX_FRAMES = 20;
 
 interface ViewportContext {
   stickyHeight: number;
@@ -90,15 +96,34 @@ export const WorkspaceTreeViewport = memo(function WorkspaceTreeViewport({
   );
   const virtuosoRef = useRef<VirtuosoHandle>(null);
   const lastRevealRequestIdRef = useRef<number | null>(null);
+  // Live element ref (read inside async rAF callbacks without a stale closure).
+  const scrollerElRef = useRef<HTMLElement | null>(null);
+  // Latest rows, so a deferred reveal recomputes its index after a
+  // non-idempotent refresh may have reordered the list mid-flight.
+  const rowsRef = useRef(rows);
+  useEffect(() => {
+    rowsRef.current = rows;
+  }, [rows]);
+  // Cancel handle for an in-flight (deferred) reveal scroll.
+  const revealCancelRef = useRef<(() => void) | null>(null);
+  // initialScrollTop is a restore-on-mount, applied at most once (when the
+  // scroller first attaches). Re-applying on later prop churn could clobber a
+  // reveal scroll that just landed.
+  const didRestoreScrollRef = useRef(false);
 
   useEffect(() => {
-    if (!scrollerElement) {
+    if (!scrollerElement || didRestoreScrollRef.current) {
       return;
     }
-    if (initialScrollTop > 0) {
+    didRestoreScrollRef.current = true;
+    // A pending reveal owns the scroll position — don't fight it with a restore.
+    if (initialScrollTop > 0 && !revealRequest) {
       scrollerElement.scrollTo({ top: initialScrollTop });
     }
-  }, [initialScrollTop, scrollerElement]);
+  }, [initialScrollTop, revealRequest, scrollerElement]);
+
+  // Cancel any in-flight reveal rAF on unmount.
+  useEffect(() => () => revealCancelRef.current?.(), []);
 
   useEffect(() => {
     if (!scrollerElement) {
@@ -142,24 +167,61 @@ export const WorkspaceTreeViewport = memo(function WorkspaceTreeViewport({
   );
 
   const handleScrollerRef = useCallback((element: HTMLElement | null | Window) => {
-    setScrollerElement(element instanceof HTMLElement ? element : null);
+    const el = element instanceof HTMLElement ? element : null;
+    scrollerElRef.current = el;
+    setScrollerElement(el);
   }, []);
 
+  // Scroll a requested path into view. The tree is conditionally rendered
+  // (search ↔ tree), so a reveal coincides with a FRESH MOUNT of this Virtuoso,
+  // whose scroller isn't measured yet during this mount-time effect —
+  // `scrollToIndex` silently no-ops there. The old fire-once code also consumed
+  // the request immediately (+ dedup ref), so it never retried once the scroller
+  // was ready → the viewport stayed at the top. Fix: claim the request, then
+  // scroll only AFTER paint and once the scroller has a real height, recomputing
+  // the index against the latest rows. (See useChatSearch for the same async/
+  // retry treatment of Virtuoso navigation.)
   useEffect(() => {
     if (!revealRequest || lastRevealRequestIdRef.current === revealRequest.id) {
       return;
     }
-    const index = rows.findIndex((row) => row.path === revealRequest.path);
-    if (index < 0) {
+    // Ancestors may still be (lazily) expanding — bail until the row exists; the
+    // next `rows` change re-runs this effect.
+    if (rows.findIndex((row) => row.path === revealRequest.path) < 0) {
       return;
     }
-    lastRevealRequestIdRef.current = revealRequest.id;
-    virtuosoRef.current?.scrollToIndex({
-      index,
-      align: "center",
-      behavior: "smooth",
-    });
-    onRevealHandled?.(revealRequest.id);
+    const { id, path } = revealRequest;
+    lastRevealRequestIdRef.current = id;
+    revealCancelRef.current?.(); // supersede any prior pending reveal
+
+    let framesLeft = REVEAL_READINESS_MAX_FRAMES;
+    let rafHandle = 0;
+    const attempt = () => {
+      const el = scrollerElRef.current;
+      const index = rowsRef.current.findIndex((row) => row.path === path);
+      if (index >= 0 && el && el.clientHeight > 0) {
+        // Instant (not 'smooth'): robust to a list refresh interrupting the
+        // animation, and the right UX for a "jump to file" reveal.
+        virtuosoRef.current?.scrollToIndex({ index, align: "center", behavior: "auto" });
+        onRevealHandled?.(id);
+        revealCancelRef.current = null;
+        return;
+      }
+      if (framesLeft-- <= 0) {
+        onRevealHandled?.(id);
+        revealCancelRef.current = null;
+        return;
+      }
+      rafHandle = requestAnimationFrame(attempt);
+    };
+    const cancelFirst = runAfterNextPaint(attempt);
+    revealCancelRef.current = () => {
+      cancelFirst();
+      if (rafHandle) cancelAnimationFrame(rafHandle);
+    };
+    // No cleanup-cancel: this effect re-runs on every `rows` change (lazy expand /
+    // refresh) and cancelling would abort an in-flight reveal. Same-id re-runs bail
+    // at the top; unmount cancellation is the dedicated effect above.
   }, [onRevealHandled, revealRequest, rows]);
 
   return (
