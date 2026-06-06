@@ -2747,6 +2747,20 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     [isExternalRuntime, handleJumpToTool],
   );
 
+  // P3 (second memo-breaker): this list was computed inline in the SimpleChatInput
+  // JSX, so a fresh array was created on every Chat re-render → broke
+  // SimpleChatInput's shallow React.memo on every streamed token. Memoize it so
+  // its identity only changes when the plugin config actually changes.
+  // Layer-1 visible plugins = Settings 开关 ON. (mcpServerNames is added by the
+  // sidecar's /api/cc-plugin/list and lives only on PluginListItem, not the bare
+  // PluginEntry in AppConfig — undefined here; the chat submenu hides it.)
+  const globallyVisiblePlugins = useMemo(
+    () => (config.plugins ?? [])
+      .filter(p => config.enabledPlugins?.[p.id] === true)
+      .map(p => ({ id: p.id, name: p.name, description: p.description })),
+    [config.plugins, config.enabledPlugins],
+  );
+
   // Stable callbacks for MessageList (extracted from inline arrows to enable memo)
   const handlePermissionDecision = useCallback((decision: 'deny' | 'allow_once' | 'always_allow') => {
     void respondPermission(decision);
@@ -3512,18 +3526,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
             // PRD 0.2.17 — Claude plugins. globallyVisiblePlugins is the
             // Layer 1 (Settings 开关 ON) candidate list; workspaceEnabledPlugins
             // is the Layer 2 actually-enabled subset for this workspace.
-            globallyVisiblePlugins={(config.plugins ?? [])
-              .filter(p => config.enabledPlugins?.[p.id] === true)
-              .map(p => ({
-                id: p.id,
-                name: p.name,
-                description: p.description,
-                // mcpServerNames is added by sidecar's `/api/cc-plugin/list`
-                // and lives only on PluginListItem (not on the bare
-                // PluginEntry stored in AppConfig). Chat doesn't fetch
-                // list here — the field is undefined; the chat submenu
-                // hides the line gracefully. v0.2.18 may add a lazy fetch.
-              }))}
+            globallyVisiblePlugins={globallyVisiblePlugins}
             workspaceEnabledPlugins={workspaceEnabledPlugins}
             onWorkspacePluginToggle={handleWorkspacePluginToggle}
             onRefreshProviders={refreshProviderData}
