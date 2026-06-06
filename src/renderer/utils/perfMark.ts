@@ -1,13 +1,19 @@
 /**
- * Minimal dev/diagnostics performance marks. No-op unless enabled, so call sites
- * are safe to leave in production. Enabled in the Vite dev build, or when
+ * Renderer perf instrumentation (P0). No-op unless enabled, so call sites are
+ * safe to leave in production. Enabled in the Vite dev build, or when
  * `localStorage['myagents:perf'] === '1'` (lets us profile a production build).
  *
- * Currently used to quantify the Task Center SWR-cache win — cache-hit vs
- * cache-miss mount and time-to-data-ready (P0-0 measurement, see
- * specs/research/0605_research_frontend_perf_architecture_deep_review.md §10).
- * Inspect in the browser/devtools Performance panel by name.
+ * Two outputs when enabled: (1) `performance.mark/measure` for the devtools
+ * Performance panel; (2) a stable `[perf] trace=renderer phase=...` line emitted
+ * via `console.debug`, which `frontendLogger` intercepts and forwards to the
+ * unified log — so perf is greppable, NOT a parallel observability system. The
+ * line shape reuses the shared perf-trace vocabulary (`@/shared/perfTrace`),
+ * the same field vocabulary as the server-side perf-trace contract.
+ *
+ * See specs/prd/prd_0.2.31_frontend_perf_round1.md §P0.
  */
+
+import { formatPerfLine, type PerfTraceDetail } from '../../shared/perfTrace';
 
 /** Pure gating decision — unit-tested directly (env/localStorage injected). */
 export function isPerfEnabled(isDev: boolean, lsGet: (key: string) => string | null): boolean {
@@ -24,13 +30,25 @@ const ENABLED = isPerfEnabled(
     (key) => (typeof localStorage !== 'undefined' ? localStorage.getItem(key) : null),
 );
 
-export function perfMark(name: string): void {
+/**
+ * Mark a renderer interaction phase. `phase` is a `RENDERER_PERF_PHASE` value or
+ * a free-form sub-phase (e.g. `tab_cache_hit`); `detail` carries structured
+ * context (tabId, surface, …).
+ */
+export function perfMark(phase: string, detail?: PerfTraceDetail): void {
     if (!ENABLED) return;
-    if (typeof performance === 'undefined' || typeof performance.mark !== 'function') return;
+    if (typeof performance !== 'undefined' && typeof performance.mark === 'function') {
+        try {
+            performance.mark(phase);
+        } catch {
+            // best-effort — never throw into a render path
+        }
+    }
     try {
-        performance.mark(name);
+        // frontendLogger intercepts console.debug → unified log
+        console.debug(formatPerfLine({ trace: 'renderer', phase, detail }));
     } catch {
-        // best-effort diagnostics — never throw into a render path
+        // ignore
     }
 }
 
@@ -39,6 +57,9 @@ export function perfMeasure(name: string, startMark: string, endMark: string): v
     if (typeof performance === 'undefined' || typeof performance.measure !== 'function') return;
     try {
         performance.measure(name, startMark, endMark);
+        const entry = performance.getEntriesByName?.(name).pop();
+        const durationMs = entry ? Math.round(entry.duration) : undefined;
+        console.debug(formatPerfLine({ trace: 'renderer', phase: name, durationMs }));
     } catch {
         // ignore — e.g. a start mark that never fired
     }
