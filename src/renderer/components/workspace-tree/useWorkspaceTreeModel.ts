@@ -15,7 +15,6 @@ interface UseWorkspaceTreeModelOptions {
   rootChildren: DirectoryTreeNode[];
   loadingPaths: ReadonlySet<string>;
   selectedPaths: readonly string[];
-  maxStickyDepth?: number;
   /**
    * Seed for the open/expanded path set, read once on mount. Lets a parent
    * persist expand state across the panel's unmount/remount (e.g. dismissing
@@ -56,7 +55,6 @@ export function useWorkspaceTreeModel({
   rootChildren,
   loadingPaths,
   selectedPaths,
-  maxStickyDepth = MAX_STICKY_ANCESTOR_DEPTH,
   initialOpenPaths,
 }: UseWorkspaceTreeModelOptions): WorkspaceTreeModel {
   // `new Set(undefined)` is an empty set, so the no-seed case is unchanged.
@@ -144,6 +142,9 @@ export function useWorkspaceTreeModel({
     [visibleRows],
   );
 
+  // Cap is the single shared constant so the model's stack depth and the
+  // viewport's complementary footer always sum to the same constant reserve
+  // (the invariant that keeps the breadcrumb flicker-free at the scroll bottom).
   const getStickyAncestors = useCallback(
     (firstVisibleIndex: number, scrollTop: number) =>
       buildStickyAncestors(
@@ -151,9 +152,9 @@ export function useWorkspaceTreeModel({
         nodeMetaByPath,
         firstVisibleIndex,
         scrollTop,
-        maxStickyDepth,
+        MAX_STICKY_ANCESTOR_DEPTH,
       ),
-    [visibleRows, nodeMetaByPath, maxStickyDepth],
+    [visibleRows, nodeMetaByPath],
   );
 
   return {
