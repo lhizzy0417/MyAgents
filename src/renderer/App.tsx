@@ -29,28 +29,24 @@ import { useTabSwipeGesture } from '@/hooks/useTabSwipeGesture';
 import Launcher from '@/pages/Launcher'; // eager: default first view → no cold-start fallback
 // Route-split (P1): heavy / non-initial pages load on demand. lazy-Chat moves the
 // entire markdown/mermaid/katex/syntax-highlighter chain out of the entry chunk
-// (it is reachable only via Chat). Import factories are reused for idle preload
-// (preloadRoutes) so navigation stays instant and no new loading-flash appears.
-const importChat = () => import('@/pages/Chat');
-const importSettings = () => import('@/pages/Settings');
-const importTaskCenter = () => import('@/pages/TaskCenter');
-const Chat = lazy(importChat);
-const Settings = lazy(importSettings);
-const TaskCenter = lazy(importTaskCenter);
+// (reachable only via Chat). Launcher stays eager (default first view → no
+// cold-start fallback).
+//
+// NOTE: we deliberately do NOT idle-preload these. A blind idle preload made
+// WKWebView warn "<chunk> was preloaded but not used within a few seconds" for
+// the whole route graph on every startup, AND eagerly pulled Monaco/Markdown
+// (several MB) at boot even when the user never opened those pages. In Tauri the
+// chunks are LOCAL assets, so first-open is fast and just shows the same paper
+// Suspense fallback the deferred-mount placeholder already uses. (If first Chat
+// open ever feels slow, add a targeted preload on launch intent — not a blind
+// idle preload of every route.)
+const Chat = lazy(() => import('@/pages/Chat'));
+const Settings = lazy(() => import('@/pages/Settings'));
+const TaskCenter = lazy(() => import('@/pages/TaskCenter'));
 
 /** Layout-compatible Suspense fallback for a lazy page chunk — same paper fill
  *  as the deferred-mount placeholder, so a chunk-load is never a jarring blank. */
 const PAGE_FALLBACK = <div className="h-full w-full bg-[var(--paper)]" />;
-
-/** Preload the lazy page chunks after first paint, highest-likelihood first
- *  (Chat carries the markdown chain). Keeps first paint light while making later
- *  navigation instant — preload is load-bearing for "no new transition". */
-function preloadRoutes(): void {
-    const onErr = (err: unknown) => console.warn('[preloadRoutes] route chunk preload failed', err);
-    void importChat().catch(onErr);
-    void importSettings().catch(onErr);
-    void importTaskCenter().catch(onErr);
-}
 import {
   type Project,
 } from '@/config/types';
@@ -314,17 +310,6 @@ export default function App() {
 
   // Apply theme (light/dark/system) to <html> element
   useThemeEffect();
-
-  // P1: after first paint, preload the lazy page chunks at idle so navigating to
-  // Chat/Settings/TaskCenter is instant and never shows a chunk-load flash
-  // (preload is load-bearing — without it the entry-shrink just shifts cost to
-  // first-open). WKWebView may lack requestIdleCallback → setTimeout fallback.
-  useEffect(() => {
-    const ric = (window as unknown as { requestIdleCallback?: (cb: () => void) => number }).requestIdleCallback;
-    if (typeof ric === 'function') { ric(preloadRoutes); return; }
-    const t = setTimeout(preloadRoutes, 1500);
-    return () => clearTimeout(t);
-  }, []);
 
   // Settings initial section state (for deep linking to specific section)
   const [settingsInitialSection, setSettingsInitialSection] = useState<string | undefined>(undefined);
