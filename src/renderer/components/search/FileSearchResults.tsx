@@ -12,6 +12,7 @@ import { getFileIcon } from '@/utils/fileIcons';
 interface FileSearchResultsProps {
     results: FileSearchHit[];
     isLoading: boolean;
+    isRefreshing: boolean;
     query: string;
     expandedFiles: Set<string>;
     onToggleFile: (path: string) => void;
@@ -23,6 +24,7 @@ interface FileSearchResultsProps {
 export default memo(function FileSearchResults({
     results,
     isLoading,
+    isRefreshing,
     query,
     expandedFiles,
     onToggleFile,
@@ -30,7 +32,7 @@ export default memo(function FileSearchResults({
     onMatchClick,
     onContextMenu,
 }: FileSearchResultsProps) {
-    if (isLoading) {
+    if (isLoading && results.length === 0) {
         return (
             <div className="flex h-full flex-col px-4 py-3 pb-8 overflow-y-auto overscroll-contain">
                 <div className="flex items-center gap-2 mb-4">
@@ -53,7 +55,9 @@ export default memo(function FileSearchResults({
         return (
             <div className="flex h-full flex-col px-4 py-3 pb-8 overflow-y-auto overscroll-contain">
                 <div className="flex items-center gap-2 mb-4">
-                    <div className="text-[11px] font-medium text-[var(--ink-muted)]">0 个结果</div>
+                    <div className="text-[11px] font-medium text-[var(--ink-muted)]">
+                        0 个结果{isRefreshing ? ' · 正在更新索引...' : ''}
+                    </div>
                 </div>
             </div>
         );
@@ -65,7 +69,7 @@ export default memo(function FileSearchResults({
         <div className="flex h-full flex-col pb-8 overflow-y-auto overscroll-contain" style={{ scrollbarGutter: 'stable' }}>
             <div className="sticky top-0 z-10 bg-[var(--paper)]/90 px-4 py-2 backdrop-blur-sm border-b border-[var(--line-subtle)]">
                 <div className="text-[11px] font-medium text-[var(--ink-muted)]">
-                    {results.length} 个文件中找到 {totalMatches} 个结果
+                    {results.length} 个文件中找到 {totalMatches} 个结果{isRefreshing ? ' · 正在更新索引...' : ''}
                 </div>
             </div>
 

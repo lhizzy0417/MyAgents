@@ -18,57 +18,77 @@
 //! picked up on the next mode entry automatically.
 
 use std::collections::HashMap;
-use std::fs;
+use std::fs::{self, File, OpenOptions};
+use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
-use crate::ulog_info;
+use crate::{ulog_info, ulog_warn};
+use serde::{Deserialize, Serialize};
 
 use tantivy::collector::TopDocs;
 use tantivy::query::QueryParser;
-use tantivy::{doc, Index, IndexReader, ReloadPolicy, Term};
+use tantivy::{doc, Index, IndexReader, IndexWriter, ReloadPolicy, Term};
 
-use super::schema::{self, FileFields};
-use super::searcher::{FileSearchResult, FileSearchHit, FileMatchLine};
+use super::schema::{self, FileFields, SCHEMA_VERSION};
+use super::searcher::{FileMatchLine, FileSearchHit, FileSearchResult};
 use super::tokenizer;
 use super::util::{byte_to_utf16, ceil_char_boundary, floor_char_boundary};
 
 /// Directories to skip when scanning workspace files.
 const SKIP_DIRS: &[&str] = &[
-    "node_modules", ".git", "__pycache__", ".next", "dist",
-    "build", ".turbo", ".cache", "target", ".venv", "venv",
-    ".myagents", ".claude",
+    "node_modules",
+    ".git",
+    "__pycache__",
+    ".next",
+    "dist",
+    "build",
+    ".turbo",
+    ".cache",
+    "target",
+    ".venv",
+    "venv",
+    ".myagents",
+    ".claude",
 ];
 
 /// File extensions to skip (binary files).
 const BINARY_EXTENSIONS: &[&str] = &[
-    "png", "jpg", "jpeg", "gif", "bmp", "ico", "webp", "svg", "avif",
-    "mp3", "mp4", "avi", "mov", "wav", "ogg", "webm", "flac",
-    "zip", "tar", "gz", "rar", "7z", "bz2", "xz", "zst",
-    "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx",
-    "woff", "woff2", "ttf", "eot", "otf",
-    "exe", "dll", "so", "dylib", "a", "lib",
-    "sqlite", "db", "sqlite3",
-    "pyc", "pyo", "class", "o", "obj",
+    "png", "jpg", "jpeg", "gif", "bmp", "ico", "webp", "svg", "avif", "mp3", "mp4", "avi", "mov",
+    "wav", "ogg", "webm", "flac", "zip", "tar", "gz", "rar", "7z", "bz2", "xz", "zst", "pdf",
+    "doc", "docx", "xls", "xlsx", "ppt", "pptx", "woff", "woff2", "ttf", "eot", "otf", "exe",
+    "dll", "so", "dylib", "a", "lib", "sqlite", "db", "sqlite3", "pyc", "pyo", "class", "o", "obj",
     "DS_Store",
 ];
 
 /// Maximum file size to index (1 MB).
 const MAX_FILE_SIZE: u64 = 1_048_576;
+const FILE_INDEX_MANIFEST: &str = ".file_index_manifest.json";
+const SCHEMA_VERSION_FILE: &str = ".schema_version";
 
 /// Per-file staleness fingerprint. Two files with the same `(mtime_ms, size)`
 /// are assumed unchanged — good enough because any content edit changes mtime,
 /// and the size check catches the rare case of an editor that restores mtime
 /// after a modification.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
 struct FileState {
     mtime_ms: u64,
     size: u64,
 }
 
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FileIndexManifest {
+    schema_version: u32,
+    workspace: String,
+    files: HashMap<String, FileState>,
+}
+
 /// Manages per-workspace Tantivy indices.
 pub struct FileIndexManager {
     base_dir: PathBuf,
-    indices: HashMap<String, WorkspaceFileIndex>,
+    indices: Mutex<HashMap<String, Arc<Mutex<Option<WorkspaceFileIndex>>>>>,
 }
 
 struct WorkspaceFileIndex {
@@ -86,26 +106,185 @@ impl FileIndexManager {
         let _ = fs::create_dir_all(&base_dir);
         Self {
             base_dir,
-            indices: HashMap::new(),
+            indices: Mutex::new(HashMap::new()),
         }
+    }
+
+    fn slot_for(&self, workspace: &str) -> Result<Arc<Mutex<Option<WorkspaceFileIndex>>>, String> {
+        let mut indices = self
+            .indices
+            .lock()
+            .map_err(|e| format!("file index map mutex poisoned: {}", e))?;
+        Ok(indices
+            .entry(workspace.to_string())
+            .or_insert_with(|| Arc::new(Mutex::new(None)))
+            .clone())
+    }
+
+    fn index_dir_for_workspace(&self, workspace: &str) -> PathBuf {
+        self.base_dir.join(simple_hash(workspace))
+    }
+
+    fn load_or_create_index(&self, workspace: &str) -> Result<WorkspaceFileIndex, String> {
+        if let Some(index) = self.load_existing_index(workspace)? {
+            return Ok(index);
+        }
+        self.create_and_populate_index(workspace)
+    }
+
+    fn load_existing_index(&self, workspace: &str) -> Result<Option<WorkspaceFileIndex>, String> {
+        let index_dir = self.index_dir_for_workspace(workspace);
+        if !index_dir.join("meta.json").exists() {
+            return Ok(None);
+        }
+
+        let stored_schema_version = fs::read_to_string(index_dir.join(SCHEMA_VERSION_FILE))
+            .ok()
+            .and_then(|s| s.trim().parse::<u32>().ok());
+        if stored_schema_version != Some(SCHEMA_VERSION) {
+            ulog_warn!(
+                "[search] Workspace index schema version mismatch for {} (stored={:?}, current={}); rebuilding",
+                workspace,
+                stored_schema_version,
+                SCHEMA_VERSION
+            );
+            return Ok(None);
+        }
+
+        let manifest_path = index_dir.join(FILE_INDEX_MANIFEST);
+        let manifest: FileIndexManifest = match fs::read_to_string(&manifest_path)
+            .ok()
+            .and_then(|content| serde_json::from_str(&content).ok())
+        {
+            Some(manifest) => manifest,
+            None => {
+                ulog_warn!(
+                    "[search] Workspace index manifest missing or invalid for {}; rebuilding",
+                    workspace
+                );
+                return Ok(None);
+            }
+        };
+
+        if manifest.schema_version != SCHEMA_VERSION || manifest.workspace != workspace {
+            ulog_warn!(
+                "[search] Workspace index manifest mismatch for {}; rebuilding",
+                workspace
+            );
+            return Ok(None);
+        }
+
+        let (_schema, fields) = schema::file_schema();
+        let index = match Index::open_in_dir(&index_dir) {
+            Ok(index) => index,
+            Err(e) => {
+                ulog_warn!(
+                    "[search] Failed to open persisted workspace index for {}: {}; rebuilding",
+                    workspace,
+                    e
+                );
+                return Ok(None);
+            }
+        };
+        register_file_tokenizer(&index);
+        let reader = index
+            .reader_builder()
+            .reload_policy(ReloadPolicy::OnCommitWithDelay)
+            .try_into()
+            .map_err(|e| format!("Failed to create file index reader: {}", e))?;
+
+        ulog_info!(
+            "[search] Loaded persisted workspace index: {} files for {}",
+            manifest.files.len(),
+            workspace
+        );
+
+        Ok(Some(WorkspaceFileIndex {
+            index,
+            reader,
+            fields,
+            file_states: manifest.files,
+        }))
+    }
+
+    fn persist_manifest(
+        &self,
+        workspace: &str,
+        file_states: &HashMap<String, FileState>,
+    ) -> Result<(), String> {
+        let index_dir = self.index_dir_for_workspace(workspace);
+        fs::create_dir_all(&index_dir)
+            .map_err(|e| format!("Failed to create file index dir: {}", e))?;
+
+        let manifest = FileIndexManifest {
+            schema_version: SCHEMA_VERSION,
+            workspace: workspace.to_string(),
+            files: file_states.clone(),
+        };
+        let manifest_bytes = serde_json::to_vec_pretty(&manifest)
+            .map_err(|e| format!("Failed to serialize file index manifest: {}", e))?;
+        let manifest_path = index_dir.join(FILE_INDEX_MANIFEST);
+        let tmp_path = index_dir.join(format!(
+            "{}.tmp-{}",
+            FILE_INDEX_MANIFEST,
+            std::process::id()
+        ));
+        fs::write(&tmp_path, manifest_bytes)
+            .map_err(|e| format!("Failed to write file index manifest temp file: {}", e))?;
+        fs::rename(&tmp_path, &manifest_path).map_err(|e| {
+            let _ = fs::remove_file(&tmp_path);
+            format!("Failed to replace file index manifest: {}", e)
+        })?;
+        let _ = fs::write(
+            index_dir.join(SCHEMA_VERSION_FILE),
+            SCHEMA_VERSION.to_string(),
+        );
+        Ok(())
     }
 
     /// Invalidate an index so it will be rebuilt next time. Used for hard
     /// resets (schema migration, corruption recovery); the common path is
     /// `refresh_or_create` instead.
-    pub fn invalidate_index(&mut self, workspace: &str) {
-        self.indices.remove(workspace);
+    pub fn invalidate_index(&self, workspace: &str) -> Result<(), String> {
+        let mut indices = self
+            .indices
+            .lock()
+            .map_err(|e| format!("file index map mutex poisoned: {}", e))?;
+        if let Some(slot) = indices.remove(workspace) {
+            let mut guard = slot
+                .lock()
+                .map_err(|e| format!("file index slot mutex poisoned: {}", e))?;
+            *guard = None;
+        }
+        drop(indices);
+
+        let index_dir = self.index_dir_for_workspace(workspace);
+        match fs::symlink_metadata(&index_dir) {
+            Ok(meta) if meta.is_dir() => fs::remove_dir_all(&index_dir)
+                .map_err(|e| format!("Failed to remove workspace file index dir: {}", e))?,
+            Ok(_) => fs::remove_file(&index_dir)
+                .map_err(|e| format!("Failed to remove workspace file index path: {}", e))?,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(format!("Failed to stat workspace file index dir: {}", e)),
+        }
+        Ok(())
     }
 
-    /// Refresh an existing workspace index incrementally, or build from
-    /// scratch on first access. Returns `(total_files, changed_files)`.
+    /// Refresh an existing workspace index incrementally, loading the persisted
+    /// Tantivy index + manifest first if this process has not touched the
+    /// workspace yet. Returns `(total_files, changed_files)`.
     ///
-    /// Called when the user enters search mode. Cheap on a warm cache
-    /// (hundreds of ms to stat the tree + zero writes if nothing changed).
-    pub fn refresh_or_create(&mut self, workspace: &str) -> Result<(usize, usize), String> {
-        if !self.indices.contains_key(workspace) {
-            let count = self.create_and_populate_index(workspace)?;
-            return Ok((count, count));
+    /// Called after the foreground search has returned available results.
+    /// Cheap on a warm cache (hundreds of ms to stat the tree + zero writes if
+    /// nothing changed).
+    pub fn refresh_or_create(&self, workspace: &str) -> Result<(usize, usize), String> {
+        let slot = self.slot_for(workspace)?;
+        let mut slot_guard = slot
+            .lock()
+            .map_err(|e| format!("file index slot mutex poisoned: {}", e))?;
+
+        if slot_guard.is_none() {
+            *slot_guard = Some(self.load_or_create_index(workspace)?);
         }
 
         let ws_path = Path::new(workspace);
@@ -118,7 +297,7 @@ impl FileIndexManager {
 
         // Scope the mutable borrow so we can call ulog_info after.
         let (total, change_count) = {
-            let ws_index = self.indices.get_mut(workspace).unwrap();
+            let ws_index = slot_guard.as_mut().unwrap();
 
             let mut to_reindex: Vec<(String, PathBuf)> = Vec::new();
             let mut new_file_states: HashMap<String, FileState> =
@@ -150,10 +329,9 @@ impl FileIndexManager {
                 return Ok((total, 0));
             }
 
-            let mut writer = ws_index
-                .index
-                .writer(30_000_000)
-                .map_err(|e| format!("Failed to create writer for refresh: {}", e))?;
+            let index_dir = self.index_dir_for_workspace(workspace);
+            let mut writer =
+                create_file_index_writer(&ws_index.index, &index_dir, 30_000_000, "refresh")?;
 
             let path_field = ws_index.fields.path;
             for (rel, _) in &to_reindex {
@@ -164,15 +342,16 @@ impl FileIndexManager {
             }
 
             for (rel_path, abs_path) in &to_reindex {
-                let content = match fs::read_to_string(abs_path) {
-                    Ok(c) => c,
-                    Err(_) => {
-                        // File vanished or became non-UTF8 between discovery
-                        // and read. Drop from the state map so a future
-                        // refresh re-adds it if it comes back.
-                        new_file_states.remove(rel_path);
-                        continue;
-                    }
+                let Some(expected_state) = new_file_states.get(rel_path).cloned() else {
+                    continue;
+                };
+                let Some(content) = read_indexable_file(abs_path, &expected_state) else {
+                    // File vanished, became non-UTF8, grew past the cap, changed
+                    // between discovery/read, or was swapped to a symlink. Drop
+                    // from the state map so a future refresh re-adds it if it
+                    // settles back into an indexable regular file.
+                    new_file_states.remove(rel_path);
+                    continue;
                 };
                 let name = abs_path
                     .file_name()
@@ -201,6 +380,12 @@ impl FileIndexManager {
                 .reload()
                 .map_err(|e| format!("reader reload failed: {}", e))?;
             ws_index.file_states = new_file_states;
+            if let Err(e) = self.persist_manifest(workspace, &ws_index.file_states) {
+                ulog_warn!(
+                    "[search] Failed to persist workspace index manifest after refresh: {}",
+                    e
+                );
+            }
 
             (total, change_count)
         };
@@ -216,9 +401,10 @@ impl FileIndexManager {
         Ok((total, change_count))
     }
 
-    /// Search workspace files. Creates the index on first access.
+    /// Search workspace files. Loads a persisted index on first access, falling
+    /// back to a cold build only when no valid manifest/index is available.
     pub fn search(
-        &mut self,
+        &self,
         query: &str,
         workspace: &str,
         limit: usize,
@@ -226,12 +412,18 @@ impl FileIndexManager {
     ) -> Result<FileSearchResult, String> {
         let start = std::time::Instant::now();
 
-        // Ensure index exists (lazy creation on cache miss)
-        if !self.indices.contains_key(workspace) {
-            self.create_and_populate_index(workspace)?;
+        let slot = self.slot_for(workspace)?;
+        let mut slot_guard = slot
+            .lock()
+            .map_err(|e| format!("file index slot mutex poisoned: {}", e))?;
+
+        // Ensure index exists (lazy creation on cache miss).
+        if slot_guard.is_none() {
+            *slot_guard = Some(self.load_or_create_index(workspace)?);
         }
 
-        let ws_index = self.indices.get(workspace)
+        let ws_index = slot_guard
+            .as_ref()
             .ok_or_else(|| format!("Index not found for workspace: {}", workspace))?;
 
         let f = &ws_index.fields;
@@ -264,11 +456,7 @@ impl FileIndexManager {
             let content = get_text_field(&doc, f.content);
 
             // Find matching lines from the actual file content
-            let matches = find_matching_lines(
-                &content,
-                &query_lower,
-                max_matches_per_file,
-            );
+            let matches = find_matching_lines(&content, &query_lower, max_matches_per_file);
 
             let match_count = matches.len();
             total_matches += match_count;
@@ -294,15 +482,16 @@ impl FileIndexManager {
 
     /// Create and populate a workspace file index from scratch. Returns the
     /// number of files indexed.
-    fn create_and_populate_index(&mut self, workspace: &str) -> Result<usize, String> {
+    fn create_and_populate_index(&self, workspace: &str) -> Result<WorkspaceFileIndex, String> {
         // Use a hash of the workspace path as directory name
-        let hash = simple_hash(workspace);
-        let index_dir = self.base_dir.join(&hash);
+        let index_dir = self.index_dir_for_workspace(workspace);
         let _ = fs::create_dir_all(&index_dir);
 
         let (schema, fields) = schema::file_schema();
 
-        // Always create fresh index for workspace files (they change frequently)
+        // Create a fresh index only when there is no valid persisted workspace
+        // index + manifest to load. Search uses this cold path as a fallback;
+        // normal restarts should open the existing Tantivy directory instead.
         let index = Index::create_in_dir(&index_dir, schema.clone())
             .or_else(|_| {
                 // If directory exists with incompatible index, recreate
@@ -316,13 +505,9 @@ impl FileIndexManager {
         // snapshots the tokenizer manager at construction time, so late
         // registration would leave docs tokenized with the default English
         // tokenizer and jieba would never run.
-        index
-            .tokenizers()
-            .register(tokenizer::TOKENIZER_NAME, tokenizer::build_chinese_tokenizer());
+        register_file_tokenizer(&index);
 
-        let mut writer = index
-            .writer(30_000_000)
-            .map_err(|e| format!("Failed to create file index writer: {}", e))?;
+        let mut writer = create_file_index_writer(&index, &index_dir, 30_000_000, "initial build")?;
 
         // Walk the tree metadata-first, then read + index each discovered file.
         let ws_path = Path::new(workspace);
@@ -330,9 +515,8 @@ impl FileIndexManager {
             let discovered = discover_files(ws_path)?;
             let mut states: HashMap<String, FileState> = HashMap::with_capacity(discovered.len());
             for (rel_path, (abs_path, state)) in discovered {
-                let content = match fs::read_to_string(&abs_path) {
-                    Ok(c) => c,
-                    Err(_) => continue, // Skip non-UTF8 / unreadable
+                let Some(content) = read_indexable_file(&abs_path, &state) else {
+                    continue;
                 };
                 let name = abs_path
                     .file_name()
@@ -361,7 +545,9 @@ impl FileIndexManager {
             HashMap::new()
         };
 
-        writer.commit().map_err(|e| format!("commit failed: {}", e))?;
+        writer
+            .commit()
+            .map_err(|e| format!("commit failed: {}", e))?;
         // Drop the writer after the initial commit — subsequent incremental
         // refreshes open a short-lived writer of their own. Keeping one live
         // would waste ~30 MB of heap per workspace for no benefit.
@@ -373,15 +559,21 @@ impl FileIndexManager {
             .try_into()
             .map_err(|e| format!("Failed to create file index reader: {}", e))?;
 
-        let count = file_states.len();
-        self.indices.insert(workspace.to_string(), WorkspaceFileIndex {
+        let workspace_index = WorkspaceFileIndex {
             index,
             reader,
             fields,
             file_states,
-        });
+        };
 
-        Ok(count)
+        if let Err(e) = self.persist_manifest(workspace, &workspace_index.file_states) {
+            ulog_warn!(
+                "[search] Failed to persist workspace index manifest after build: {}",
+                e
+            );
+        }
+
+        Ok(workspace_index)
     }
 }
 
@@ -394,11 +586,7 @@ fn discover_files(root: &Path) -> Result<HashMap<String, (PathBuf, FileState)>, 
     Ok(out)
 }
 
-fn walk_dir(
-    root: &Path,
-    dir: &Path,
-    out: &mut HashMap<String, (PathBuf, FileState)>,
-) {
+fn walk_dir(root: &Path, dir: &Path, out: &mut HashMap<String, (PathBuf, FileState)>) {
     let entries = match fs::read_dir(dir) {
         Ok(e) => e,
         Err(_) => return, // permission denied / vanished → skip silently
@@ -408,7 +596,15 @@ fn walk_dir(
         let path = entry.path();
         let name = entry.file_name().to_string_lossy().into_owned();
 
-        if path.is_dir() {
+        let metadata = match fs::symlink_metadata(&path) {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
+        if metadata.file_type().is_symlink() {
+            continue;
+        }
+
+        if metadata.is_dir() {
             if SKIP_DIRS.iter().any(|s| name == *s) || name.starts_with('.') {
                 continue;
             }
@@ -429,24 +625,14 @@ fn walk_dir(
             continue;
         }
 
-        let metadata = match fs::metadata(&path) {
-            Ok(m) => m,
-            Err(_) => continue,
-        };
+        if !metadata.is_file() {
+            continue;
+        }
         if metadata.len() > MAX_FILE_SIZE {
             continue;
         }
 
-        let mtime_ms = metadata
-            .modified()
-            .ok()
-            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-            .map(|d| d.as_millis() as u64)
-            .unwrap_or(0);
-        let state = FileState {
-            mtime_ms,
-            size: metadata.len(),
-        };
+        let state = file_state_from_metadata(&metadata);
 
         let rel = path
             .strip_prefix(root)
@@ -463,11 +649,7 @@ fn walk_dir(
 /// offsets** into `line_content` (the unit JavaScript strings are indexed by).
 /// All byte slicing is clamped to UTF-8 char boundaries to avoid panics on
 /// Chinese / emoji content.
-fn find_matching_lines(
-    content: &str,
-    query_lower: &str,
-    max_matches: usize,
-) -> Vec<FileMatchLine> {
+fn find_matching_lines(content: &str, query_lower: &str, max_matches: usize) -> Vec<FileMatchLine> {
     const MAX_LINE_BYTES: usize = 200;
 
     let mut matches = Vec::new();
@@ -553,6 +735,89 @@ fn get_text_field(doc: &tantivy::TantivyDocument, field: tantivy::schema::Field)
         .unwrap_or_default()
 }
 
+fn file_state_from_metadata(metadata: &fs::Metadata) -> FileState {
+    let mtime_ms = metadata
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    FileState {
+        mtime_ms,
+        size: metadata.len(),
+    }
+}
+
+fn read_indexable_file(abs_path: &Path, expected_state: &FileState) -> Option<String> {
+    let metadata = fs::symlink_metadata(abs_path).ok()?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() || metadata.len() > MAX_FILE_SIZE {
+        return None;
+    }
+    if file_state_from_metadata(&metadata) != *expected_state {
+        return None;
+    }
+
+    let file = open_regular_file_no_follow(abs_path)?;
+    let mut reader = file.take(MAX_FILE_SIZE + 1);
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    reader.read_to_end(&mut bytes).ok()?;
+    if bytes.len() as u64 > MAX_FILE_SIZE {
+        return None;
+    }
+    String::from_utf8(bytes).ok()
+}
+
+fn open_regular_file_no_follow(abs_path: &Path) -> Option<File> {
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW);
+    }
+    options.open(abs_path).ok()
+}
+
+fn create_file_index_writer(
+    index: &Index,
+    index_dir: &Path,
+    heap_size: usize,
+    context: &str,
+) -> Result<IndexWriter, String> {
+    match index.writer(heap_size) {
+        Ok(writer) => Ok(writer),
+        Err(first_err) => {
+            let lock_path = index_dir.join(".tantivy-writer.lock");
+            if lock_path.exists() {
+                let _ = fs::remove_file(&lock_path);
+                ulog_warn!(
+                    "[search] Recovered stale workspace Tantivy writer lock during {} at {:?}",
+                    context,
+                    lock_path
+                );
+                index.writer(heap_size).map_err(|e| {
+                    format!(
+                        "Failed to create file index writer for {} after lock recovery: {}",
+                        context, e
+                    )
+                })
+            } else {
+                Err(format!(
+                    "Failed to create file index writer for {}: {}",
+                    context, first_err
+                ))
+            }
+        }
+    }
+}
+
+fn register_file_tokenizer(index: &Index) {
+    index.tokenizers().register(
+        tokenizer::TOKENIZER_NAME,
+        tokenizer::build_chinese_tokenizer(),
+    );
+}
+
 /// Stable 64-bit FNV-1a hash of the workspace path.
 ///
 /// This is used as the on-disk directory name for per-workspace Tantivy
@@ -569,4 +834,160 @@ fn simple_hash(s: &str) -> String {
         hash = hash.wrapping_mul(FNV_PRIME);
     }
     format!("{:016x}", hash)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn workspace_path(path: &Path) -> String {
+        path.to_string_lossy().into_owned()
+    }
+
+    #[test]
+    fn loads_persisted_index_before_refreshing_filesystem_changes() {
+        let temp = tempfile::tempdir().unwrap();
+        let base_dir = temp.path().join("index");
+        let workspace = temp.path().join("workspace");
+        fs::create_dir_all(&workspace).unwrap();
+        let file_path = workspace.join("notes.txt");
+        fs::write(&file_path, "originaltoken line\n").unwrap();
+
+        let workspace = workspace_path(&workspace);
+        let manager = FileIndexManager::new(base_dir.clone());
+        let initial = manager.search("originaltoken", &workspace, 10, 5).unwrap();
+        assert_eq!(initial.hits.len(), 1);
+
+        let index_dir = base_dir.join(simple_hash(&workspace));
+        assert!(index_dir.join(FILE_INDEX_MANIFEST).exists());
+
+        // Simulate an app restart and an external file edit before the next
+        // foreground refresh. The first search should serve the persisted
+        // Tantivy index (stale but immediate); refresh then reconciles it.
+        drop(manager);
+        fs::write(&file_path, "updatedtoken line with different size\n").unwrap();
+
+        let manager = FileIndexManager::new(base_dir);
+        let stale = manager.search("originaltoken", &workspace, 10, 5).unwrap();
+        assert_eq!(stale.hits.len(), 1);
+
+        let (_total, changed) = manager.refresh_or_create(&workspace).unwrap();
+        assert_eq!(changed, 1);
+
+        let old = manager.search("originaltoken", &workspace, 10, 5).unwrap();
+        assert!(old.hits.is_empty());
+        let updated = manager.search("updatedtoken", &workspace, 10, 5).unwrap();
+        assert_eq!(updated.hits.len(), 1);
+    }
+
+    #[test]
+    fn invalidate_removes_persisted_workspace_index() {
+        let temp = tempfile::tempdir().unwrap();
+        let base_dir = temp.path().join("index");
+        let workspace = temp.path().join("workspace");
+        fs::create_dir_all(&workspace).unwrap();
+        let file_path = workspace.join("notes.txt");
+        fs::write(&file_path, "beforetoken").unwrap();
+
+        let workspace = workspace_path(&workspace);
+        let manager = FileIndexManager::new(base_dir.clone());
+        assert_eq!(
+            manager
+                .search("beforetoken", &workspace, 10, 5)
+                .unwrap()
+                .hits
+                .len(),
+            1
+        );
+
+        let index_dir = base_dir.join(simple_hash(&workspace));
+        assert!(index_dir.join(FILE_INDEX_MANIFEST).exists());
+
+        manager.invalidate_index(&workspace).unwrap();
+        assert!(!index_dir.exists());
+
+        fs::write(&file_path, "aftertoken with different size").unwrap();
+        let old = manager.search("beforetoken", &workspace, 10, 5).unwrap();
+        assert!(old.hits.is_empty());
+        let new = manager.search("aftertoken", &workspace, 10, 5).unwrap();
+        assert_eq!(new.hits.len(), 1);
+    }
+
+    #[test]
+    fn invalid_manifest_rebuilds_from_current_filesystem() {
+        let temp = tempfile::tempdir().unwrap();
+        let base_dir = temp.path().join("index");
+        let workspace = temp.path().join("workspace");
+        fs::create_dir_all(&workspace).unwrap();
+        let file_path = workspace.join("notes.txt");
+        fs::write(&file_path, "oldtoken").unwrap();
+
+        let workspace = workspace_path(&workspace);
+        let manager = FileIndexManager::new(base_dir.clone());
+        assert_eq!(
+            manager
+                .search("oldtoken", &workspace, 10, 5)
+                .unwrap()
+                .hits
+                .len(),
+            1
+        );
+        drop(manager);
+
+        let index_dir = base_dir.join(simple_hash(&workspace));
+        fs::write(index_dir.join(FILE_INDEX_MANIFEST), "not json").unwrap();
+        fs::write(&file_path, "newtoken with different size").unwrap();
+
+        let manager = FileIndexManager::new(base_dir);
+        let old = manager.search("oldtoken", &workspace, 10, 5).unwrap();
+        assert!(old.hits.is_empty());
+        let new = manager.search("newtoken", &workspace, 10, 5).unwrap();
+        assert_eq!(new.hits.len(), 1);
+    }
+
+    #[test]
+    fn read_indexable_file_rechecks_size_before_read() {
+        let temp = tempfile::tempdir().unwrap();
+        let file_path = temp.path().join("grows.txt");
+        fs::write(&file_path, "small").unwrap();
+        let expected_state = file_state_from_metadata(&fs::symlink_metadata(&file_path).unwrap());
+
+        fs::write(&file_path, "x".repeat(MAX_FILE_SIZE as usize + 1)).unwrap();
+
+        assert!(read_indexable_file(&file_path, &expected_state).is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn skips_symlinked_files_inside_workspace() {
+        let temp = tempfile::tempdir().unwrap();
+        let base_dir = temp.path().join("index");
+        let workspace = temp.path().join("workspace");
+        fs::create_dir_all(&workspace).unwrap();
+        let outside = temp.path().join("outside-secret.txt");
+        fs::write(&outside, "secretoutsideworkspace").unwrap();
+        std::os::unix::fs::symlink(&outside, workspace.join("link.txt")).unwrap();
+
+        let manager = FileIndexManager::new(base_dir);
+        let result = manager
+            .search("secretoutsideworkspace", &workspace_path(&workspace), 10, 5)
+            .unwrap();
+        assert!(result.hits.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn read_indexable_file_rejects_symlink_swap_after_discovery() {
+        let temp = tempfile::tempdir().unwrap();
+        let file_path = temp.path().join("candidate.txt");
+        let outside = temp.path().join("outside-secret.txt");
+        fs::write(&file_path, "regular content").unwrap();
+        fs::write(&outside, "secretoutsideworkspace").unwrap();
+        let expected_state = file_state_from_metadata(&fs::symlink_metadata(&file_path).unwrap());
+
+        fs::remove_file(&file_path).unwrap();
+        std::os::unix::fs::symlink(&outside, &file_path).unwrap();
+
+        assert!(read_indexable_file(&file_path, &expected_state).is_none());
+    }
 }

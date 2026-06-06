@@ -2028,6 +2028,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
     virtuosoRef,
     messages: chatSearchMessages,
     firstItemIndex,
+    pauseAutoScroll,
     active: chatSearchOpen,
   });
   const chatSearchSetQueryRef = useRef(chatSearch.setQuery);

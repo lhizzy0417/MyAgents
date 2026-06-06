@@ -10,22 +10,23 @@
 //! Architecture: singleton `SearchEngine` managed as Tauri state, same tier as
 //! `SidecarManager` and `CronTaskManager`.
 
-mod schema;
-mod session_indexer;
 mod file_indexer;
+mod schema;
 mod searcher;
+mod session_indexer;
 mod tokenizer;
 mod util;
 mod watcher;
 
+use serde::Serialize;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::sync::Mutex;
-use serde::Serialize;
 
-use crate::{ulog_info, ulog_error};
+use crate::{ulog_error, ulog_info};
 
-pub use searcher::{SessionSearchResult, SessionSearchHit, FileSearchResult, FileSearchHit, FileMatchLine};
+pub use searcher::{
+    FileMatchLine, FileSearchHit, FileSearchResult, SessionSearchHit, SessionSearchResult,
+};
 
 /// The main search engine singleton.
 ///
@@ -36,20 +37,22 @@ pub use searcher::{SessionSearchResult, SessionSearchHit, FileSearchResult, File
 /// indexing. The single-writer invariant is enforced internally via
 /// `StdMutex<IndexWriter>` inside `SessionIndex`.
 ///
-/// **File indices** still need a mutex because `FileIndexManager` owns a
-/// `HashMap<String, WorkspaceFileIndex>` that can be mutated when a new
-/// workspace is indexed on first access.
+/// **File indices** keep only a short global map lock to locate the per-workspace
+/// slot. Heavy refresh/search work is serialized per workspace and run on a
+/// blocking worker, so a cold index in one workspace does not block searches in
+/// another workspace or pin an async runtime thread.
 pub struct SearchEngine {
     data_dir: PathBuf,
     session_index: Arc<session_indexer::SessionIndex>,
-    file_indices: Arc<Mutex<file_indexer::FileIndexManager>>,
+    file_indices: Arc<file_indexer::FileIndexManager>,
 }
 
 impl SearchEngine {
     /// Create a new SearchEngine with indices stored under `data_dir/search_index/`.
     pub fn new(data_dir: PathBuf) -> Result<Self, String> {
         let index_dir = data_dir.join("search_index");
-        std::fs::create_dir_all(&index_dir).map_err(|e| format!("Failed to create search index dir: {}", e))?;
+        std::fs::create_dir_all(&index_dir)
+            .map_err(|e| format!("Failed to create search index dir: {}", e))?;
 
         let session_index = session_indexer::SessionIndex::new(index_dir.join("sessions"))
             .map_err(|e| format!("Failed to create session index: {}", e))?;
@@ -59,7 +62,7 @@ impl SearchEngine {
         Ok(Self {
             data_dir,
             session_index: Arc::new(session_index),
-            file_indices: Arc::new(Mutex::new(file_manager)),
+            file_indices: Arc::new(file_manager),
         })
     }
 
@@ -88,10 +91,9 @@ impl SearchEngine {
                 // the user search path (lock-free reader) stays responsive.
                 let indexer = session_index.clone();
                 let dir_for_index = data_dir.clone();
-                let result = tokio::task::spawn_blocking(move || {
-                    indexer.index_all_sessions(&dir_for_index)
-                })
-                .await;
+                let result =
+                    tokio::task::spawn_blocking(move || indexer.index_all_sessions(&dir_for_index))
+                        .await;
 
                 match result {
                     Ok(Ok(count)) => {
@@ -140,8 +142,14 @@ impl SearchEngine {
         limit: usize,
         max_matches_per_file: usize,
     ) -> Result<FileSearchResult, String> {
-        let mut mgr = self.file_indices.lock().await;
-        mgr.search(query, workspace, limit, max_matches_per_file)
+        let mgr = self.file_indices.clone();
+        let query = query.to_string();
+        let workspace = workspace.to_string();
+        tokio::task::spawn_blocking(move || {
+            mgr.search(&query, &workspace, limit, max_matches_per_file)
+        })
+        .await
+        .map_err(|e| format!("file search task panicked: {}", e))?
     }
 
     /// Get index status (for debugging).
@@ -154,17 +162,29 @@ impl SearchEngine {
 
     /// Invalidate workspace file index to force it to be rebuilt from scratch next time
     pub async fn invalidate_workspace_file_index(&self, workspace: &str) {
-        let mut mgr = self.file_indices.lock().await;
-        mgr.invalidate_index(workspace);
+        let mgr = self.file_indices.clone();
+        let workspace = workspace.to_string();
+        match tokio::task::spawn_blocking(move || mgr.invalidate_index(&workspace)).await {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => ulog_error!("[search] Failed to invalidate workspace index: {}", e),
+            Err(e) => ulog_error!("[search] Workspace index invalidation task panicked: {}", e),
+        }
     }
 
     /// Incrementally refresh the workspace file index against the current
     /// filesystem. Walks metadata only and re-indexes just the files whose
-    /// mtime/size changed. Called when the user enters search mode — cheap
-    /// on a warm cache, full-build on cold.
-    pub async fn refresh_workspace_file_index(&self, workspace: &str) -> Result<(usize, usize), String> {
-        let mut mgr = self.file_indices.lock().await;
-        mgr.refresh_or_create(workspace)
+    /// mtime/size changed. Called after the foreground file search returns
+    /// available results, so refresh work cannot jump ahead of the user's
+    /// actual query.
+    pub async fn refresh_workspace_file_index(
+        &self,
+        workspace: &str,
+    ) -> Result<(usize, usize), String> {
+        let mgr = self.file_indices.clone();
+        let workspace = workspace.to_string();
+        tokio::task::spawn_blocking(move || mgr.refresh_or_create(&workspace))
+            .await
+            .map_err(|e| format!("workspace index refresh task panicked: {}", e))?
     }
 
     /// Search Task Center thoughts (v0.1.69, PRD §13.2). Substring match over
@@ -427,7 +447,12 @@ pub async fn cmd_search_workspace_files(
         });
     }
     state
-        .search_files(query, &workspace, limit.unwrap_or(50), max_matches_per_file.unwrap_or(10))
+        .search_files(
+            query,
+            &workspace,
+            limit.unwrap_or(50),
+            max_matches_per_file.unwrap_or(10),
+        )
         .await
 }
 

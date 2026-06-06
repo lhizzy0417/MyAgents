@@ -41,7 +41,6 @@ import { getTabServerUrl, proxyFetch, isTauri, getSessionActivation, getSessionP
 import { resolveAttachmentUrl } from '@/utils/attachmentUrl';
 import { isExistingSessionSwitch, isResetSessionBirth, shouldDegradedLoad } from '@/utils/optionResolve';
 import { getSessionDisplayText } from '@/utils/sessionDisplay';
-import { refreshWorkspaceFileIndex } from '@/api/searchClient';
 import { listenWithCleanup } from '@/utils/tauriListen';
 import type { PermissionMode } from '@/config/types';
 import type { QueuedMessageInfo } from '@/types/queue';
@@ -2674,17 +2673,6 @@ export default function TabProvider({
     // Unmount guard for async recovery
     const isMountedRef = useRef(true);
     useEffect(() => { return () => { isMountedRef.current = false; }; }, []);
-
-    // Warm the workspace file search index on tab open. Cold cache → full
-    // build; warm cache → metadata-only walk + diff. Fire-and-forget — the
-    // user's search UX doesn't depend on the result, and the Rust side is
-    // serialized by an internal mutex so duplicate calls across tabs of the
-    // same workspace are safe. Search-mode entry triggers a second refresh
-    // (see DirectoryPanel) to catch anything written after tab open.
-    useEffect(() => {
-        if (!isTauri() || !agentDir) return;
-        refreshWorkspaceFileIndex(agentDir).catch(() => {});
-    }, [agentDir]);
 
     // Recover a dead Session Sidecar: re-ensure + reconnect SSE.
     // Called when SSE retries exhaust OR when Rust health monitor restarts the sidecar.

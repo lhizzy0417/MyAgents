@@ -97,8 +97,7 @@ export async function searchWorkspaceFiles(
 
 /**
  * Invalidate a workspace file index so it is rebuilt from scratch on the next
- * search. Prefer `refreshWorkspaceFileIndex` for the normal freshness path —
- * this is only needed for hard resets (schema migration, corruption recovery).
+ * search. Kept for hard resets (schema migration, corruption recovery).
  */
 export async function invalidateWorkspaceFileIndex(workspace: string): Promise<void> {
     return invoke('cmd_invalidate_workspace_index', { workspace });
@@ -108,9 +107,10 @@ export async function invalidateWorkspaceFileIndex(workspace: string): Promise<v
  * Incrementally refresh a workspace file index against the current filesystem.
  * Walks metadata only and re-indexes just the files whose mtime/size changed.
  *
- * Call this when the user enters search mode — it's cheap on a warm cache
- * (hundreds of ms for thousands of files, zero writes if nothing changed) and
- * performs a full build on first access.
+ * Explicit refresh hook. Do not call this as background prewarm for ordinary
+ * tab opens or empty search mode: cold refreshes are heavy IO/CPU work. The
+ * file-search UI calls search first, then uses this as stale-while-revalidate
+ * follow-up work, or for an explicit user action.
  *
  * Returns `[totalFiles, changedFiles]`.
  */

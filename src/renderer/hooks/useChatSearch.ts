@@ -50,10 +50,11 @@ const SCOPE_ATTR = 'data-chat-search-scope';
 const MESSAGE_ID_ATTR = 'data-message-id';
 const PULSE_CLASS = 'chat-search-msg-pulse';
 const DEBOUNCE_MS = 150;
-// Number of rAFs to wait after virtuoso.scrollToIndex before retrying the DOM
-// paint. One frame schedules Virtuoso's mount; the second lets the row's
-// subtree (Markdown / KaTeX / tool cards) finish first-render.
-const PAINT_RETRY_FRAMES = 2;
+// Bounded retry window after virtuoso.scrollToIndex. Complex Markdown/tool
+// rows can take more than a couple of animation frames to mount and paint; a
+// short time budget keeps navigation reliable without creating an unbounded
+// polling loop.
+const PAINT_RETRY_TIMEOUT_MS = 1200;
 
 function getCssHighlights(): CssWithHighlights | null {
   if (typeof CSS === 'undefined') return null;
@@ -299,13 +300,13 @@ export interface UseChatSearchOptions {
   /** Full message list (history + streaming combined) — drives the count. */
   messages: Message[];
   /**
-   * Offset that Virtuoso applies to incoming indices. When the chat lazy-loads
-   * older pages, MessageList passes `firstItemIndex` to Virtuoso so its
-   * internal indices stay stable across paginations; scrollToIndex expects
-   * the SAME offset domain. Pass through here so our jumps don't drift after
-   * the user scrolls to an older page.
+   * Kept only as a pagination dependency marker. Virtuoso applies
+   * `firstItemIndex` to rendered item keys/content, but its imperative
+   * `scrollToIndex` API still consumes the 0-based data-array index.
    */
   firstItemIndex?: number;
+  /** Temporarily disable bottom auto-follow while search navigation scrolls. */
+  pauseAutoScroll?: (duration?: number) => void;
   /** When true, the hook is active: scan + paint highlights. */
   active: boolean;
 }
@@ -326,7 +327,7 @@ export function useChatSearch({
   scrollerRef,
   virtuosoRef,
   messages,
-  firstItemIndex = 0,
+  pauseAutoScroll,
   active,
 }: UseChatSearchOptions): ChatSearchController {
   const [query, setQueryState] = useState('');
@@ -346,10 +347,11 @@ export function useChatSearch({
   // Same justification as queryRef above.
   // eslint-disable-next-line react-hooks/refs
   messagesRef.current = messages;
-  const firstItemIndexRef = useRef(firstItemIndex);
+  const pauseAutoScrollRef = useRef(pauseAutoScroll);
   // eslint-disable-next-line react-hooks/refs
-  firstItemIndexRef.current = firstItemIndex;
+  pauseAutoScrollRef.current = pauseAutoScroll;
   const summariesRef = useRef<MessageMatchSummary[]>([]);
+  const focusRequestIdRef = useRef(0);
   // Timestamp of the user's most recent next/prev click. `reconcile()` runs on
   // a debounce (DEBOUNCE_MS) after `messages` changes (streaming, append, …);
   // if the user clicked next/prev during the debounce window, the unconditional
@@ -579,8 +581,12 @@ export function useChatSearch({
 
   // Clear highlights on deactivation / unmount.
   useEffect(() => {
-    if (!active) clearHighlights();
+    if (!active) {
+      focusRequestIdRef.current += 1;
+      clearHighlights();
+    }
     return () => {
+      focusRequestIdRef.current += 1;
       clearHighlights();
       if (recomputeTimerRef.current) {
         clearTimeout(recomputeTimerRef.current);
@@ -599,6 +605,7 @@ export function useChatSearch({
    * then retry the DOM lookup once it mounts.
    */
   const focusCurrent = useCallback(() => {
+    const focusRequestId = ++focusRequestIdRef.current;
     const pos = resolveFlatIndex(summariesRef.current, currentIndexRef.current);
     if (!pos) {
       paintAllAndCurrent(null);
@@ -606,6 +613,7 @@ export function useChatSearch({
     }
     const scroller = scrollerRef.current;
     if (!scroller) return;
+    pauseAutoScrollRef.current?.(2000);
 
     const tryPaintAndScroll = (): boolean => {
       const scope = findMessageScope(scroller, pos.messageId);
@@ -629,22 +637,22 @@ export function useChatSearch({
 
     if (tryPaintAndScroll()) return;
 
-    // Off-screen: ask Virtuoso to mount the row, then retry. Virtuoso's
-    // scrollToIndex consumes indices in the same domain as firstItemIndex
-    // (which can be non-zero when older pages have been loaded).
+    // Off-screen: ask Virtuoso to mount the row, then retry. react-virtuoso's
+    // scrollToIndex consumes the 0-based data-array index even when
+    // firstItemIndex is set for inverse pagination.
     const handle = virtuosoRef.current;
     if (handle) {
       handle.scrollToIndex({
-        index: pos.messageIndex + firstItemIndexRef.current,
+        index: pos.messageIndex,
         behavior: 'auto',
         align: 'center',
       });
     }
-    let attempt = 0;
+    const startedAt = Date.now();
     const retry = () => {
+      if (focusRequestIdRef.current !== focusRequestId) return;
       if (tryPaintAndScroll()) return;
-      attempt += 1;
-      if (attempt >= PAINT_RETRY_FRAMES) {
+      if (Date.now() - startedAt >= PAINT_RETRY_TIMEOUT_MS) {
         // Give up the precise paint; the pulse + scroll already landed the
         // user in the right neighbourhood when scrollToIndex eventually
         // commits, and the MutationObserver-driven reconcile will pick up
@@ -678,6 +686,7 @@ export function useChatSearch({
   }, [focusCurrent]);
 
   const setQuery = useCallback((value: string) => {
+    focusRequestIdRef.current += 1;
     setQueryState(value);
   }, []);
 

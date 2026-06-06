@@ -74,6 +74,8 @@ import ContextMenu, { type ContextMenuItem } from "./ContextMenu";
 import { searchWorkspaceFiles, refreshWorkspaceFileIndex, type FileSearchHit } from "@/api/searchClient";
 import FileSearchResults from "./search/FileSearchResults";
 
+const SEARCH_REFRESH_DELAY_MS = 250;
+
 function useDebounce<T>(value: T, delay: number): T {
   const [debouncedValue, setDebouncedValue] = useState<T>(value);
   useEffect(() => {
@@ -363,52 +365,107 @@ const DirectoryPanel = memo(
     const [isSearchMode, setIsSearchMode] = useState(false);
     const [searchQuery, setSearchQuery] = useState("");
     const [isSearching, setIsSearching] = useState(false);
+    const [isRefreshingSearch, setIsRefreshingSearch] = useState(false);
     const [searchResults, setSearchResults] = useState<FileSearchHit[]>([]);
     const [expandedFiles, setExpandedFiles] = useState<Set<string>>(new Set());
     const searchInputRef = useRef<HTMLInputElement>(null);
+    const searchRequestIdRef = useRef(0);
+    const searchRefreshRef = useRef<{ workspace: string; promise: Promise<[number, number]> } | null>(null);
 
     const debouncedSearchQuery = useDebounce(searchQuery, 300);
 
     // Image preview context
     const { openPreview } = useImagePreview();
 
-    // When entering search mode, incrementally refresh the Tantivy file index
-    // against the current filesystem. `refreshWorkspaceFileIndex` walks metadata
-    // only and re-indexes just the files whose mtime/size changed — cheap on a
-    // warm cache, full-build on cold. This picks up any files the AI / user
-    // created since the last session without paying the 20s full-reindex cost.
-    useEffect(() => {
-      if (isSearchMode) {
-        refreshWorkspaceFileIndex(agentDir).catch(() => {});
-      }
-    }, [isSearchMode, agentDir]);
+    const refreshSearchIndex = useCallback(() => {
+      const current = searchRefreshRef.current;
+      if (current?.workspace === agentDir) return current.promise;
+      const entry = {
+        workspace: agentDir,
+        promise: refreshWorkspaceFileIndex(agentDir),
+      };
+      entry.promise = entry.promise.finally(() => {
+        if (searchRefreshRef.current === entry) {
+          searchRefreshRef.current = null;
+        }
+      });
+      searchRefreshRef.current = entry;
+      return entry.promise;
+    }, [agentDir]);
 
-    // Trigger search
+    // Trigger search. Stale-while-revalidate: query the currently-available
+    // index first so the panel gets pixels on screen quickly, then refresh the
+    // index in the background and re-run the same query only if files changed.
+    // refresh/create/search all share the same Rust file-index queue, so tab
+    // open prewarm or empty-mode refreshes must not sit in front of the user's
+    // actual query on large workspaces.
     useEffect(() => {
-      if (!isSearchMode) return;
-      if (debouncedSearchQuery.trim() === "") {
-        setSearchResults([]);
+      if (!isSearchMode) {
+        searchRequestIdRef.current += 1;
+        searchRefreshRef.current = null;
         setIsSearching(false);
+        setIsRefreshingSearch(false);
         return;
       }
-      let isMounted = true;
+      const query = debouncedSearchQuery.trim();
+      if (query === "") {
+        searchRequestIdRef.current += 1;
+        setSearchResults([]);
+        setIsSearching(false);
+        setIsRefreshingSearch(false);
+        return;
+      }
+      const requestId = searchRequestIdRef.current + 1;
+      searchRequestIdRef.current = requestId;
       const runSearch = async () => {
         setIsSearching(true);
+        setIsRefreshingSearch(false);
+        setSearchResults([]);
+        setExpandedFiles(new Set());
         try {
-          const result = await searchWorkspaceFiles(debouncedSearchQuery, agentDir);
-          if (isMounted) {
+          const result = await searchWorkspaceFiles(query, agentDir);
+          if (searchRequestIdRef.current === requestId) {
             setSearchResults(result.hits);
             setExpandedFiles(new Set(result.hits.map(h => h.path)));
           }
         } catch (err) {
-          console.error("File search failed:", err);
+          if (searchRequestIdRef.current === requestId) {
+            console.error("File search failed:", err);
+            setSearchResults([]);
+            setExpandedFiles(new Set());
+          }
+          return;
         } finally {
-          if (isMounted) setIsSearching(false);
+          if (searchRequestIdRef.current === requestId) {
+            setIsSearching(false);
+          }
+        }
+
+        await new Promise<void>(resolve => setTimeout(resolve, SEARCH_REFRESH_DELAY_MS));
+        if (searchRequestIdRef.current !== requestId) return;
+        setIsRefreshingSearch(true);
+        try {
+          const [, changedFiles] = await refreshSearchIndex();
+          if (searchRequestIdRef.current !== requestId) return;
+          if (changedFiles > 0) {
+            const refreshed = await searchWorkspaceFiles(query, agentDir);
+            if (searchRequestIdRef.current === requestId) {
+              setSearchResults(refreshed.hits);
+              setExpandedFiles(new Set(refreshed.hits.map(h => h.path)));
+            }
+          }
+        } catch (err) {
+          if (searchRequestIdRef.current === requestId) {
+            console.error("File search refresh failed:", err);
+          }
+        } finally {
+          if (searchRequestIdRef.current === requestId) {
+            setIsRefreshingSearch(false);
+          }
         }
       };
       runSearch();
-      return () => { isMounted = false; };
-    }, [debouncedSearchQuery, agentDir, isSearchMode]);
+    }, [debouncedSearchQuery, agentDir, refreshSearchIndex, isSearchMode]);
 
     // Toast for notifications
     const toast = useToast();
@@ -487,9 +544,9 @@ const DirectoryPanel = memo(
     // watcher event (AI tool completion, Monaco save, external edits), so
     // invalidating would thrash the Tantivy index and force a full rebuild of
     // ~1000+ files on every keystroke in the search box while the agent is
-    // actively writing files. The search index is invalidated in a dedicated
-    // effect that fires ONLY when search mode is entered, so each search
-    // session gets a fresh index exactly once.
+    // actively writing files. File search refreshes the index from the
+    // foreground query path; background refreshes must not jump ahead of that
+    // query on the Rust file-index queue.
     const rawRefresh = useCallback(() => {
       setError(null);
       const reqId = ++refreshReqIdRef.current;
@@ -2093,6 +2150,7 @@ const DirectoryPanel = memo(
                   <FileSearchResults
                     results={searchResults}
                     isLoading={isSearching}
+                    isRefreshing={isRefreshingSearch}
                     query={debouncedSearchQuery}
                     expandedFiles={expandedFiles}
                     onToggleFile={(path) => {
