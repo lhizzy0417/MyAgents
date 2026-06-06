@@ -3396,13 +3396,12 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
           <BrowserPanelContext.Provider value={browserPanelCtx}>
           {/*
             FileActionProvider.refreshTrigger intentionally excludes
-            toolCompleteCount. toolCompleteCount bumps on every
-            workspace:files-changed SSE event, which fires on a 500ms
-            debounce from the Node file watcher whenever *anything* in the
-            workspace changes (tsc/vite output, git index, log files, …).
-            Tying the path-existence cache to that signal caused a full
-            wipe-and-requery storm — on an active dev workspace, a POST
-            /agent/check-paths every ~600ms for an idle historical session.
+            toolCompleteCount. toolCompleteCount bumps when AI file-modifying
+            tools complete, and workspace filesystem changes also arrive via
+            the Rust workspace watcher in the surfaces that need live data.
+            Tying the path-existence cache to those coarse invalidation
+            signals caused full wipe-and-requery storms on active dev
+            workspaces.
 
             The path cache is safe to keep across file changes: inline-code
             path annotations are rendered once from history and rarely
@@ -3739,8 +3738,8 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
             )}
 
             {/* File preview view */}
-            {splitFile && splitActiveView === 'file' && (
-              <div className="flex min-w-0 flex-1 flex-col overflow-hidden bg-[var(--paper-elevated)]">
+            {splitFile && (
+              <div className={`flex min-w-0 flex-1 flex-col overflow-hidden bg-[var(--paper-elevated)] ${splitActiveView !== 'file' ? 'hidden' : ''}`}>
                 <Suspense fallback={<div className="flex h-full items-center justify-center text-[var(--ink-muted)]"><Loader2 className="h-5 w-5 animate-spin" /></div>}>
                   <FilePreviewModal
                     name={splitFile.name}
@@ -3751,6 +3750,12 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
                     workspacePath={agentDir}
                     initialEditMode={splitFile.initialEditMode}
                     initialLineNumber={splitFile.initialLineNumber}
+                    externalRefreshSignal={toolCompleteCount}
+                    onExternalContentUpdated={(updated) => {
+                      setSplitFile(prev => prev && prev.path === updated.path
+                        ? { ...prev, name: updated.name, content: updated.content, size: updated.size, initialEditMode: undefined }
+                        : prev);
+                    }}
                     onClose={() => {
                       setSplitFile(null);
                       if (browserUrl) setSplitActiveView('browser');
@@ -3867,6 +3872,12 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, initialMes
             workspacePath={agentDir}
             initialEditMode={fullscreenPreviewFile.initialEditMode}
             initialLineNumber={fullscreenPreviewFile.initialLineNumber}
+            externalRefreshSignal={toolCompleteCount}
+            onExternalContentUpdated={(updated) => {
+              setFullscreenPreviewFile(prev => prev && prev.path === updated.path
+                ? { ...prev, name: updated.name, content: updated.content, size: updated.size, initialEditMode: undefined }
+                : prev);
+            }}
             onClose={() => setFullscreenPreviewFile(null)}
             onSaved={() => setWorkspaceRefreshTrigger(prev => prev + 1)}
             onRenamed={(newPath, newName) => {

@@ -17,7 +17,8 @@
 use std::fs;
 
 use super::path_safety::{
-    atomic_write_file, resolve_existing_inside_workspace, validate_workspace_root,
+    atomic_write_file, atomic_write_file_if_current, resolve_existing_inside_workspace,
+    validate_workspace_root,
 };
 
 const MAX_CONTENT_BYTES: usize = 512 * 1024;
@@ -29,6 +30,7 @@ pub async fn cmd_workspace_save_file(
     workspace: String,
     path: String,
     content: String,
+    expected_content: Option<String>,
 ) -> Result<(), String> {
     let trimmed = path.trim();
     if trimmed.is_empty() {
@@ -50,7 +52,11 @@ pub async fn cmd_workspace_save_file(
         return Err("Not a regular file".to_string());
     }
 
-    atomic_write_file(&resolved, content.as_bytes())
+    if let Some(expected) = expected_content {
+        atomic_write_file_if_current(&resolved, content.as_bytes(), expected.as_bytes())
+    } else {
+        atomic_write_file(&resolved, content.as_bytes())
+    }
 }
 
 #[cfg(test)]
@@ -66,6 +72,7 @@ mod tests {
             ws.to_string_lossy().to_string(),
             "a.md".to_string(),
             "new content".to_string(),
+            None,
         )
         .await
         .unwrap();
@@ -80,6 +87,7 @@ mod tests {
             ws.to_string_lossy().to_string(),
             "nope.md".to_string(),
             "x".to_string(),
+            None,
         )
         .await;
         assert!(res.is_err());
@@ -95,6 +103,7 @@ mod tests {
             ws.to_string_lossy().to_string(),
             "f.md".to_string(),
             big,
+            None,
         )
         .await;
         assert!(res.is_err());
@@ -110,6 +119,7 @@ mod tests {
             ws.to_string_lossy().to_string(),
             "../etc/hosts".to_string(),
             "x".to_string(),
+            None,
         )
         .await;
         assert!(res.is_err());
@@ -124,6 +134,7 @@ mod tests {
             ws.to_string_lossy().to_string(),
             "sub".to_string(),
             "x".to_string(),
+            None,
         )
         .await;
         assert!(res.is_err());
@@ -151,6 +162,7 @@ mod tests {
             ws.to_string_lossy().to_string(),
             "evil.md".to_string(),
             "OVERWRITE".to_string(),
+            None,
         )
         .await;
         assert!(res.is_err());
@@ -158,5 +170,54 @@ mod tests {
         assert_eq!(fs::read_to_string(&real).unwrap(), "OUTSIDE");
         let _ = fs::remove_dir_all(&ws);
         let _ = fs::remove_dir_all(&outside);
+    }
+
+    #[tokio::test]
+    async fn rejects_when_expected_content_mismatches() {
+        let ws = make_test_workspace("save_expected_mismatch");
+        fs::write(ws.join("a.md"), "external").unwrap();
+        let res = cmd_workspace_save_file(
+            ws.to_string_lossy().to_string(),
+            "a.md".to_string(),
+            "local dirty".to_string(),
+            Some("old baseline".to_string()),
+        )
+        .await;
+        assert!(res.is_err());
+        assert_eq!(fs::read_to_string(ws.join("a.md")).unwrap(), "external");
+        let _ = fs::remove_dir_all(&ws);
+    }
+
+    #[tokio::test]
+    async fn rejects_when_expected_content_mismatches_large_current_file() {
+        let ws = make_test_workspace("save_expected_large_mismatch");
+        let huge_external = "x".repeat(MAX_CONTENT_BYTES + 128);
+        fs::write(ws.join("a.md"), &huge_external).unwrap();
+        let res = cmd_workspace_save_file(
+            ws.to_string_lossy().to_string(),
+            "a.md".to_string(),
+            "local dirty".to_string(),
+            Some("old baseline".to_string()),
+        )
+        .await;
+        assert!(res.is_err());
+        assert_eq!(fs::metadata(ws.join("a.md")).unwrap().len(), huge_external.len() as u64);
+        let _ = fs::remove_dir_all(&ws);
+    }
+
+    #[tokio::test]
+    async fn writes_when_expected_content_matches() {
+        let ws = make_test_workspace("save_expected_match");
+        fs::write(ws.join("a.md"), "old baseline").unwrap();
+        cmd_workspace_save_file(
+            ws.to_string_lossy().to_string(),
+            "a.md".to_string(),
+            "local dirty".to_string(),
+            Some("old baseline".to_string()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(fs::read_to_string(ws.join("a.md")).unwrap(), "local dirty");
+        let _ = fs::remove_dir_all(&ws);
     }
 }

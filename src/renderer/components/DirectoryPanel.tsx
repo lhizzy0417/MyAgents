@@ -66,7 +66,7 @@ import { useImagePreview } from "@/context/ImagePreviewContext";
 import { useToast } from "@/components/Toast";
 import { type Provider } from "@/config/types";
 import { isDebugMode } from "@/utils/debug";
-import { listenWithCleanup } from "@/utils/tauriListen";
+import { useWorkspaceChangeSignal } from "@/hooks/useWorkspaceChangeSignal";
 import { shortenPathForDisplay } from "@/utils/pathDetection";
 
 import ConfirmDialog from "./ConfirmDialog";
@@ -482,6 +482,7 @@ const DirectoryPanel = memo(
     // invoke. The hook is identical to the one SimpleChatInput uses, just with
     // the additional Phase D operations (dirTree, dirExpand, readPreview, etc.).
     const fileService = useWorkspaceFileService(agentDir ?? null);
+    const workspaceChangeSignal = useWorkspaceChangeSignal(agentDir ?? null, fileService.isAvailable);
 
     // Narrow mode collapse state (for responsive layout)
     const [isNarrowMode, setIsNarrowMode] = useState(false);
@@ -729,49 +730,12 @@ const DirectoryPanel = memo(
       }
     }, [refreshTrigger, refresh]);
 
-    // PRD 0.2.7 Phase D: Tauri-side workspace fs watcher.
-    //
-    // Pre-PRD-0.2.7 the sidecar emitted SSE `agent:files-changed` from a Node
-    // chokidar watcher and DirectoryPanel listened via the SSE proxy. Phase D
-    // moves the watch to Rust (notify-debouncer-full) so the panel works
-    // without a sidecar; the event hops Tauri-side via `app.emit` and the
-    // renderer subscribes through `@tauri-apps/api/event::listen`.
-    //
-    // Lifecycle: start the watch on mount (or when agentDir changes), stop on
-    // unmount. The Rust side ref-counts, so multiple panels on the same
-    // workspace share one OS watch.
+    // PRD 0.2.7 Phase D: Tauri-side workspace fs watcher. The hook owns the
+    // token lifecycle; this panel interprets the coarse signal as "refresh the
+    // tree" and keeps the existing debounce.
     useEffect(() => {
-      if (!fileService.isAvailable) return;
-      const ac = new AbortController();
-      let token: string | null = null;
-
-      (async () => {
-        try {
-          // Phase D.5 — single round-trip returns the token (held for stop)
-          // and the eventKey (used for the listen subscription).
-          const handle = await fileService.watchStart();
-          if (ac.signal.aborted) {
-            // Race: unmount fired during the await — release immediately.
-            await fileService.watchStop({ token: handle.token }).catch(() => {});
-            return;
-          }
-          token = handle.token;
-          await listenWithCleanup(`workspace:files-changed:${handle.eventKey}`, () => {
-            // Coarse signal — refresh re-fetches the whole tree (debounced).
-            refreshRef.current();
-          }, ac.signal);
-        } catch (err) {
-          console.warn("[DirectoryPanel] watch start failed:", err);
-        }
-      })();
-
-      return () => {
-        ac.abort();
-        if (token) {
-          fileService.watchStop({ token }).catch(() => {});
-        }
-      };
-    }, [fileService]);
+      if (workspaceChangeSignal > 0) refreshRef.current();
+    }, [workspaceChangeSignal]);
 
     // Safety-net polling: catch anything the file watcher might miss.
     // With the watcher active, this is a fallback — 120s is sufficient.
@@ -2466,6 +2430,12 @@ const DirectoryPanel = memo(
                 workspacePath={agentDir}
                 initialEditMode={preview?.initialEditMode}
                 initialLineNumber={preview?.initialLineNumber}
+                externalRefreshSignal={refreshTrigger}
+                onExternalContentUpdated={(updated) => {
+                  setPreview((prev) => prev && prev.path === updated.path
+                    ? { ...prev, name: updated.name, content: updated.content, size: updated.size, initialEditMode: undefined }
+                    : prev);
+                }}
                 onClose={() => {
                   setPreview(null);
                   setPreviewError(null);

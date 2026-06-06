@@ -33,7 +33,7 @@
 //! `fs::canonicalize` fails on paths that don't exist yet.
 
 use std::fs;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -243,6 +243,26 @@ fn is_windows_reserved_name(name: &str) -> bool {
 /// `create_dir_all` if their UX needs implicit-dir-create — `save_file.rs`
 /// requires the file to exist anyway, so its parent does too).
 pub fn atomic_write_file(target: &Path, bytes: &[u8]) -> Result<(), String> {
+    atomic_write_file_inner(target, bytes, None)
+}
+
+/// Atomically write `bytes` only if the current target bytes still match
+/// `expected_current`. The comparison runs after the tmp file is written and
+/// immediately before the final rename, keeping stale autosaves from committing
+/// over a newer external edit in the normal UI/AI interleaving.
+pub fn atomic_write_file_if_current(
+    target: &Path,
+    bytes: &[u8],
+    expected_current: &[u8],
+) -> Result<(), String> {
+    atomic_write_file_inner(target, bytes, Some(expected_current))
+}
+
+fn atomic_write_file_inner(
+    target: &Path,
+    bytes: &[u8],
+    expected_current: Option<&[u8]>,
+) -> Result<(), String> {
     let parent = target
         .parent()
         .ok_or_else(|| "Cannot determine parent directory".to_string())?;
@@ -271,12 +291,35 @@ pub fn atomic_write_file(target: &Path, bytes: &[u8]) -> Result<(), String> {
         // Drop the file handle before rename — Windows requires this.
     }
 
+    if let Some(expected) = expected_current {
+        let current = match read_prefix(target, expected.len().saturating_add(1)) {
+            Ok(current) => current,
+            Err(err) => {
+                let _ = fs::remove_file(&tmp_path);
+                return Err(err);
+            }
+        };
+        if current != expected {
+            let _ = fs::remove_file(&tmp_path);
+            return Err("File changed externally".to_string());
+        }
+    }
+
     if let Err(e) = fs::rename(&tmp_path, target) {
         // Best-effort cleanup so a failed rename doesn't leak a tmp file.
         let _ = fs::remove_file(&tmp_path);
         return Err(format!("Failed to commit write: {}", e));
     }
     Ok(())
+}
+
+fn read_prefix(target: &Path, max_bytes: usize) -> Result<Vec<u8>, String> {
+    let file = fs::File::open(target).map_err(|_| "File not found".to_string())?;
+    let mut current = Vec::with_capacity(max_bytes.min(64 * 1024));
+    file.take(max_bytes as u64)
+        .read_to_end(&mut current)
+        .map_err(|e| format!("Failed to read file: {}", e))?;
+    Ok(current)
 }
 
 /// Sanitize a filename for filesystem write — strips Windows-illegal chars by
@@ -429,6 +472,24 @@ mod tests {
     fn sanitize_falls_back_to_untitled() {
         assert_eq!(sanitize_filename(""), "untitled");
         assert_eq!(sanitize_filename("   "), "untitled");
+    }
+
+    #[test]
+    fn atomic_write_if_current_cleans_tmp_when_current_read_fails() {
+        let ws = make_tmp_workspace();
+        let target = ws.join("missing.md");
+
+        let res = atomic_write_file_if_current(&target, b"new content", b"old content");
+
+        assert!(res.is_err());
+        let leftovers: Vec<String> = fs::read_dir(&ws)
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.file_name().to_string_lossy().to_string())
+            .filter(|name| name.contains(".myagents-"))
+            .collect();
+        assert!(leftovers.is_empty(), "tmp leftovers: {:?}", leftovers);
+        let _ = fs::remove_dir_all(&ws);
     }
 
     // ── resolve_existing_inside_workspace — Phase D.5 symlink hardening ──

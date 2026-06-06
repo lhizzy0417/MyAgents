@@ -261,7 +261,7 @@ export interface WorkspaceFileService {
   /** [requires workspace] Save edited content back to a workspace file.
    *  The file MUST already exist (no create-on-save). 512KB content cap.
    *  Atomic via tmp + rename. Resolves on success; rejects on failure. */
-  saveFile(args: { path: string; content: string }): Promise<void>;
+  saveFile(args: { path: string; content: string; expectedContent?: string }): Promise<void>;
   /** [requires workspace] Read `<workspace>/CLAUDE.md`. `exists:false` is
    *  not an error — Settings UI shows an empty editor in that case. */
   readClaudeMd(): Promise<ReadClaudeMdResult>;
@@ -573,12 +573,13 @@ export function useWorkspaceFileService(workspacePath: string | null): Workspace
   );
 
   const saveFile: WorkspaceFileService['saveFile'] = useCallback(
-    async ({ path, content }) => {
+    async ({ path, content, expectedContent }) => {
       const ws = requireWorkspace();
       await invokeIfTauri<void>('cmd_workspace_save_file', {
         workspace: ws,
         path,
         content,
+        expectedContent,
       });
     },
     [requireWorkspace, invokeIfTauri],
