@@ -1474,6 +1474,18 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
           return;
         }
 
+        // Push only when the sidecar is reachable. This effect re-fires on the
+        // isConnected false→true transition (isConnected is in the deps), so a
+        // freshly-spawned / reconnected / respawned sidecar always re-receives
+        // the MCP set — in-process MCP state dies with the old sidecar process
+        // (mirrors the model-push pattern below). Without this gate the single
+        // mount-time push could land before the sidecar is reachable, or never
+        // when the Chat mounts BEFORE the sidecar is ready (the instant-nav
+        // case) → the first turn falls back to disk file-config = wrong MCP set
+        // (#300/#301 config-stomping class). Local state (setMcpServers etc.)
+        // above is display-only and intentionally NOT gated.
+        if (!isConnected) return;
+
         // CRITICAL: Always sync effective MCP servers to backend on initial load
         // This ensures the Agent SDK has correct MCP config (including empty = no MCP)
         // Without this, backend currentMcpServers stays null and falls back to file config
@@ -1508,6 +1520,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
     //    fingerprint diff.
     // eslint-disable-next-line react-hooks/exhaustive-deps -- apiPost / fileService are stable refs we deliberately exclude
   }, [
+    isConnected, // re-push MCP when the sidecar becomes reachable (re)connect — see guard above
     currentAgent?.mcpEnabledServers,
     currentProject?.mcpEnabledServers,
     config?.mcpEnabledServers,
