@@ -30,14 +30,14 @@ export default function ToolImageAttachment({ attachment }: Props) {
 
   if (urlState.state === 'pending') {
     return (
-      <div className="flex h-32 w-full items-center justify-center rounded border border-dashed border-[var(--paper-line)] bg-[var(--paper-inset)]/40 text-sm text-[var(--ink-muted)]">
+      <div className="flex h-32 w-full items-center justify-center rounded border border-dashed border-[var(--line)] bg-[var(--paper-inset)]/40 text-sm text-[var(--ink-muted)]">
         <span className="animate-pulse">生成中…</span>
       </div>
     );
   }
   if (urlState.state === 'loading') {
     return (
-      <div className="flex h-32 w-full items-center justify-center rounded border border-dashed border-[var(--paper-line)] bg-[var(--paper-inset)]/40 text-sm text-[var(--ink-muted)]">
+      <div className="flex h-32 w-full items-center justify-center rounded border border-dashed border-[var(--line)] bg-[var(--paper-inset)]/40 text-sm text-[var(--ink-muted)]">
         <span className="animate-pulse">加载中…</span>
       </div>
     );
@@ -57,7 +57,7 @@ export default function ToolImageAttachment({ attachment }: Props) {
         <button
           type="button"
           onClick={() => setZoomed(true)}
-          className="group block max-w-sm overflow-hidden rounded-md border border-[var(--paper-line)] bg-[var(--paper-inset)]/30 transition-transform hover:scale-[1.01]"
+          className="group block max-w-sm overflow-hidden rounded-md border border-[var(--line)] bg-[var(--paper-inset)]/30 transition-transform hover:scale-[1.01]"
         >
           <img
             src={urlState.url}

@@ -39,7 +39,7 @@ export default function ToolAttachmentGallery({ attachments }: Props) {
             return (
               <div
                 key={key}
-                className="rounded border border-[var(--paper-line)] bg-[var(--paper-inset)]/30 px-3 py-2 text-xs text-[var(--ink-secondary)]"
+                className="rounded border border-[var(--line)] bg-[var(--paper-inset)]/30 px-3 py-2 text-xs text-[var(--ink-secondary)]"
               >
                 <div className="font-medium">{a.mimeType}</div>
                 {a.caption ? <div className="mt-1 line-clamp-2 text-[var(--ink-muted)]">{a.caption}</div> : null}
