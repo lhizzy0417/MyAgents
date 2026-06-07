@@ -9,7 +9,7 @@ import { useFileAction } from '@/context/FileActionContext';
 import { isAudioPath } from '@/utils/audioPlayer';
 import { useAudioPlayer } from '@/hooks/useAudioPlayer';
 import { looksLikeFilePath } from '@/utils/pathDetection';
-import { resolveAgainstWorkspace } from '@/utils/workspaceFileLinks';
+import { resolveActionPath, resolveAgainstWorkspace } from '@/utils/workspaceFileLinks';
 import { Play, Pause } from 'lucide-react';
 
 interface InlineCodeProps {
@@ -58,8 +58,16 @@ export default function InlineCode({ children }: InlineCodeProps) {
         return <code className={BASE_CLASS}>{children}</code>;
     }
 
+    // Normalize an in-workspace ABSOLUTE path to workspace-relative form before
+    // the existence check + menu actions — the Rust resolver rejects absolute
+    // paths, so without this an absolute path the model wrote in backticks
+    // (e.g. `/Users/me/ws/CLAUDE.md`) silently stayed a plain <code>. Mirrors
+    // the file-tool chip (tools/FilePath) so both surfaces resolve identically.
+    // The chip still DISPLAYS the original text (`children`).
+    const actionPath = resolveActionPath(text, fileAction.workspacePath);
+
     // Ask context for cached result (may trigger a batched backend request)
-    const pathInfo = fileAction.checkPath(text);
+    const pathInfo = fileAction.checkPath(actionPath);
 
     if (!pathInfo?.exists) {
         // Not yet resolved or does not exist → plain code
@@ -74,13 +82,13 @@ export default function InlineCode({ children }: InlineCodeProps) {
         e.preventDefault();
         e.stopPropagation();
         const rect = (e.target as HTMLElement).getBoundingClientRect();
-        fileAction.openFileMenu(rect.left, rect.bottom + 4, text, pathInfo.type);
+        fileAction.openFileMenu(rect.left, rect.bottom + 4, actionPath, pathInfo.type, text);
     };
 
     const handleContextMenu = (e: React.MouseEvent) => {
         e.preventDefault();
         e.stopPropagation();
-        fileAction.openFileMenu(e.clientX, e.clientY, text, pathInfo.type);
+        fileAction.openFileMenu(e.clientX, e.clientY, actionPath, pathInfo.type, text);
     };
 
     const codeEl = (

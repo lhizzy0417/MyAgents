@@ -135,6 +135,25 @@ export function toWorkspaceRelativePath(rawPath: string, workspacePath: string):
   return normalizeRelativePath(path);
 }
 
+/**
+ * Resolve the path to use for backend existence checks + context-menu actions
+ * from a raw path that may be absolute or workspace-relative.
+ *
+ * In-workspace absolute paths are normalized to workspace-relative form (the
+ * Rust `resolve_inside_workspace` resolver rejects absolute paths outright);
+ * everything else — relative paths, or absolute paths outside the workspace —
+ * passes through unchanged so the backend reports them as not-found.
+ *
+ * Shared by the two surfaces that turn paths into clickable chips so they
+ * resolve identically: the inline-code path detector (`markdown/InlineCode`)
+ * and the file-tool chip (`tools/FilePath`). Before this was shared, only the
+ * tool chip normalized — inline absolute paths in AI text silently stayed plain
+ * because the absolute form was sent straight to the rejecting resolver.
+ */
+export function resolveActionPath(rawPath: string, workspacePath: string | null | undefined): string {
+  return (workspacePath ? toWorkspaceRelativePath(rawPath, workspacePath) : null) ?? rawPath;
+}
+
 function absoluteToWorkspaceRelative(rawPath: string, rawWorkspace: string): string | null {
   const path = stripTrailingSlash(normalizeSlashes(rawPath));
   const workspace = stripTrailingSlash(normalizeSlashes(rawWorkspace));

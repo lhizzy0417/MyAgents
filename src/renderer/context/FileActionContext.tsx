@@ -6,7 +6,7 @@
  *
  * Only provided inside Chat; Settings / other pages get null from useFileAction().
  */
-import { AtSign, ExternalLink, Eye, FolderOpen, LocateFixed } from 'lucide-react';
+import { AtSign, Copy, ExternalLink, Eye, FolderOpen, LocateFixed } from 'lucide-react';
 import {
   createContext,
   lazy,
@@ -22,6 +22,7 @@ import type { ReactNode } from 'react';
 
 import ContextMenu from '@/components/ContextMenu';
 import type { ContextMenuItem } from '@/components/ContextMenu';
+import { useToastOptional } from '@/components/Toast';
 import { useImagePreview } from '@/context/ImagePreviewContext';
 import { useWorkspaceFileService } from '@/hooks/useWorkspaceFileService';
 import { getRichDocKind, isImageFile, isPreviewable, type RichDocKind } from '../../shared/fileTypes';
@@ -43,8 +44,10 @@ export interface FileActionContextValue {
   checkPath: (path: string) => PathInfo | null;
   /** Incremented each time the cache is updated, so consumers can re-render. */
   cacheVersion: number;
-  /** Open the context menu for a resolved path. */
-  openFileMenu: (x: number, y: number, path: string, pathType: 'file' | 'dir') => void;
+  /** Open the context menu for a resolved path. `path` is the normalized form
+   *  used for backend actions; `displayPath` is the verbatim text shown to the
+   *  user (what 「复制」 copies) — defaults to `path` when omitted. */
+  openFileMenu: (x: number, y: number, path: string, pathType: 'file' | 'dir', displayPath?: string) => void;
   /** Workspace root, for resolving workspace-relative paths to absolute (e.g. the
    *  inline audio play button, whose player needs an absolute path). May be null
    *  outside a workspace. */
@@ -109,6 +112,13 @@ const BATCH_DELAY_MS = 50;
 export function FileActionProvider({ children, workspacePath, onInsertReference, refreshTrigger, onFilePreviewExternal, onQuoteFile, onQuoteSelection, onRevealInTree }: FileActionProviderProps) {
   const fileService = useWorkspaceFileService(workspacePath);
   const { openPreview: openImagePreview } = useImagePreview();
+
+  // Optional so the Provider has no hard dependency on a ToastProvider above
+  // (isolated component tests mount it without one). Held in a ref per the
+  // project's React-stability rules so handlers don't re-bind on toast changes.
+  const toast = useToastOptional();
+  const toastRef = useRef(toast);
+  toastRef.current = toast;
 
   // Stabilise callbacks via refs
   const onInsertReferenceRef = useRef(onInsertReference);
@@ -204,10 +214,11 @@ export function FileActionProvider({ children, workspacePath, onInsertReference,
     y: number;
     path: string;
     pathType: 'file' | 'dir';
+    displayPath: string;
   } | null>(null);
 
-  const openFileMenu = useCallback((x: number, y: number, path: string, pathType: 'file' | 'dir') => {
-    setMenuState({ x, y, path, pathType });
+  const openFileMenu = useCallback((x: number, y: number, path: string, pathType: 'file' | 'dir', displayPath?: string) => {
+    setMenuState({ x, y, path, pathType, displayPath: displayPath ?? path });
   }, []);
 
   const closeMenu = useCallback(() => setMenuState(null), []);
@@ -367,6 +378,16 @@ export function FileActionProvider({ children, workspacePath, onInsertReference,
     onInsertReferenceRef.current?.([path]);
   }, []);
 
+  // Copy the path VERBATIM — exactly the text shown in the chip (所见所得),
+  // whatever the model wrote (relative or absolute). The menu's `path` is the
+  // normalized action form; copy uses the separate `displayPath` instead.
+  const handleCopyPath = useCallback((displayPath: string) => {
+    void navigator.clipboard.writeText(displayPath).then(
+      () => toastRef.current?.success('已复制'),
+      () => toastRef.current?.error('复制失败'),
+    );
+  }, []);
+
   const handleOpenWithDefault = useCallback((path: string) => {
     void fileServiceRef.current.openWithDefault({ path }).catch(() => {});
   }, []);
@@ -382,7 +403,7 @@ export function FileActionProvider({ children, workspacePath, onInsertReference,
   // Build menu items
   const menuItems = useMemo((): ContextMenuItem[] => {
     if (!menuState) return [];
-    const { path, pathType } = menuState;
+    const { path, pathType, displayPath } = menuState;
     const fileName = path.split('/').pop() ?? path;
     const items: ContextMenuItem[] = [];
 
@@ -395,6 +416,12 @@ export function FileActionProvider({ children, workspacePath, onInsertReference,
         onClick: () => handlePreview(path),
       });
     }
+
+    items.push({
+      label: '复制',
+      icon: <Copy className="h-4 w-4" />,
+      onClick: () => handleCopyPath(displayPath),
+    });
 
     items.push({
       label: '引用',
@@ -425,7 +452,7 @@ export function FileActionProvider({ children, workspacePath, onInsertReference,
     }
 
     return items;
-  }, [menuState, handlePreview, handleReference, handleOpenWithDefault, handleOpenInFinder, handleRevealInTree]);
+  }, [menuState, handlePreview, handleCopyPath, handleReference, handleOpenWithDefault, handleOpenInFinder, handleRevealInTree]);
 
   // ---------- Context value ----------
   const contextValue = useMemo<FileActionContextValue>(() => ({

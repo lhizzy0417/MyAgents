@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { resolveWorkspaceFileLinkTarget, resolveAgainstWorkspace } from './workspaceFileLinks';
+import { resolveActionPath, resolveWorkspaceFileLinkTarget, resolveAgainstWorkspace } from './workspaceFileLinks';
 
 const WORKSPACE = '/Users/zhihu/Documents/project/MyAgents';
 
@@ -100,5 +100,33 @@ describe('resolveAgainstWorkspace', () => {
 
   it('returns null for empty input', () => {
     expect(resolveAgainstWorkspace('', WORKSPACE)).toBeNull();
+  });
+});
+
+describe('resolveActionPath', () => {
+  it('normalizes an in-workspace absolute path to workspace-relative', () => {
+    expect(resolveActionPath(`${WORKSPACE}/CLAUDE.md`, WORKSPACE)).toBe('CLAUDE.md');
+    expect(resolveActionPath(`${WORKSPACE}/.claude/rules/04-MEMORY.md`, WORKSPACE))
+      .toBe('.claude/rules/04-MEMORY.md');
+  });
+
+  it('passes a workspace-relative path through (normalized)', () => {
+    expect(resolveActionPath('memory/2026-02-06.md', WORKSPACE)).toBe('memory/2026-02-06.md');
+    expect(resolveActionPath('./src/App.tsx', WORKSPACE)).toBe('src/App.tsx');
+  });
+
+  it('leaves an absolute path OUTSIDE the workspace unchanged (backend will reject)', () => {
+    expect(resolveActionPath('/etc/passwd', WORKSPACE)).toBe('/etc/passwd');
+    expect(resolveActionPath('/Users/zhihu/Other/file.ts', WORKSPACE)).toBe('/Users/zhihu/Other/file.ts');
+  });
+
+  it('passes the raw path through when no workspace is known', () => {
+    expect(resolveActionPath('memory/2026-02-06.md', null)).toBe('memory/2026-02-06.md');
+    expect(resolveActionPath(`${WORKSPACE}/CLAUDE.md`, undefined)).toBe(`${WORKSPACE}/CLAUDE.md`);
+  });
+
+  it('passes a non-file-reference token through unchanged', () => {
+    // toWorkspaceRelativePath can\'t classify it → fall back to the raw input.
+    expect(resolveActionPath('foo', WORKSPACE)).toBe('foo');
   });
 });
