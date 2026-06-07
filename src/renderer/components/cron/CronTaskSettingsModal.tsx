@@ -9,6 +9,7 @@ import { MIN_CRON_INTERVAL } from '@/types/cronTask';
 import ScheduleTypeTabs from '@/components/scheduled-tasks/ScheduleTypeTabs';
 import CustomSelect from '@/components/CustomSelect';
 import { useDeliveryChannels } from '@/hooks/useDeliveryChannels';
+import { type EndMode, deriveInitialEndMode } from './cronEndMode';
 
 /** Toggle Switch */
 function ToggleSwitch({ enabled, onChange }: { enabled: boolean; onChange: (v: boolean) => void }) {
@@ -58,8 +59,6 @@ function PillButton({ selected, onClick, children }: { selected: boolean; onClic
   );
 }
 
-type EndMode = 'conditional' | 'forever';
-
 /** Execution target: current chat session or new standalone task */
 export type ExecutionTarget = 'current_session' | 'new_task';
 
@@ -68,8 +67,9 @@ export type CronSettingsResult = Omit<CronTaskConfig, 'workspacePath' | 'session
   executionTarget: ExecutionTarget;
 };
 
-/** Configuration that can be passed to restore previous settings */
-type InitialConfig = {
+/** Configuration that can be passed to restore previous settings or preset a
+ *  fresh open (e.g. `/loop` opens the modal preset to infinite-loop mode). */
+export type CronInitialConfig = {
   prompt: string;
   intervalMinutes: number;
   endConditions: CronEndConditions;
@@ -85,7 +85,7 @@ interface CronTaskSettingsModalProps {
   onClose: () => void;
   onConfirm: (config: CronSettingsResult) => void;
   initialPrompt?: string;
-  initialConfig?: InitialConfig | null;
+  initialConfig?: CronInitialConfig | null;
   /** Current workspace path for delivery channel grouping */
   workspacePath?: string;
 }
@@ -128,11 +128,14 @@ function CronTaskSettingsForm({
   // EndConditions, but this defense-in-depth keeps the modal correct
   // even if some other producer (admin CLI, future migration) emits
   // explicit null.
+  //
+  // Mode derivation lives in `deriveInitialEndMode` (pure, unit-tested): a
+  // config whose only end-condition is `aiCanExit` opens in 永久运行, not
+  // 条件停止 — see that module for why (and so the /loop preset opens correctly).
   const [endCondInit] = useState(() => {
     const ec = initialConfig?.endConditions;
-    const hasCond = ec && (ec.deadline || ec.maxExecutions != null || ec.aiCanExit);
     return {
-      mode: (hasCond ? 'conditional' : 'forever') as EndMode,
+      mode: deriveInitialEndMode(ec),
       useDeadline: !!ec?.deadline,
       deadline: ec?.deadline ? toLocalDateTimeString(new Date(ec.deadline)) : toLocalDateTimeString(new Date(Date.now() + 86400000)),
       useMaxExec: ec?.maxExecutions != null,

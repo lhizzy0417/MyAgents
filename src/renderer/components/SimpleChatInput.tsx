@@ -12,6 +12,7 @@ import { type PermissionMode, PERMISSION_MODES, type Provider, type ProviderVeri
 import { useConfigData } from '@/config/useConfigData';
 import { resolveEnterKeyAction, sendHintLabel } from '@/utils/chatSendKey';
 import SlashCommandMenu, { type SlashCommand, filterAndSortCommands } from './SlashCommandMenu';
+import { isClientActionCommand, withClientActionCommands } from '@/utils/slashActions';
 import QueuedMessagesPanel from './QueuedMessageBubble';
 import CronTaskStatusBar from './cron/CronTaskStatusBar';
 import CronTaskOverlay from './cron/CronTaskOverlay';
@@ -167,6 +168,10 @@ interface SimpleChatInputProps {
   onCronCancel?: () => void;
   /** Callback when cron task is stopped */
   onCronStop?: () => void;
+  /** Dispatch a client-action slash command (e.g. `/loop` opening the loop
+   *  panel) by name. When provided, client-action commands are injected into
+   *  the slash menu; when omitted they don't appear. See `@/utils/slashActions`. */
+  onSlashAction?: (name: string) => void;
   /** Display mode: 'chat' (default) or 'launcher' (hides @/slash/cron features) */
   mode?: 'chat' | 'launcher';
   /** Optional ReactNode rendered at the start of the toolbar (e.g., workspace selector in launcher) */
@@ -320,6 +325,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
   onCronSettings,
   onCronCancel,
   onCronStop,
+  onSlashAction,
   mode = 'chat',
   toolbarPrefix,
   contextIndicator,
@@ -606,25 +612,32 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
   // frontmatter parse), not the sidecar /api/commands. Launcher gets the
   // exact same menu as chat-tab — no more "ah, the launcher has no apiGet"
   // empty-menu bug.
+  // Client-action commands (e.g. /loop) are injected only when a handler is
+  // wired to service them — see `withClientActionCommands`. The `!!` boolean is
+  // value-stable across renders so it's safe in the deps array (unlike the raw
+  // callback, which could be a fresh identity each render).
+  const clientActionsEnabled = !!onSlashAction;
   const fetchCommands = useCallback(async () => {
+    const apply = (list: SlashCommand[]) =>
+      setSlashCommands(withClientActionCommands(list, clientActionsEnabled));
     if (!fileService.isAvailable) {
       // Fall back to builtins so the menu isn't empty in browser dev mode.
-      setSlashCommands(BUILTIN_FALLBACK_SLASH_COMMANDS);
+      apply(BUILTIN_FALLBACK_SLASH_COMMANDS);
       return;
     }
     try {
       const response = await fileService.listSlashCommands();
       if (response.success && response.commands.length > 0) {
-        setSlashCommands(response.commands);
+        apply(response.commands);
       } else {
         console.warn('[slash-commands] Rust returned empty, using builtin fallback');
-        setSlashCommands(BUILTIN_FALLBACK_SLASH_COMMANDS);
+        apply(BUILTIN_FALLBACK_SLASH_COMMANDS);
       }
     } catch (err) {
       console.error('Failed to fetch slash commands, using fallback:', err);
-      setSlashCommands(BUILTIN_FALLBACK_SLASH_COMMANDS);
+      apply(BUILTIN_FALLBACK_SLASH_COMMANDS);
     }
-  }, [fileService]);
+  }, [fileService, clientActionsEnabled]);
 
   // Fetch slash commands on mount or when workspacePath changes (so launcher
   // workspace switching reloads project-level skills).
@@ -1410,6 +1423,35 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
   }, [onSend, images, inputValue, provider, currentModelId, isExternalRuntime]);
 
   // Handle keyboard navigation in file search and slash menu
+  // Handler for selecting a slash command — shared by the click path
+  // (`onSelect`) and the keyboard path (Enter/Tab in `handleKeyDown`). Defined
+  // above `handleKeyDown` so the latter can reference it without a TDZ.
+  //
+  // Client-action builtins (e.g. /loop) strip the typed `/fragment` and
+  // dispatch a renderer-side action via `onSlashAction` instead of inserting
+  // text — the action (opening the loop panel) owns what happens next, and the
+  // task content is entered into the input afterwards. Everything else inserts
+  // `/name ` as before.
+  const handleSlashSelect = useCallback((cmd: SlashCommand) => {
+    if (slashPosition === null) return;
+    const before = inputValue.slice(0, slashPosition);
+    const after = inputValue.slice(textareaRef.current?.selectionStart || slashPosition + slashSearchQuery.length + 1);
+
+    if (onSlashAction && isClientActionCommand(cmd)) {
+      setInputValue(`${before}${after}`);
+      setShowSlashMenu(false);
+      setSlashPosition(null);
+      onSlashAction(cmd.name);
+      return;
+    }
+
+    handleSkillSelect(cmd);
+    setInputValue(`${before}/${cmd.name} ${after}`);
+    setShowSlashMenu(false);
+    setSlashPosition(null);
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- textareaRef is a stable ref
+  }, [slashPosition, inputValue, slashSearchQuery, handleSkillSelect, onSlashAction]);
+
   const handleKeyDown = useCallback(async (event: React.KeyboardEvent<HTMLTextAreaElement>) => {
     // Shift+Tab to cycle permission mode
     if (event.key === 'Tab' && event.shiftKey) {
@@ -1489,15 +1531,10 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
         // truly won't fire.
         event.stopPropagation();
         const selected = filteredSlashCommands[selectedSlashIndex];
-        if (selected && slashPosition !== null) {
-          // Trigger skill copy if user-level skill
-          handleSkillSelect(selected);
-          // Replace /query with /command
-          const before = inputValue.slice(0, slashPosition);
-          const after = inputValue.slice(textareaRef.current?.selectionStart || slashPosition + slashSearchQuery.length + 1);
-          setInputValue(`${before}/${selected.name} ${after}`);
-          setShowSlashMenu(false);
-          setSlashPosition(null);
+        if (selected) {
+          // Single dispatch point shared with the click path — also handles
+          // client-action commands (e.g. /loop) vs plain text insertion.
+          handleSlashSelect(selected);
         }
         return;
       }
@@ -1597,20 +1634,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
       // 'newline' → fall through, the browser inserts the newline.
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps -- textareaRef is stable
-  }, [cyclePermissionMode, undoStack, fileService, showSlashMenu, filteredSlashCommands, slashSearchQuery, selectedSlashIndex, slashPosition, showFileSearch, fileSearchResults, selectedFileIndex, inputValue, atPosition, fileSearchQuery, images.length, handleSend, handleSkillSelect, mentionTab, thoughtResults]);
-
-  // Handler for selecting a slash command from the menu
-  const handleSlashSelect = useCallback((cmd: SlashCommand) => {
-    if (slashPosition !== null) {
-      handleSkillSelect(cmd);
-      const before = inputValue.slice(0, slashPosition);
-      const after = inputValue.slice(textareaRef.current?.selectionStart || slashPosition + slashSearchQuery.length + 1);
-      setInputValue(`${before}/${cmd.name} ${after}`);
-      setShowSlashMenu(false);
-      setSlashPosition(null);
-    }
-  // eslint-disable-next-line react-hooks/exhaustive-deps -- textareaRef is a stable ref
-  }, [slashPosition, inputValue, slashSearchQuery, handleSkillSelect]);
+  }, [cyclePermissionMode, undoStack, fileService, showSlashMenu, filteredSlashCommands, slashSearchQuery, selectedSlashIndex, slashPosition, showFileSearch, fileSearchResults, selectedFileIndex, inputValue, atPosition, fileSearchQuery, images.length, handleSend, handleSkillSelect, handleSlashSelect, mentionTab, thoughtResults]);
 
   return (
     <>

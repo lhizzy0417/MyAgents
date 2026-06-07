@@ -43,7 +43,7 @@ import type { CronTask } from '@/types/cronTask';
 import { formatScheduleDescription } from '@/types/cronTask';
 import CronTaskCard from '@/components/scheduled-tasks/CronTaskCard';
 import CronTaskDetailPanel from '@/components/CronTaskDetailPanel';
-import type { CronSettingsResult } from '@/components/cron/CronTaskSettingsModal';
+import type { CronSettingsResult, CronInitialConfig } from '@/components/cron/CronTaskSettingsModal';
 import { isTauriEnvironment } from '@/utils/browserMock';
 import { isDebugMode } from '@/utils/debug';
 import { isImSource, getChannelTypeLabel } from '@/utils/taskCenterUtils';
@@ -196,6 +196,19 @@ interface ChatProps {
   /** Called when user forks session at a specific assistant message — App creates new tab */
   onForkSession?: (newSessionId: string, agentDir: string, title: string, initialMessage?: string) => void;
 }
+
+/** Preset for the `/loop` slash command: opens the cron modal in infinite-loop
+ *  (Ralph Loop) mode with "allow AI to autonomously end the task" pre-checked.
+ *  Mirrors what the user would otherwise pick by hand in the 定时 panel. */
+const LOOP_SLASH_PRESET: CronInitialConfig = {
+  prompt: '',
+  intervalMinutes: 30, // ignored in loop mode; satisfies the type
+  endConditions: { aiCanExit: true },
+  runMode: 'single_session', // loop mode forces single_session
+  notifyEnabled: true,
+  schedule: { kind: 'loop' },
+  executionTarget: 'current_session',
+};
 
 export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSessionInNewTab, initialMessage, onInitialMessageConsumed, sidecarConfigDisposition, onSidecarConfigAdopted, sessionTitle, onRenameSession, onForkSession }: ChatProps) {
   // Get state from TabContext (required - Chat must be inside TabProvider)
@@ -652,6 +665,10 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
   // Cron task state
   const [showCronSettings, setShowCronSettings] = useState(false);
   const [cronPrompt, setCronPrompt] = useState('');
+  // Preset applied when opening the cron modal via a slash command (e.g.
+  // `/loop`). Wins over `cronState.config` only for a fresh open (no running
+  // task); cleared on open-via-定时-button / close / confirm so it never leaks.
+  const [cronOpenPreset, setCronOpenPreset] = useState<CronInitialConfig | null>(null);
   const [cronCardTask, setCronCardTask] = useState<CronTask | null>(null);
   const [cronDetailTask, setCronDetailTask] = useState<CronTask | null>(null);
 
@@ -2780,7 +2797,19 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
   // comment).
   const handleOpenCronSettings = useCallback(() => {
     setCronPrompt(chatInputRef.current?.getCurrentValue() ?? '');
+    setCronOpenPreset(null); // 定时 button = no slash preset
     setShowCronSettings(true);
+  }, []);
+
+  // Dispatch a client-action slash command from the chat input. `/loop` opens
+  // the cron modal preset to infinite-loop mode; the task content is entered in
+  // the input after confirming (which arms cron mode — see handleSendMessage).
+  const handleSlashAction = useCallback((name: string) => {
+    if (name === 'loop') {
+      setCronPrompt(''); // task is entered after confirm, not snapshotted here
+      setCronOpenPreset(LOOP_SLASH_PRESET);
+      setShowCronSettings(true);
+    }
   }, []);
 
   const handleCronStop = useCallback(async () => {
@@ -3719,6 +3748,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
             onCronSettings={handleOpenCronSettings}
             onCronCancel={disableCronMode}
             onCronStop={handleCronStop}
+            onSlashAction={handleSlashAction}
             runtime={currentRuntime}
             runtimeDetections={multiAgentRuntimeEnabled ? runtimeDetections : undefined}
             onRuntimeChange={multiAgentRuntimeEnabled ? handleRuntimeChange : undefined}
@@ -4167,9 +4197,11 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
       {/* Cron Task Settings Modal */}
       <CronTaskSettingsModal
         isOpen={showCronSettings}
-        onClose={() => setShowCronSettings(false)}
+        onClose={() => { setShowCronSettings(false); setCronOpenPreset(null); }}
         initialPrompt={cronPrompt}
-        initialConfig={cronState.config}
+        // Editing a running task wins; otherwise a slash preset (e.g. /loop)
+        // applies for a fresh open. Plain 定时-button opens have neither.
+        initialConfig={cronState.config ?? cronOpenPreset}
         workspacePath={agentDir}
         onConfirm={async (config: CronSettingsResult) => {
           // PRD 0.2.9 — Forward `providerId` (live-resolve at sidecar)
@@ -4203,6 +4235,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
             notify_enabled: config.notifyEnabled,
           });
           setShowCronSettings(false);
+          setCronOpenPreset(null);
         }}
       />
 

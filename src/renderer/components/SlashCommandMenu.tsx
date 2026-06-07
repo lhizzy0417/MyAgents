@@ -80,12 +80,18 @@ export default function SlashCommandMenu({
 }
 
 // Helper function to filter and sort commands (used by SimpleChatInput)
+//
+// Built-in/system commands (`source: 'builtin'`, e.g. /loop, /compact) always
+// rank above user skills & commands so the app's own capabilities surface
+// first. Within a tier the existing order is preserved (alphabetical with no
+// query; prefix-match-then-alphabetical when filtering).
 export function filterAndSortCommands(commands: SlashCommand[], query: string): SlashCommand[] {
     const q = query.toLowerCase();
+    const tier = (c: SlashCommand) => (c.source === 'builtin' ? 0 : 1);
 
     if (!q) {
-        // No query: return all commands sorted alphabetically
-        return [...commands].sort((a, b) => a.name.localeCompare(b.name));
+        // No query: builtins first, then alphabetical within each tier
+        return [...commands].sort((a, b) => tier(a) - tier(b) || a.name.localeCompare(b.name));
     }
 
     return commands
@@ -94,6 +100,10 @@ export function filterAndSortCommands(commands: SlashCommand[], query: string): 
             cmd.description.toLowerCase().includes(q)
         )
         .sort((a, b) => {
+            // Builtins first, regardless of match quality
+            const tierDiff = tier(a) - tier(b);
+            if (tierDiff !== 0) return tierDiff;
+
             const aName = a.name.toLowerCase();
             const bName = b.name.toLowerCase();
             const aStartsWith = aName.startsWith(q);
