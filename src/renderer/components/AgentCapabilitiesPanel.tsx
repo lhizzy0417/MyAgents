@@ -257,11 +257,12 @@ export default memo(function AgentCapabilitiesPanel({
         setCtxMenu({ x: e.clientX, y: e.clientY, items });
     }, [openSettingsFor, onRefresh]);
 
-    // Empty state
+    // Empty state. The tree↔capabilities boundary is owned by the parent
+    // (DirectoryPanel's drag-divider) — this branch must NOT draw its own top
+    // border or two separator lines render back-to-back (#314).
     if (totalCount === 0) {
         return (
             <div data-capabilities-panel className="flex shrink-0 flex-col">
-                <div className="mx-4 border-b border-[var(--line-subtle)]" />
                 <button
                     onClick={toggleExpand}
                     className="flex w-full items-center gap-2 px-3 py-2 text-sm text-[var(--ink)] transition-colors"
