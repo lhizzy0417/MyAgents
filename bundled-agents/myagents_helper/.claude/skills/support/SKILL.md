@@ -49,6 +49,7 @@ CLI 的**只读命令**（`status` / `*list` / `*get` / `runtime-status` / `*run
 | "Sidecar 老重启 / 应用没响应" | `myagents status` | grep `[sidecar]` 启动序列 | Sidecar 启动错误表 |
 | "回溯/分叉异常 / 历史消息不对" | — | grep `rewindFiles` `[agent] rewind` | Rewind / Fork 错误表 |
 | "任务中心任务卡住 / 状态不对" | `myagents task get <id>` 看 `statusHistory` | grep `[task]` 任务 id | — |
+| "整个界面崩了 / 白屏 / 弹「界面渲染出错」/ 点某处就跳到错误页" | —（前端 render 崩溃无 CLI 取证） | grep `\[AppErrorBoundary\]` 和 `[REACT] [ERROR]` | §1.6 前端 render 崩溃 |
 
 ⚠️ **Provider 验证超时几乎都是 401 假装的**——`Promise.race(verify, 30s)` 机制下，即使 Provider 已经返回 401，处理超时就显示"验证超时"。**MUST grep `auth error` 和 `401`**，而且**这些错误可能出现在超时结果之后**——别只看最后一行。
 
@@ -59,6 +60,24 @@ CLI 的**只读命令**（`status` / `*list` / `*get` / `runtime-status` / `*run
 #### 1.5 读 config.json 看相关配置
 
 读 `~/.myagents/config.json` 时**必须脱敏 API Key**（仅保留前 4 位 + 后 4 位，中间 `****`），关注 Provider / MCP / 代理 / Agent / Channel 配置与现象的对应关系。
+
+#### 1.6 前端 render 崩溃（整页「界面渲染出错」/ 白屏）
+
+前端错误边界挂在界面最外层，**任意一个组件渲染时抛错就会把整个界面替换成「界面渲染出错」**（不是局部某块坏掉）。这类**几乎都是产品 Bug，用户改配置救不了**——别往「配置错误」那条路上引。
+
+取证：
+
+```bash
+grep -E '\[AppErrorBoundary\]|\[REACT\] \[ERROR\]' ./logs/unified-*.log | tail -30
+```
+
+你能拿到、且真正有用的两样东西：
+- **错误消息本身**（如 `Cannot read properties of undefined (reading 'trim')`）——运行时字符串，保真，是定位线索；
+- **时间戳 + 崩之前用户在做什么**（"恢复以前的会话"、"点了某条带文件的消息卡"、"打开某个面板"）——复现路径。
+
+⚠️ **不要拿错误后面那串组件栈假装定位**：用户装的是正式发布包，组件名被压缩成 `at t`、`at Dn` 这种乱码，定位不到具体组件，硬猜只会误导用户。你的价值是**取到「错误消息 + 复现上下文」，直接走 Step 3c 提 Bug Report**（报告里带上 error 原文、复现步骤、boot banner），交给开发去定位。
+
+判定结论：前端 render 崩溃 = 真 Bug（不是配置错、不是已知非问题）→ Step 2 归「产品 Bug」→ Step 3c。
 
 ### Step 2 — 分类
 

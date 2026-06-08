@@ -237,6 +237,7 @@ Rust `CronTaskManager` 管理所有定时任务，支持三种调度：
 | `[CronTask]` | 定时任务管理 | 创建、调度、执行、恢复 |
 | `[Updater]` | 自动更新 | 版本检查、下载 |
 | `[bridge] npm install` | 插件 npm 安装 | 成功/失败诊断 |
+| `[AppErrorBoundary]` / `[REACT] [ERROR]` | 前端 render 崩溃 | 整页「界面渲染出错」/ 白屏——多半真 Bug，取 error 原文 + 复现上下文走 /support 报 Bug（组件栈在发布包是压缩乱码，别硬猜，详见 /support §1.6） |
 
 ---
 
