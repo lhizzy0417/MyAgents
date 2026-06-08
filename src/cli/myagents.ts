@@ -365,6 +365,9 @@ function printResult(group: string, action: string, result: Record<string, unkno
   }
   if (group === 'cron' && action === 'list') {
     printCronList(result.data as Array<Record<string, unknown>>);
+    // Surface the workspace-scope note so an empty list isn't misread as
+    // "no cron tasks anywhere" (#320 secondary). --json carries it inline.
+    if (result.hint) console.log(`\n${result.hint}`);
     return;
   }
   if (group === 'cron' && action === 'runs') {
@@ -422,6 +425,7 @@ function printResult(group: string, action: string, result: Record<string, unkno
   }
   if (group === 'cron' && action === 'status') {
     printCronStatus(result.data as Record<string, unknown>);
+    if (result.hint) console.log(`\n${result.hint}`);
     return;
   }
   if (group === 'plugin' && action === 'list') {
