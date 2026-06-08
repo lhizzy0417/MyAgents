@@ -279,6 +279,7 @@ v0.2.0 Windows 版的 IM Bot 全部启动失败就是这个 trap：`find_tsx_run
 - 任何超 256KB 的值直接 `JSON.stringify` 进 SSE / IPC
 - 自己手写 base64 round-trip
 - 新加 `controller.enqueue` 不过 priority gate
+- 新增 SSE 事件只注册一处。两处都要：renderer `SseConnection.ts::JSON_EVENTS`（否则前端静默丢弃）+ server `sse.ts::SSE_EVENT_PRIORITIES`（否则回落 `critical` → 永不 coalesce + 每进程一次性 `[sse] missing from SSE_EVENT_PRIORITIES` warn）。latest-wins 快照类（如 `chat:context-usage`）选 `coalescible`
 
 ---
 
