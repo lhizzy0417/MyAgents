@@ -20,7 +20,7 @@ pub mod types;
 mod util;
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -4242,6 +4242,139 @@ mod agent_monitor_tests {
         assert!(!normalize_stringified_json_value(&mut value));
     }
 
+    /// Issue #316: missing providerEnvJson was rebuilt only on the typed clone
+    /// returned by `read_agent_configs_from_disk`, so status polling re-read the
+    /// still-missing disk config every 5s and logged the migration repeatedly.
+    /// The raw Value migration is what can be persisted once under config lock.
+    #[test]
+    fn agent_provider_env_value_migration_is_idempotent() {
+        let keys = std::collections::HashMap::from([
+            ("siliconflow".to_string(), "sk-sf-test".to_string()),
+            ("zenmux".to_string(), "sk-zen-test".to_string()),
+        ]);
+        let mut value = serde_json::json!({
+            "providerApiKeys": {
+                "siliconflow": "sk-sf-test",
+                "zenmux": "sk-zen-test"
+            },
+            "agents": [{
+                "id": "agent-1",
+                "name": "Agent",
+                "enabled": true,
+                "workspacePath": "/tmp/project",
+                "providerId": "siliconflow",
+                "channels": [{
+                    "id": "ch-1",
+                    "type": "telegram",
+                    "enabled": true,
+                    "botToken": "bot-token",
+                    "overrides": {
+                        "providerId": "zenmux"
+                    }
+                }]
+            }]
+        });
+
+        assert!(migrate_agent_provider_env_value(&mut value, &keys, false));
+        assert!(value["agents"][0]["providerEnvJson"].is_string());
+        assert!(value["agents"][0]["channels"][0]["overrides"]["providerEnvJson"].is_string());
+
+        let agents = salvage_agents_from_value(&value, &keys).expect("agent should parse");
+        assert!(agents[0].provider_env_json.is_some());
+        assert!(agents[0].channels[0]
+            .overrides
+            .as_ref()
+            .and_then(|ov| ov.provider_env_json.as_ref())
+            .is_some());
+
+        assert!(!migrate_agent_provider_env_value(&mut value, &keys, false));
+    }
+
+    fn temp_config_path(name: &str) -> PathBuf {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "myagents-im-{}-{}-{}",
+            name,
+            std::process::id(),
+            unique
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir.join("config.json")
+    }
+
+    #[test]
+    fn agent_provider_env_read_heal_persists_once_for_usable_main_config() {
+        let path = temp_config_path("provider-env-heal-ok");
+        let dir = path.parent().unwrap().to_path_buf();
+        std::fs::write(
+            &path,
+            serde_json::json!({
+                "providerApiKeys": {
+                    "siliconflow": "sk-sf-test"
+                },
+                "agents": [{
+                    "id": "agent-1",
+                    "name": "Agent",
+                    "enabled": true,
+                    "workspacePath": "/tmp/project",
+                    "providerId": "siliconflow",
+                    "channels": []
+                }]
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        persist_agent_config_read_heal(&path, "test");
+        let healed = std::fs::read_to_string(&path).unwrap();
+        let healed_value: serde_json::Value = serde_json::from_str(&healed).unwrap();
+        assert!(healed_value["agents"][0]["providerEnvJson"].is_string());
+        let backup_after_first = std::fs::read_to_string(path.with_file_name("config.json.bak"))
+            .expect("first heal should keep a backup of the pre-heal config");
+
+        persist_agent_config_read_heal(&path, "test");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), healed);
+        assert_eq!(
+            std::fs::read_to_string(path.with_file_name("config.json.bak")).unwrap(),
+            backup_after_first,
+            "second idempotent heal must not rewrite config or rotate backup"
+        );
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn agent_provider_env_read_heal_skips_unusable_main_config() {
+        let path = temp_config_path("provider-env-heal-bad-main");
+        let dir = path.parent().unwrap().to_path_buf();
+        let bad_main = serde_json::json!({
+            "providerApiKeys": {
+                "siliconflow": "sk-sf-test"
+            },
+            "agents": [{
+                "providerId": "siliconflow"
+            }]
+        })
+        .to_string();
+        let backup = "{\"agents\":[{\"id\":\"fallback\"}]}";
+        std::fs::write(&path, &bad_main).unwrap();
+        std::fs::write(path.with_file_name("config.json.bak"), backup).unwrap();
+
+        persist_agent_config_read_heal(&path, "test");
+
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), bad_main);
+        assert_eq!(
+            std::fs::read_to_string(path.with_file_name("config.json.bak")).unwrap(),
+            backup,
+            "read-time heal must not clobber fallback backup when main agents[] is unusable"
+        );
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     /// `salvage_agents_from_value` signals recovery (`None`) only when the
     /// `agents` value is present-but-unusable, and salvages valid entries from a
     /// mixed array.
@@ -4593,6 +4726,26 @@ fn migrate_provider_env(
     );
 }
 
+fn provider_env_json_for_provider(
+    provider_id: &str,
+    api_keys: &std::collections::HashMap<String, String>,
+) -> Option<String> {
+    if provider_id.is_empty() || provider_id.contains("sub") {
+        return None;
+    }
+    let api_key = api_keys.get(provider_id).filter(|k| !k.is_empty())?;
+    let meta = preset_provider_meta(provider_id)?;
+    let mut env = serde_json::json!({
+        "baseUrl": meta.base_url,
+        "apiKey": api_key,
+        "authType": meta.auth_type,
+    });
+    if let Some(proto) = meta.api_protocol {
+        env["apiProtocol"] = serde_json::json!(proto);
+    }
+    Some(env.to_string())
+}
+
 /// Backward-compat migration for Agent configs: rebuild missing `provider_env_json`
 /// on both the agent level and each channel's overrides.
 /// Uses the same preset baseUrl map as `migrate_provider_env`.
@@ -4603,24 +4756,12 @@ fn migrate_agent_provider_env(
     // 1. Migrate agent-level providerEnvJson
     if agent.provider_env_json.is_none() {
         if let Some(ref pid) = agent.provider_id {
-            if !pid.is_empty() && !pid.contains("sub") {
-                if let Some(api_key) = api_keys.get(pid).filter(|k| !k.is_empty()) {
-                    if let Some(meta) = preset_provider_meta(pid) {
-                        let mut env = serde_json::json!({
-                            "baseUrl": meta.base_url,
-                            "apiKey": api_key,
-                            "authType": meta.auth_type,
-                        });
-                        if let Some(proto) = meta.api_protocol {
-                            env["apiProtocol"] = serde_json::json!(proto);
-                        }
-                        agent.provider_env_json = Some(env.to_string());
-                        ulog_info!(
-                            "[agent] Migrated agent-level providerEnvJson for provider '{}'",
-                            pid
-                        );
-                    }
-                }
+            if let Some(env) = provider_env_json_for_provider(pid, api_keys) {
+                agent.provider_env_json = Some(env);
+                ulog_info!(
+                    "[agent] Migrated agent-level providerEnvJson for provider '{}'",
+                    pid
+                );
             }
         }
     }
@@ -4630,29 +4771,102 @@ fn migrate_agent_provider_env(
         if let Some(ref mut ov) = ch.overrides {
             if ov.provider_env_json.is_none() {
                 if let Some(ref pid) = ov.provider_id {
-                    if !pid.is_empty() && !pid.contains("sub") {
-                        if let Some(api_key) = api_keys.get(pid).filter(|k| !k.is_empty()) {
-                            if let Some(meta) = preset_provider_meta(pid) {
-                                let mut env = serde_json::json!({
-                                    "baseUrl": meta.base_url,
-                                    "apiKey": api_key,
-                                    "authType": meta.auth_type,
-                                });
-                                if let Some(proto) = meta.api_protocol {
-                                    env["apiProtocol"] = serde_json::json!(proto);
-                                }
-                                ov.provider_env_json = Some(env.to_string());
-                                ulog_info!(
-                                    "[agent] Migrated channel override providerEnvJson for provider '{}'",
-                                    pid
-                                );
-                            }
-                        }
+                    if let Some(env) = provider_env_json_for_provider(pid, api_keys) {
+                        ov.provider_env_json = Some(env);
+                        ulog_info!(
+                            "[agent] Migrated channel override providerEnvJson for provider '{}'",
+                            pid
+                        );
                     }
                 }
             }
         }
     }
+}
+
+fn provider_env_json_missing(
+    obj: &serde_json::Map<String, serde_json::Value>,
+    field: &str,
+) -> bool {
+    !matches!(obj.get(field), Some(serde_json::Value::String(s)) if !s.is_empty())
+}
+
+fn migrate_provider_env_json_field(
+    obj: &mut serde_json::Map<String, serde_json::Value>,
+    provider_field: &str,
+    env_field: &str,
+    api_keys: &std::collections::HashMap<String, String>,
+    emit_logs: bool,
+    log_prefix: &str,
+) -> bool {
+    if !provider_env_json_missing(obj, env_field) {
+        return false;
+    }
+    let Some(provider_id) = obj
+        .get(provider_field)
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+    else {
+        return false;
+    };
+    let Some(env) = provider_env_json_for_provider(&provider_id, api_keys) else {
+        return false;
+    };
+
+    obj.insert(env_field.to_string(), serde_json::Value::String(env));
+    if emit_logs {
+        ulog_info!(
+            "[agent] Migrated {} providerEnvJson for provider '{}'",
+            log_prefix,
+            provider_id
+        );
+    }
+    true
+}
+
+/// Rebuild missing Agent `providerEnvJson` fields at the raw JSON layer.
+///
+/// The typed fallback in `migrate_agent_provider_env()` keeps old callers safe,
+/// but doing the migration on `serde_json::Value` lets `read_agent_configs_from_disk`
+/// persist the healed config once. Without this, status polling re-read the same
+/// missing fields every 5s and logged the migration thousands of times.
+fn migrate_agent_provider_env_value(
+    value: &mut serde_json::Value,
+    api_keys: &std::collections::HashMap<String, String>,
+    emit_logs: bool,
+) -> bool {
+    let mut changed = false;
+    if let Some(agents) = value.get_mut("agents").and_then(|v| v.as_array_mut()) {
+        for agent in agents.iter_mut() {
+            let Some(obj) = agent.as_object_mut() else {
+                continue;
+            };
+            changed |= migrate_provider_env_json_field(
+                obj,
+                "providerId",
+                "providerEnvJson",
+                api_keys,
+                emit_logs,
+                "agent-level",
+            );
+
+            if let Some(channels) = obj.get_mut("channels").and_then(|v| v.as_array_mut()) {
+                for ch in channels.iter_mut() {
+                    if let Some(ov) = ch.get_mut("overrides").and_then(|v| v.as_object_mut()) {
+                        changed |= migrate_provider_env_json_field(
+                            ov,
+                            "providerId",
+                            "providerEnvJson",
+                            api_keys,
+                            emit_logs,
+                            "channel override",
+                        );
+                    }
+                }
+            }
+        }
+    }
+    changed
 }
 
 /// Preset provider metadata for migration: (baseUrl, authType, apiProtocol).
@@ -4843,6 +5057,49 @@ fn salvage_agents_from_value(
     }
 }
 
+fn persist_agent_config_read_heal(config_path: &Path, reason: &str) {
+    let mut changed_under_lock = false;
+    let result = with_config_lock(config_path, true, |config| {
+        let mut healed = config.clone();
+        let normalized = normalize_stringified_json_value(&mut healed);
+        let api_keys: std::collections::HashMap<String, String> = config
+            .get("providerApiKeys")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .unwrap_or_default();
+        let migrated_provider_env =
+            migrate_agent_provider_env_value(&mut healed, &api_keys, false);
+        if !(normalized || migrated_provider_env) {
+            return Ok(());
+        }
+
+        if salvage_agents_from_value(&healed, &api_keys).is_none() {
+            ulog_warn!(
+                "[agent] Skipped config read-time heal because main agents[] is unusable: {}",
+                reason
+            );
+            return Ok(());
+        }
+
+        *config = healed;
+        changed_under_lock = true;
+        Ok(())
+    });
+
+    match result {
+        Ok(_) if changed_under_lock => {
+            ulog_info!("[agent] Persisted config read-time heal: {}", reason);
+        }
+        Ok(_) => {}
+        Err(e) => {
+            ulog_warn!(
+                "[agent] Failed to persist config read-time heal ({}): {}",
+                reason,
+                e
+            );
+        }
+    }
+}
+
 /// Read Agent configs from disk. Falls back to reading imBotConfigs and converting.
 fn read_agent_configs_from_disk() -> Vec<AgentConfigRust> {
     let home = match dirs::home_dir() {
@@ -4877,15 +5134,26 @@ fn read_agent_configs_from_disk() -> Vec<AgentConfigRust> {
                 continue;
             }
         };
-        normalize_stringified_json_value(&mut value);
+        let normalized = normalize_stringified_json_value(&mut value);
 
         let api_keys: std::collections::HashMap<String, String> = value
             .get("providerApiKeys")
             .and_then(|v| serde_json::from_value(v.clone()).ok())
             .unwrap_or_default();
+        let migrated_provider_env =
+            migrate_agent_provider_env_value(&mut value, &api_keys, true);
 
         match salvage_agents_from_value(&value, &api_keys) {
             Some(agents) => {
+                if i == 0 && (normalized || migrated_provider_env) {
+                    let reason = match (normalized, migrated_provider_env) {
+                        (true, true) => "stringified JSON normalization + providerEnvJson migration",
+                        (true, false) => "stringified JSON normalization",
+                        (false, true) => "providerEnvJson migration",
+                        (false, false) => unreachable!(),
+                    };
+                    persist_agent_config_read_heal(&main_path, reason);
+                }
                 if i > 0 {
                     ulog_warn!("[agent] Recovered config from {} file", label);
                 }
