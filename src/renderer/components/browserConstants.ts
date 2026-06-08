@@ -22,14 +22,19 @@ export const BROWSER_BLANK_URL = 'data:text/html;charset=utf-8,%3Chtml%3E%3C%2Fh
 // `getBoundingClientRect()` read in the create effect captures `width: 0`. A
 // webview born at width 0 — or a stray `resize(0,0,0,0)` from a transient
 // display:none read — collapses the OS overlay and leaves it mis-positioned
-// over the chat area instead of the right panel. Treat any sub-pixel bound as
-// "not laid out yet" and refuse to push it down to Rust.
-const MIN_BROWSER_BOUNDS_PX = 1;
+// over the chat area instead of the right panel.
+//
+// Windows follow-up: during the same transition, WebView2 can see small but
+// non-zero widths (1.1px, 24px, ...). Those are not usable browser geometry;
+// creating/resizing the native child webview there seeds it with transition
+// bounds before the final panel exists. Match TerminalPanel's transition guard
+// and wait until the panel is at least meaningfully interactive.
+const MIN_BROWSER_BOUNDS_PX = 100;
 
 /**
  * True when a container's measured bounds are real enough to position the
- * native browser webview over them. Rejects 0/NaN/negative dimensions that
- * appear mid-transition or while the container is `display:none`.
+ * native browser webview over them. Rejects 0/NaN/negative/tiny dimensions
+ * that appear mid-transition or while the container is `display:none`.
  */
 export function hasUsableBrowserBounds(width: number, height: number): boolean {
   return (

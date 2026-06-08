@@ -114,6 +114,10 @@ export default function BrowserPanel({
   // ── Create or navigate webview when url prop changes ──
   useEffect(() => {
     if (!url) return;
+    // Native child webviews do not participate in the parent CSS width
+    // transition on Windows. Wait for the split panel to settle before create
+    // or navigate so the first native geometry is the final panel geometry.
+    if (isSplitTransitioning) return;
     const el = containerRef.current;
     if (!el) return;
 
@@ -186,7 +190,7 @@ export default function BrowserPanel({
     }
 
     return () => { cancelled = true; pendingObserver?.disconnect(); };
-  }, [url, browserAlive, tabId, onBrowserCreated, onCreateFailed]);
+  }, [url, browserAlive, isSplitTransitioning, tabId, onBrowserCreated, onCreateFailed]);
 
   // ── Listen for URL/loading events from Rust ──
   useEffect(() => {

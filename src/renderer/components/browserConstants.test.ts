@@ -34,11 +34,16 @@ describe('hasUsableBrowserBounds', () => {
     expect(hasUsableBrowserBounds(694, 662)).toBe(true);
   });
 
-  it('accepts a 1px sliver so we create as soon as the transition starts', () => {
-    // We intentionally create the moment the container is non-degenerate and
-    // let the post-create ResizeObserver track the rest of the transition to
-    // the final size — better a correctly-positioned sliver on the right than
-    // a 0-width webview over the chat.
-    expect(hasUsableBrowserBounds(1, 1)).toBe(true);
+  it('rejects tiny non-zero transition widths from the split panel', () => {
+    // Windows WebView2 is an OS child view, not a React div. Creating it at
+    // intermediate transition widths can seed native geometry with a sliver
+    // before the real right panel exists.
+    expect(hasUsableBrowserBounds(1.1, 662)).toBe(false);
+    expect(hasUsableBrowserBounds(24, 662)).toBe(false);
+    expect(hasUsableBrowserBounds(99.9, 662)).toBe(false);
+  });
+
+  it('accepts the minimum interactive panel size', () => {
+    expect(hasUsableBrowserBounds(100, 100)).toBe(true);
   });
 });
