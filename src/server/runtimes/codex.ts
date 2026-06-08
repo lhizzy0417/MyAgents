@@ -591,20 +591,28 @@ export function resolveTopLevelSpawnCard(
 }
 
 /**
- * Thread/turn LIFECYCLE notification methods that drive the MAIN MyAgents
- * session and carry a top-level `threadId`. When such an event comes from a
- * spawned sub-agent thread it must be ignored (see the guard in
- * parseNotification). Item notifications are deliberately excluded — those are
- * the sub-agent tools we want to surface/nest.
+ * Notification methods that drive the MAIN MyAgents session and carry a
+ * top-level `threadId`. When such an event comes from a spawned sub-agent
+ * thread it must be ignored (see the guard in parseNotification). Two reasons a
+ * method belongs here:
+ *   - LIFECYCLE (turn/*, thread/status|closed): a child's turn/completed would
+ *     finalize the user's turn early + resetTurnAccumulators() mid-fan-out.
+ *   - USAGE (thread/tokenUsage/updated): a child's token usage would otherwise
+ *     flow through as a `usage` event and pollute the MAIN session's context
+ *     indicator + persisted lastContextUsage (external-session attributes every
+ *     `usage` event to the main turn). Codex sends { threadId, turnId, tokenUsage }.
+ * Item notifications are deliberately excluded — those are the sub-agent tools we
+ * want to surface/nest.
  */
-const CHILD_GATED_LIFECYCLE_METHODS: ReadonlySet<string> = new Set([
+const CHILD_GATED_METHODS: ReadonlySet<string> = new Set([
   'turn/started',
   'turn/completed',
   'thread/status/changed',
   'thread/closed',
+  'thread/tokenUsage/updated',
 ]);
-export function isChildThreadLifecycleMethod(method: string): boolean {
-  return CHILD_GATED_LIFECYCLE_METHODS.has(method);
+export function isChildThreadGatedMethod(method: string): boolean {
+  return CHILD_GATED_METHODS.has(method);
 }
 
 /**
@@ -2159,12 +2167,15 @@ export class CodexRuntime implements AgentRuntime {
     // Those MUST NOT drive the MAIN MyAgents session: a child's turn/completed
     // would otherwise finalize the user's turn early and resetTurnAccumulators()
     // mid-fan-out — wiping currentContentBlocks (the spawn card + its nested
-    // calls) and breaking both turn integrity and the nesting itself. Child
-    // ITEM notifications (the tools we nest) are intentionally NOT gated here.
-    if (isChildThreadLifecycleMethod(method)) {
+    // calls) and breaking both turn integrity and the nesting itself.
+    // PRD 0.2.32 — thread/tokenUsage/updated is gated here for the same reason:
+    // a child's usage would otherwise become a `usage` event and pollute the
+    // MAIN context indicator + persisted lastContextUsage (cross-review codex HIGH).
+    // Child ITEM notifications (the tools we nest) are intentionally NOT gated here.
+    if (isChildThreadGatedMethod(method)) {
       const evtThreadId = stringValue(p.threadId);
       if (evtThreadId && codexProc.threadId && evtThreadId !== codexProc.threadId) {
-        return null; // ignore child-thread lifecycle; only the main thread drives the session
+        return null; // ignore child-thread event; only the main thread drives the session
       }
     }
 

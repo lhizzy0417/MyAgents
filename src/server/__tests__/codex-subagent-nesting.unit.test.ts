@@ -12,7 +12,7 @@ import {
   parseSubAgentThreadSource,
   recordSpawnAgentChildThreads,
   computeSubAgentScope,
-  isChildThreadLifecycleMethod,
+  isChildThreadGatedMethod,
   resolveCollabAgentControlParents,
   subagentControlToolUseId,
   buildCollabAgentControlStartEvents,
@@ -314,20 +314,28 @@ describe('collab control event builders', () => {
   });
 });
 
-describe('isChildThreadLifecycleMethod', () => {
+describe('isChildThreadGatedMethod', () => {
   // Live-verified (Codex 0.135.0): spawned child threads emit their own
   // turn/started + turn/completed (isMain=false) over the same connection.
   // These lifecycle methods must be gated to the main thread; child item
   // notifications (the tools we nest) must NOT be gated.
   it('gates thread/turn lifecycle methods', () => {
-    expect(isChildThreadLifecycleMethod('turn/started')).toBe(true);
-    expect(isChildThreadLifecycleMethod('turn/completed')).toBe(true);
-    expect(isChildThreadLifecycleMethod('thread/status/changed')).toBe(true);
-    expect(isChildThreadLifecycleMethod('thread/closed')).toBe(true);
+    expect(isChildThreadGatedMethod('turn/started')).toBe(true);
+    expect(isChildThreadGatedMethod('turn/completed')).toBe(true);
+    expect(isChildThreadGatedMethod('thread/status/changed')).toBe(true);
+    expect(isChildThreadGatedMethod('thread/closed')).toBe(true);
+  });
+  // PRD 0.2.32 cross-review (codex HIGH): a sub-agent child thread also emits
+  // thread/tokenUsage/updated { threadId, turnId, tokenUsage }. Before the fix
+  // it was NOT gated, so a child's usage flowed through as a `usage` event and
+  // polluted the MAIN session's context indicator + persisted lastContextUsage.
+  // It must now be gated like lifecycle so the foreign-thread guard drops it.
+  it('gates thread/tokenUsage/updated (child usage must not drive main context)', () => {
+    expect(isChildThreadGatedMethod('thread/tokenUsage/updated')).toBe(true);
   });
   it('does NOT gate item notifications (sub-agent tools must surface)', () => {
-    expect(isChildThreadLifecycleMethod('item/started')).toBe(false);
-    expect(isChildThreadLifecycleMethod('item/completed')).toBe(false);
-    expect(isChildThreadLifecycleMethod('item/commandExecution/outputDelta')).toBe(false);
+    expect(isChildThreadGatedMethod('item/started')).toBe(false);
+    expect(isChildThreadGatedMethod('item/completed')).toBe(false);
+    expect(isChildThreadGatedMethod('item/commandExecution/outputDelta')).toBe(false);
   });
 });
