@@ -27,6 +27,7 @@ import {
   type ScheduleSummary,
 } from '@/utils/scheduleSummary';
 import { relativeTime } from '@/utils/taskCenterUtils';
+import { workspacePathsEqual } from '@/../shared/workspacePath';
 import type { Task, TaskExecutionMode, TaskRunStats } from '@/../shared/types/task';
 
 interface Props {
@@ -46,7 +47,7 @@ export function SummaryCard({ task, stats }: Props) {
   const { projects } = useConfig();
   const { statuses } = useAgentStatuses();
   const workspace = useMemo(
-    () => projects.find((p) => p.path === task.workspacePath) ?? null,
+    () => projects.find((p) => workspacePathsEqual(p.path, task.workspacePath)) ?? null,
     [projects, task.workspacePath],
   );
   // Agent names are keyed by the Rust `agent.id` UUID on workspaces;

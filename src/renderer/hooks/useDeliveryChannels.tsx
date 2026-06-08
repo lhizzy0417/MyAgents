@@ -7,6 +7,7 @@ import { useConfig } from './useConfig';
 import type { SelectOption } from '@/components/CustomSelect';
 import type { CronDelivery } from '@/types/cronTask';
 import type { ChannelConfig } from '../../shared/types/agent';
+import { normalizeWorkspacePathIdentity } from '../../shared/workspacePath';
 import { getChannelTypeLabel } from '@/utils/taskCenterUtils';
 import { resolveChannelDisplayName } from '@/utils/channelDisplayName';
 
@@ -74,16 +75,20 @@ export function useDeliveryChannels(currentWorkspacePath?: string) {
 
     // Build agentId → Project display name mapping (matches Agent card list logic)
     const agentDisplayNames = new Map<string, string>();
+    // Key by canonical workspace identity: an Agent's workspacePath may be in
+    // the native Windows form while currentWorkspacePath arrives POSIX-style
+    // (e.g. from a Task), so raw-string keying mis-grouped the current
+    // workspace's channels as "other workspace" on Windows (#320).
     const wsToAgent = new Map<string, string>();
     for (const a of agents) {
-      wsToAgent.set(a.workspacePath, a.id);
+      wsToAgent.set(normalizeWorkspacePathIdentity(a.workspacePath), a.id);
       // Find corresponding Project for display name (same logic as AgentCardList/AgentSettingsPanel)
       const proj = projects.find(p => p.agentId === a.id);
       const displayName = proj?.displayName || proj?.name || a.workspacePath.split('/').pop() || a.id;
       agentDisplayNames.set(a.id, displayName);
     }
 
-    const currentAgentId = currentWorkspacePath ? wsToAgent.get(currentWorkspacePath) : undefined;
+    const currentAgentId = currentWorkspacePath ? wsToAgent.get(normalizeWorkspacePathIdentity(currentWorkspacePath)) : undefined;
 
     interface ChannelGroup {
       agentId: string;

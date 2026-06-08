@@ -32,6 +32,7 @@ import { Popover } from '@/components/ui/Popover';
 import { type Project } from '@/config/types';
 import { getFolderName } from '@/types/tab';
 import { shortenPathForDisplay } from '@/utils/pathDetection';
+import { workspacePathsEqual } from '@/../shared/workspacePath';
 import WorkspaceIcon from './WorkspaceIcon';
 
 interface WorkspaceSelectorProps {
@@ -66,8 +67,8 @@ export default function WorkspaceSelector({
     // count which is small but the sort runs on every dropdown open otherwise.
     const orderedProjects = useMemo(() => {
         const sorted = [...projects].sort((a, b) => {
-            const aIsDefault = a.path === defaultWorkspacePath;
-            const bIsDefault = b.path === defaultWorkspacePath;
+            const aIsDefault = workspacePathsEqual(a.path, defaultWorkspacePath);
+            const bIsDefault = workspacePathsEqual(b.path, defaultWorkspacePath);
             if (aIsDefault && !bIsDefault) return -1;
             if (!aIsDefault && bIsDefault) return 1;
             const aTime = a.lastOpened ? new Date(a.lastOpened).getTime() : 0;
@@ -120,7 +121,7 @@ export default function WorkspaceSelector({
                  *  add scroll without fighting Tailwind's class order. */}
                 <div className="max-h-72 overflow-y-auto py-1">
                     {orderedProjects.map(project => {
-                        const isDefault = project.path === defaultWorkspacePath;
+                        const isDefault = workspacePathsEqual(project.path, defaultWorkspacePath);
                         const isSelected = selectedProject?.id === project.id;
                         return (
                             <WorkspaceRow

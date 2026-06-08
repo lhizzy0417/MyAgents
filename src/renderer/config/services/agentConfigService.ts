@@ -4,6 +4,7 @@ import { getEffectiveModelAliases, PRESET_TEMPLATES } from '../types';
 import type { AgentConfig, ChannelConfig, ChannelOverrides } from '../../../shared/types/agent';
 import type { ImBotConfig } from '../../../shared/types/im';
 import { atomicModifyConfig, loadAppConfig } from './appConfigService';
+import { workspacePathsEqual } from '../../../shared/workspacePath';
 
 // ============= Query Helpers =============
 
@@ -31,8 +32,9 @@ export function channelHasCredentials(ch: ChannelConfig): boolean {
 }
 
 export function getAgentByWorkspacePath(config: AppConfig, workspacePath: string): AgentConfig | undefined {
-  const normalized = workspacePath.replace(/\\/g, '/');
-  return config.agents?.find(a => a.workspacePath.replace(/\\/g, '/') === normalized);
+  // Canonical identity (#320): Agent.workspacePath and the queried path can
+  // diverge in separator/case form across stores — match the same way Rust does.
+  return config.agents?.find(a => workspacePathsEqual(a.workspacePath, workspacePath));
 }
 
 // ============= Agent Creation Helpers =============
@@ -191,8 +193,7 @@ export function migrateImBotConfigsToAgents(config: AppConfig, projects: Project
     agents.push(agent);
 
     // Mark corresponding project as agent
-    const normalizedAgentPath = resolvedPath.replace(/\\/g, '/');
-    const project = projects.find(p => p.path.replace(/\\/g, '/') === normalizedAgentPath);
+    const project = projects.find(p => workspacePathsEqual(p.path, resolvedPath));
     if (project) {
       project.isAgent = true;
       project.agentId = agentId;
@@ -236,8 +237,7 @@ export function ensureAllProjectsHaveAgent(
     }
 
     // Also check by workspacePath (agent exists but project.agentId is stale/missing)
-    const normalized = project.path.replace(/\\/g, '/');
-    const existingByPath = agents.find(a => a.workspacePath.replace(/\\/g, '/') === normalized);
+    const existingByPath = agents.find(a => workspacePathsEqual(a.workspacePath, project.path));
     if (existingByPath) {
       // Fix orphaned reference
       project.agentId = existingByPath.id;

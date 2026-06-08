@@ -76,6 +76,7 @@ import ShortcutRecorder from '@/components/ShortcutRecorder';
 import { VISIBLE_APP_SHORTCUTS } from '@/utils/appShortcuts';
 import { shouldDebounceAutoVerify } from '@/utils/apiKeyAutoVerify';
 import { DEFAULT_SUMMON_ACCELERATOR } from '../../shared/config-types';
+import { workspacePathsEqual } from '../../shared/workspacePath';
 import ProviderEnableOrderDialog from '@/components/ProviderEnableOrderDialog';
 
 /** Parse a string as a positive integer, returning undefined for invalid/non-positive values */
@@ -3217,7 +3218,7 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                                     const { open } = await import('@tauri-apps/plugin-dialog');
                                                     const selected = await open({ directory: true, multiple: false, title: '选择默认工作区' });
                                                     if (selected && typeof selected === 'string') {
-                                                        if (!projects.find(p => p.path === selected)) {
+                                                        if (!projects.find(p => workspacePathsEqual(p.path, selected))) {
                                                             await addProject(selected);
                                                         }
                                                         await updateConfig({ defaultWorkspacePath: selected });

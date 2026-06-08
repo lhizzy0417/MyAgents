@@ -16,6 +16,7 @@ import {
     MIN_CRON_INTERVAL,
 } from '@/types/cronTask';
 import { getFolderName } from '@/utils/taskCenterUtils';
+import { workspacePathsEqual } from '@/../shared/workspacePath';
 import WorkspaceIcon from './launcher/WorkspaceIcon';
 import { useToast } from './Toast';
 import { useConfig } from '@/hooks/useConfig';
@@ -83,7 +84,7 @@ export default function CronTaskDetailPanel({ task, botInfo, onClose, onDelete, 
     const { projects } = useConfig();
     const isMountedRef = useRef(true);
     useEffect(() => () => { isMountedRef.current = false; }, []);
-    const project = useMemo(() => projects.find(p => p.path === task.workspacePath), [projects, task.workspacePath]);
+    const project = useMemo(() => projects.find(p => workspacePathsEqual(p.path, task.workspacePath)), [projects, task.workspacePath]);
     const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
     const [showStopConfirm, setShowStopConfirm] = useState(false);
     const [showSyncConfirm, setShowSyncConfirm] = useState(false);

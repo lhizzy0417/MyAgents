@@ -73,6 +73,7 @@ import { normalizeRuntime, resolveEffectiveRuntime, planSessionOpen } from '@/ut
 import { applyTerminalSessionToTabs } from '@/utils/sessionTermination';
 import { listenWithCleanup } from '@/utils/tauriListen';
 import { CUSTOM_EVENTS, createPendingSessionId, isPendingSessionId } from '../shared/constants';
+import { workspacePathsEqual } from '../shared/workspacePath';
 import type { CapabilityInitialSelect } from '../shared/skillsTypes';
 import { ensureSelfAwarenessWorkspace, resolveBuiltinSelection, pairBuiltinSelection, isProviderAvailable } from '@/config/configService';
 import { getAgentByWorkspacePath, getAgentById } from '@/config/services/agentConfigService';
@@ -2756,7 +2757,7 @@ export default function App() {
       if (!sessionId || !workspacePath) return;
 
       const workspace = configProjectsRef.current.find(
-        (p) => p.path === workspacePath,
+        (p) => workspacePathsEqual(p.path, workspacePath),
       );
       if (!workspace) {
         toastRef.current?.error('找不到对应的工作区，可能已被删除');

@@ -30,6 +30,7 @@ import { useToast } from '@/components/Toast';
 import { taskCreateDirect, taskRun, taskWriteDoc } from '@/api/taskCenter';
 import NotificationConfigEditor from '@/components/task-center/NotificationConfigEditor';
 import { splitWithTagHighlights } from '@/utils/parseThoughtTags';
+import { workspacePathsEqual } from '@/../shared/workspacePath';
 import type { Thought } from '@/../shared/types/thought';
 import type {
   EndConditions,
@@ -96,7 +97,7 @@ export function DispatchTaskDialog({
     if (visibleProjects.length === 0) return null;
     // Explicit hint wins (e.g. Launcher passed the user's selected workspace).
     if (defaultWorkspacePath) {
-      const explicit = visibleProjects.find((p) => p.path === defaultWorkspacePath);
+      const explicit = visibleProjects.find((p) => workspacePathsEqual(p.path, defaultWorkspacePath));
       if (explicit) return explicit;
     }
     // PRD §8.4 — match any of the thought's tags to a workspace name.
@@ -166,7 +167,7 @@ export function DispatchTaskDialog({
   }, [executionMode]);
 
   const workspace = useMemo(
-    () => visibleProjects.find((p) => p.path === workspacePath) ?? null,
+    () => visibleProjects.find((p) => workspacePathsEqual(p.path, workspacePath)) ?? null,
     [workspacePath, visibleProjects],
   );
 

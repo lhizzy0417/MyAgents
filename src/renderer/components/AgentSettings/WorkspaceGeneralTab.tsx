@@ -8,6 +8,7 @@ import { useAgentStatuses } from '@/hooks/useAgentStatuses';
 import { isTauriEnvironment } from '@/utils/browserMock';
 import { getAgentById, addAgentConfig, patchAgentConfig, invokeStartAgentChannel } from '@/config/services/agentConfigService';
 import type { AgentConfig } from '../../../shared/types/agent';
+import { workspacePathsEqual } from '../../../shared/workspacePath';
 import { DEFAULT_HEARTBEAT_CONFIG } from '../../../shared/types/im';
 import WorkspaceBasicsSection from './WorkspaceBasicsSection';
 import AgentChannelsSection from './sections/AgentChannelsSection';
@@ -22,7 +23,7 @@ interface WorkspaceGeneralTabProps {
 
 export default function WorkspaceGeneralTab({ agentDir }: WorkspaceGeneralTabProps) {
   const { config, projects, patchProject, refreshConfig } = useConfig();
-  const project = projects.find(p => p.path.replace(/\\/g, '/') === agentDir.replace(/\\/g, '/'));
+  const project = projects.find(p => workspacePathsEqual(p.path, agentDir));
   const agent = project?.agentId ? getAgentById(config, project.agentId) : undefined;
   const isProactive = !!(project?.isAgent && agent?.enabled);
   const { statuses, refresh: refreshStatuses } = useAgentStatuses(isProactive);

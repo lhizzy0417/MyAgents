@@ -28,6 +28,7 @@ import CustomSelect from '@/components/CustomSelect';
 import { useToast } from '@/components/Toast';
 import { getFolderName, formatTime, isImSource, getSessionDisplayText, formatMessageCount } from '@/utils/taskCenterUtils';
 import { updateSession, type SessionMetadata } from '@/api/sessionClient';
+import { workspacePathsEqual } from '@/../shared/workspacePath';
 import type { Project } from '@/config/types';
 import OverlayBackdrop from '@/components/OverlayBackdrop';
 import SessionSearchItem from '@/components/search/SessionSearchItem';
@@ -94,7 +95,7 @@ export default memo(function TaskCenterOverlay({
     const workspaceOptions = useMemo(() => {
         const seen = new Map<string, string | undefined>(); // name → icon
         for (const s of sessions) {
-            const proj = projects.find(p => p.path === s.agentDir);
+            const proj = projects.find(p => workspacePathsEqual(p.path, s.agentDir));
             if (proj) {
                 const name = getFolderName(proj.path);
                 if (!seen.has(name)) seen.set(name, proj.icon);
@@ -135,7 +136,7 @@ export default memo(function TaskCenterOverlay({
 
             // Workspace filter
             if (workspaceFilter !== 'all') {
-                const proj = projects.find(p => p.path === session.agentDir);
+                const proj = projects.find(p => workspacePathsEqual(p.path, session.agentDir));
                 if (!proj || getFolderName(proj.path) !== workspaceFilter) return false;
             }
 
@@ -179,7 +180,7 @@ export default memo(function TaskCenterOverlay({
 
     const getProjectForSession = useCallback(
         (session: SessionMetadata): Project | undefined =>
-            projects.find(p => p.path === session.agentDir),
+            projects.find(p => workspacePathsEqual(p.path, session.agentDir)),
         [projects]
     );
 
@@ -437,7 +438,7 @@ export default memo(function TaskCenterOverlay({
                                         ) : (
                                             searchResults.map(hit => {
                                                 const session = sessions.find(s => s.id === hit.sessionId);
-                                                const project = projects.find(p => p.path === hit.agentDir);
+                                                const project = projects.find(p => workspacePathsEqual(p.path, hit.agentDir));
                                                 if (!session || !project) return null;
                                                 const isCronProtected = cronProtectedSessionIds.has(session.id);
                                                 return (

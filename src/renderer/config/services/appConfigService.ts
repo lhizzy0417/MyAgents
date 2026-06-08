@@ -22,6 +22,7 @@ import {
     mockSaveConfig,
 } from '@/utils/browserMock';
 import { normalizeStringifiedJsonFields } from './configNormalize';
+import { workspacePathsEqual } from '../../../shared/workspacePath';
 import { type ImBotConfig, DEFAULT_IM_BOT_CONFIG } from '../../../shared/types/im';
 // Agent migration is triggered from ConfigProvider after both config + projects are loaded
 import { isDebugMode } from '@/utils/debug';
@@ -351,8 +352,7 @@ export async function ensureBundledWorkspace(): Promise<boolean> {
         }
 
         const projects = await loadProjects();
-        const normalizedResult = result.path.replace(/\\/g, '/');
-        const found = projects.some(p => p.path.replace(/\\/g, '/') === normalizedResult);
+        const found = projects.some(p => workspacePathsEqual(p.path, result.path));
         if (!found) {
             const project = await addProject(result.path);
             const { patchProject } = await import('./projectService');
@@ -393,8 +393,7 @@ export async function ensureSelfAwarenessWorkspace(
     if (isBrowserDevMode()) return null;
     try {
         const dir = await getConfigDir();
-        const normalizedDir = dir.replace(/\\/g, '/');
-        let project = projects.find(p => p.path.replace(/\\/g, '/') === normalizedDir);
+        let project = projects.find(p => workspacePathsEqual(p.path, dir));
         if (!project) {
             project = await addProject(dir);
         }

@@ -18,6 +18,7 @@ import SessionStatsModal from '@/components/SessionStatsModal';
 import ConfirmDialog from '@/components/ConfirmDialog';
 import { useToast } from '@/components/Toast';
 import { getFolderName, formatTime, getSessionDisplayText, formatMessageCount, relativeTime } from '@/utils/taskCenterUtils';
+import { normalizeWorkspacePathIdentity, workspacePathsEqual } from '@/../shared/workspacePath';
 import type { SessionMetadata } from '@/api/sessionClient';
 import type { TaskStatus } from '@/../shared/types/task';
 import type { Project } from '@/config/types';
@@ -70,8 +71,11 @@ export default memo(function RecentTasks({
 
     // Top 5 sessions — filter to those with a matching visible project first, then slice
     const displaySessions = useMemo(() => {
-        const projectPaths = new Set(projects.map(p => p.path));
-        return sessions.filter(s => projectPaths.has(s.agentDir)).slice(0, DISPLAY_COUNT);
+        // Key membership by canonical identity — project.path keeps the native
+        // Windows form (backslashes) while session.agentDir is POSIX-style, so a
+        // raw Set.has(agentDir) dropped every session on Windows (#320).
+        const projectPaths = new Set(projects.map(p => normalizeWorkspacePathIdentity(p.path)));
+        return sessions.filter(s => projectPaths.has(normalizeWorkspacePathIdentity(s.agentDir))).slice(0, DISPLAY_COUNT);
     }, [sessions, projects]);
 
     // "我的任务" tab: all Task statuses, sorted by updatedAt desc, take the
@@ -88,7 +92,7 @@ export default memo(function RecentTasks({
 
     const getProjectForSession = useCallback(
         (session: SessionMetadata): Project | undefined =>
-            projects.find(p => p.path === session.agentDir),
+            projects.find(p => workspacePathsEqual(p.path, session.agentDir)),
         [projects]
     );
 

@@ -2,6 +2,7 @@
 import { join, basename } from '@tauri-apps/api/path';
 
 import type { Project } from '../types';
+import { workspacePathsEqual } from '../../../shared/workspacePath';
 import {
     isBrowserDevMode,
     withProjectsLock,
@@ -88,7 +89,10 @@ export async function addProject(path: string): Promise<Project> {
     return withProjectsLock(async () => {
         const projects = await loadProjects();
 
-        const existing = projects.find((p) => p.path === path);
+        // #320: dedup by canonical workspace identity, not raw `===`, so a path
+        // arriving in a different separator/case form doesn't create a duplicate
+        // project pointing at the same directory.
+        const existing = projects.find((p) => workspacePathsEqual(p.path, path));
         if (existing) {
             console.log('[configService] Project already exists, updating lastOpened');
             existing.lastOpened = new Date().toISOString();

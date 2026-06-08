@@ -26,6 +26,7 @@ import { useConfig } from '@/hooks/useConfig';
 import { useTaskCenterData } from '@/hooks/useTaskCenterData';
 import { type Project, type PermissionMode, type McpServerDefinition, type WorkspaceTemplate, isProviderEnabled } from '@/config/types';
 import { CUSTOM_EVENTS } from '../../shared/constants';
+import { normalizeWorkspacePathIdentity, workspacePathsEqual } from '../../shared/workspacePath';
 import {
     getAllMcpServers,
     getEnabledMcpServerIds,
@@ -84,7 +85,9 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
         const map = new Map<string, { agent: NonNullable<typeof config.agents>[number]; status?: (typeof agentStatuses)[string] }>();
         if (!config.agents) return map;
         for (const agent of config.agents) {
-            const key = agent.workspacePath.replace(/\\/g, '/');
+            // Canonical identity key (#320): agent.workspacePath and project.path
+            // can diverge in separator/case form across stores on Windows.
+            const key = normalizeWorkspacePathIdentity(agent.workspacePath);
             map.set(key, { agent, status: agentStatuses[agent.id] });
         }
         return map;
@@ -106,7 +109,7 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
     // Fallback chain: defaultWorkspacePath → mino project → first project → null
     const resolveDefaultWorkspace = useCallback((projs: Project[]): Project | null => {
         if (config.defaultWorkspacePath) {
-            const def = projs.find(p => p.path === config.defaultWorkspacePath);
+            const def = projs.find(p => workspacePathsEqual(p.path, config.defaultWorkspacePath));
             if (def) return def;
         }
         // Fallback: find mino project by path suffix
@@ -771,7 +774,7 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
     // provider/model/permission selection that the brand-section send uses.
     const handleRequestInitFromAgentOverlay = useCallback(() => {
         if (!agentOverlay) return;
-        const project = projects.find(p => p.path === agentOverlay.workspacePath);
+        const project = projects.find(p => workspacePathsEqual(p.path, agentOverlay.workspacePath));
         if (!project) return;
         // Fallback path must respect global enablement — providers[0] can be the
         // first ordered provider which the user disabled in Settings → 启用和排序.
@@ -947,7 +950,7 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
                         ) : (
                             <div className="grid grid-cols-2 gap-3">
                                 {visibleProjects.map((project) => {
-                                    const agentData = agentLookup.get(project.path.replace(/\\/g, '/'));
+                                    const agentData = agentLookup.get(normalizeWorkspacePathIdentity(project.path));
                                     return (
                                         <WorkspaceCard
                                             key={project.id}

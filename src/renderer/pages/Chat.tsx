@@ -58,6 +58,7 @@ import { patchAgentConfig, getAgentById } from '@/config/services/agentConfigSer
 import { BrowserPanelContext } from '@/context/BrowserPanelContext';
 import { BROWSER_BLANK_URL } from '@/components/browserConstants';
 import { CUSTOM_EVENTS, isPendingSessionId } from '../../shared/constants';
+import { workspacePathsEqual } from '../../shared/workspacePath';
 import type { CapabilityInitialSelect } from '../../shared/skillsTypes';
 import { CC_MODELS, CC_PERMISSION_MODES, CODEX_PERMISSION_MODES, GEMINI_PERMISSION_MODES, getDefaultRuntimePermissionMode, getRuntimePermissionModes, buildRuntimeChangePatch } from '../../shared/types/runtime';
 import type { RuntimeType, RuntimeDetections, RuntimeConfig } from '../../shared/types/runtime';
@@ -274,7 +275,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
 
   // Get config to find current project provider
   const { config, projects, providers, patchProject, apiKeys, providerVerifyStatus, refreshProviderData, refreshConfig } = useConfig();
-  const currentProject = projects.find((p) => p.path === agentDir);
+  const currentProject = projects.find((p) => workspacePathsEqual(p.path, agentDir));
   // AgentConfig is source of truth for AI settings, Project is fallback for non-agent workspaces
   const currentAgent = currentProject?.agentId ? getAgentById(config, currentProject.agentId) : undefined;
   // Local provider state: snapshot from AgentConfig (priority) or Project at creation.

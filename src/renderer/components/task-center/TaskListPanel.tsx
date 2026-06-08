@@ -28,6 +28,7 @@ import { useConfig } from '@/hooks/useConfig';
 import { listenWithCleanup } from '@/utils/tauriListen';
 import WorkspaceIcon from '@/components/launcher/WorkspaceIcon';
 import type { Task, TaskStatus } from '@/../shared/types/task';
+import { normalizeWorkspacePathIdentity, workspacePathsEqual } from '@/../shared/workspacePath';
 import { canAutoUpgrade, isBenignAlreadyLinked, upgradeLegacyCron, type LegacyCronRaw } from './legacyUpgrade';
 import { DispatchTaskDialog } from './DispatchTaskDialog';
 import { LegacyCronOverlay } from './LegacyCronOverlay';
@@ -328,8 +329,8 @@ export function TaskListPanel({ highlightTaskId, refreshKey, pendingIntent }: Pr
     const afterWorkspace = workspaceFilter
       ? all.filter((c) =>
           c.kind === 'task'
-            ? c.task.workspacePath === workspaceFilter
-            : c.legacy.workspacePath === workspaceFilter,
+            ? workspacePathsEqual(c.task.workspacePath, workspaceFilter)
+            : workspacePathsEqual(c.legacy.workspacePath, workspaceFilter),
         )
       : all;
 
@@ -400,30 +401,43 @@ export function TaskListPanel({ highlightTaskId, refreshKey, pendingIntent }: Pr
   // list every project the app knows about (most of which may have
   // zero tasks). `'' → 全部` is the always-present first entry.
   const workspaceOptions: SelectOption[] = useMemo(() => {
-    const taskPaths = new Set<string>();
-    for (const t of tasks) if (t.workspacePath) taskPaths.add(t.workspacePath);
-    for (const l of legacy) if (l.workspacePath) taskPaths.add(l.workspacePath);
+    // Key membership by canonical identity, not raw string. A Task/CronTask
+    // workspacePath is stored POSIX-style while a Project.path keeps the native
+    // Windows form (backslashes) — comparing them with `Set.has(p.path)` made
+    // every project drop out of the filter on Windows, leaving only "(已失效)"
+    // orphan rows (#320).
+    const taskPathIds = new Set<string>();
+    for (const t of tasks) if (t.workspacePath) taskPathIds.add(normalizeWorkspacePathIdentity(t.workspacePath));
+    for (const l of legacy) if (l.workspacePath) taskPathIds.add(normalizeWorkspacePathIdentity(l.workspacePath));
     const opts: SelectOption[] = [{ value: '', label: '全部工作区' }];
+    const coveredIds = new Set<string>();
     for (const p of projects) {
       if (p.internal) continue;
-      if (!taskPaths.has(p.path)) continue;
+      const id = normalizeWorkspacePathIdentity(p.path);
+      if (!taskPathIds.has(id)) continue;
+      coveredIds.add(id);
       opts.push({
         value: p.path,
         label: p.displayName || p.name || p.path.split('/').pop() || p.path,
         icon: <WorkspaceIcon icon={p.icon} size={14} />,
       });
     }
-    // Include any path present in tasks but NOT in `projects` (e.g. the
-    // workspace was renamed / removed since the task was created) so
-    // users can still filter to orphan tasks rather than being locked
-    // out. Label uses the tail of the path.
-    for (const path of taskPaths) {
-      if (opts.some((o) => o.value === path)) continue;
+    // Include any workspace present in tasks but NOT in `projects` (e.g. the
+    // workspace was renamed / removed since the task was created) so users can
+    // still filter to orphan tasks rather than being locked out. Dedupe by
+    // identity and keep the original path form for the label/value.
+    const seenOrphan = new Set<string>();
+    const addOrphan = (path: string) => {
+      const id = normalizeWorkspacePathIdentity(path);
+      if (coveredIds.has(id) || seenOrphan.has(id)) return;
+      seenOrphan.add(id);
       opts.push({
         value: path,
         label: `${path.split('/').pop() ?? path} (已失效)`,
       });
-    }
+    };
+    for (const t of tasks) if (t.workspacePath) addOrphan(t.workspacePath);
+    for (const l of legacy) if (l.workspacePath) addOrphan(l.workspacePath);
     return opts;
   }, [tasks, legacy, projects]);
 

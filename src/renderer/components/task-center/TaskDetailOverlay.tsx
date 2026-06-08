@@ -22,6 +22,7 @@ import { useAgentStatuses } from '@/hooks/useAgentStatuses';
 import { useConfig } from '@/hooks/useConfig';
 import { useToast } from '@/components/Toast';
 import { listenWithCleanup } from '@/utils/tauriListen';
+import { workspacePathsEqual } from '@/../shared/workspacePath';
 import {
   taskArchive,
   taskDelete,
@@ -94,7 +95,7 @@ export function TaskDetailOverlay({
   const toast = useToast();
   const { projects } = useConfig();
   const agentId = useMemo(() => {
-    const p = projects.find((x) => x.path === task.workspacePath);
+    const p = projects.find((x) => workspacePathsEqual(x.path, task.workspacePath));
     return p?.agentId ?? null;
   }, [projects, task.workspacePath]);
 

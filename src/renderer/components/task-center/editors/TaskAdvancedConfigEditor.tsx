@@ -33,6 +33,7 @@ import {
 import type { McpServerDefinition } from '@/config/types';
 import type { RuntimeConfig } from '@/../shared/types/runtime';
 import { getAllMcpServersFromConfig } from '@/config/services/mcpService';
+import { workspacePathsEqual } from '@/../shared/workspacePath';
 import { apiGetJson } from '@/api/apiFetch';
 
 // "跟随" sentinel: an empty-string value selected from <CustomSelect>
@@ -121,7 +122,7 @@ export function TaskAdvancedConfigEditor(props: Props) {
   // permission / MCP via their own CLI flags.
   const workspaceAgent = useMemo(() => {
     if (!workspacePath) return null;
-    return config?.agents?.find((a) => a.workspacePath === workspacePath) ?? null;
+    return config?.agents?.find((a) => workspacePathsEqual(a.workspacePath, workspacePath)) ?? null;
   }, [workspacePath, config]);
 
   // Multi-Agent Runtime feature gate (Settings → 实验室). When OFF, this editor
@@ -228,7 +229,7 @@ export function TaskAdvancedConfigEditor(props: Props) {
   // Agent's `model` is unset, and to derive the display name for hint copy.
   const workspaceProject = useMemo(() => {
     if (!workspacePath) return null;
-    return projects.find((p) => p.path === workspacePath) ?? null;
+    return projects.find((p) => workspacePathsEqual(p.path, workspacePath)) ?? null;
   }, [workspacePath, projects]);
 
   // Workspace display label — derived locally from the resolved project so

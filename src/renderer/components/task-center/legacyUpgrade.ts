@@ -13,6 +13,7 @@
 // owned), then call the Rust primitive.
 
 import { taskCenterAvailable, taskUpgradeLegacyCron } from '@/api/taskCenter';
+import { workspacePathsEqual } from '@/../shared/workspacePath';
 import type { Project } from '@/config/types';
 import type { Task } from '@/../shared/types/task';
 
@@ -38,7 +39,9 @@ function getWorkspacePath(legacy: LegacyCronRaw): string {
 
 function resolveWorkspaceId(path: string, projects: Project[]): string | null {
   if (!path) return null;
-  return projects.find((p) => p.path === path)?.id ?? null;
+  // #320: projects.json keeps the native Windows dialog path (backslashes)
+  // while a cron's workspacePath is POSIX-style — never compare with raw `===`.
+  return projects.find((p) => workspacePathsEqual(p.path, path))?.id ?? null;
 }
 
 /** Cheap pre-flight: does this row have enough metadata for the Rust
