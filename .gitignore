@@ -48,7 +48,6 @@ npm-debug.log*
 # Codex CLI
 .context/
 .agents/
-AGENTS.md
 
 # Tauri / Rust
 src-tauri/target/
