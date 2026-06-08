@@ -128,11 +128,9 @@ export default memo(function WorkspaceCard({
                     <p className="mt-0.5 truncate text-[11px] text-[var(--ink-muted)]">
                         {shortenPathForDisplay(project.path)}
                     </p>
-                    {isProactive && (
+                    {isProactive && state !== 'pending' && (
                         <div className="mt-1 flex flex-wrap items-center gap-1">
-                            {state === 'pending' ? (
-                                <span className="text-[11px] text-[var(--accent-warm)]">待配置聊天机器人</span>
-                            ) : (agent?.channels ?? []).map(ch => {
+                            {(agent?.channels ?? []).map(ch => {
                                 const runtime = agentStatus?.channels.find(c => c.channelId === ch.id);
                                 const isOn = runtime?.status === 'online' || runtime?.status === 'connecting';
                                 const isErr = runtime?.status === 'error';
