@@ -3626,7 +3626,11 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
         const replayMsg = event.message.timestamp
           ? event.message
           : { ...event.message, timestamp: new Date().toISOString() };
-        broadcast('chat:message-replay', { message: replayMsg });
+        // This is RESUME history replay (not a live send echo — those come from
+        // sendExternalMessage above). Tag it cold-history so a REST-restored
+        // session suppresses it (REST owns ordered history) without suppressing
+        // the live user echo (#0608).
+        broadcast('chat:message-replay', { message: replayMsg, replayKind: 'cold-history' });
       }
       // Assistant replay: normally dropped because stream_event deltas already delivered
       // the content. But if stream deltas were missing (short response, rate limiting,

@@ -2165,7 +2165,14 @@ async function main() {
             ? stripPlaywrightResults(message.content)
             : message.content;
           const content = shrinkReplayContentForClient(strippedContent);
-          client.send('chat:message-replay', { message: { ...message, content } });
+          // `replayKind: 'cold-history'` marks this as the SSE-connect history
+          // backfill (the whole in-memory transcript), distinct from the LIVE
+          // `chat:message-replay` echoes that broadcast a freshly-sent user /
+          // command bubble (agent-session.ts). The renderer suppresses ONLY
+          // cold-history replay for a REST-restored session (REST owns ordered
+          // history); live echoes must always render or new user bubbles vanish
+          // after a restore (#0608 review — Codex caught the overload).
+          client.send('chat:message-replay', { message: { ...message, content }, replayKind: 'cold-history' });
         });
         client.send('chat:logs', { lines: getLogLines() });
         if (shouldUseExternalRuntime()) {
