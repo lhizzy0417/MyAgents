@@ -1209,10 +1209,25 @@ fn is_skill_blocked_on_platform(skill_folder: &str) -> bool {
 /// bump — idempotent otherwise. User edits to these directories will
 /// be overwritten when the version changes, by design (see module
 /// comment above).
+///
+/// async + spawn_blocking (cross-review 0.2.32): this command recursively
+/// deletes/copies skill directories and is invoked during config load
+/// (ConfigProvider). As a synchronous command it ran on the main thread —
+/// on macOS that's WKWebView's UI thread, so a version bump or a slow disk
+/// froze the whole WebView for the duration of the sweep (same class as the
+/// 0.2.31 cmd_ensure_session_sidecar freeze). The healthy-install fast path
+/// (version stamp + per-skill SKILL.md stat) is also disk I/O, so the entire
+/// body moves off-thread, not just the copy loop.
 #[tauri::command]
-pub fn cmd_sync_system_skills<R: Runtime>(
+pub async fn cmd_sync_system_skills<R: Runtime>(
     app_handle: AppHandle<R>,
 ) -> Result<bool, String> {
+    tauri::async_runtime::spawn_blocking(move || sync_system_skills_blocking(app_handle))
+        .await
+        .map_err(|e| format!("system-skills sync task failed: {}", e))?
+}
+
+fn sync_system_skills_blocking<R: Runtime>(app_handle: AppHandle<R>) -> Result<bool, String> {
     let home = dirs::home_dir().ok_or("Home dir not found")?;
     let myagents_dir = home.join(".myagents");
     let skills_dir = myagents_dir.join("skills");
