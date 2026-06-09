@@ -51,7 +51,7 @@ import type { ToolInput } from '../renderer/types/chat';
 import { parsePartialJson } from '../shared/parsePartialJson';
 import { deriveSessionTitle } from '../shared/sessionTitle';
 import { computeContextUsage } from '../shared/contextUsage';
-import { observedContextTokens } from './runtimes/external-watchdog-policy';
+import { resolveContextOccupancyTokens } from './runtimes/external-watchdog-policy';
 import type { SystemInitInfo } from '../shared/types/system';
 import { saveSessionMetadata, updateSessionTitleFromMessage, saveSessionMessages, saveAttachment, updateSessionMetadata, getSessionMetadata, getSessionData } from './SessionStore';
 import { firePostTurnTitleHook } from './turn-hooks';
@@ -1679,17 +1679,14 @@ function resetTurnUsage(): void {
  * `ModelUsage.contextWindow`，缺省回落 `lookupModelContextLength ?? 200K`（= auto-compact 有效窗口）。
  */
 function broadcastBuiltinContextUsage(): void {
-  // Fall back to the aggregate only when no per-message usage was captured
-  // (single-call turns make aggregate == latest, so this stays correct for the
-  // common no-tool case; multi-call providers all emit per-message usage).
-  const usageForOccupancy: MessageUsage = latestMainAssistantUsage ?? {
-    inputTokens: currentTurnUsage.inputTokens,
-    outputTokens: currentTurnUsage.outputTokens,
-    cacheReadTokens: currentTurnUsage.cacheReadTokens,
-    cacheCreationTokens: currentTurnUsage.cacheCreationTokens,
-  };
-  const occupied = observedContextTokens(usageForOccupancy);
-  if (occupied <= 0) return; // no usable data yet — don't flash a meaningless 0%
+  // 占用只取「最近一条主轮 assistant message」的 per-call usage；没有就**跳过**广播。
+  // #323 — 绝不回落到 currentTurnUsage 聚合：那是整 turn 多次调用的 cache-read 之和，
+  // `/compact` 这种控制轮（有成功 result + 大 modelUsage、却没有携带 usage 的主轮 assistant
+  // message）会把 20M+ 的求和当成当前占用 → computeContextUsage 把 % 封顶 100、却照样显示
+  // 不可能的 token 数（4.55M / 20.40M over 1M window）。跳过则保留上一可信值，下一条真实
+  // 消息（其 input ≈ 压缩后大小）自愈。与外部 runtime「缺 contextOccupiedTokens 就不发」同纪律。
+  const occupied = resolveContextOccupancyTokens(latestMainAssistantUsage);
+  if (occupied === null) return; // 无 per-call 快照（如 /compact 控制轮）— 不广播假占用
   // 窗口刻意用 `lookupModelContextLength ?? 200K`（computeContextUsage 内部回落），**不**用 SDK
   // `ModelUsage.contextWindow`：后者是 SDK `getContextWindowForModel()` 的值，对经 bridge 的第三方
   // builtin 模型（DeepSeek-128K 等）只会回落 200K 默认，与我们注入的 `CLAUDE_CODE_AUTO_COMPACT_WINDOW`
