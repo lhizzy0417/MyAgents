@@ -276,20 +276,41 @@ export default function BrowserPanel({
     };
   }, [browserAlive, isSplitTransitioning, syncBrowserBounds]);
 
+  // Track-until-stable resync (cross-review 0.2.32): a layoutSignature change
+  // (workspace panel open/close, overlay flip) can MOVE the panel without
+  // resizing it — an x/y-only animated move never fires ResizeObserver, and
+  // the previous fixed 8-frame pump (~133ms @60fps) stopped mid-way through
+  // the 300ms layout transition, leaving the native webview at a stale origin
+  // until some other trigger fired. Mirror the create path's stable-frames
+  // predicate instead: keep sampling until the rect holds still for
+  // STABLE_FRAMES consecutive frames, hard-capped as a runaway bound.
   useEffect(() => {
     if (!browserAlive || !isVisible || isSplitTransitioning) return;
     let rafId = 0;
     let frames = 0;
+    let stable = 0;
+    let lastSample: BrowserBounds | null = null;
+    const STABLE_FRAMES = 3;
+    const HARD_CAP_FRAMES = 40; // ~660ms @60fps — outlives the 300ms transition with margin
     const tick = () => {
       syncBrowserBounds();
+      const bounds = readUsableBounds();
+      if (bounds && lastSample && browserBoundsEqual(lastSample, bounds)) {
+        stable += 1;
+      } else {
+        stable = 0;
+      }
+      if (bounds) lastSample = bounds;
       frames += 1;
-      if (frames < 8) rafId = requestAnimationFrame(tick);
+      if (stable < STABLE_FRAMES && frames < HARD_CAP_FRAMES) {
+        rafId = requestAnimationFrame(tick);
+      }
     };
     rafId = requestAnimationFrame(tick);
     return () => {
       if (rafId) cancelAnimationFrame(rafId);
     };
-  }, [browserAlive, isVisible, isSplitTransitioning, layoutSignature, syncBrowserBounds]);
+  }, [browserAlive, isVisible, isSplitTransitioning, layoutSignature, syncBrowserBounds, readUsableBounds]);
 
   // Blank-state detection.
   //
