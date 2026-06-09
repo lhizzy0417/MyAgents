@@ -22,6 +22,7 @@ import { buildForkUuidRemap, remapStoredSdkUuids } from './utils/fork-remap';
 import { decideInFlightActionOnResult } from './utils/inflight-terminal';
 import { shouldBlockToolInPlanMode, planModeDenyMessage, isPlanModeInEffect, PLAN_MODE_READONLY_TOOLS, PLAN_MODE_HOST_INTERACTION_TOOLS, applyPermissionModeSelection, computePlanExitState, computeRestoredPlanState } from './utils/plan-mode-gate';
 import { isEmptySuccessfulSdkResult, isRecoveredAssistantMessageError } from './utils/sdk-turn-outcome';
+import { diagnoseSdkSubprocessFailure } from './utils/sdk-subprocess-diagnostics';
 import { InactivityWatchdog } from './utils/inactivity-watchdog';
 import { WATCHDOG_RESUME_REMINDER, planWatchdogAutoResume, shouldAdoptPendingContinueIntoScheduledAutoResume, shouldConsumePendingContinueAfterAbort, shouldDeferPendingContinueToScheduledAutoResume, shouldPrependWatchdogAutoResume } from './utils/watchdog-auto-resume';
 import { processImage, resizeToolImageContent, classifyImageError } from './utils/imageResize';
@@ -4027,6 +4028,11 @@ export async function materializeCurrentSessionMetadataForPublishedReset(): Prom
 function localizeImError(rawError: string): string {
   if (!rawError) return '模型处理消息时出错';
 
+  const sdkSubprocessDiagnostic = diagnoseSdkSubprocessFailure({ errorMessage: rawError });
+  if (sdkSubprocessDiagnostic) {
+    return sdkSubprocessDiagnostic.imMessage;
+  }
+
   // Image content not supported by model
   if (rawError.includes('unknown variant') && rawError.includes('image')) {
     return '当前模型不支持图片，请发送文字消息';
@@ -5437,7 +5443,7 @@ function handleMessageStopped(): void {
   clearBuiltinTurnTrace(stoppedTrace);
 }
 
-function handleMessageError(error: string): void {
+function handleMessageError(error: string, localizedError?: string): void {
   isStreamingMessage = false;
   const errorTrace = snapshotBuiltinTurnTrace();
   emitBuiltinTurnTrace('final', {
@@ -5462,7 +5468,7 @@ function handleMessageError(error: string): void {
   // Cross-owner fix: scope by sessionId so we only clear OUR slot.
   clearAmbientLogContextField(sessionId, 'turnId');
   // Pattern B/C/G: error → emit 'error' for head + pop queue.
-  emitImEvent('error', localizeImError(error));
+  emitImEvent('error', localizedError ?? localizeImError(error));
   const failedReq = popPendingRequest();
   if (failedReq) {
     imRequestRegistry.setStatus(failedReq, 'failed');
@@ -8398,6 +8404,7 @@ async function startStreamingSession(preWarm = false): Promise<void> {
   let preWarmStartedOk = false; // Tracks whether pre-warm received system_init
   let abortedByTimeout = false; // Distinguishes timeout abort from config-change abort
   let detectedAlreadyInUse = false; // stderr reported "Session ID already in use"
+  const recentSdkStderr: string[] = [];
   streamIndexToToolId.clear();
   streamIndexToBlockType.clear();
   imTextBlockIndices.clear();
@@ -8694,6 +8701,8 @@ async function startStreamingSession(preWarm = false): Promise<void> {
       pathToClaudeCodeExecutable: resolveClaudeCodeCli(),
       env,
       stderr: (message: string) => {
+        recentSdkStderr.push(message);
+        if (recentSdkStderr.length > 20) recentSdkStderr.shift();
         // Always log stderr to help diagnose subprocess issues (especially on older Windows)
         console.error('[sdk-stderr]', message);
         // Detect "Session ID already in use" early — stderr arrives before process exit error
@@ -11134,13 +11143,16 @@ async function startStreamingSession(preWarm = false): Promise<void> {
 
     // Enhanced error diagnostics for Windows subprocess failures
     let userFacingError = errorMessage;
-    if (errorMessage.includes('process exited with code 1') && process.platform === 'win32') {
-      console.error('[agent] Windows subprocess failure detected. Possible causes:');
-      console.error('[agent] 1. Git for Windows not installed (most common)');
-      console.error('[agent] 2. Git Bash not in PATH');
-      console.error('[agent] 3. CLAUDE_CODE_GIT_BASH_PATH environment variable not set');
-      console.error('[agent] Windows version:', process.env.OS || 'unknown');
-      userFacingError = '子进程启动失败 (exit code 1)。最可能原因：未安装 Git for Windows。请安装 Git：https://git-scm.com/downloads/win';
+    const sdkSubprocessDiagnostic = diagnoseSdkSubprocessFailure({
+      errorMessage,
+      stderr: recentSdkStderr,
+    });
+    if (sdkSubprocessDiagnostic) {
+      console.error(
+        `[agent] Windows SDK subprocess failure classified: kind=${sdkSubprocessDiagnostic.kind} ` +
+        `code=${sdkSubprocessDiagnostic.exitCodeHex ?? 'unknown'} os=${process.env.OS || 'unknown'}`,
+      );
+      userFacingError = sdkSubprocessDiagnostic.userMessage;
     }
 
     // Don't broadcast errors to frontend during pre-warm.
@@ -11163,7 +11175,7 @@ async function startStreamingSession(preWarm = false): Promise<void> {
     // debugging, just not broadcast.
     if (!isPreWarming && !shouldAbortSession) {
       broadcast('chat:message-error', userFacingError);
-      handleMessageError(errorMessage);
+      handleMessageError(errorMessage, sdkSubprocessDiagnostic?.imMessage);
       setSessionState('error');
     } else if (shouldAbortSession) {
       console.log(`[agent] Suppressing SDK error surfaced during abort (expected): ${errorMessage}`);

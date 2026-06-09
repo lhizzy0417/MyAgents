@@ -159,6 +159,7 @@ v0.2.0 之前这些步骤用 `bun build` + `bun install` — 完全切到 Node.j
 | 120s 超时 | health check 失败 | 查看 `[NODE]` 日志定位根因 |
 | MCP 安装失败 | 包管理器未找到 | 确认 `getPackageManagerPath()` 返回 npm（固定 npm） |
 | `Claude Code process exited with code 1` (Windows) | 缺少 Git for Windows | NSIS 安装程序内置 Git；或设 `CLAUDE_CODE_GIT_BASH_PATH` 环境变量 |
+| `Claude Code process exited with code 3221226505` / `0xC0000409` (Windows) | SDK 自带 `claude.exe` 是 native binary；可能受系统组件、DLL 环境或上游 binary 兼容性影响 | 提示 `Claude Agent SDK 启动失败（exit code ...），请检查运行环境。` |
 | npm v11.9.0 minizlib CJS bug (Windows) | bundled npm 与 Windows 某些文件锁冲突 | `setup_windows.ps1` / `build_windows.ps1` 自动升级到 latest npm |
 
 ### Windows Git 依赖说明
