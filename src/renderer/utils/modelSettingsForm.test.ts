@@ -5,6 +5,7 @@ import {
   isModalitySelectionValid,
   initialModalitySelection,
   resolveModalitiesToSave,
+  discoveredModelWritePlan,
 } from './modelSettingsForm';
 
 describe('parseContextWindowInput', () => {
@@ -80,5 +81,27 @@ describe('resolveModalitiesToSave', () => {
 
   it('persists for models that already had an explicit list, even untouched', () => {
     expect(resolveModalitiesToSave(false, ['text', 'image'], ['text', 'image'])).toEqual(['text', 'image']);
+  });
+});
+
+describe('discoveredModelWritePlan — re-adding a removed bundled preset (cross-review 0.2.32, codex)', () => {
+  const bundled = new Set(['claude-fable-5', 'claude-haiku-4-5']);
+
+  it('bundled id: un-remove only, never append a duplicate into presetCustomModels', () => {
+    // Regression: handleAddDiscoveredModel used to ALSO append the discovered
+    // entity into presetCustomModels. The renderer merge is preset-wins but the
+    // sidecar registry is first-wins over presetCustomModels — the duplicate
+    // made the UI show bundled values while the sidecar used discovered ones.
+    expect(discoveredModelWritePlan(bundled, 'claude-fable-5')).toEqual({
+      unremove: true,
+      appendToCustomModels: false,
+    });
+  });
+
+  it('non-bundled discovered id keeps today\'s behavior (append as user-added custom model)', () => {
+    expect(discoveredModelWritePlan(bundled, 'my-org/custom-model')).toEqual({
+      unremove: true,
+      appendToCustomModels: true,
+    });
   });
 });

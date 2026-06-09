@@ -12,6 +12,7 @@ import { useCloseLayer } from '@/hooks/useCloseLayer';
 import {
   EDITABLE_MODALITIES,
   MODALITY_LABELS,
+  discoveredModelWritePlan,
   initialModalitySelection,
   isModalitySelectionValid,
   parseContextWindowInput,
@@ -179,17 +180,26 @@ export default function ModelManagementPanel({
   // only fills gaps) while the sidecar registry ingests presetCustomModels
   // BEFORE bundled presets with first-wins, so the edit would silently apply
   // on the sidecar but never show in the UI. Exclude bundled IDs explicitly.
+  // Hand-curated bundled model ids for this builtin provider — shared by the
+  // editability gate below and the re-add write plan in
+  // handleAddDiscoveredModel (both must agree on what "bundled" means).
+  const bundledModelIds = useMemo(
+    () => new Set(
+      provider.isBuiltin
+        ? PRESET_PROVIDERS.find(p => p.id === provider.id)?.models.map(m => m.model) ?? []
+        : [],
+    ),
+    [provider.isBuiltin, provider.id],
+  );
+
   const editableModelIds = useMemo(() => {
     if (!provider.isBuiltin) return activeModelIds;
-    const bundled = new Set(
-      PRESET_PROVIDERS.find(p => p.id === provider.id)?.models.map(m => m.model) ?? [],
-    );
     return new Set(
       (config.presetCustomModels?.[provider.id] ?? [])
         .map(m => m.model)
-        .filter(id => !bundled.has(id)),
+        .filter(id => !bundledModelIds.has(id)),
     );
-  }, [provider.isBuiltin, provider.id, activeModelIds, config.presetCustomModels]);
+  }, [provider.isBuiltin, provider.id, activeModelIds, config.presetCustomModels, bundledModelIds]);
 
   const handleToggleEdit = useCallback((modelId: string) => {
     setEditingModelId(prev => (prev === modelId ? null : modelId));
@@ -238,13 +248,21 @@ export default function ModelManagementPanel({
           },
         };
       });
-      const existing = config.presetCustomModels?.[provider.id] ?? [];
-      await onSaveCustomModels(provider.id, [...existing, entity]);
+      // Re-adding a BUNDLED preset stops here: un-removing makes the preset
+      // resurface by itself. Appending a duplicate into presetCustomModels
+      // would diverge the registries (renderer merge is preset-wins, sidecar
+      // ingest is first-wins over presetCustomModels) — see
+      // discoveredModelWritePlan + its regression tests.
+      const plan = discoveredModelWritePlan(bundledModelIds, model.id);
+      if (plan.appendToCustomModels) {
+        const existing = config.presetCustomModels?.[provider.id] ?? [];
+        await onSaveCustomModels(provider.id, [...existing, entity]);
+      }
     } else if (onUpdateCustomProvider) {
       await onUpdateCustomProvider({ ...provider, models: [...provider.models, entity] });
     }
     await onRefresh();
-  }, [activeModelIds, provider, config.presetCustomModels, onSaveCustomModels, onUpdateCustomProvider, onRefresh]);
+  }, [activeModelIds, provider, config.presetCustomModels, bundledModelIds, onSaveCustomModels, onUpdateCustomProvider, onRefresh]);
 
   // ===== Filtered discovery (exclude already-added) =====
   const filteredDiscovered = useMemo(() => {

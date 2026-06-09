@@ -40,7 +40,7 @@ const MAX_CONTEXT_WINDOW = 20_000_000;
  *   '128k'    → 128_000      (case-insensitive, decimal allowed: '1.5k' → 1500)
  *   '1m'      → 1_000_000
  * Returns 'invalid' for anything that doesn't resolve to a positive integer
- * within (0, 100M].
+ * within (0, 20M] (see MAX_CONTEXT_WINDOW above).
  */
 export function parseContextWindowInput(raw: string): number | null | 'invalid' {
   const input = raw.trim();
@@ -66,6 +66,41 @@ export function initialModalitySelection(prev: readonly string[] | undefined): E
     return EDITABLE_MODALITIES.filter((m) => prev.includes(m));
   }
   return ['text'];
+}
+
+/**
+ * True when `modelId` is one of the app's hand-curated bundled models for a
+ * builtin (preset) provider.
+ *
+ * Why this gate exists (cross-review 0.2.32, codex): re-adding a previously
+ * REMOVED bundled preset must only delete it from `presetRemovedModels` — it
+ * must NOT also append a copy into `presetCustomModels`. The two registries
+ * disagree on precedence: the renderer merge is preset-wins
+ * (mergePresetCustomModels only fills gaps) while the sidecar capability
+ * registry ingests presetCustomModels BEFORE bundled presets with first-wins.
+ * A duplicate entry therefore makes the UI show the bundled context/modalities
+ * while the sidecar silently uses the discovered copy's values.
+ */
+export function isBundledPresetModelId(
+  bundledModelIds: ReadonlySet<string>,
+  modelId: string,
+): boolean {
+  return bundledModelIds.has(modelId);
+}
+
+/**
+ * Decide what `handleAddDiscoveredModel` should write for a builtin provider.
+ *  - bundled id  → un-remove only (the preset resurfaces by itself)
+ *  - custom id   → un-remove + append to presetCustomModels (today's behavior)
+ */
+export function discoveredModelWritePlan(
+  bundledModelIds: ReadonlySet<string>,
+  modelId: string,
+): { unremove: true; appendToCustomModels: boolean } {
+  return {
+    unremove: true,
+    appendToCustomModels: !isBundledPresetModelId(bundledModelIds, modelId),
+  };
 }
 
 /**
