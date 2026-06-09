@@ -48,8 +48,8 @@ import {
   EXTERNAL_WATCHDOG_DEFAULT_TIMEOUT_MS,
   externalRuntimeWatchdogTimeoutMs,
   estimatedContextTokensFromMessages,
-  observedContextTokens,
 } from './external-watchdog-policy';
+import { observedContextTokens } from '../utils/context-occupancy';
 import { computeContextUsage } from '../../shared/contextUsage';
 import type { ContextUsage } from '../../shared/types/context-usage';
 import { lookupModelContextLength } from '../utils/model-capabilities';

@@ -52,7 +52,7 @@ import type { ToolInput } from '../renderer/types/chat';
 import { parsePartialJson } from '../shared/parsePartialJson';
 import { deriveSessionTitle } from '../shared/sessionTitle';
 import { computeContextUsage } from '../shared/contextUsage';
-import { resolveContextOccupancyTokens } from './runtimes/external-watchdog-policy';
+import { resolveContextOccupancyTokens } from './utils/context-occupancy';
 import type { SystemInitInfo } from '../shared/types/system';
 import { saveSessionMetadata, updateSessionTitleFromMessage, saveSessionMessages, saveAttachment, updateSessionMetadata, getSessionMetadata, getSessionData } from './SessionStore';
 import { firePostTurnTitleHook } from './turn-hooks';
