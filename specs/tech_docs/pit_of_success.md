@@ -454,7 +454,7 @@ v0.2.0 Windows 版的 IM Bot 全部启动失败就是这个 trap：`find_tsx_run
 | `validate_workspace_root(path)` | 工作区根校验：必须是绝对路径 + 存在 + 通过 `commands::validate_file_path` 黑名单 | 所有 cmd 入口（读+写）|
 | `resolve_inside_workspace(root, rel)` | **写侧** 路径解析：lexical resolve `..`/`.` + `starts_with(root)` 校验。允许目标不存在（write/create cmd 必须） | `crud`、`gitignore`、`transfer`、`save_file` 等创建/重命名场景 |
 | `resolve_existing_inside_workspace(root, rel)` | **读侧** 路径解析：先调 lexical 版本，再 `fs::canonicalize` 把整条 symlink 链解开，最终路径必须 `starts_with(canonicalize(root))`。不存在 → 返回 `File not found` | `read_preview`、`download`、`save_file`（require existing）、`check_paths`、`claude_md` |
-| `validate_external_read_path(abs)` | 绝对路径外部读校验（drag-drop、Skill 详情打开），仅过 blacklist | `transfer::copy_paths`、`files_b64::read_files_b64`、`open_path_external` |
+| `validate_external_read_path(abs)` | 绝对路径外部读校验（drag-drop / launcher 工作区根）：lexical blacklist；路径**存在**时再 `fs::canonicalize` 复查一遍 blacklist（0.2.33 cross-review：中间 symlink 组件 `lure → ~/.ssh` 可穿透纯 lexical 检查）；不存在时仅 lexical 放行（slash.rs 要校验尚未创建的新工作区根）。返回 **lexical** 路径，保住调用方的 leaf-symlink 拒绝语义 | `slash`（workspace 根）、`transfer::copy_paths`、`files_b64::read_files_b64` |
 | `validate_item_name(name)` | 文件名校验：禁止空 / 路径分隔符 / 控制符 / Windows 保留名（含 trailing dot/space）| `crud::new_file/folder/rename` |
 | `sanitize_filename(name)` | 修复型清洗：把非法字符替换为 `_`，用于"用户上传文件名带 `<`/`?`"等 | `files_b64::write_unique_file` |
 
