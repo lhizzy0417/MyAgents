@@ -2,7 +2,11 @@ import { describe, expect, it, vi } from "vitest";
 
 import type { StickyAncestor } from "./treeTypes";
 
+import type { DirectoryTreeNode } from "../../../shared/dir-types";
+import type { VisibleTreeRow, WorkspaceTreeNodeMeta } from "./treeTypes";
+
 import {
+  buildStickyAncestors,
   MAX_STICKY_ANCESTOR_DEPTH,
   resolveStickyAncestors,
 } from "./treeFlatten";
@@ -122,5 +126,63 @@ describe("resolveStickyAncestors", () => {
     const spy = vi.fn(base);
     resolveStickyAncestors(3 * ROW, ROW, MAX_STICKY_ANCESTOR_DEPTH, spy);
     expect(spy.mock.calls.length).toBeLessThanOrEqual(MAX_STICKY_ANCESTOR_DEPTH + 1);
+  });
+});
+
+describe("buildStickyAncestors probe clamping", () => {
+  function makeRows(): {
+    rows: VisibleTreeRow[];
+    meta: Map<string, WorkspaceTreeNodeMeta>;
+  } {
+    const dir: DirectoryTreeNode = { id: "a", name: "a", path: "a", type: "dir" };
+    const child = (p: string): DirectoryTreeNode => ({
+      id: p,
+      name: p.split("/").pop() ?? p,
+      path: p,
+      type: "file",
+    });
+    const rows: VisibleTreeRow[] = [
+      {
+        data: dir,
+        depth: 0,
+        isDir: true,
+        isLoading: false,
+        isOpen: true,
+        isSelected: false,
+        parentPath: null,
+        path: "a",
+      },
+      ...["a/x.md", "a/y.md"].map((p) => ({
+        data: child(p),
+        depth: 1,
+        isDir: false,
+        isLoading: false,
+        isOpen: false,
+        isSelected: false,
+        parentPath: "a",
+        path: p,
+      })),
+    ];
+    const meta = new Map<string, WorkspaceTreeNodeMeta>([
+      ["a", { data: dir, depth: 0, parentPath: null }],
+    ]);
+    return { rows, meta };
+  }
+
+  // Regression: the overlay probe (`topUnits + count`) can overshoot the row
+  // list near the scroll bottom of a SHORT viewport. Bailing to [] there made
+  // the fixed point oscillate between [] and an n-deep stack across row
+  // boundaries (per-row breadcrumb flicker at the bottom). Overshoot must
+  // clamp to the LAST row's ancestors instead.
+  it("clamps an overshooting index to the last row's ancestors", () => {
+    const { rows, meta } = makeRows();
+    const result = buildStickyAncestors(rows, meta, 10, ROW, MAX_STICKY_ANCESTOR_DEPTH);
+    expect(result.map((a) => a.path)).toEqual(["a"]);
+  });
+
+  it("still returns [] for an empty row list", () => {
+    expect(
+      buildStickyAncestors([], new Map(), 5, ROW, MAX_STICKY_ANCESTOR_DEPTH),
+    ).toEqual([]);
   });
 });

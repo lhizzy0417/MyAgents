@@ -27,7 +27,7 @@ interface DragDropPayload {
 interface DropZone {
   id: string;
   element: HTMLElement | null;
-  onDrop: (paths: string[]) => void;
+  onDrop: (paths: string[], position?: { x: number; y: number }) => void;
 }
 
 interface UseTauriFileDropOptions {
@@ -35,8 +35,14 @@ interface UseTauriFileDropOptions {
   onDragEnter?: () => void;
   /** Called when drag leaves all zones */
   onDragLeave?: () => void;
-  /** Called when files are dropped */
-  onDrop?: (paths: string[], zoneId: string | null) => void;
+  /** Called when files are dropped. `position` is the drop point in the same
+   *  CSS-pixel space the zone hit-testing uses — consumers can resolve a
+   *  finer-grained target (e.g. which tree row) via `elementFromPoint`. */
+  onDrop?: (
+    paths: string[],
+    zoneId: string | null,
+    position?: { x: number; y: number },
+  ) => void;
   /**
    * Whether this hook instance should respond to Tauri drag events. Default `true`.
    *
@@ -176,9 +182,9 @@ export function useTauriFileDrop(options: UseTauriFileDropOptions = {}): UseTaur
 
       if (zoneId) {
         const zone = zonesRef.current.get(zoneId);
-        zone?.onDrop(paths);
+        zone?.onDrop(paths, event.payload.position);
       }
-      onDropRef.current?.(paths, zoneId);
+      onDropRef.current?.(paths, zoneId, event.payload.position);
 
       setActiveZoneId(null);
     }, ac.signal);

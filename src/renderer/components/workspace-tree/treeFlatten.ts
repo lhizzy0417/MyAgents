@@ -84,7 +84,14 @@ export function buildStickyAncestors(
     return [];
   }
 
-  const row = visibleRows[firstVisibleIndex];
+  // Clamp to the last row instead of bailing: the overlay-model probe
+  // (`topUnits + count`) can overshoot the row list near the scroll bottom
+  // when the viewport is only a few rows tall. Bailing to `[]` there makes
+  // the fixed-point iteration oscillate between `[]` and an n-deep stack at
+  // every row boundary (visible as per-row breadcrumb flicker); clamping
+  // means "use the last row's ancestors" — which is also the correct VS Code
+  // semantics for a bottom-pinned view.
+  const row = visibleRows[Math.min(firstVisibleIndex, visibleRows.length - 1)];
   if (!row) {
     return [];
   }

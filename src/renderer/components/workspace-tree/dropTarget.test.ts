@@ -5,8 +5,10 @@ import type { WorkspaceTreeNodeMeta } from "./treeTypes";
 
 import {
   parseDropId,
+  resolveExternalDropDir,
   resolveInternalDropTarget,
   ROOT_DROP_ID,
+  STICKY_DROP_PREFIX,
 } from "./dropTarget";
 
 function metaMap(
@@ -44,6 +46,37 @@ describe("parseDropId", () => {
     expect(parseDropId(ROOT_DROP_ID)).toBe("");
     expect(parseDropId("drag:docs")).toBeNull();
     expect(parseDropId(null)).toBeNull();
+  });
+
+  it("extracts the path from sticky breadcrumb drop ids", () => {
+    expect(parseDropId(`${STICKY_DROP_PREFIX}docs/notes`)).toBe("docs/notes");
+  });
+});
+
+describe("resolveInternalDropTarget via sticky breadcrumb ids", () => {
+  it("targets the breadcrumb's folder (the bar visually owns the top rows)", () => {
+    expect(
+      resolveInternalDropTarget(`${STICKY_DROP_PREFIX}docs/notes`, ["root.md"], META),
+    ).toBe("docs/notes");
+  });
+
+  it("still applies self/descendant and no-op guards", () => {
+    expect(
+      resolveInternalDropTarget(`${STICKY_DROP_PREFIX}docs`, ["docs"], META),
+    ).toBeNull();
+    expect(
+      resolveInternalDropTarget(`${STICKY_DROP_PREFIX}docs/notes`, ["docs/notes/a.md"], META),
+    ).toBeNull();
+  });
+});
+
+describe("resolveExternalDropDir", () => {
+  it("maps dir → itself, file → parent, blank/unknown → root", () => {
+    expect(resolveExternalDropDir("docs/notes", META)).toBe("docs/notes");
+    expect(resolveExternalDropDir("docs/notes/a.md", META)).toBe("docs/notes");
+    expect(resolveExternalDropDir("root.md", META)).toBe("");
+    expect(resolveExternalDropDir(null, META)).toBe("");
+    expect(resolveExternalDropDir("gone/away.md", META)).toBe("");
   });
 });
 

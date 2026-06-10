@@ -9,9 +9,23 @@ import type { WorkspaceTreeNodeMeta } from "./treeTypes";
  */
 export const ROOT_DROP_ID = "drop:";
 
-/** Extract the workspace-relative path from a `drop:<path>` droppable id. */
+/**
+ * Droppable id prefix for STICKY breadcrumb rows. They need their own
+ * namespace because the ancestor's real row (`drop:<path>`) is still
+ * registered while scrolled out of view, and dnd-kit ids must be unique.
+ * The sticky bar visually owns the top of the viewport, so the panel's
+ * collision detection lets sticky hits beat the rows hidden underneath —
+ * without this, dropping "on the breadcrumb folder" landed in whatever
+ * invisible row happened to sit behind the bar.
+ */
+export const STICKY_DROP_PREFIX = "sticky:";
+
+/** Extract the workspace-relative path from a `drop:<path>` / `sticky:<path>` id. */
 export function parseDropId(overId: string | null): string | null {
   if (overId === null) return null;
+  if (overId.startsWith(STICKY_DROP_PREFIX)) {
+    return overId.slice(STICKY_DROP_PREFIX.length);
+  }
   if (!overId.startsWith("drop:")) return null;
   return overId.slice("drop:".length);
 }
@@ -19,6 +33,24 @@ export function parseDropId(overId: string | null): string | null {
 function parentDirOf(path: string): string {
   const idx = path.lastIndexOf("/");
   return idx > 0 ? path.slice(0, idx) : "";
+}
+
+/**
+ * Resolve the target directory for an EXTERNAL drag (OS files / browser
+ * File objects) hovering or dropping on a tree element, identified by the
+ * `data-tree-path` attribute under the pointer. Same semantics as the
+ * internal resolver minus the source guards (external items have no source
+ * inside the tree): dir → itself, file → its parent dir, blank / unknown →
+ * workspace root.
+ */
+export function resolveExternalDropDir(
+  pathAttr: string | null,
+  nodeMetaByPath: ReadonlyMap<string, WorkspaceTreeNodeMeta>,
+): string {
+  if (!pathAttr) return "";
+  const meta = nodeMetaByPath.get(pathAttr);
+  if (!meta) return "";
+  return meta.data.type === "dir" ? pathAttr : (meta.parentPath ?? "");
 }
 
 /**

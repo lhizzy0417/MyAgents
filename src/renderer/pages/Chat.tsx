@@ -1407,13 +1407,14 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
     triggerWorkspaceRefresh();
   }, [triggerWorkspaceRefresh]);
 
-  // Handle Tauri file drop on directory panel
-  const handleTauriDirectoryDrop = useCallback(async (paths: string[]) => {
+  // Handle Tauri file drop on directory panel. Forward the drop position so
+  // the panel resolves the target folder from the tree row under the pointer
+  // (instead of the current selection — see DirectoryPanelHandle.handleFileDrop).
+  const handleTauriDirectoryDrop = useCallback(async (paths: string[], position?: { x: number; y: number }) => {
     if (isDebugMode()) {
-      console.log('[Chat] Tauri drop on directory panel:', paths);
+      console.log('[Chat] Tauri drop on directory panel:', paths, position);
     }
-    // DirectoryPanel handles this internally now
-    await directoryPanelRef.current?.handleFileDrop(paths);
+    await directoryPanelRef.current?.handleFileDrop(paths, position);
   }, []);
 
   // Use refs to avoid recreating onDrop callback when handlers change
@@ -1432,14 +1433,14 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
     // below defaults to chat-drop regardless. Gating at the hook ensures only the
     // visible tab reacts.
     enabled: isActive,
-    onDrop: (paths, zoneId) => {
+    onDrop: (paths, zoneId, position) => {
       if (isDebugMode()) {
         console.log('[Chat] Tauri drop event - zoneId:', zoneId, 'paths:', paths);
       }
       if (zoneId === 'chat-content') {
         void handleTauriChatDropRef.current(paths);
       } else if (zoneId === 'directory-panel') {
-        void handleTauriDirectoryDropRef.current(paths);
+        void handleTauriDirectoryDropRef.current(paths, position);
       } else {
         // Default: drop to chat area
         void handleTauriChatDropRef.current(paths);

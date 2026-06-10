@@ -1,11 +1,15 @@
 import { ChevronRight, FolderOpen } from "lucide-react";
 import { memo } from "react";
+import { useDroppable } from "@dnd-kit/core";
 
+import { STICKY_DROP_PREFIX } from "./dropTarget";
 import type { StickyAncestor } from "./treeTypes";
 
 interface WorkspaceTreeStickyAncestorsProps {
   ancestors: StickyAncestor[];
   rowHeight: number;
+  /** The resolved drop target (internal drag OR external drag), for highlight. */
+  dropHighlightPath: string | null;
   /** Chevron click → collapse that folder. */
   onClosePath: (path: string) => void;
   /** Row click → jump to (select + scroll to) that folder, VS Code style. */
@@ -15,57 +19,116 @@ interface WorkspaceTreeStickyAncestorsProps {
    *  and opened the ROOT menu — so 「新建笔记」 on what the user perceived
    *  as a folder created the note at the workspace root. */
   onPathContextMenu: (path: string, event: React.MouseEvent) => void;
+  /** Wheel events would otherwise die on the overlay (it is a SIBLING of the
+   *  Virtuoso scroller, so nothing scrollable sits in its bubble path) —
+   *  forward them so the bar isn't a scroll dead zone. */
+  onWheel: (event: React.WheelEvent) => void;
 }
+
+/** One breadcrumb row. Split out so each row can register its own droppable:
+ *  the bar visually owns the top of the viewport, and without an explicit
+ *  droppable the collision detection hit the INVISIBLE rows covered by the
+ *  bar — dropping "on the breadcrumb folder" landed somewhere else.
+ *  `data-tree-row` / `data-tree-path` make external (OS / browser) drags and
+ *  the container's empty-area checks see this row like any tree row. */
+const StickyAncestorRow = memo(function StickyAncestorRow({
+  ancestor,
+  rowHeight,
+  isDropTarget,
+  onClosePath,
+  onJumpToPath,
+  onPathContextMenu,
+}: {
+  ancestor: StickyAncestor;
+  rowHeight: number;
+  isDropTarget: boolean;
+  onClosePath: (path: string) => void;
+  onJumpToPath: (path: string) => void;
+  onPathContextMenu: (path: string, event: React.MouseEvent) => void;
+}) {
+  const { setNodeRef } = useDroppable({
+    id: `${STICKY_DROP_PREFIX}${ancestor.path}`,
+  });
+
+  return (
+    <div
+      ref={setNodeRef}
+      role="button"
+      tabIndex={0}
+      data-tree-row
+      data-tree-path={ancestor.path}
+      className={`flex w-full cursor-pointer items-center gap-2 px-3 text-[13px] font-medium transition-colors ${
+        isDropTarget
+          ? "ring-1 ring-inset ring-[var(--accent)]/40 bg-[var(--accent)]/8 text-[var(--ink)]"
+          : "text-[var(--ink-muted)] hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]"
+      }`}
+      style={{
+        height: rowHeight,
+        paddingLeft: `${12 + ancestor.depth * 16}px`,
+      }}
+      onClick={() => onJumpToPath(ancestor.path)}
+      onKeyDown={(e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          onJumpToPath(ancestor.path);
+        }
+      }}
+      onContextMenu={(e) => onPathContextMenu(ancestor.path, e)}
+    >
+      <button
+        type="button"
+        title="收起文件夹"
+        className="flex h-4 w-4 flex-shrink-0 items-center justify-center rounded text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
+        onClick={(e) => {
+          e.stopPropagation();
+          onClosePath(ancestor.path);
+        }}
+        // Keyboard activation must stay on the chevron: without this the
+        // keydown bubbles to the row, whose handler preventDefaults (killing
+        // the button's native click) and jumps instead of collapsing.
+        onKeyDown={(e) => {
+          if (e.key === "Enter" || e.key === " ") {
+            e.stopPropagation();
+          }
+        }}
+      >
+        <ChevronRight className="h-3 w-3 rotate-90 transition-transform" />
+      </button>
+      <FolderOpen className="h-3.5 w-3.5 flex-shrink-0 text-[var(--accent-warm)]/70" />
+      <span className="min-w-0 flex-1 truncate text-left">{ancestor.name}</span>
+    </div>
+  );
+});
 
 export const WorkspaceTreeStickyAncestors = memo(
   function WorkspaceTreeStickyAncestors({
     ancestors,
     rowHeight,
+    dropHighlightPath,
     onClosePath,
     onJumpToPath,
     onPathContextMenu,
+    onWheel,
   }: WorkspaceTreeStickyAncestorsProps) {
     if (ancestors.length === 0) {
       return null;
     }
 
     return (
-      <div className="absolute left-0 right-0 top-0 z-10 border-b border-[var(--line-subtle)] bg-[var(--paper-elevated)] shadow-xs">
+      <div
+        className="absolute left-0 right-0 top-0 z-10 border-b border-[var(--line-subtle)] bg-[var(--paper-elevated)] shadow-xs"
+        onWheel={onWheel}
+      >
         {ancestors.map((ancestor) => (
-          <div
+          <StickyAncestorRow
             key={ancestor.path}
-            role="button"
-            tabIndex={0}
-            className="flex w-full cursor-pointer items-center gap-2 px-3 text-[13px] font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]"
-            style={{
-              height: rowHeight,
-              paddingLeft: `${12 + ancestor.depth * 16}px`,
-            }}
-            onClick={() => onJumpToPath(ancestor.path)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter" || e.key === " ") {
-                e.preventDefault();
-                onJumpToPath(ancestor.path);
-              }
-            }}
-            onContextMenu={(e) => onPathContextMenu(ancestor.path, e)}
-          >
-            <button
-              type="button"
-              title="收起文件夹"
-              className="flex h-4 w-4 flex-shrink-0 items-center justify-center rounded text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
-              onClick={(e) => {
-                e.stopPropagation();
-                onClosePath(ancestor.path);
-              }}
-            >
-              <ChevronRight className="h-3 w-3 rotate-90 transition-transform" />
-            </button>
-            <FolderOpen className="h-3.5 w-3.5 flex-shrink-0 text-[var(--accent-warm)]/70" />
-            <span className="min-w-0 flex-1 truncate text-left">
-              {ancestor.name}
-            </span>
-          </div>
+            ancestor={ancestor}
+            rowHeight={rowHeight}
+            isDropTarget={dropHighlightPath === ancestor.path}
+            onClosePath={onClosePath}
+            onJumpToPath={onJumpToPath}
+            onPathContextMenu={onPathContextMenu}
+          />
         ))}
       </div>
     );

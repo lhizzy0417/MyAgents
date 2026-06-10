@@ -109,8 +109,10 @@ import WorkspaceIcon from "./launcher/WorkspaceIcon";
 import { useWorkspaceTreeModel } from "./workspace-tree/useWorkspaceTreeModel";
 import { WorkspaceTreeViewport } from "./workspace-tree/WorkspaceTreeViewport";
 import {
-  ROOT_DROP_ID,
+  resolveExternalDropDir,
   resolveInternalDropTarget,
+  ROOT_DROP_ID,
+  STICKY_DROP_PREFIX,
 } from "./workspace-tree/dropTarget";
 import {
   applyChildrenMap,
@@ -125,8 +127,15 @@ const FilePreviewModal = lazy(() => import("./FilePreviewModal"));
 
 /** Imperative handle for DirectoryPanel */
 export interface DirectoryPanelHandle {
-  /** Handle file drop from Tauri (takes absolute file paths) */
-  handleFileDrop: (paths: string[]) => Promise<void>;
+  /** Handle file drop from Tauri (absolute file paths + the drop position in
+   *  CSS pixels, same coordinate space `useTauriFileDrop` already uses for
+   *  zone hit-testing). With a position the target dir is resolved from the
+   *  tree element under the pointer; without one (browser dev mode) it falls
+   *  back to the current selection. */
+  handleFileDrop: (
+    paths: string[],
+    position?: { x: number; y: number },
+  ) => Promise<void>;
   /** Refresh the directory tree */
   refresh: () => void;
 }
@@ -441,6 +450,15 @@ const DirectoryPanel = memo(
     const searchResultsRef = useRef<FileSearchHit[]>([]);
     const previewFocusRequestIdRef = useRef(0);
     const treeRevealRequestIdRef = useRef(0);
+    // Invalidate all in-flight reveal polls (waitForNodeMeta loops run up to
+    // ~3s on rAF) when the panel unmounts — otherwise they keep walking and
+    // fire openPath / setSelectedNodes / error toasts on a dead panel.
+    useEffect(
+      () => () => {
+        treeRevealRequestIdRef.current += 1;
+      },
+      [],
+    );
 
     const debouncedSearchQuery = useDebounce(searchQuery, 300);
 
@@ -963,9 +981,15 @@ const DirectoryPanel = memo(
     );
 
     const handleRevealSearchResultInTree = useCallback(
-      async (path: string) => {
+      async (path: string, options?: { silentIfMissing?: boolean }) => {
         const requestId = ++treeRevealRequestIdRef.current;
         const ancestors = ancestorDirectoryPaths(path);
+        // "Missing" is a real error for search/chat reveals (the file should
+        // exist), but expected noise for just-created files whose watcher
+        // refresh is slow — those callers pass silentIfMissing.
+        const reportMissing = () => {
+          if (!options?.silentIfMissing) toast.error("文件不存在或已删除");
+        };
 
         for (const ancestor of ancestors) {
           const result = await waitForNodeMeta(ancestor, requestId);
@@ -973,7 +997,7 @@ const DirectoryPanel = memo(
             return;
           }
           if (result.status !== "found" || result.meta.data.type !== "dir") {
-            toast.error("文件不存在或已删除");
+            reportMissing();
             return;
           }
 
@@ -992,7 +1016,7 @@ const DirectoryPanel = memo(
         // Accept files AND dirs — search hits are files, but the chat path menu
         // can reveal a directory too (locate + select + scroll, no auto-expand).
         if (targetResult.status !== "found") {
-          toast.error("文件不存在或已删除");
+          reportMissing();
           return;
         }
 
@@ -1361,25 +1385,45 @@ const DirectoryPanel = memo(
     useImperativeHandle(
       ref,
       () => ({
-        handleFileDrop: async (paths: string[]) => {
-          // Determine target directory based on selection (use first selected item)
+        handleFileDrop: async (
+          paths: string[],
+          position?: { x: number; y: number },
+        ) => {
           let targetDir = "";
-          const firstSelected = selectedNodes[0];
-          if (firstSelected) {
-            if (firstSelected.type === "dir") {
-              targetDir = firstSelected.path;
-            } else {
-              // For files, use parent directory
-              const parts = firstSelected.path.split("/");
-              parts.pop();
-              targetDir = parts.join("/");
+          const hitEl = position
+            ? document
+                .elementFromPoint(position.x, position.y)
+                ?.closest?.("[data-tree-path]")
+            : null;
+          if (position) {
+            // Desktop path: Tauri intercepts OS drags (HTML5 drag events never
+            // fire), so the row-level targeting can't run — resolve from the
+            // element under the DROP position instead. Pre-fix this used the
+            // CURRENT SELECTION, so "dropping onto folder A" imported into
+            // whatever was selected (or the root), regardless of the pointer.
+            targetDir = resolveExternalDropDir(
+              hitEl?.getAttribute("data-tree-path") ?? null,
+              nodeMetaByPath,
+            );
+          } else {
+            // No position (browser dev mode) — fall back to the selection
+            // heuristic.
+            const firstSelected = selectedNodes[0];
+            if (firstSelected) {
+              if (firstSelected.type === "dir") {
+                targetDir = firstSelected.path;
+              } else {
+                const parts = firstSelected.path.split("/");
+                parts.pop();
+                targetDir = parts.join("/");
+              }
             }
           }
           await handleTauriFileDrop(paths, targetDir);
         },
         refresh,
       }),
-      [selectedNodes, handleTauriFileDrop, refresh],
+      [selectedNodes, handleTauriFileDrop, refresh, nodeMetaByPath],
     );
 
     // Check if a drag event contains external files
@@ -1406,6 +1450,21 @@ const DirectoryPanel = memo(
       [isExternalFileDrag],
     );
 
+    // Resolve the target dir of an external (HTML5) drag from whatever tree
+    // element sits under the pointer. Attribute-based so it uniformly covers
+    // tree rows AND sticky breadcrumb rows (both carry `data-tree-path`):
+    // dir → itself, file → its parent, blank space → workspace root.
+    const externalDropDirFromEventTarget = useCallback(
+      (e: React.DragEvent): string => {
+        const el = (e.target as HTMLElement).closest?.("[data-tree-path]");
+        return resolveExternalDropDir(
+          el?.getAttribute("data-tree-path") ?? null,
+          nodeMetaByPath,
+        );
+      },
+      [nodeMetaByPath],
+    );
+
     const handleTreeDragOver = useCallback(
       (e: React.DragEvent) => {
         e.preventDefault();
@@ -1414,14 +1473,14 @@ const DirectoryPanel = memo(
         if (!isExternalFileDrag(e)) return;
 
         e.dataTransfer.dropEffect = "copy";
-        // Hovering blank space (below the last row) targets the workspace
-        // root. Pre-fix the last-highlighted folder silently stayed the
-        // target, so the drop landed somewhere the pointer wasn't.
-        if (!(e.target as HTMLElement).closest?.("[data-tree-row]")) {
-          setDropTargetPath((prev) => (prev === "" ? prev : ""));
-        }
+        // Re-resolve continuously from the element under the pointer. The
+        // previous enter/leave bookkeeping let the last-highlighted folder
+        // stay the target when the pointer moved onto a file row or blank
+        // space — the drop landed somewhere the pointer wasn't.
+        const next = externalDropDirFromEventTarget(e);
+        setDropTargetPath((prev) => (prev === next ? prev : next));
       },
-      [isExternalFileDrag],
+      [externalDropDirFromEventTarget, isExternalFileDrag],
     );
 
     const handleTreeDragLeave = useCallback((e: React.DragEvent) => {
@@ -1442,9 +1501,11 @@ const DirectoryPanel = memo(
 
         dragCounterRef.current = 0;
         setIsExternalDrop(false);
-
-        const targetPath = dropTargetPath ?? "";
         setDropTargetPath(null);
+
+        // Resolve at DROP time from the element under the pointer — never
+        // trust the (state-lagged) hover highlight for the actual write.
+        const targetPath = externalDropDirFromEventTarget(e);
 
         const files = Array.from(e.dataTransfer?.files ?? []);
         if (files.length > 0) {
@@ -1459,27 +1520,8 @@ const DirectoryPanel = memo(
           void handleExternalFileDrop(files, targetPath);
         }
       },
-      [dropTargetPath, handleExternalFileDrop],
+      [externalDropDirFromEventTarget, handleExternalFileDrop],
     );
-
-    // Row-level drag handlers for directory highlighting (external OS drags).
-    // VS Code semantics: a directory row targets itself; a FILE row targets
-    // the directory the file lives in (root = ""). Pre-fix file rows kept the
-    // previously-highlighted directory as the target, so dropping "on a file"
-    // imported into whatever folder the pointer passed earlier.
-    const handleRowDragEnter = useCallback(
-      (e: React.DragEvent, row: VisibleTreeRow) => {
-        e.stopPropagation();
-        if (!isExternalFileDrag(e)) return;
-        setDropTargetPath(row.isDir ? row.path : (row.parentPath ?? ""));
-      },
-      [isExternalFileDrag],
-    );
-
-    const handleRowDragLeave = useCallback((e: React.DragEvent) => {
-      e.stopPropagation();
-      // Don't clear dropTargetPath here - let tree level handler or drop handler do it
-    }, []);
 
     // Move handler (used by both internal DnD and context menu).
     // Cross-review caught: pre-fix this ignored `result.errors`, so partial
@@ -1531,14 +1573,24 @@ const DirectoryPanel = memo(
       useSensor(PointerSensor, { activationConstraint: { distance: 5 } }),
     );
 
-    // Pointer-based collision with "rows beat the root zone". `pointerWithin`
+    // Pointer-based collision with explicit z-order arbitration. `pointerWithin`
     // (vs the default rect-intersection) keys the target to where the POINTER
     // is, not where the floating overlay's rectangle happens to overlap —
     // rect-intersection made the highlight flip between adjacent folders
-    // while dragging (the "拖拽晃动" jitter). The viewport-wide root zone
-    // geometrically contains every row, so rows must win when both match.
+    // while dragging (the "拖拽晃动" jitter). pointerWithin is geometric, not
+    // a DOM hit-test, so stacking must be arbitrated here:
+    //   1. STICKY breadcrumb rows beat everything — they visually COVER the
+    //      rows underneath, which are still registered droppables; without
+    //      this, dropping "on the breadcrumb folder" landed in an invisible
+    //      covered row.
+    //   2. Tree rows beat the viewport-wide root zone (which geometrically
+    //      contains every row).
     const dndCollisionDetection: CollisionDetection = useCallback((args) => {
       const within = pointerWithin(args);
+      const stickyHits = within.filter((c) =>
+        String(c.id).startsWith(STICKY_DROP_PREFIX),
+      );
+      if (stickyHits.length > 0) return stickyHits;
       const rowHits = within.filter((c) => c.id !== ROOT_DROP_ID);
       return rowHits.length > 0 ? rowHits : within;
     }, []);
@@ -1791,7 +1843,9 @@ const DirectoryPanel = memo(
           },
         ]);
         lastClickedPathRef.current = relPath;
-        void handleRevealSearchResultInTree(relPath);
+        // silentIfMissing: creation already succeeded — a slow watcher refresh
+        // must not surface a scary "文件不存在或已删除" toast.
+        void handleRevealSearchResultInTree(relPath, { silentIfMissing: true });
       },
       [markPendingSelection, handleRevealSearchResultInTree],
     );
@@ -2643,8 +2697,6 @@ const DirectoryPanel = memo(
                       onScrollTopChange={handleTreeScrollTopChange}
                       onRowClick={handleRowClick}
                       onRowContextMenu={handleRowContextMenu}
-                      onRowDragEnter={handleRowDragEnter}
-                      onRowDragLeave={handleRowDragLeave}
                     />
                     {/* Drag overlay — floating preview that follows cursor */}
                     <DragOverlay dropAnimation={null}>

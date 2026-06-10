@@ -66,8 +66,6 @@ interface WorkspaceTreeViewportProps {
   onAncestorContextMenu: (path: string, event: React.MouseEvent) => void;
   onRowClick: (row: VisibleTreeRow, event: React.MouseEvent) => void;
   onRowContextMenu: (row: VisibleTreeRow, event: React.MouseEvent) => void;
-  onRowDragEnter: (event: React.DragEvent, row: VisibleTreeRow) => void;
-  onRowDragLeave: (event: React.DragEvent, row: VisibleTreeRow) => void;
   onScrollTopChange?: (scrollTop: number) => void;
 }
 
@@ -86,8 +84,6 @@ export const WorkspaceTreeViewport = memo(function WorkspaceTreeViewport({
   onAncestorContextMenu,
   onRowClick,
   onRowContextMenu,
-  onRowDragEnter,
-  onRowDragLeave,
   onScrollTopChange,
 }: WorkspaceTreeViewportProps) {
   // Scroll position quantized to whole rows. The sticky breadcrumb only
@@ -183,6 +179,13 @@ export const WorkspaceTreeViewport = memo(function WorkspaceTreeViewport({
   // via the panel's collision detection (rows are checked first).
   const { setNodeRef: setRootDropRef } = useDroppable({ id: ROOT_DROP_ID });
 
+  // Forward wheel events from the sticky overlay to the scroller. The overlay
+  // is a SIBLING of Virtuoso's scroller, so wheel events over it have no
+  // scrollable ancestor and the top of the tree becomes a scroll dead zone.
+  const handleStickyWheel = useCallback((event: React.WheelEvent) => {
+    scrollerElRef.current?.scrollBy({ top: event.deltaY });
+  }, []);
+
   // Scroll a requested path into view. The tree is conditionally rendered
   // (search ↔ tree), so a reveal coincides with a FRESH MOUNT of this Virtuoso,
   // whose scroller isn't measured yet during this mount-time effect —
@@ -240,9 +243,11 @@ export const WorkspaceTreeViewport = memo(function WorkspaceTreeViewport({
       <WorkspaceTreeStickyAncestors
         ancestors={stickyAncestors}
         rowHeight={rowHeight}
+        dropHighlightPath={internalDropTarget ?? dropTargetPath}
         onClosePath={onCloseAncestorPath}
         onJumpToPath={onJumpToAncestorPath}
         onPathContextMenu={onAncestorContextMenu}
+        onWheel={handleStickyWheel}
       />
       <Virtuoso
         ref={virtuosoRef}
@@ -263,8 +268,6 @@ export const WorkspaceTreeViewport = memo(function WorkspaceTreeViewport({
             isDragging={activeDragPaths.includes(row.path)}
             onClick={(event) => onRowClick(row, event)}
             onContextMenu={(event) => onRowContextMenu(row, event)}
-            onDragEnter={(event) => onRowDragEnter(event, row)}
-            onDragLeave={(event) => onRowDragLeave(event, row)}
           />
         )}
       />

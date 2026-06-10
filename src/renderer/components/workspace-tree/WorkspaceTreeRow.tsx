@@ -14,8 +14,6 @@ interface WorkspaceTreeRowProps {
   isDragging: boolean;
   onClick: (e: React.MouseEvent) => void;
   onContextMenu: (e: React.MouseEvent) => void;
-  onDragEnter: (e: React.DragEvent) => void;
-  onDragLeave: (e: React.DragEvent) => void;
 }
 
 export const WorkspaceTreeRow = memo(function WorkspaceTreeRow({
@@ -26,8 +24,6 @@ export const WorkspaceTreeRow = memo(function WorkspaceTreeRow({
   isDragging,
   onClick,
   onContextMenu,
-  onDragEnter,
-  onDragLeave,
 }: WorkspaceTreeRowProps) {
   const {
     attributes,
@@ -63,6 +59,7 @@ export const WorkspaceTreeRow = memo(function WorkspaceTreeRow({
     <div
       ref={mergedRef}
       data-tree-row
+      data-tree-path={row.path}
       {...attributes}
       {...listeners}
       className={`flex cursor-pointer items-center gap-2 px-3 text-[13px] transition-colors select-none ${
@@ -80,8 +77,6 @@ export const WorkspaceTreeRow = memo(function WorkspaceTreeRow({
       }}
       onClick={onClick}
       onContextMenu={onContextMenu}
-      onDragEnter={onDragEnter}
-      onDragLeave={onDragLeave}
     >
       <span className="flex h-4 w-4 flex-shrink-0 items-center justify-center text-[var(--ink-muted)]">
         {row.isLoading ? (

@@ -97,8 +97,6 @@ function renderViewport(overrides: Partial<ComponentProps<typeof WorkspaceTreeVi
       onAncestorContextMenu={vi.fn()}
       onRowClick={vi.fn()}
       onRowContextMenu={vi.fn()}
-      onRowDragEnter={vi.fn()}
-      onRowDragLeave={vi.fn()}
       {...overrides}
     />,
   );
