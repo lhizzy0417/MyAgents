@@ -49,9 +49,13 @@ pub async fn cmd_workspace_delete(
         Err(e) => return Err(format!("stat failed: {}", e)),
     };
 
-    // Symlinks always unlink directly regardless of mode: removing a link
-    // destroys no data (the target is untouched), and trash backends stat
-    // the link target — a broken link would error the whole delete.
+    // Symlinks always unlink directly regardless of mode. Rationale
+    // (corrected by cross-review — trash 5.x backends are actually
+    // symlink-aware on Linux): removing a link destroys no data (the target
+    // is untouched), and trash-vs-unlink behavior for links differs subtly
+    // across the macOS / Windows / freedesktop backends — direct unlink is
+    // the one deterministic cross-platform semantic. Cost: a deleted VALID
+    // symlink isn't restorable from the trash (only the link itself is lost).
     if metadata.is_symlink() {
         fs::remove_file(&target)
             .map_err(|e| format!("Failed to delete {}: {}", path, e))?;

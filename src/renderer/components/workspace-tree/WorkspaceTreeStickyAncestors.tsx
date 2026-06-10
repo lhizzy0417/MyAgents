@@ -70,6 +70,10 @@ const StickyAncestorRow = memo(function StickyAncestorRow({
       onKeyDown={(e) => {
         if (e.key === "Enter" || e.key === " ") {
           e.preventDefault();
+          // Without stopPropagation the event reaches the tree container's
+          // key handler, which re-runs `activate` against the (stale)
+          // focused row — a second action on top of the jump.
+          e.stopPropagation();
           onJumpToPath(ancestor.path);
         }
       }}

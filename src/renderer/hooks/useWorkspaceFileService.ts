@@ -219,8 +219,11 @@ export interface WorkspaceFileService {
   addGitignore(args: { pattern: string }): Promise<GitignoreResult>;
   /** [requires workspace] Fuzzy file-name search for the @ mention picker. */
   searchFiles(args: { query: string }): Promise<FileSearchResult[]>;
-  /** [requires workspace] Delete a workspace-relative path (file / dir / broken symlink). */
-  deleteFile(args: { path: string }): Promise<DeleteResult>;
+  /** [requires workspace] Delete a workspace-relative path (file / dir /
+   *  broken symlink). Default goes to the OS trash; `permanent: true` keeps
+   *  unlink semantics for scratch-file cleanup (don't pollute the trash with
+   *  files the user never saw). */
+  deleteFile(args: { path: string; permanent?: boolean }): Promise<DeleteResult>;
   /** [requires workspace] List slash-command picker entries — global + project skills + builtins. */
   listSlashCommands(): Promise<SlashCommandsResponse>;
   // ─── Phase D: DirectoryPanel ops ───
@@ -394,11 +397,12 @@ export function useWorkspaceFileService(workspacePath: string | null): Workspace
   );
 
   const deleteFile: WorkspaceFileService['deleteFile'] = useCallback(
-    async ({ path }) => {
+    async ({ path, permanent }) => {
       const ws = requireWorkspace();
       return invokeIfTauri<DeleteResult>('cmd_workspace_delete', {
         workspace: ws,
         path,
+        permanent,
       });
     },
     [requireWorkspace, invokeIfTauri],

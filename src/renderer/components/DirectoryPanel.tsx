@@ -890,6 +890,20 @@ const DirectoryPanel = memo(
       [fileService, updateNodeInTree],
     );
 
+    // Workspace-scoped interaction state must not leak across an agentDir
+    // swap (a tab's agentDir is fixed today, but the journal/clipboard hold
+    // WORKSPACE-RELATIVE paths — replaying them against another workspace
+    // would move/trash same-named files in the wrong workspace).
+    const prevAgentDirRef = useRef(agentDir);
+    useEffect(() => {
+      if (prevAgentDirRef.current === agentDir) return;
+      prevAgentDirRef.current = agentDir;
+      setClipboard(null);
+      undoJournalRef.current = [];
+      setFocusedPath(null);
+      setEditing(null);
+    }, [agentDir]);
+
     useEffect(() => {
       rawRefresh(); // Initial load — no debounce needed
       // Clear old branch first to avoid flash, then fetch new
@@ -2277,8 +2291,13 @@ const DirectoryPanel = memo(
 
     /** Cmd+Z — undo the last reversible mutation (move/rename/create/paste).
      *  Deletes are NOT here: they live in the OS trash (用户决策 2026-06-11,
-     *  Finder「放回原处」owns restoration). */
+     *  Finder「放回原处」owns restoration). Best-effort by design: the entry
+     *  is popped up front (no retry), partial failures surface via toasts. */
+    const undoInFlightRef = useRef(false);
     const executeUndo = useCallback(async () => {
+      // Serialize: a held-down Cmd+Z would interleave two async plans over
+      // the same paths.
+      if (undoInFlightRef.current) return;
       const journal = undoJournalRef.current;
       const entry = journal[journal.length - 1];
       if (!entry) {
@@ -2286,6 +2305,8 @@ const DirectoryPanel = memo(
         return;
       }
       undoJournalRef.current = journal.slice(0, -1);
+      undoInFlightRef.current = true;
+      let renameBackFailures = 0;
       try {
         for (const step of buildUndoPlan(entry)) {
           if (step.op === "delete") {
@@ -2308,18 +2329,26 @@ const DirectoryPanel = memo(
             if (landed && baseNameOf(landed.newPath) !== step.desiredName) {
               // The forward move auto-renamed; best-effort restore of the
               // original basename (a new occupant may block it — keep the
-              // landed name then).
+              // landed name then, but don't report unqualified success).
               await fileService
                 .rename({ oldPath: landed.newPath, newName: step.desiredName })
-                .catch(() => {});
+                .catch(() => {
+                  renameBackFailures += 1;
+                });
             }
           }
         }
-        toast.success("已撤销");
+        if (renameBackFailures > 0) {
+          toast.warning(`已撤销（${renameBackFailures} 项未能恢复原文件名）`);
+        } else {
+          toast.success("已撤销");
+        }
       } catch (err) {
         toast.error(
           err instanceof Error ? `撤销失败：${err.message}` : "撤销失败",
         );
+      } finally {
+        undoInFlightRef.current = false;
       }
       refresh();
     }, [fileService, refresh, toast]);
@@ -2380,6 +2409,11 @@ const DirectoryPanel = memo(
           { rows: visibleRows, focusedPath, isOpen },
         );
         if (!action) return;
+        // Internal clipboard empty → this Cmd+V belongs to the OS clipboard:
+        // the document-level `paste` listener imports files/screenshots into
+        // the workspace, and preventDefault here would suppress that event
+        // entirely (the tree usually has focus now that clicks focus it).
+        if (action.type === "paste" && !clipboard) return;
         e.preventDefault();
         e.stopPropagation();
 
@@ -2459,6 +2493,7 @@ const DirectoryPanel = memo(
       },
       [
         editing,
+        clipboard,
         visibleRows,
         focusedPath,
         isOpen,

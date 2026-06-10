@@ -135,15 +135,20 @@ export function buildTreeListItems(
   const creatingIn =
     editing && editing.mode !== "rename" ? editing.parentDir : null;
 
+  // Synthetic keys use a `:`-namespace — `:` is rejected by
+  // `validate_item_name` on both sides, so no real path can ever collide
+  // with these in Virtuoso's computeItemKey.
+  const EDIT_KEY = "synthetic:edit";
+
   if (creatingIn === "") {
-    items.push({ kind: "edit", key: "__edit__", depth: 0, editing: editing! });
+    items.push({ kind: "edit", key: EDIT_KEY, depth: 0, editing: editing! });
   }
 
   for (const row of visibleRows) {
     if (editing?.mode === "rename" && row.path === editing.path) {
       items.push({
         kind: "edit",
-        key: "__edit__",
+        key: EDIT_KEY,
         depth: row.depth,
         editing,
       });
@@ -155,7 +160,7 @@ export function buildTreeListItems(
       if (creatingIn === row.path) {
         items.push({
           kind: "edit",
-          key: "__edit__",
+          key: EDIT_KEY,
           depth: row.depth + 1,
           editing: editing!,
         });
@@ -166,7 +171,7 @@ export function buildTreeListItems(
       ) {
         items.push({
           kind: "empty-hint",
-          key: `${row.path}/__empty__`,
+          key: `synthetic:empty:${row.path}`,
           depth: row.depth + 1,
           parentDir: row.path,
         });

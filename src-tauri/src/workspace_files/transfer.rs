@@ -16,7 +16,8 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 
 use super::path_safety::{
-    resolve_inside_workspace, validate_external_read_path, validate_workspace_root,
+    resolve_existing_inside_workspace, resolve_inside_workspace,
+    validate_external_read_path, validate_workspace_root,
 };
 
 const MAX_COLLISION_SUFFIX: u32 = 9999;
@@ -152,14 +153,29 @@ fn copy_internal_one(
     workspace_root: &Path,
     target_root: &Path,
 ) -> Result<CopiedFile, String> {
-    let resolved = resolve_inside_workspace(workspace_root, src_rel)?;
+    // READ side: canonicalize (CLAUDE.md red-line). A lexical resolve would
+    // let an intermediate symlink component (`evil → /etc`) pass the prefix
+    // check while `fs::copy` follows the link — exfiltrating bytes from
+    // outside the workspace INTO an AI-readable workspace file.
+    let resolved = resolve_existing_inside_workspace(workspace_root, src_rel)?;
     let metadata =
         fs::symlink_metadata(&resolved).map_err(|e| format!("stat failed: {}", e))?;
 
     // Copying a directory into itself / its own subtree would make
     // `copy_dir_recursive` walk the growing destination — refuse up front.
-    // Component-aware Path::starts_with, same rationale as crud.rs::move.
-    if metadata.is_dir() && target_root.starts_with(&resolved) {
+    // BOTH sides canonicalized: the target dir exists (checked by the
+    // command), and a symlink target pointing into the source subtree would
+    // defeat a lexical comparison (unbounded recursive copy). Canonicalizing
+    // the target also fails closed if `targetDir` is a symlink escaping the
+    // workspace (the write would land outside otherwise).
+    let canonical_target = fs::canonicalize(target_root)
+        .map_err(|_| "Target directory canonicalize failed".to_string())?;
+    let canonical_root = fs::canonicalize(workspace_root)
+        .map_err(|_| "Workspace root canonicalize failed".to_string())?;
+    if !canonical_target.starts_with(&canonical_root) {
+        return Err("Target escapes workspace root via symlink".to_string());
+    }
+    if metadata.is_dir() && canonical_target.starts_with(&resolved) {
         return Err("Cannot copy folder into itself".to_string());
     }
 
@@ -167,8 +183,12 @@ fn copy_internal_one(
         .file_name()
         .map(|s| s.to_string_lossy().to_string())
         .ok_or_else(|| "source has no filename".to_string())?;
-    let (final_name, renamed) = unique_target_name(target_root, &name, true)?;
-    let dest = target_root.join(&final_name);
+    // All filesystem ops below run on CANONICAL paths — `strip_prefix` must
+    // use the canonical root too (on macOS the temp/workspace path may be
+    // reached via `/var → /private/var`, so lexical and canonical prefixes
+    // differ).
+    let (final_name, renamed) = unique_target_name(&canonical_target, &name, true)?;
+    let dest = canonical_target.join(&final_name);
 
     if metadata.is_dir() {
         copy_dir_recursive(&resolved, &dest)?;
@@ -179,7 +199,7 @@ fn copy_internal_one(
     }
 
     let target_relative = dest
-        .strip_prefix(workspace_root)
+        .strip_prefix(&canonical_root)
         .map_err(|_| "Resolved path escaped workspace".to_string())?
         .to_string_lossy()
         .replace('\\', "/");
@@ -361,6 +381,62 @@ mod tests {
             ws.to_string_lossy().to_string(),
             vec!["a".to_string()],
             "a/b".to_string(),
+        )
+        .await
+        .unwrap();
+
+        assert!(res.copied_files.is_empty());
+        assert_eq!(res.errors.len(), 1);
+        assert!(res.errors[0].contains("itself"));
+        let _ = fs::remove_dir_all(&ws);
+    }
+
+    // Cross-review (Codex critical): a LEXICAL source resolve let an
+    // intermediate symlink component (`evil → outside`) pass the prefix
+    // check while fs::copy followed the link — exfiltrating outside bytes
+    // into the AI-readable workspace. Sources must canonicalize.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn internal_copy_rejects_symlinked_source_component_escape() {
+        use std::os::unix::fs::symlink;
+        let ws = make_tmp_dir("internal_symlink_src_ws");
+        let outside = make_tmp_dir("internal_symlink_src_outside");
+        fs::write(outside.join("secret.txt"), "secret").unwrap();
+        symlink(&outside, ws.join("evil")).unwrap();
+        fs::create_dir_all(ws.join("dst")).unwrap();
+
+        let res = cmd_workspace_copy_internal(
+            ws.to_string_lossy().to_string(),
+            vec!["evil/secret.txt".to_string()],
+            "dst".to_string(),
+        )
+        .await
+        .unwrap();
+
+        assert!(res.copied_files.is_empty());
+        assert_eq!(res.errors.len(), 1);
+        assert!(!ws.join("dst/secret.txt").exists());
+        let _ = fs::remove_dir_all(&ws);
+        let _ = fs::remove_dir_all(&outside);
+    }
+
+    // Cross-review (Codex critical): the into-self check must compare
+    // CANONICAL paths — a symlink target dir pointing into the source
+    // subtree defeats a lexical comparison and the recursive copy chases
+    // its own growing destination.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn internal_copy_rejects_symlink_target_into_source() {
+        use std::os::unix::fs::symlink;
+        let ws = make_tmp_dir("internal_symlink_self");
+        fs::create_dir_all(ws.join("a/b")).unwrap();
+        fs::write(ws.join("a/f.txt"), "x").unwrap();
+        symlink(ws.join("a/b"), ws.join("ln")).unwrap();
+
+        let res = cmd_workspace_copy_internal(
+            ws.to_string_lossy().to_string(),
+            vec!["a".to_string()],
+            "ln".to_string(),
         )
         .await
         .unwrap();

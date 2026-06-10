@@ -117,6 +117,9 @@ export const WorkspaceTreeEditRow = memo(function WorkspaceTreeEditRow({
         // while typing a name those must stay in the input.
         onKeyDown={(e) => {
           e.stopPropagation();
+          // IME composition (中文输入选候选词) also presses Enter — committing
+          // there would create/rename with a half-composed name.
+          if (e.nativeEvent.isComposing) return;
           if (e.key === "Enter") {
             e.preventDefault();
             settle("commit");
