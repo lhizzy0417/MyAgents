@@ -103,6 +103,8 @@ interface WorkspaceTreeViewportProps {
   cutPaths: readonly string[];
   /** Keyboard-focused row path. */
   focusedPath: string | null;
+  /** DOM focus is inside the tree container — selection renders active. */
+  treeActive: boolean;
   initialScrollTop?: number;
   revealRequest?: { id: number; path: string } | null;
   onRevealHandled?: (id: number) => void;
@@ -137,6 +139,7 @@ export const WorkspaceTreeViewport = memo(
         activeDragPaths,
         cutPaths,
         focusedPath,
+        treeActive,
         initialScrollTop = 0,
         revealRequest = null,
         onRevealHandled,
@@ -431,6 +434,7 @@ export const WorkspaceTreeViewport = memo(
                       isDragging={activeDragPaths.includes(row.path)}
                       isFocused={focusedPath === row.path}
                       isCut={cutPaths.includes(row.path)}
+                      treeActive={treeActive}
                       onClick={(event) => onRowClick(row, event)}
                       onContextMenu={(event) => onRowContextMenu(row, event)}
                     />

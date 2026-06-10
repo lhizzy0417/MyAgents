@@ -19,6 +19,12 @@ interface WorkspaceTreeRowProps {
   isFocused: boolean;
   /** On the clipboard in CUT mode — dimmed until pasted elsewhere. */
   isCut: boolean;
+  /** DOM focus is inside the tree container. Selection renders ACTIVE
+   *  (accent) only then; otherwise it dims (VS Code inactive selection) so
+   *  the user can see the tree won't receive keyboard shortcuts — a Cmd+C
+   *  while another pane (editor / embedded browser) owns the keys was
+   *  previously indistinguishable from an armed selection. */
+  treeActive: boolean;
   onClick: (e: React.MouseEvent) => void;
   onContextMenu: (e: React.MouseEvent) => void;
 }
@@ -32,6 +38,7 @@ export const WorkspaceTreeRow = memo(function WorkspaceTreeRow({
   isDragging,
   isFocused,
   isCut,
+  treeActive,
   onClick,
   onContextMenu,
 }: WorkspaceTreeRowProps) {
@@ -75,7 +82,9 @@ export const WorkspaceTreeRow = memo(function WorkspaceTreeRow({
             : ""
         }${
           row.isSelected
-            ? "bg-[var(--paper-inset)] text-[var(--ink)]"
+            ? treeActive
+              ? "bg-[var(--accent-warm-muted)] text-[var(--ink)]"
+              : "bg-[var(--paper-inset)] text-[var(--ink)]"
             : "text-[var(--ink-muted)] hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]"
         }${isCut ? " opacity-50" : ""}`;
 
@@ -87,7 +96,9 @@ export const WorkspaceTreeRow = memo(function WorkspaceTreeRow({
       {...attributes}
       {...listeners}
       className={`flex cursor-pointer items-center gap-2 px-3 text-[13px] transition-colors select-none ${stateClasses}${
-        isFocused ? " outline outline-1 -outline-offset-1 outline-[var(--accent)]/45" : ""
+        isFocused && treeActive
+          ? " outline outline-1 -outline-offset-1 outline-[var(--accent)]/45"
+          : ""
       }`}
       style={{
         height: rowHeight,

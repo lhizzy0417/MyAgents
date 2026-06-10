@@ -98,6 +98,7 @@ function renderViewport(overrides: Partial<ComponentProps<typeof WorkspaceTreeVi
       activeDragPaths={[]}
       cutPaths={[]}
       focusedPath={null}
+      treeActive={false}
       revealRequest={{ id: 7, path: 'dir/b.md' }}
       onRevealHandled={onRevealHandled}
       getStickyAncestors={() => []}

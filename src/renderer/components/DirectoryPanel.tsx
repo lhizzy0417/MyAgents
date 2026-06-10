@@ -420,6 +420,12 @@ const DirectoryPanel = memo(
 
     // Keyboard focus (distinct from selection — VS Code tree semantics).
     const [focusedPath, setFocusedPath] = useState<string | null>(null);
+    // Whether DOM focus is inside the tree container. Selection renders
+    // DIMMED when it isn't — without this cue, a tree that lost focus (to
+    // the editor pane / the embedded-browser OS webview) still LOOKS armed,
+    // and the user can't tell their Cmd+C went somewhere else entirely
+    // (实测 2026-06-11: 浏览器面板吞掉 Cmd+C, Cmd+V 落空且无从解释).
+    const [isTreeFocusWithin, setIsTreeFocusWithin] = useState(false);
     // Inline create/rename editor state (synthetic row in the tree).
     const [editing, setEditing] = useState<TreeEditingState | null>(null);
     // Internal file clipboard (Cmd+C / Cmd+X / Cmd+V on tree nodes).
@@ -1845,6 +1851,13 @@ const DirectoryPanel = memo(
         }
 
         if (files.length === 0) {
+          // Cmd+V reached the tree but NEITHER clipboard has files. Say so —
+          // the silent path is exactly how a swallowed Cmd+C (tree wasn't
+          // focused / embedded browser ate the keys) turns into an
+          // unexplainable "粘贴没反应" (实测 2026-06-11).
+          if (treeContainerRef.current?.contains(document.activeElement)) {
+            toast.info("剪贴板中没有可粘贴的文件——先在文件树中选中文件按 Cmd+C");
+          }
           return;
         }
 
@@ -1877,7 +1890,7 @@ const DirectoryPanel = memo(
 
       document.addEventListener("paste", handlePaste);
       return () => document.removeEventListener("paste", handlePaste);
-    }, [selectedNodes, handleExternalFileDrop]);
+    }, [selectedNodes, handleExternalFileDrop, toast]);
 
     const handleOpenInFinder = async (path: string) => {
       try {
@@ -1906,12 +1919,15 @@ const DirectoryPanel = memo(
     // Tree node paths are workspace-relative (Rust `tree.rs` emits the relative
     // path; root node is ""). Join with the absolute `agentDir` to get the real
     // filesystem path users expect from "copy path". Mirrors Chat.tsx's join.
-    const toAbsolutePath = (relPath: string): string => {
-      if (!agentDir) return relPath;
-      if (!relPath) return agentDir;
-      const sep = agentDir.includes("\\") ? "\\" : "/";
-      return `${agentDir}${sep}${relPath}`;
-    };
+    const toAbsolutePath = useCallback(
+      (relPath: string): string => {
+        if (!agentDir) return relPath;
+        if (!relPath) return agentDir;
+        const sep = agentDir.includes("\\") ? "\\" : "/";
+        return `${agentDir}${sep}${relPath}`;
+      },
+      [agentDir],
+    );
 
     const handleCopyPath = (relPath: string, label: string) => {
       navigator.clipboard
@@ -2186,7 +2202,12 @@ const DirectoryPanel = memo(
       ],
     );
 
-    /** Cmd+C / Cmd+X — selection (or the focused row) onto the clipboard. */
+    /** Cmd+C / Cmd+X — selection (or the focused row) onto the clipboard.
+     *  ALWAYS confirms via toast: a Cmd+C swallowed by an unfocused tree /
+     *  the embedded-browser OS webview is otherwise indistinguishable from
+     *  success, and the user only finds out when Cmd+V silently does
+     *  nothing (实测 2026-06-11). Also mirrors the absolute paths onto the
+     *  OS clipboard so the copy is pasteable into a terminal / chat. */
     const copySelection = useCallback(
       (mode: "copy" | "cut") => {
         const nodes =
@@ -2197,8 +2218,15 @@ const DirectoryPanel = memo(
               : [];
         if (nodes.length === 0) return;
         setClipboard({ mode, paths: nodes.map((n) => n.path) });
+        const label = mode === "copy" ? "已复制" : "已剪切";
+        const what =
+          nodes.length === 1 ? `"${nodes[0].name}"` : `${nodes.length} 项`;
+        toast.success(`${label} ${what}，在目标文件夹按 Cmd+V 粘贴`);
+        void navigator.clipboard
+          .writeText(nodes.map((n) => toAbsolutePath(n.path)).join("\n"))
+          .catch(() => {});
       },
-      [selectedNodes, focusedPath, nodeMetaByPath],
+      [selectedNodes, focusedPath, nodeMetaByPath, toAbsolutePath, toast],
     );
 
     /** Paste lands where a drop would: selected dir → itself, selected file →
@@ -2389,13 +2417,20 @@ const DirectoryPanel = memo(
           return;
         }
         if (editing) return;
-        // Real text selected somewhere in the panel → let native copy win.
-        if (
-          (e.metaKey || e.ctrlKey) &&
-          e.key.toLowerCase() === "c" &&
-          window.getSelection()?.toString()
-        ) {
-          return;
+        // Yield Cmd+C to native copy ONLY for a text selection INSIDE the
+        // tree (practically impossible — rows are select-none). A stale
+        // selection in ANOTHER pane (markdown preview, chat) must not beat
+        // an explicit file copy on the focused tree.
+        if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "c") {
+          const sel = window.getSelection();
+          if (
+            sel &&
+            !sel.isCollapsed &&
+            sel.anchorNode &&
+            treeContainerRef.current?.contains(sel.anchorNode)
+          ) {
+            return;
+          }
         }
 
         const action = resolveTreeKeyAction(
@@ -3181,6 +3216,18 @@ const DirectoryPanel = memo(
                     treeContainerRef.current?.focus({ preventScroll: true });
                   }
                 }}
+                // focus-within tracking: selection dims while the tree
+                // doesn't own the keyboard (React focus/blur bubble).
+                onFocus={() => setIsTreeFocusWithin(true)}
+                onBlur={(e) => {
+                  if (
+                    !treeContainerRef.current?.contains(
+                      e.relatedTarget as Node | null,
+                    )
+                  ) {
+                    setIsTreeFocusWithin(false);
+                  }
+                }}
                 onContextMenu={handleTreeContainerContextMenu}
                 onDragEnter={handleTreeDragEnter}
                 onDragOver={handleTreeDragOver}
@@ -3261,6 +3308,7 @@ const DirectoryPanel = memo(
                         clipboard?.mode === "cut" ? clipboard.paths : []
                       }
                       focusedPath={focusedPath}
+                      treeActive={isTreeFocusWithin}
                       initialScrollTop={treeScrollTopRef.current}
                       revealRequest={treeRevealRequest}
                       onRevealHandled={handleTreeRevealHandled}
