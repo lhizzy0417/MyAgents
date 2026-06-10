@@ -16,6 +16,7 @@ import {
   Scissors,
   SlidersHorizontal,
   Trash2,
+  Undo2,
   Upload,
   ExternalLink,
   TerminalSquare,
@@ -430,6 +431,18 @@ const DirectoryPanel = memo(
     const [editing, setEditing] = useState<TreeEditingState | null>(null);
     // Internal file clipboard (Cmd+C / Cmd+X / Cmd+V on tree nodes).
     const [clipboard, setClipboard] = useState<TreeClipboard>(null);
+    // Refs for the document-level clipboard EVENT listeners (declared early;
+    // mirrored after the handlers are defined). On macOS the native Edit
+    // menu's ⌘C/⌘X/⌘V key equivalents are consumed by the MENU before the
+    // WebView dispatches any keydown — what reaches the DOM is the standard
+    // clipboard event (menu Copy → `copy:` selector → `copy` event). The
+    // tree's clipboard must therefore hook these EVENTS; the keydown mapping
+    // only serves platforms without a pre-empting native menu.
+    const copySelectionRef = useRef<(mode: "copy" | "cut") => string | null>(
+      () => null,
+    );
+    const pasteFromClipboardRef = useRef<() => Promise<void>>(async () => {});
+    const clipboardRef = useRef<TreeClipboard>(null);
     // Undo journal for reversible mutations (move/rename/create/paste).
     // Ref — pushing/popping must not re-render the tree.
     const undoJournalRef = useRef<readonly UndoableOp[]>([]);
@@ -1835,6 +1848,19 @@ const DirectoryPanel = memo(
           return;
         }
 
+        // INTERNAL file clipboard takes precedence. On macOS ⌘V arrives ONLY
+        // as this paste event (the native Edit menu consumes the keydown), so
+        // the tree's own paste must be served here — the key handler never
+        // gets a chance.
+        if (
+          clipboardRef.current &&
+          treeContainerRef.current?.contains(document.activeElement)
+        ) {
+          e.preventDefault();
+          void pasteFromClipboardRef.current();
+          return;
+        }
+
         const items = e.clipboardData?.items;
         if (!items) {
           return;
@@ -2209,22 +2235,24 @@ const DirectoryPanel = memo(
      *  nothing (实测 2026-06-11). Also mirrors the absolute paths onto the
      *  OS clipboard so the copy is pasteable into a terminal / chat. */
     const copySelection = useCallback(
-      (mode: "copy" | "cut") => {
+      (mode: "copy" | "cut"): string | null => {
         const nodes =
           selectedNodes.length > 0
             ? selectedNodes
             : focusedPath && nodeMetaByPath.has(focusedPath)
               ? [nodeMetaByPath.get(focusedPath)!.data]
               : [];
-        if (nodes.length === 0) return;
+        if (nodes.length === 0) return null;
         setClipboard({ mode, paths: nodes.map((n) => n.path) });
         const label = mode === "copy" ? "已复制" : "已剪切";
         const what =
           nodes.length === 1 ? `"${nodes[0].name}"` : `${nodes.length} 项`;
         toast.success(`${label} ${what}，在目标文件夹按 Cmd+V 粘贴`);
-        void navigator.clipboard
-          .writeText(nodes.map((n) => toAbsolutePath(n.path)).join("\n"))
-          .catch(() => {});
+        const osText = nodes.map((n) => toAbsolutePath(n.path)).join("\n");
+        void navigator.clipboard.writeText(osText).catch(() => {});
+        // Returned so the document `copy`/`cut` event handler can ALSO stuff
+        // e.clipboardData synchronously (deterministic OS-clipboard write).
+        return osText;
       },
       [selectedNodes, focusedPath, nodeMetaByPath, toAbsolutePath, toast],
     );
@@ -2316,6 +2344,52 @@ const DirectoryPanel = memo(
       selectAndRevealCreated,
       toast,
     ]);
+
+    // Mirror the latest clipboard handlers into the early-declared refs used
+    // by the document-level clipboard event listeners.
+    useEffect(() => {
+      copySelectionRef.current = copySelection;
+      pasteFromClipboardRef.current = pasteFromClipboard;
+      clipboardRef.current = clipboard;
+    }, [copySelection, pasteFromClipboard, clipboard]);
+
+    // Document-level `copy` / `cut` listeners — THE working path on macOS,
+    // where the native Edit menu eats the ⌘C/⌘X keydown and only this DOM
+    // event arrives (实测 2026-06-11: keydown-only made ⌘C silently dead on
+    // macOS while ⌘V "worked" via the paste event). The keydown mapping in
+    // handleTreeKeyDown stays for Windows/Linux; double-fire is impossible
+    // because that path preventDefaults the key (suppressing the native copy
+    // command) when it handles it.
+    useEffect(() => {
+      const handleClipboardEvent =
+        (mode: "copy" | "cut") => (e: ClipboardEvent) => {
+          const active = document.activeElement as HTMLElement | null;
+          if (!treeContainerRef.current?.contains(active)) return;
+          // The inline editor's input owns its own copy/cut.
+          if (
+            active &&
+            (active.tagName === "INPUT" || active.tagName === "TEXTAREA")
+          ) {
+            return;
+          }
+          // A real text selection wins over file copy.
+          const sel = window.getSelection();
+          if (sel && !sel.isCollapsed) return;
+          const osText = copySelectionRef.current(mode);
+          if (osText !== null) {
+            e.preventDefault();
+            e.clipboardData?.setData("text/plain", osText);
+          }
+        };
+      const onCopy = handleClipboardEvent("copy");
+      const onCut = handleClipboardEvent("cut");
+      document.addEventListener("copy", onCopy);
+      document.addEventListener("cut", onCut);
+      return () => {
+        document.removeEventListener("copy", onCopy);
+        document.removeEventListener("cut", onCut);
+      };
+    }, []);
 
     /** Cmd+Z — undo the last reversible mutation (move/rename/create/paste).
      *  Deletes are NOT here: they live in the OS trash (用户决策 2026-06-11,
@@ -2821,6 +2895,14 @@ const DirectoryPanel = memo(
             icon: <ClipboardPaste className="h-4 w-4" />,
             disabled: !clipboard,
             onClick: () => void pasteFromClipboard(),
+          },
+          {
+            // ⌘Z is consumed by the native Edit menu on macOS, so the menu
+            // is the tree-undo's reachable entry point there.
+            label: "撤销上一步操作",
+            icon: <Undo2 className="h-4 w-4" />,
+            disabled: undoJournalRef.current.length === 0,
+            onClick: () => void executeUndo(),
           },
           {
             label: "刷新",
