@@ -737,6 +737,25 @@ export default function App() {
         listenerAc.signal,
       );
 
+      // Floating ball "展开 ↗" (PRD 0.2.35): Rust raises the main window and
+      // emits this; re-dispatch onto the existing OPEN_SESSION_IN_NEW_TAB
+      // DOM-event path so the companion's session opens via the same
+      // cron-aware plan→spawn flow as the task center.
+      void listenWithCleanup<{ sessionId: string; workspacePath: string }>(
+        'fb:open-session',
+        (event) => {
+          if (!mountedRef.current) return;
+          const { sessionId, workspacePath } = event.payload ?? {};
+          if (!sessionId || !workspacePath) return;
+          window.dispatchEvent(
+            new CustomEvent(CUSTOM_EVENTS.OPEN_SESSION_IN_NEW_TAB, {
+              detail: { sessionId, workspacePath },
+            }),
+          );
+        },
+        listenerAc.signal,
+      );
+
       // Listen for individual task recovered events
       void listenWithCleanup<CronTaskRecoveredPayload>(
         CRON_EVENTS.TASK_RECOVERED,

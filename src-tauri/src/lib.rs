@@ -7,6 +7,7 @@ pub mod cli;
 pub mod config_io;
 mod commands;
 pub mod cron_task;
+pub mod floating_ball;
 mod global_shortcut;
 pub mod im;
 pub mod inbox;
@@ -246,7 +247,7 @@ pub fn run() {
 
     // Build the app first, then run with event handler
     // This allows us to handle RunEvent::ExitRequested for Cmd+Q and Dock quit
-    let app = tauri::Builder::default()
+    let builder = tauri::Builder::default()
         // Builder-level menu event handler (canonical Tauri 2 pattern).
         // Routes Window > Close Tab (Cmd+W accelerator + mouse click) to the
         // frontend, which walks its own overlay/tab close hierarchy.
@@ -278,7 +279,13 @@ pub fn run() {
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_autostart::init(MacosLauncher::LaunchAgent, Some(vec!["--minimized"])))
-        .plugin(global_shortcut::build_plugin())
+        .plugin(global_shortcut::build_plugin());
+
+    // Floating ball panels need the NSPanel plugin (macOS only).
+    #[cfg(target_os = "macos")]
+    let builder = builder.plugin(tauri_nspanel::init());
+
+    let app = builder
         .manage(sidecar_state)
         .manage(sse_proxy_state)
         .manage(im_bot_state)
@@ -390,6 +397,22 @@ pub fn run() {
             // Global shortcut (summon-or-toggle, PRD 0.2.16)
             global_shortcut::cmd_get_global_summon_shortcut,
             global_shortcut::cmd_set_global_summon_shortcut,
+            // Floating ball desktop companion (PRD 0.2.35)
+            floating_ball::cmd_fb_enable,
+            floating_ball::cmd_fb_disable,
+            floating_ball::cmd_fb_capabilities,
+            floating_ball::cmd_fb_show_companion,
+            floating_ball::cmd_fb_pin_companion,
+            floating_ball::cmd_fb_hide_companion,
+            floating_ball::cmd_fb_drag_ball,
+            floating_ball::cmd_fb_snap_ball,
+            floating_ball::cmd_fb_drag_companion,
+            floating_ball::cmd_fb_set_companion_size,
+            floating_ball::cmd_fb_capture_context,
+            floating_ball::cmd_fb_ax_status,
+            floating_ball::cmd_fb_screenshot,
+            floating_ball::cmd_fb_relay,
+            floating_ball::cmd_fb_open_main_with_session,
             // OS notification + click-to-foreground deep-link (v0.2.14)
             notification::cmd_show_notification,
             notification::cmd_consume_notification_click,
@@ -953,6 +976,10 @@ pub fn run() {
             // Auto-start Agent channels (4s delay, after IM bots)
             im::schedule_agent_auto_start(app.handle().clone());
             ulog_info!("[App] Agent auto-start scheduled");
+
+            // Floating ball (PRD 0.2.35): bring the ball up at launch when the
+            // developer gate + ball toggle are both enabled in config.
+            floating_ball::setup_on_startup(app.handle());
 
             // Start Global Sidecar health monitor
             // Periodically checks if the Global Sidecar is alive and auto-restarts it

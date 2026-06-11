@@ -1,7 +1,7 @@
 import React from 'react';
 import { createRoot } from 'react-dom/client';
+import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
 
-import App from './App';
 import AppErrorBoundary from './components/AppErrorBoundary';
 import { ConfigProvider } from './config/ConfigProvider';
 import { ToastProvider } from './components/Toast';
@@ -33,16 +33,55 @@ if (!import.meta.env.DEV) {
 }
 
 const root = createRoot(document.getElementById('root')!);
-// Note: React.StrictMode removed to prevent double-rendering of SSE effects in development
-// StrictMode causes useEffect to run twice, which duplicates SSE events and thinking blocks
-root.render(
-  <AppErrorBoundary>
-    <ConfigProvider>
-      <ToastProvider>
-        <ImagePreviewProvider>
-          <App />
-        </ImagePreviewProvider>
-      </ToastProvider>
-    </ConfigProvider>
-  </AppErrorBoundary>
-);
+
+// Floating ball windows (PRD 0.2.35): the ball + companion are separate Tauri
+// WebviewWindows loading this same bundle. Route by window label — they mount
+// their own minimal trees (no App / ConfigProvider; they read config via the
+// service layer directly). App itself is lazy so the two tiny fb windows never
+// parse/execute the multi-MB main-app chunk (and the main window pays only a
+// microtask + local chunk fetch).
+let tauriWindowLabel: string | undefined;
+try {
+  tauriWindowLabel = getCurrentWebviewWindow().label;
+} catch {
+  tauriWindowLabel = undefined; // browser dev mode — no Tauri runtime
+}
+
+if (tauriWindowLabel === 'fb-ball') {
+  const BallWindow = React.lazy(() => import('./floating-ball/BallWindow'));
+  document.documentElement.classList.add('fb-transparent');
+  root.render(
+    <AppErrorBoundary>
+      <React.Suspense fallback={null}>
+        <BallWindow />
+      </React.Suspense>
+    </AppErrorBoundary>
+  );
+} else if (tauriWindowLabel === 'fb-companion') {
+  const CompanionWindow = React.lazy(() => import('./floating-ball/CompanionWindow'));
+  document.documentElement.classList.add('fb-transparent');
+  root.render(
+    <AppErrorBoundary>
+      <React.Suspense fallback={null}>
+        <CompanionWindow />
+      </React.Suspense>
+    </AppErrorBoundary>
+  );
+} else {
+  const App = React.lazy(() => import('./App'));
+  // Note: React.StrictMode removed to prevent double-rendering of SSE effects in development
+  // StrictMode causes useEffect to run twice, which duplicates SSE events and thinking blocks
+  root.render(
+    <AppErrorBoundary>
+      <ConfigProvider>
+        <ToastProvider>
+          <ImagePreviewProvider>
+            <React.Suspense fallback={null}>
+              <App />
+            </React.Suspense>
+          </ImagePreviewProvider>
+        </ToastProvider>
+      </ConfigProvider>
+    </AppErrorBoundary>
+  );
+}

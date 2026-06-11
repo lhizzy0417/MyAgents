@@ -10,6 +10,7 @@
     "beforeBuildCommand": "npm run build:web && npm run build:server && npm run build:bridge && npm run build:cli"
   },
   "app": {
+    "macOSPrivateApi": true,
     "windows": [],
     "security": {
       "csp": "default-src 'self' ipc: tauri: asset: http://ipc.localhost; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' data: https://fonts.gstatic.com; connect-src 'self' ipc: tauri: asset: http://ipc.localhost http://localhost:* http://127.0.0.1:* ws://localhost:* ws://127.0.0.1:* https://download.myagents.io; img-src 'self' data: blob: asset: myagents: http://myagents.localhost https://asset.localhost https://download.myagents.io https:; media-src 'self' blob: asset: myagents: http://myagents.localhost http://asset.localhost https://asset.localhost;",

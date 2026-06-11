@@ -3781,6 +3781,39 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                             </div>
                                         </div>
 
+                                        {/* Floating Ball Dev Gate (PRD 0.2.35 — 先开发不发布，D10) */}
+                                        <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5">
+                                            <div className="flex items-center justify-between">
+                                                <div>
+                                                    <h3 className="text-sm font-medium text-[var(--ink)]">桌面悬浮球（实验）</h3>
+                                                    <p className="mt-1 text-xs text-[var(--ink-muted)]">
+                                                        Mino 的桌面渠道：屏幕边缘常驻悬浮球，hover 瞥一眼、点击即问，发完就走由球替你跑（仅 macOS）。开启后 Tab 栏出现显隐开关。
+                                                    </p>
+                                                </div>
+                                                <button
+                                                    onClick={() => {
+                                                        const next = !config.floatingBallDevGate;
+                                                        updateConfig({
+                                                            floatingBallDevGate: next,
+                                                            // 总门控开 → 球默认随之启用；关 → 球一并收走
+                                                            floatingBallEnabled: next,
+                                                        });
+                                                        track('floating_ball_toggle', { gate: true, enabled: next });
+                                                        void invoke(next ? 'cmd_fb_enable' : 'cmd_fb_disable').catch((err) => {
+                                                            console.warn('[Settings] floating ball toggle:', err);
+                                                        });
+                                                    }}
+                                                    className={`relative h-6 w-11 shrink-0 cursor-pointer rounded-full transition-colors ${config.floatingBallDevGate ? 'bg-[var(--accent)]' : 'bg-[var(--line-strong)]'
+                                                        }`}
+                                                >
+                                                    <span
+                                                        className={`absolute left-0.5 top-0.5 h-5 w-5 rounded-full bg-[var(--toggle-thumb)] shadow transition-transform ${config.floatingBallDevGate ? 'translate-x-5' : 'translate-x-0'
+                                                            }`}
+                                                    />
+                                                </button>
+                                            </div>
+                                        </div>
+
                                         {/* LiteLLM Model Data Refresh Toggle */}
                                         <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5">
                                             <div className="flex items-center justify-between">

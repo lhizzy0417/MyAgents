@@ -28,7 +28,10 @@ tauri-build = { version = "2.5.3", features = [] }
 serde_json = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 log = "0.4"
-tauri = { version = "2.9.6", features = ["tray-icon", "devtools", "image-png", "unstable", "webview-data-url"] }
+# `macos-private-api` is required for transparent webview windows on macOS —
+# the floating ball / companion panels (PRD 0.2.35) are transparent NSPanels.
+# Main window is unaffected (it never sets transparent(true)).
+tauri = { version = "2.9.6", features = ["tray-icon", "devtools", "image-png", "unstable", "webview-data-url", "macos-private-api"] }
 tauri-plugin-log = "2"
 tauri-plugin-fs = "2.4.5"
 tauri-plugin-dialog = "2.6.0"
@@ -79,6 +82,19 @@ nix = { version = "0.29", default-features = false, features = ["signal"] }
 # U+F74F from the DOM value when the leak happens.
 # See tauri-apps/tauri#5685, tauri-apps/wry#769, tauri-apps/tauri#10194.
 [target.'cfg(target_os = "macos")'.dependencies]
+# Floating ball (PRD 0.2.35): NSPanel windows that never activate the app.
+# Git branch dependency (not on crates.io) — pinned to a commit per PRD §10.
+tauri-nspanel = { git = "https://github.com/ahkohd/tauri-nspanel", rev = "a3122e894383aa068ec5365a42994e3ac94ba1b6" }
+# Frontmost app / window title probe (zero-permission context, PRD §5.1).
+active-win-pos-rs = "0.11"
+# Selected-text capture: AX API first, clipboard round-trip fallback. Only
+# ever invoked on explicit summon (PRD D3 red line), never on hover.
+get-selected-text = "0.1"
+# AXIsProcessTrusted probe + one-shot system prompt for the permission flow.
+macos-accessibility-client = "0.0.1"
+# True NSVisualEffectView frosted glass behind the companion panel (already a
+# transitive dep of tauri — adding directly so we can call apply_vibrancy).
+window-vibrancy = "0.6"
 objc2 = "0.6"
 objc2-foundation = { version = "0.3.2", features = ["NSString"] }
 objc2-web-kit = { version = "0.3.2", features = ["WKWebView", "block2"] }

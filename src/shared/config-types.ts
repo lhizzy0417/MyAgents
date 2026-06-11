@@ -528,6 +528,15 @@ export interface AppConfig {
   showDevTools: boolean; // 显示开发者工具 (Logs/System Info)
   multiAgentRuntime?: boolean; // 多 Agent Runtime 模式（开发者，默认关闭）
   experimentalSplitView?: boolean; // 实验性：文件预览在右侧分屏而非弹窗
+  /** 开发者总门控：桌面悬浮球（PRD 0.2.35，先开发不发布）。默认关。
+   *  关闭时 Tab 顶显隐开关与悬浮球本体均不存在（D10）。 */
+  floatingBallDevGate?: boolean;
+  /** 悬浮球本体显隐开关（总门控开启后才有意义）。 */
+  floatingBallEnabled?: boolean;
+  /** 桌面渠道持久 session id（伴侣窗自铸 UUID v4；按天轮换，PRD §6.2）。 */
+  floatingBallSessionId?: string;
+  /** 上述 session 的铸造日期（本地 YYYY-MM-DD）。与今天不同时轮换新 session。 */
+  floatingBallSessionDate?: string;
   /** 开发者：定期从 LiteLLM (GitHub) 拉取 model_prices_and_context_window.json，
    *  作为模型 contextLength/maxOutputTokens 的最低优先级兜底数据源。缺省视同 true。
    *  抓取在 Rust 侧（启动条件检查 + 24h interval，ETag/If-None-Match 增量）。 */

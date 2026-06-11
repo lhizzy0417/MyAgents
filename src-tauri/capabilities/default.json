@@ -3,7 +3,9 @@
   "identifier": "default",
   "description": "Minimal permissions for MyAgents desktop app",
   "windows": [
-    "main"
+    "main",
+    "fb-ball",
+    "fb-companion"
   ],
   "permissions": [
     "core:default",
