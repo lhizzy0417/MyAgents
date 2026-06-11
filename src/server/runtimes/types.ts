@@ -27,6 +27,9 @@ export interface SessionStartOptions {
   systemPromptAppend?: string;
   model?: string;
   permissionMode?: string;
+  /** #324 — NORMALIZED reasoning effort level (never 'default'); absent =
+   *  runtime default. CC maps to `--effort`, Codex to `turn/start.effort`. */
+  reasoningEffort?: string;
   maxTurns?: number;
   resumeSessionId?: string;
   disallowedTools?: string[];
@@ -275,6 +278,18 @@ export interface AgentRuntime {
    * so the next message resumes with the new model.
    */
   setModel?(process: RuntimeProcess, model: string): Promise<void>;
+
+  /**
+   * #324 — switch the session's reasoning effort in-place without restarting
+   * the process. `effort` is a NORMALIZED level (never 'default'); undefined
+   * = revert to the runtime's default. Optional — currently Codex (its
+   * `turn/start.effort` param overrides "this turn and subsequent turns", so
+   * the adapter just records the value on its process state). When absent,
+   * the session layer falls back to stopExternalSession() so the next message
+   * resumes with the new effort (Claude Code: per-turn spawn rereads it via
+   * SessionStartOptions.reasoningEffort → `--effort`).
+   */
+  setReasoningEffort?(process: RuntimeProcess, effort: string | undefined): Promise<void>;
 }
 
 /**

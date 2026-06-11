@@ -97,6 +97,9 @@ export interface AgentConfig {
   model?: string;
   providerEnvJson?: string;
   permissionMode: string;  // 'plan' | 'auto' | 'fullAgency'
+  /** #324 — builtin-runtime reasoning effort default ('default' | level; see
+   *  shared/reasoningEffort.ts). External runtimes use runtimeConfig.reasoningEffort. */
+  reasoningEffort?: string;
   mcpEnabledServers?: string[];
   /** Resolved MCP server definitions JSON (persisted for auto-start, rebuilt on manual start) */
   mcpServersJson?: string;

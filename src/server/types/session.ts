@@ -77,6 +77,12 @@ export interface SessionMetadata {
 
     /** Snapshot model name. Undefined → fallback to agent.model (lazy migration). */
     model?: string;
+    /** #324 — snapshot reasoning effort setting ('default' | level, see
+     *  shared/reasoningEffort.ts). Undefined → fallback to agent.reasoningEffort
+     *  (builtin) / agent.runtimeConfig.reasoningEffort (external). The literal
+     *  'default' is persisted so a session can explicitly revert to default
+     *  even when the agent-level value is non-default. */
+    reasoningEffort?: string;
     /** Snapshot permission mode. Undefined → fallback to agent.permissionMode. */
     permissionMode?: string;
     /** Snapshot MCP enabled list. Undefined → fallback to agent.mcpEnabledServers. */

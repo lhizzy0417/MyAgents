@@ -510,6 +510,7 @@ import {
   withCronDispatchLock,
   setAgents,
   setSessionModel,
+  setSessionReasoningEffort,
   resetSession,
   materializeCurrentSessionMetadataForPublishedReset,
   waitForSessionIdle,
@@ -602,6 +603,7 @@ import {
   getLastExternalAssistantText,
   setExternalModel,
   setExternalPermissionMode,
+  setExternalReasoningEffort,
   didLastTurnSucceed,
   getExternalSessionState,
   getExternalSystemInitPayload,
@@ -610,6 +612,7 @@ import {
   getExternalLiveAssistantMessage,
   getExternalSessionModel,
   getExternalSessionPermissionMode,
+  getExternalSessionReasoningEffort,
   prewarmExternalSession,
   awaitExternalSessionStarting,
   getCurrentBoundSessionId,
@@ -659,6 +662,9 @@ type SendMessagePayload = {
   backgroundAgentPermissionMode?: BackgroundAgentPermissionMode;
   runtimeConfig?: RuntimeConfig;
   model?: string;
+  // #324 — reasoning effort setting ('default' | level). Omitted by IM/Cron
+  // callers (keep current session value); desktop sends its picker state.
+  reasoningEffort?: string;
   // 'subscription' = explicit switch to Anthropic subscription (from desktop)
   // undefined/missing = "keep current provider" (safe default for IM/Cron callers)
   // object = use this specific third-party provider
@@ -676,6 +682,17 @@ type SendMessagePayload = {
 function getRuntimeConfigModel(runtimeConfig?: RuntimeConfig | null): string | undefined {
   const model = runtimeConfig?.model?.trim();
   return model ? model : undefined;
+}
+
+/** #324 — RAW effort setting from runtimeConfig for ExternalSendContext.
+ *  Always defined ('default' when unset): headless IM/cron callers resolve
+ *  authoritatively from the agent each turn, and the context value must be
+ *  able to express "explicitly back to default" — collapsing 'default' to
+ *  undefined here would make external-session fall back to stale module
+ *  state (a session bumped to xhigh would keep xhigh forever after the
+ *  agent reverted to default; cross-review Critical). */
+function getRuntimeConfigReasoningEffort(runtimeConfig?: RuntimeConfig | null): string {
+  return runtimeConfig?.reasoningEffort?.trim() || 'default';
 }
 
 function getRuntimeConfigPermissionMode(runtimeConfig?: RuntimeConfig | null): string | undefined {
@@ -1796,6 +1813,9 @@ async function main() {
               maxOutputTokensParamName: cfg.maxOutputTokensParamName,
               upstreamFormat: cfg.upstreamFormat,
               modelMapping,
+              // #324 — per-token live value (session bridges resolve it from
+              // currentReasoningEffort on every request).
+              reasoningEffort: cfg.reasoningEffort,
             };
           },
           logger: (msg) => console.log(msg),
@@ -2220,6 +2240,7 @@ async function main() {
         const permissionMode = payload?.permissionMode ?? 'auto';
         const model = payload?.model;
         const providerEnv = payload?.providerEnv;
+        const reasoningEffort = typeof payload?.reasoningEffort === 'string' ? payload.reasoningEffort : undefined;
 
         // Allow sending with just images or just text
         if (!text && images.length === 0) {
@@ -2299,6 +2320,7 @@ async function main() {
             permissionMode,
             model,
             providerEnv,
+            reasoningEffort,
             { source: 'desktop' as SessionSource },
           );
           if (result.error) {
@@ -2938,6 +2960,7 @@ async function main() {
                 scenario: { type: 'cron', taskId, intervalMinutes: intervalMinutes ?? 15, aiCanExit: aiCanExit ?? false },
                 permissionMode: effectivePermissionMode,
                 model: getRuntimeConfigModel(effectiveRuntimeConfig ?? null),
+                reasoningEffort: getRuntimeConfigReasoningEffort(effectiveRuntimeConfig ?? null),
               },
             );
             if (!runtimeResult.queued) {
@@ -3337,6 +3360,7 @@ async function main() {
                 scenario: { type: 'cron', taskId: taskId ?? 'unknown', intervalMinutes: intervalMinutes ?? 0, aiCanExit: aiCanExit ?? false },
                 permissionMode: effectivePermissionMode,
                 model: getRuntimeConfigModel(effectiveRuntimeConfig ?? null),
+                reasoningEffort: getRuntimeConfigReasoningEffort(effectiveRuntimeConfig ?? null),
               },
             );
             if (!ccResult.queued) {
@@ -4031,6 +4055,8 @@ async function main() {
            *  on disk. */
           favorite?: boolean;
           model?: string | null;
+          /** #324 — reasoning effort snapshot ('default' | level); null clears. */
+          reasoningEffort?: string | null;
           permissionMode?: string | null;
           mcpEnabledServers?: string[] | null;
           providerId?: string | null;
@@ -4053,6 +4079,7 @@ async function main() {
           'title',           // user-edited title implies engagement
           'titleSource',
           'model',
+          'reasoningEffort',
           'permissionMode',
           'mcpEnabledServers',
           'providerId',
@@ -4092,6 +4119,7 @@ async function main() {
 
         const snapshotKeys = [
           'model',
+          'reasoningEffort',
           'permissionMode',
           'mcpEnabledServers',
           'providerId',
@@ -7987,6 +8015,30 @@ async function main() {
         }
       }
 
+      // POST /api/reasoning-effort/set — #324 set reasoning effort for this
+      // session. Desktop-picker only today (mirrors /api/model/set without the
+      // Rust IM router caller, hence no imConfigSync flag). `effort` is the
+      // setting string ('default' | level); 'default' restores pre-#324
+      // behavior. Branches to the external-runtime handler per the
+      // config-sync routing red line (CLAUDE.md Multi-Agent Runtime).
+      if (pathname === '/api/reasoning-effort/set' && request.method === 'POST') {
+        try {
+          const payload = await request.json() as { effort?: string };
+          if (typeof payload?.effort !== 'string' || !payload.effort.trim()) {
+            return jsonResponse({ success: false, error: 'effort is required' }, 400);
+          }
+          if (shouldUseExternalRuntime()) {
+            await setExternalReasoningEffort(payload.effort);
+            return jsonResponse({ success: true });
+          }
+          setSessionReasoningEffort(payload.effort);
+          return jsonResponse({ success: true });
+        } catch (error) {
+          console.error('[api/reasoning-effort/set] Error:', error);
+          return jsonResponse({ success: false, error: error instanceof Error ? error.message : 'Failed to set reasoning effort' }, 500);
+        }
+      }
+
       // POST /api/provider/set - Set provider env for this session (called by Rust IM router on sidecar creation)
       if (pathname === '/api/provider/set' && request.method === 'POST') {
         try {
@@ -8069,6 +8121,11 @@ async function main() {
           if (typeof snapshot.model === 'string') {
             patch.model = snapshot.model;
           }
+          // #324 — accepted for forward-compat; today's Rust freeze writer
+          // never sends it (documented divergence, see session-snapshot.ts).
+          if (typeof snapshot.reasoningEffort === 'string') {
+            patch.reasoningEffort = snapshot.reasoningEffort;
+          }
           if (typeof snapshot.permissionMode === 'string') {
             patch.permissionMode = snapshot.permissionMode;
           }
@@ -8110,10 +8167,14 @@ async function main() {
               mcpServerIds: null,
               agentNames: null,
               permissionMode: getExternalSessionPermissionMode(),
+              // #324 — 'default' when unset so the adoption effect can mirror
+              // the live sidecar value into the picker without a null-vs-default
+              // ambiguity.
+              reasoningEffort: getExternalSessionReasoningEffort() ?? 'default',
             });
           }
 
-          const { getSessionModel, getMcpServers, getAgents, getSessionPermissionMode } = await import('./agent-session');
+          const { getSessionModel, getMcpServers, getAgents, getSessionPermissionMode, getSessionReasoningEffort } = await import('./agent-session');
           const model = getSessionModel();
           const mcpServers = getMcpServers();
           const agents = getAgents();
@@ -8125,6 +8186,7 @@ async function main() {
             mcpServerIds: mcpServers?.map(s => s.id) ?? null,
             agentNames: agents ? Object.keys(agents) : null,
             permissionMode,
+            reasoningEffort: getSessionReasoningEffort() ?? 'default',
           });
         } catch (error) {
           console.error('[api/session/config] Error:', error);
@@ -8563,6 +8625,7 @@ async function main() {
                 scenario: { type: 'agent-channel' as const, platform: imSource, sourceType: imSourceType, botName: payload.botName },
                 permissionMode: getRuntimeConfigPermissionMode(runtimeConfig),
                 model: getRuntimeConfigModel(runtimeConfig),
+                reasoningEffort: getRuntimeConfigReasoningEffort(runtimeConfig),
                 requestId: payload.requestId,
               },
             );
@@ -8626,6 +8689,7 @@ async function main() {
               resolvedPermissionMode,
               resolvedModel,
               resolvedProviderEnv,
+              undefined, // reasoningEffort — IM turns keep the session's current value
               metadata,
               payload.requestId,
             );
@@ -9051,6 +9115,7 @@ description: >
                 scenario: { type: 'agent-channel', platform: payload.source?.split('_')[0] ?? 'unknown', sourceType: 'private' },
                 permissionMode: getRuntimeConfigPermissionMode(runtimeConfig),
                 model: getRuntimeConfigModel(runtimeConfig),
+                reasoningEffort: getRuntimeConfigReasoningEffort(runtimeConfig),
               },
             );
             if (!ccResult.queued) {
@@ -9077,6 +9142,7 @@ description: >
               'fullAgency',
               getSessionModel(),
               getSessionProviderEnv(),
+              undefined, // reasoningEffort — heartbeat keeps the session's current value
               {
                 source: payload.source as SessionSource,
                 sourceId: payload.sourceId,
@@ -9438,7 +9504,7 @@ description: >
                 });
               }
             : async (text, inboxMeta) =>
-                enqueueUserMessage(text, undefined, undefined, undefined, undefined, { source: 'desktop' }, undefined, inboxMeta);
+                enqueueUserMessage(text, undefined, undefined, undefined, undefined, undefined, { source: 'desktop' }, undefined, inboxMeta);
           const result = await handleInboxDrain(
             body.messages as import('./inbox/types').PendingInboxMessage[],
             injector,

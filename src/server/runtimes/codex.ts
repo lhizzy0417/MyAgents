@@ -210,6 +210,10 @@ export function buildCodexTurnStartParams(args: {
   approvalPolicy: CodexApprovalPolicy;
   sandbox: CodexSandboxMode;
   model?: string | null;
+  /** #324 — reasoning effort level; falsy = omit (Codex default applies).
+   *  Schema: TurnStartParams.effort "Override the reasoning effort for this
+   *  turn and subsequent turns" (codex app-server v2). */
+  reasoningEffort?: string | null;
 }): Record<string, unknown> {
   return {
     threadId: args.threadId,
@@ -219,6 +223,9 @@ export function buildCodexTurnStartParams(args: {
     sandboxPolicy: buildCodexSandboxPolicy(args.sandbox, args.cwd),
     model: args.model || null,
     summary: 'concise',
+    // Omit when default — an explicit null is "no override" per schema, but
+    // omitting is the conservative shape older codex builds also accept.
+    ...(args.reasoningEffort ? { effort: args.reasoningEffort } : {}),
   };
 }
 
@@ -1038,6 +1045,10 @@ class CodexProcess implements RuntimeProcess {
   approvalPolicy: CodexApprovalPolicy = 'on-request';
   sandbox: CodexSandboxMode = 'workspace-write';
   permissionMode = '';
+  /** #324 — NORMALIZED effort level ('' = Codex default). Carried on every
+   *  turn/start (its `effort` overrides "this turn and subsequent turns"),
+   *  which is also what makes setReasoningEffort an in-place update. */
+  reasoningEffort = '';
 
   /** MyAgents sessionId (from SessionStartOptions). Used as the attachment scope key
    *  so refPath /api/attachment/tool/<sessionId>/<turnId>/<file> stays consistent
@@ -1907,6 +1918,7 @@ export class CodexRuntime implements AgentRuntime {
       codexProc.approvalPolicy = approval;
       codexProc.sandbox = sandbox;
       codexProc.model = options.model || '';
+      codexProc.reasoningEffort = options.reasoningEffort || '';
 
       // 3. Start or resume thread
       if (options.resumeSessionId) {
@@ -1965,6 +1977,7 @@ export class CodexRuntime implements AgentRuntime {
           approvalPolicy: approval,
           sandbox,
           model: options.model || null,
+          reasoningEffort: codexProc.reasoningEffort || null,
         }), 15_000) as { turn: { id: string } };
         codexProc.currentTurnId = turnResult.turn.id;
       }
@@ -2033,8 +2046,20 @@ export class CodexRuntime implements AgentRuntime {
       approvalPolicy: codexProc.approvalPolicy,
       sandbox: codexProc.sandbox,
       model: codexProc.model || null,
+      reasoningEffort: codexProc.reasoningEffort || null,
     }), 15_000) as { turn: { id: string } };
     codexProc.currentTurnId = turnResult.turn.id;
+  }
+
+  /**
+   * #324 — in-place reasoning-effort switch. turn/start.effort overrides
+   * "this turn and subsequent turns", so recording the value on process
+   * state is sufficient: the next sendMessage carries it. No RPC needed.
+   */
+  async setReasoningEffort(process: RuntimeProcess, effort: string | undefined): Promise<void> {
+    const codexProc = process as CodexProcess;
+    if (codexProc.exited) throw new Error('Codex process has exited');
+    codexProc.reasoningEffort = effort ?? '';
   }
 
   /**

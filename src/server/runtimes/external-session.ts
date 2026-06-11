@@ -17,6 +17,7 @@ import { awaitInFlightSaves, rebuildAttachmentRegistryFromBlocks, trackInFlightS
 import { maybeSpill, type LargeValueRef } from '../utils/large-value-store';
 import type { AskUserQuestionInput, AskUserQuestion } from '../../shared/types/askUserQuestion';
 import { withQuestionTextAnswerKeys } from '../../shared/types/askUserQuestion';
+import { normalizeReasoningEffort } from '../../shared/reasoningEffort';
 import { getExternalRuntime, getCurrentRuntimeType, isExternalRuntime } from './factory';
 import { resolveCodexWorkspaceInstructions } from './workspace-instructions';
 import { shouldQueueExternalSend, canDrainExternalQueue } from './external-queue-policy';
@@ -98,6 +99,7 @@ let lastRuntimeSessionId = '';  // Runtime's session ID (CC: from hook/init; Cod
 let lastModel = '';             // Latest model from config sync (passed on resume)
 let lastRuntimeReportedModel = ''; // Actual model reported by runtime (session_init/model_update)
 let lastPermissionMode = '';    // Latest permission mode from config sync
+let lastReasoningEffort = '';   // #324 — NORMALIZED effort level ('' = default), passed on start/resume
 let lastPersistedRuntimeUsageTotals: MessageUsage | null = null;
 // PRD 0.2.32 — 本轮 context 用量快照（turn-scoped，sibling of currentTurnUsage）。Codex 亚轮多次
 // → 保留最新一个；turn 末 persistTurnResult 快照后写盘一次。**每轮在 resetTurnAccumulators 清空**
@@ -298,6 +300,7 @@ function resetModuleState(): void {
   lastModel = '';
   lastRuntimeReportedModel = '';
   lastPermissionMode = '';
+  lastReasoningEffort = '';
   lastPersistedRuntimeUsageTotals = null;
   currentTurnContextUsage = null;
   allSessionMessages = [];
@@ -1130,7 +1133,12 @@ export function restoreExternalSessionState(
   if (meta?.permissionMode) {
     lastPermissionMode = meta.permissionMode;
   }
-  console.log(`[external-session] Restored state for session ${sessionId}, runtimeSessionId=${lastRuntimeSessionId} (${allSessionMessages.length} messages), permissionMode=${lastPermissionMode || '(default)'}, model=${lastModel || '(default)'}`);
+  // #324 — snapshot stores the setting ('default' | level); module state is
+  // normalized ('' = default), so a persisted 'default' collapses to ''.
+  if (meta?.reasoningEffort) {
+    lastReasoningEffort = normalizeReasoningEffort(meta.reasoningEffort) ?? '';
+  }
+  console.log(`[external-session] Restored state for session ${sessionId}, runtimeSessionId=${lastRuntimeSessionId} (${allSessionMessages.length} messages), permissionMode=${lastPermissionMode || '(default)'}, model=${lastModel || '(default)'}, effort=${lastReasoningEffort || '(default)'}`);
 }
 
 // Pattern B — `setExternalImStreamCallback` removed. The /api/im/chat handler
@@ -1146,6 +1154,12 @@ export function restoreExternalSessionState(
  * Called from index.ts /api/model/set when runtime is external.
  */
 export async function setExternalModel(model: string): Promise<void> {
+  // NOTE(#324 cross-review): `prevModel` exists because the fallback dedupe
+  // below must compare against the PRE-call value. The in-place branch writes
+  // `lastModel = model` before its RPC; on RPC failure the old comparison
+  // (`model === lastModel`) was always true → the documented stop-and-resume
+  // fallback was dead code and the failed in-place switch was silently lost.
+  const prevModel = lastModel;
   // Wait for any in-flight startExternalSession (notably pre-warm) to finish
   // before dispatching. Without this, a user-initiated model change during
   // the 10–14s handshake window sees `activeProcess=null` → skips the in-place
@@ -1185,7 +1199,8 @@ export async function setExternalModel(model: string): Promise<void> {
   // dedupe is best-effort, so a redundant push here would otherwise cause
   // a needless kill+respawn (paying ~10s cold restart for nothing). Safe at
   // this point because there's no in-flight runtime RPC to race against.
-  if (model === lastModel) return;
+  // Compares against the pre-call value (see prevModel note at top).
+  if (model === prevModel) return;
   lastModel = model;
   console.log(`[external-session] Model set to "${model}" (will restart on next send)`);
   if (isRunning || activeProcess) {
@@ -1218,6 +1233,62 @@ export async function setExternalPermissionMode(mode: string): Promise<void> {
     console.log('[external-session] Stopping process for permission mode change');
     await stopExternalSession();
   }
+}
+
+/**
+ * #324 — set reasoning effort for external runtimes. `setting` is the UI
+ * value ('default' | level); module state stores the normalized level
+ * ('' = default).
+ *
+ * In-place path: Codex implements `setReasoningEffort` (its `turn/start.effort`
+ * overrides "this turn and subsequent turns", so the adapter just records the
+ * value on process state — next turn carries it). Always call through on
+ * duplicates for the same self-healing reason as setExternalModel.
+ *
+ * Fallback: stop the process so the next sendExternalMessage start/resume
+ * passes `reasoningEffort` in SessionStartOptions (Claude Code: per-turn
+ * spawn → `--effort`, so between turns this is effectively free).
+ */
+export async function setExternalReasoningEffort(setting: string): Promise<void> {
+  if (startingPromise) {
+    await startingPromise;
+  }
+  const effort = normalizeReasoningEffort(setting) ?? '';
+  // Capture BEFORE any write: the fallback dedupe below must compare against
+  // the pre-call value, not the value the in-place branch just wrote —
+  // otherwise a failed in-place attempt short-circuits its own fallback
+  // (cross-review: setExternalModel inherited exactly this dead path).
+  const prev = lastReasoningEffort;
+
+  if (isExternalSessionActive() && activeProcess && activeRuntime?.setReasoningEffort) {
+    lastReasoningEffort = effort;
+    console.log(`[external-session] Reasoning effort set to "${effort || '(default)'}" (in-place)`);
+    try {
+      await activeRuntime.setReasoningEffort(activeProcess, effort || undefined);
+      return;
+    } catch (err) {
+      console.warn('[external-session] In-place setReasoningEffort failed — falling back to process restart:', err);
+      // Fall through to the stop-and-resume path below.
+    }
+  }
+
+  if (effort === prev) return;
+  lastReasoningEffort = effort;
+  console.log(`[external-session] Reasoning effort set to "${effort || '(default)'}" (applies on next send)`);
+  // Claude Code is per-turn spawn (`--effort` flag read fresh from
+  // lastReasoningEffort each turn via Case 2's start options) — stopping the
+  // process here would only kill an in-flight response for zero benefit.
+  // Other runtimes without an in-place setter need the stop so the next
+  // sendExternalMessage resumes with the new value.
+  if ((isRunning || activeProcess) && getCurrentRuntimeType() !== 'claude-code') {
+    console.log('[external-session] Stopping process for reasoning effort change');
+    await stopExternalSession();
+  }
+}
+
+/** #324 — current normalized reasoning effort level, undefined = default. */
+export function getExternalSessionReasoningEffort(): string | undefined {
+  return lastReasoningEffort || undefined;
 }
 
 // ─── Public API ───
@@ -1499,6 +1570,9 @@ export async function startExternalSession(options: {
   initialImages?: ImagePayload[];
   model?: string;
   permissionMode?: string;
+  /** #324 — NORMALIZED effort level, OR '' = explicit reset to the runtime
+   *  default (records over a stale module value); absent = keep module state. */
+  reasoningEffort?: string;
   scenario: InteractionScenario;
   resumeSessionId?: string;
   /** Issue #194 — per-agent env policy (proxy: myagents/terminal/direct). */
@@ -1539,6 +1613,7 @@ async function _doStartExternalSession(options: {
   initialImages?: ImagePayload[];
   model?: string;
   permissionMode?: string;
+  reasoningEffort?: string;
   scenario: InteractionScenario;
   resumeSessionId?: string;
   envPolicy?: import('../../shared/types/runtime').RuntimeEnvPolicy;
@@ -1616,6 +1691,7 @@ async function _doStartExternalSession(options: {
   // Track latest config for resume
   if (options.model !== undefined) lastModel = options.model;
   if (options.permissionMode !== undefined) lastPermissionMode = options.permissionMode;
+  if (options.reasoningEffort !== undefined) lastReasoningEffort = options.reasoningEffort;
   // Only clear message history for new sessions, not resumes
   if (!options.resumeSessionId) {
     allSessionMessages = [];
@@ -1758,6 +1834,12 @@ export interface ExternalSendContext {
   scenario: InteractionScenario;
   permissionMode?: string;
   model?: string;  // Runtime-specific model (e.g., "sonnet", "opus")
+  /** #324 — RAW effort setting ('default' | level). Tri-state contract:
+   *  PRESENT = authoritative for this turn (headless IM/cron callers resolve
+   *  it from agent.runtimeConfig each turn; 'default' explicitly clears to
+   *  the runtime default). ABSENT = caller doesn't manage effort (desktop —
+   *  module state from /api/reasoning-effort/set + snapshot restore wins). */
+  reasoningEffort?: string;
   // Pattern B — IM trace ID. Forwarded from /api/im/chat (Rust generates at edge).
   // Tags every UnifiedEvent emitted to ImEventBus so the bus subscriber for this
   // request can route delta/block-end/etc. to the correct reply slot.
@@ -1792,6 +1874,20 @@ export interface ExternalSendContext {
  * If you ever wire modality lookups for external-runtime models, add the
  * filter here and lift the frontend gate.
  */
+/**
+ * #324 — resolve the effort to pass into startExternalSession for this turn.
+ * Context-present = authoritative (raw setting; 'default' normalizes to ''
+ * which startExternalSession records as "explicit default" and runtimes
+ * treat as "omit the knob"). Context-absent = desktop / unmanaged → module
+ * state (set by /api/reasoning-effort/set or snapshot restore).
+ */
+function resolveTurnReasoningEffort(context: ExternalSendContext | undefined): string | undefined {
+  if (context?.reasoningEffort !== undefined) {
+    return normalizeReasoningEffort(context.reasoningEffort) ?? '';
+  }
+  return lastReasoningEffort || undefined;
+}
+
 export async function sendExternalMessage(
   text: string,
   images?: ImagePayload[],
@@ -1929,6 +2025,7 @@ export async function sendExternalMessage(
         initialImages: hasImages ? images : undefined,
         model: context.model,
         permissionMode: context.permissionMode,
+        reasoningEffort: resolveTurnReasoningEffort(context),
         scenario: context.scenario,
       });
       return { queued: true };
@@ -1958,6 +2055,7 @@ export async function sendExternalMessage(
         initialImages: hasImages ? images : undefined,
         model: nextModel,
         permissionMode: nextPermissionMode,
+        reasoningEffort: resolveTurnReasoningEffort(context), // #324
         scenario: nextScenario,
         resumeSessionId: resumeId, // CC: --resume <myagents-session-id>; Codex: --resume <threadId>
       });

@@ -12,7 +12,9 @@ export interface ResponsesRequest {
   temperature?: number;
   top_p?: number;
   stream?: boolean;
-  reasoning?: { effort: 'low' | 'medium' | 'high' };
+  // #324: effort widened to plain string — same pass-through rationale as
+  // OpenAIRequest.reasoning_effort (provider vocabularies diverge).
+  reasoning?: { effort: string };
   text?: { format: ResponsesTextFormat };
 }
 

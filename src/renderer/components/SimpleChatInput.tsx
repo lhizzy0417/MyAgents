@@ -1,4 +1,4 @@
-import { AlertCircle, ChevronUp, Loader, Paperclip, Plus, Send, Square, X, FileText, AtSign, Wrench, Timer, Settings2, Unlock } from 'lucide-react';
+import { AlertCircle, ChevronRight, ChevronUp, Gauge, Loader, Paperclip, Plus, Send, Square, X, FileText, AtSign, Wrench, Timer, Settings2, Unlock } from 'lucide-react';
 import { memo, useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState, forwardRef } from 'react';
 
 import Tip from '@/components/Tip';
@@ -20,6 +20,7 @@ import { useUndoStack } from '@/hooks/useUndoStack';
 import { isImageFile, isImageMimeType, ALLOWED_IMAGE_MIME_TYPES } from '../../shared/fileTypes';
 import type { QueuedMessageInfo } from '@/types/queue';
 import { CUSTOM_EVENTS } from '../../shared/constants';
+import { reasoningEffortChoices, REASONING_EFFORT_DESCRIPTIONS, REASONING_EFFORT_DEFAULT } from '../../shared/reasoningEffort';
 import { isDebugMode } from '@/utils/debug';
 import { retainFocusOnMouseDown } from '@/utils/focusRetention';
 import { renameIfBareClipboardImage } from '@/utils/clipboardImage';
@@ -102,6 +103,11 @@ interface SimpleChatInputProps {
   onProviderChange?: (providerId: string, targetModel?: string) => void; // Called when provider is changed (with optional model to set atomically)
   selectedModel?: string; // Current selected model ID
   onModelChange?: (modelId: string) => void; // Called when model is changed
+  /** #324 — 推理强度 setting ('default' | level). Renders as the fixed bottom
+   *  row of the model menu. Choices derive from runtime + provider.apiProtocol
+   *  (shared/reasoningEffort.ts); row hidden when the surface has no knob (Gemini). */
+  reasoningEffort?: string;
+  onReasoningEffortChange?: (effort: string) => void;
   /**
    * v0.1.69: true when session exists but has no snapshot (legacy pre-v0.1.69 session).
    * Renders an "unlocked" indicator next to the model button so the user knows changes
@@ -302,6 +308,8 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
   onProviderChange,
   selectedModel,
   onModelChange,
+  reasoningEffort = 'default',
+  onReasoningEffortChange,
   sessionUnlocked = false,
   permissionMode = 'auto',
   onPermissionModeChange,
@@ -475,6 +483,41 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
   const [showModeMenu, setShowModeMenu] = useState(false);
   const [showModelMenu, setShowModelMenu] = useState(false);
   const [showToolMenu, setShowToolMenu] = useState(false);
+
+  // #324 — 推理强度 submenu (fixed bottom row of the model menu). Opens on
+  // hover/click of the row; 120ms close delay + an invisible hover bridge
+  // prevent flicker when the pointer crosses the 6px gap to the flyout.
+  const [showEffortSubmenu, setShowEffortSubmenu] = useState(false);
+  // Flyout direction — flips to the left when the popover sits too close to
+  // the window's right edge for the 224px submenu to fit.
+  const [effortFlipLeft, setEffortFlipLeft] = useState(false);
+  const effortRowWrapRef = useRef<HTMLDivElement | null>(null);
+  const effortCloseTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // null = this surface has no reasoning-effort knob (Gemini / unknown) → row hidden.
+  const effortChoices = onReasoningEffortChange
+    ? reasoningEffortChoices(isExternalRuntime ? (runtime ?? 'builtin') : 'builtin', provider?.apiProtocol)
+    : null;
+  const openEffortSubmenu = useCallback(() => {
+    if (effortCloseTimerRef.current) {
+      clearTimeout(effortCloseTimerRef.current);
+      effortCloseTimerRef.current = null;
+    }
+    const rect = effortRowWrapRef.current?.getBoundingClientRect();
+    // 224px submenu + 6px gap + 8px margin of comfort
+    setEffortFlipLeft(!!rect && rect.right + 238 > window.innerWidth);
+    setShowEffortSubmenu(true);
+  }, []);
+  const scheduleCloseEffortSubmenu = useCallback(() => {
+    if (effortCloseTimerRef.current) clearTimeout(effortCloseTimerRef.current);
+    effortCloseTimerRef.current = setTimeout(() => setShowEffortSubmenu(false), 120);
+  }, []);
+  // Reset submenu state whenever the model menu closes (incl. outside-click).
+  useEffect(() => {
+    if (!showModelMenu) setShowEffortSubmenu(false);
+  }, [showModelMenu]);
+  useEffect(() => () => {
+    if (effortCloseTimerRef.current) clearTimeout(effortCloseTimerRef.current);
+  }, []);
 
   // Derive current model ID from prop or provider default — no hardcoded fallback
   const currentModelId = selectedModel ?? provider?.primaryModel;
@@ -2446,13 +2489,20 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                 <span className="max-w-[140px] truncate">{currentModelName}</span>
                 <ChevronUp className="h-3 w-3 shrink-0" />
               </button>
+              {/* #324 — unstyled + hand-rolled chrome (= Popover DEFAULT_CHROME minus
+                  `overflow-hidden`): the 推理强度 flyout is positioned OUTSIDE the
+                  popover bounds and would be clipped by overflow-hidden. The model
+                  list keeps its own scroll container below; the effort row stays
+                  fixed at the bottom, outside the scroll area. */}
               <Popover
                 open={showModelMenu}
                 onClose={() => setShowModelMenu(false)}
                 anchorRef={modelBtnRef}
                 placement="top-end"
-                className="w-64 max-h-[300px] overflow-y-auto py-1"
+                unstyled
+                className="w-64 rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] shadow-xl"
               >
+                <div className="max-h-[260px] overflow-y-auto py-1">
                 {isExternalRuntime && runtimeModels ? (
                   <>
                     <div className="px-3 pb-0.5 pt-1.5 text-[10px] font-semibold uppercase tracking-wider text-[var(--ink-muted)]/60">
@@ -2539,6 +2589,86 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                     </div>
                   ));
                 })()}
+                </div>
+
+                {/* #324 — fixed bottom row: 推理强度. Hidden when the surface has
+                    no effort knob (Gemini / unknown runtime). Hover or click
+                    opens the flyout; selection closes the whole menu. */}
+                {effortChoices && (
+                  <div
+                    ref={effortRowWrapRef}
+                    className="relative border-t border-[var(--line)] p-1"
+                    onMouseEnter={openEffortSubmenu}
+                    onMouseLeave={scheduleCloseEffortSubmenu}
+                  >
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        if (showEffortSubmenu) {
+                          setShowEffortSubmenu(false);
+                        } else {
+                          openEffortSubmenu();
+                        }
+                      }}
+                      className={`flex w-full items-center gap-1.5 rounded-md px-3 py-1.5 text-left text-[13px] text-[var(--ink)] transition-colors ${
+                        showEffortSubmenu ? 'bg-[var(--hover-bg)]' : 'hover:bg-[var(--hover-bg)]'
+                      }`}
+                    >
+                      <Gauge className="h-3.5 w-3.5 shrink-0 text-[var(--ink-muted)]" />
+                      <span className="flex-1">推理强度</span>
+                      <span className={`text-[12px] ${
+                        reasoningEffort !== REASONING_EFFORT_DEFAULT
+                          ? 'font-medium text-[var(--accent)]'
+                          : 'text-[var(--ink-muted)]'
+                      }`}>
+                        {reasoningEffort === REASONING_EFFORT_DEFAULT ? '默认' : reasoningEffort}
+                      </span>
+                      <ChevronRight className="h-3 w-3 shrink-0 text-[var(--ink-muted)]" />
+                    </button>
+
+                    {showEffortSubmenu && (
+                      <>
+                        {/* invisible hover bridge across the 6px gap */}
+                        <div className={`absolute top-0 h-full w-2 ${effortFlipLeft ? 'right-full' : 'left-full'}`} />
+                        <div
+                          className={`absolute bottom-0 z-10 w-56 rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] p-1 shadow-xl ${
+                            effortFlipLeft ? 'right-[calc(100%+6px)]' : 'left-[calc(100%+6px)]'
+                          }`}
+                        >
+                          {[REASONING_EFFORT_DEFAULT, ...effortChoices].map(level => {
+                            const isSelected = reasoningEffort === level;
+                            return (
+                              <button
+                                key={level}
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  onReasoningEffortChange?.(level);
+                                  setShowEffortSubmenu(false);
+                                  setShowModelMenu(false);
+                                }}
+                                className={`flex w-full items-center justify-between rounded-md px-3 py-1.5 text-left text-[13px] transition-colors ${
+                                  isSelected
+                                    ? 'bg-[var(--accent)]/10 font-medium text-[var(--accent)]'
+                                    : 'text-[var(--ink)] hover:bg-[var(--hover-bg)]'
+                                }`}
+                              >
+                                <span>{level === REASONING_EFFORT_DEFAULT ? '默认' : level}</span>
+                                <span className={`text-[11px] font-normal ${isSelected ? 'text-[var(--accent)]/70' : 'text-[var(--ink-muted)]'}`}>
+                                  {REASONING_EFFORT_DESCRIPTIONS[level] ?? ''}
+                                </span>
+                              </button>
+                            );
+                          })}
+                          <div className="mt-1 whitespace-nowrap border-t border-[var(--line)] px-3 pb-1 pt-1.5 text-[10px] text-[var(--ink-muted)]/60">
+                            需服务商支持该参数，以实际生效为准
+                          </div>
+                        </div>
+                      </>
+                    )}
+                  </div>
+                )}
               </Popover>
 
               {/* Button states:

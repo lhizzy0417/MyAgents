@@ -3030,7 +3030,10 @@ export default function TabProvider({
         permissionMode?: PermissionMode,
         model?: string,
         providerEnv?: { baseUrl?: string; apiKey?: string; authType?: 'auth_token' | 'api_key' | 'both' | 'auth_token_clear_api_key'; apiProtocol?: 'anthropic' | 'openai'; maxOutputTokens?: number; maxOutputTokensParamName?: 'max_tokens' | 'max_completion_tokens' | 'max_output_tokens'; upstreamFormat?: 'chat_completions' | 'responses'; modelAliases?: { sonnet?: string; opus?: string; haiku?: string } },
-        isCron?: boolean
+        isCron?: boolean,
+        // #324 — reasoning effort setting ('default' | level); send-time safety
+        // net mirroring `model` (the /api/reasoning-effort/set push is primary).
+        reasoningEffort?: string,
     ): Promise<boolean> => {
         const trimmed = text.trim();
         if (!trimmed && (!images || images.length === 0)) return false;
@@ -3099,6 +3102,7 @@ export default function TabProvider({
             // takes effect immediately in already-mounted tabs.
             backgroundAgentPermissionMode: appConfigRef.current?.backgroundAgentPermissionMode ?? 'inherit',
             model,
+            reasoningEffort,
             providerEnv: providerEnv ?? 'subscription',
         }).then((response) => {
             if (response.success) {

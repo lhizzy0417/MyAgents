@@ -12,6 +12,7 @@ import { isProviderAvailable } from '@/config/services/providerService';
 import { CUSTOM_EVENTS } from '@/../shared/constants';
 import { PERMISSION_MODES, type Project, type McpServerDefinition } from '@/config/types';
 import type { AgentConfig } from '../../../shared/types/agent';
+import { reasoningEffortChoices, REASONING_EFFORT_DESCRIPTIONS } from '@/../shared/reasoningEffort';
 import { ALL_WORKSPACE_ICON_IDS, DEFAULT_WORKSPACE_ICON } from '@/assets/workspace-icons';
 import WorkspaceIcon from '../launcher/WorkspaceIcon';
 import RuntimeSelector from '../RuntimeSelector';
@@ -39,7 +40,7 @@ export default function WorkspaceBasicsSection({ project, agent, agentDir }: Wor
     [project?.displayName, project?.name],
   );
   const [name, setName] = useState(canonicalName);
-  const [openPopup, setOpenPopup] = useState<'icon' | 'model' | 'permission' | 'mcp' | 'plugins' | null>(null);
+  const [openPopup, setOpenPopup] = useState<'icon' | 'model' | 'effort' | 'permission' | 'mcp' | 'plugins' | null>(null);
   const [mcpServers, setMcpServers] = useState<McpServerDefinition[]>([]);
   const [globalEnabledMcp, setGlobalEnabledMcp] = useState<string[]>([]);
   const isMountedRef = useRef(true);
@@ -132,7 +133,7 @@ export default function WorkspaceBasicsSection({ project, agent, agentDir }: Wor
 
   // Save AI config (model, provider, permission, mcp, plugins).
   // AgentConfig is the single source of truth when available; fallback to Project for non-agent workspaces.
-  const saveAgentConfig = useCallback(async (updates: Partial<Pick<AgentConfig, 'providerId' | 'model' | 'permissionMode' | 'mcpEnabledServers' | 'enabledPluginIds'>>) => {
+  const saveAgentConfig = useCallback(async (updates: Partial<Pick<AgentConfig, 'providerId' | 'model' | 'permissionMode' | 'mcpEnabledServers' | 'enabledPluginIds' | 'reasoningEffort'>>) => {
     if (agent) {
       // patchAgentConfig auto-resolves providerEnvJson when providerId changes
       await patchAgentConfig(agent.id, updates);
@@ -172,6 +173,13 @@ export default function WorkspaceBasicsSection({ project, agent, agentDir }: Wor
 
   const handlePermissionSelect = useCallback((mode: string) => {
     void saveAgentConfig({ permissionMode: mode });
+    setOpenPopup(null);
+  }, [saveAgentConfig]);
+
+  // #324 — agent-level 推理强度 default ('default' | level). Builtin only here
+  // (external runtimes configure it via the chat toolbar → runtimeConfig).
+  const handleEffortSelect = useCallback((effort: string) => {
+    void saveAgentConfig({ reasoningEffort: effort });
     setOpenPopup(null);
   }, [saveAgentConfig]);
 
@@ -239,6 +247,10 @@ export default function WorkspaceBasicsSection({ project, agent, agentDir }: Wor
 
   const effectivePermissionMode = agent?.permissionMode ?? project?.permissionMode;
   const permissionMode = PERMISSION_MODES.find(m => m.value === effectivePermissionMode) || PERMISSION_MODES[0];
+
+  // #324 — agent-level 推理强度 default (builtin; no project fallback — the
+  // agent is the only storage for this field).
+  const effectiveReasoningEffort = agent?.reasoningEffort ?? 'default';
 
   const effectiveMcpServers = agent?.mcpEnabledServers ?? project?.mcpEnabledServers;
   const enabledMcpNames = availableMcpServers
@@ -520,6 +532,45 @@ export default function WorkspaceBasicsSection({ project, agent, agentDir }: Wor
                   </div>
                 </button>
               ))}
+            </div>
+          </>
+        )}
+      </div>
+      )}
+
+      {/* #324 推理强度 — hidden when external runtime (configured via chat toolbar there) */}
+      {currentRuntime === 'builtin' && (
+      <div className="relative flex items-center gap-3">
+        <label className="w-14 shrink-0 text-sm text-[var(--ink-muted)]">推理强度</label>
+        <button
+          className="flex flex-1 items-center justify-between rounded-lg border border-[var(--line)] px-3 py-1.5 text-left text-sm text-[var(--ink)] transition-colors hover:border-[var(--line-strong)]"
+          onClick={() => setOpenPopup(openPopup === 'effort' ? null : 'effort')}
+        >
+          <span>{effectiveReasoningEffort === 'default' ? '默认' : effectiveReasoningEffort}</span>
+          <ChevronRight className="h-3.5 w-3.5 shrink-0 text-[var(--ink-subtle)]" />
+        </button>
+
+        {openPopup === 'effort' && (
+          <>
+            <div className="fixed inset-0 z-40" onMouseDown={(e) => { if (e.target === e.currentTarget) setOpenPopup(null); }} />
+            <div className="absolute left-20 top-0 z-50 w-[280px] rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-2 shadow-lg">
+              {['default', ...(reasoningEffortChoices('builtin', selectedProvider?.apiProtocol) ?? [])].map(level => (
+                <button
+                  key={level}
+                  className={`flex w-full items-center justify-between rounded-lg px-3 py-2 text-left transition-colors ${
+                    effectiveReasoningEffort === level
+                      ? 'bg-[var(--accent-warm-muted)] text-[var(--accent-warm)]'
+                      : 'text-[var(--ink)] hover:bg-[var(--hover-bg)]'
+                  }`}
+                  onClick={() => handleEffortSelect(level)}
+                >
+                  <span className="text-sm font-medium">{level === 'default' ? '默认' : level}</span>
+                  <span className="text-xs text-[var(--ink-muted)]">{REASONING_EFFORT_DESCRIPTIONS[level] ?? ''}</span>
+                </button>
+              ))}
+              <div className="mt-1 whitespace-nowrap border-t border-[var(--line)] px-3 pb-1 pt-2 text-[10px] text-[var(--ink-muted)]/60">
+                需服务商支持该参数，以实际生效为准
+              </div>
             </div>
           </>
         )}

@@ -325,3 +325,55 @@ describe('persistInputOptionChange — disk write fanout', () => {
     expect(m.pushRuntimeConfigToSidecar).not.toHaveBeenCalled();
   });
 });
+
+describe('persistInputOptionChange — reasoning effort routing (#324)', () => {
+  it('builtin: writes agent.reasoningEffort + snapshot.reasoningEffort, never the project', async () => {
+    const m = makeMocks();
+    await persistInputOptionChange({
+      workspaceId: 'ws-1',
+      agentId: 'agent-1',
+      isExternalRuntime: false,
+      fields: { reasoningEffort: 'max' },
+      patchProject: m.patchProject,
+      patchAgentConfig: m.patchAgentConfig,
+      patchSnapshot: m.patchSnapshot,
+    });
+    expect(m.patchAgentConfig).toHaveBeenCalledWith('agent-1', { reasoningEffort: 'max' });
+    expect(m.patchSnapshot).toHaveBeenCalledWith({ reasoningEffort: 'max' });
+    // No project-level storage for effort — the agent is the only default source.
+    expect(m.patchProject).not.toHaveBeenCalled();
+  });
+
+  it('external: routes to agent.runtimeConfig.reasoningEffort, preserving sibling keys', async () => {
+    const m = makeMocks();
+    await persistInputOptionChange({
+      workspaceId: 'ws-1',
+      agentId: 'agent-1',
+      isExternalRuntime: true,
+      currentRuntimeConfig: { model: 'gpt-5.2-codex', permissionMode: 'full-auto' },
+      fields: { reasoningEffort: 'xhigh' },
+      patchProject: m.patchProject,
+      patchAgentConfig: m.patchAgentConfig,
+      patchSnapshot: m.patchSnapshot,
+    });
+    expect(m.patchAgentConfig).toHaveBeenCalledWith('agent-1', {
+      runtimeConfig: { model: 'gpt-5.2-codex', permissionMode: 'full-auto', reasoningEffort: 'xhigh' },
+    });
+    expect(m.patchSnapshot).toHaveBeenCalledWith({ reasoningEffort: 'xhigh' });
+  });
+
+  it("persists the literal 'default' (a session can pin back to default over a non-default agent value)", async () => {
+    const m = makeMocks();
+    await persistInputOptionChange({
+      workspaceId: 'ws-1',
+      agentId: 'agent-1',
+      isExternalRuntime: false,
+      fields: { reasoningEffort: 'default' },
+      patchProject: m.patchProject,
+      patchAgentConfig: m.patchAgentConfig,
+      patchSnapshot: m.patchSnapshot,
+    });
+    expect(m.patchAgentConfig).toHaveBeenCalledWith('agent-1', { reasoningEffort: 'default' });
+    expect(m.patchSnapshot).toHaveBeenCalledWith({ reasoningEffort: 'default' });
+  });
+});

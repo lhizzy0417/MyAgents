@@ -24,6 +24,8 @@ export interface SendMessagePayload {
   attachments?: SerializedAttachmentPayload[];
   /** Model ID to use for this message (e.g., 'claude-sonnet-4-6') */
   model?: string;
+  /** #324 — reasoning effort setting ('default' | level, see shared/reasoningEffort.ts) */
+  reasoningEffort?: string;
   /** Permission mode to use for this message */
   permissionMode?: 'auto' | 'plan' | 'fullAgency' | 'custom';
   /** Background-agent permission policy (#264); echoed from global AppConfig. */

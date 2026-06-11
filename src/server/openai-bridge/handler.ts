@@ -185,8 +185,8 @@ export function createBridgeHandler(config: BridgeConfig): BridgeHandler {
     // coexist without cross-pollination.
     const effectiveModelMapping = upstream.modelMapping ?? config.modelMapping;
     const translatedReq = isResponses
-      ? translateRequestToResponses(anthropicReq, { modelOverride: upstream.model, modelMapping: effectiveModelMapping, imageSaver })
-      : translateRequest(anthropicReq, { modelMapping: effectiveModelMapping, modelOverride: upstream.model, imageSaver });
+      ? translateRequestToResponses(anthropicReq, { modelOverride: upstream.model, modelMapping: effectiveModelMapping, imageSaver, reasoningEffort: upstream.reasoningEffort })
+      : translateRequest(anthropicReq, { modelMapping: effectiveModelMapping, modelOverride: upstream.model, imageSaver, reasoningEffort: upstream.reasoningEffort });
 
     // 4a. Normalize thought_signatures on tool_calls (Gemini thinking models).
     // Gemini requires thought_signature on tool_calls in conversation history.

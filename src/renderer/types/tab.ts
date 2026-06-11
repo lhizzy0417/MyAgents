@@ -67,6 +67,10 @@ export interface InitialMessage {
     builtinSelection?: { providerId: string; model: string };
     /** External runtime 的 model — 没有 provider 概念 */
     runtimeModel?: string;
+    /** #324 — 推理强度 setting ('default' | level)。手递（hand-carry）进新 Tab：
+     *  launcher 的 agent-config 写盘是异步的，handoff 不能赌它赢过 sidecar 启动
+     *  自解析；与 builtinSelection/runtimeModel 同理。 */
+    reasoningEffort?: string;
     /** Optional cron task configuration drafted in launcher (PRD 0.2.7). */
     cron?: InitialMessageCron;
 }

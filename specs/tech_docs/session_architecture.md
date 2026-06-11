@@ -22,6 +22,14 @@ interface SessionMetadata {
     runtime?: RuntimeType;      // 'builtin' | 'claude-code' | 'codex' | 'gemini'
     // 分层 config snapshot 字段（owned session 冻结）
     model?: string;
+    // #324 推理强度：存字面 'default' | level（'default' 是有意义的值——session
+    // 显式回退默认可盖过 agent 级非默认值；undefined = 回落 agent）。变更经
+    // /api/reasoning-effort/set（external 分流）；Anthropic 协议 effort 是
+    // query() spawn 选项 → 变更走 abort+prewarm / deferred restart（reason:
+    // 'reasoning-effort'）；OpenAI 协议经 bridge live resolver 每请求注入。
+    // 注意：刻意没有 mount 期 push effect（sidecar 自解析 + send payload 兜底
+    // 已覆盖，mount push 会让 Anthropic 协议双付 respawn）。
+    reasoningEffort?: string;
     permissionMode?: PermissionMode;
     mcpEnabledServers?: string[];
     providerId?: string;

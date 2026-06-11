@@ -36,6 +36,10 @@ export interface InputOptionFields {
   /** Permission mode — split between `agent.permissionMode` (builtin) and
    *  `agent.runtimeConfig.permissionMode` (external) at the storage layer. */
   permissionMode?: PermissionMode | string;
+  /** #324 — 推理强度 setting ('default' | level, shared/reasoningEffort.ts).
+   *  Split between `agent.reasoningEffort` (builtin) and
+   *  `agent.runtimeConfig.reasoningEffort` (external), mirroring model. */
+  reasoningEffort?: string;
   /** MCP server ids enabled at the workspace level. */
   mcpEnabledServers?: string[];
   /** PRD 0.2.17 — Claude plugin ids enabled at the workspace level. Mirrors
@@ -99,6 +103,9 @@ export interface PersistInputOptionParams {
 export interface SessionSnapshotPatch {
   providerId?: string | null;
   model?: string | null;
+  /** #324 — persisted literally (incl. 'default', which meaningfully pins the
+   *  session back to default over a non-default agent value). */
+  reasoningEffort?: string;
   permissionMode?: string;
   mcpEnabledServers?: string[];
   enabledPluginIds?: string[];
@@ -273,6 +280,10 @@ function buildSnapshotPatch(params: PersistInputOptionParams): SessionSnapshotPa
   if (fields.permissionMode !== undefined) {
     patch.permissionMode = fields.permissionMode;
   }
+  // Effort is one snapshot field regardless of runtime (like snapshot.model).
+  if (fields.reasoningEffort !== undefined) {
+    patch.reasoningEffort = fields.reasoningEffort;
+  }
   if (fields.mcpEnabledServers !== undefined) {
     patch.mcpEnabledServers = fields.mcpEnabledServers;
   }
@@ -314,6 +325,10 @@ function buildAgentPatch(
       next.model = fields.runtimeModel ?? undefined;
       runtimeConfigDirty = true;
     }
+    if (fields.reasoningEffort !== undefined) {
+      next.reasoningEffort = fields.reasoningEffort;
+      runtimeConfigDirty = true;
+    }
     if (runtimeConfigDirty) {
       patch.runtimeConfig = next as RuntimeConfig;
     }
@@ -323,6 +338,9 @@ function buildAgentPatch(
     }
     if (fields.builtinModel !== undefined) {
       patch.model = fields.builtinModel ?? undefined;
+    }
+    if (fields.reasoningEffort !== undefined) {
+      patch.reasoningEffort = fields.reasoningEffort;
     }
   }
 

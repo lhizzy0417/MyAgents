@@ -64,6 +64,23 @@ describe('Codex app-server protocol helpers', () => {
     });
   });
 
+  // #324 — turn/start.effort: included only when the user picked a non-default
+  // level; default/null OMITS the key (conservative shape older codex builds
+  // also accept — an explicit null is "no override" per schema but adds noise).
+  it('includes effort in turn/start only when set', () => {
+    const base = {
+      threadId: 'thread-1',
+      input: [],
+      cwd: '/tmp/ws',
+      approvalPolicy: 'never' as const,
+      sandbox: 'danger-full-access' as const,
+      model: null,
+    };
+    expect(buildCodexTurnStartParams({ ...base, reasoningEffort: 'xhigh' }).effort).toBe('xhigh');
+    expect('effort' in buildCodexTurnStartParams({ ...base, reasoningEffort: null })).toBe(false);
+    expect('effort' in buildCodexTurnStartParams(base)).toBe(false);
+  });
+
   it('serializes command/file approvals with session scope when always allowed', () => {
     const pending: PendingCodexRequest = {
       kind: 'command_approval',

@@ -1,0 +1,59 @@
+import { describe, it, expect } from 'vitest';
+
+import {
+  normalizeReasoningEffort,
+  isSdkEffortLevel,
+  reasoningEffortChoices,
+  SDK_EFFORT_LEVELS,
+  OPENAI_EFFORT_LEVELS,
+  CODEX_EFFORT_LEVELS,
+  REASONING_EFFORT_DEFAULT,
+} from './reasoningEffort';
+
+describe('normalizeReasoningEffort (#324)', () => {
+  it("collapses 'default' / empty / whitespace / nullish to undefined", () => {
+    expect(normalizeReasoningEffort(REASONING_EFFORT_DEFAULT)).toBeUndefined();
+    expect(normalizeReasoningEffort('')).toBeUndefined();
+    expect(normalizeReasoningEffort('   ')).toBeUndefined();
+    expect(normalizeReasoningEffort(null)).toBeUndefined();
+    expect(normalizeReasoningEffort(undefined)).toBeUndefined();
+  });
+  it('passes levels through trimmed', () => {
+    expect(normalizeReasoningEffort('max')).toBe('max');
+    expect(normalizeReasoningEffort(' high ')).toBe('high');
+    expect(normalizeReasoningEffort('minimal')).toBe('minimal');
+  });
+});
+
+describe('isSdkEffortLevel', () => {
+  it('accepts exactly the SDK EffortLevel union', () => {
+    for (const level of SDK_EFFORT_LEVELS) expect(isSdkEffortLevel(level)).toBe(true);
+  });
+  it("rejects OpenAI-side values and 'default'/undefined — these must never reach query({ effort })", () => {
+    expect(isSdkEffortLevel('minimal')).toBe(false);
+    expect(isSdkEffortLevel('none')).toBe(false);
+    expect(isSdkEffortLevel(REASONING_EFFORT_DEFAULT)).toBe(false);
+    expect(isSdkEffortLevel(undefined)).toBe(false);
+  });
+});
+
+describe('reasoningEffortChoices — per-surface vocabularies', () => {
+  it('builtin + Anthropic protocol → SDK levels (no minimal)', () => {
+    expect(reasoningEffortChoices('builtin')).toEqual(SDK_EFFORT_LEVELS);
+    expect(reasoningEffortChoices('builtin', 'anthropic')).toEqual(SDK_EFFORT_LEVELS);
+  });
+  it('builtin + OpenAI protocol → cross-provider union incl. minimal/max', () => {
+    expect(reasoningEffortChoices('builtin', 'openai')).toEqual(OPENAI_EFFORT_LEVELS);
+  });
+  it('claude-code → SDK levels (matches `claude --effort` vocabulary)', () => {
+    expect(reasoningEffortChoices('claude-code')).toEqual(SDK_EFFORT_LEVELS);
+  });
+  it('codex → minimal..xhigh (no max tier)', () => {
+    expect(reasoningEffortChoices('codex')).toEqual(CODEX_EFFORT_LEVELS);
+    expect(CODEX_EFFORT_LEVELS).not.toContain('max');
+  });
+  it('gemini / unknown → null (UI hides the row entirely)', () => {
+    expect(reasoningEffortChoices('gemini')).toBeNull();
+    expect(reasoningEffortChoices('some-future-runtime')).toBeNull();
+  });
+});

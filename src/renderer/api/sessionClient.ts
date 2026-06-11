@@ -58,6 +58,8 @@ export interface SessionMetadata {
     // Desktop/Cron sessions capture these on first write; IM sessions stay undefined
     // (live-follow AgentConfig). `configSnapshotAt` presence marks "locked".
     model?: string;
+    /** #324 — reasoning effort snapshot ('default' | level) */
+    reasoningEffort?: string;
     permissionMode?: string;
     mcpEnabledServers?: string[];
     providerId?: string;
@@ -171,6 +173,8 @@ export async function updateSession(
         // Server auto-stamps configSnapshotAt when any snapshot field is touched
         // and redacts providerEnvJson to '[redacted]' in the response (zero-trust).
         model?: string | null;
+        /** #324 — reasoning effort snapshot ('default' | level); null clears. */
+        reasoningEffort?: string | null;
         permissionMode?: string | null;
         mcpEnabledServers?: string[] | null;
         providerId?: string | null;

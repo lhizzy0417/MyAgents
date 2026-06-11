@@ -53,6 +53,7 @@ import type { ToolInput } from '../renderer/types/chat';
 import { parsePartialJson } from '../shared/parsePartialJson';
 import { deriveSessionTitle } from '../shared/sessionTitle';
 import { workspacePathsEqual } from '../shared/workspacePath';
+import { normalizeReasoningEffort, isSdkEffortLevel } from '../shared/reasoningEffort';
 import { computeContextUsage } from '../shared/contextUsage';
 import { resolveContextOccupancyTokens } from './utils/context-occupancy';
 import type { SystemInitInfo } from '../shared/types/system';
@@ -608,7 +609,8 @@ type RestartReason =
   | 'oauth'        // MCP OAuth token acquired/refreshed
   | 'model-window'  // setSessionModel — contextLength crossed a boundary, need to reinject CLAUDE_CODE_AUTO_COMPACT_WINDOW
   | 'model-aliases' // setSessionModel — collapsed provider aliases now target a different active model
-  | 'plugins';     // PRD 0.2.17 — Claude plugin install / uninstall / toggle
+  | 'plugins'      // PRD 0.2.17 — Claude plugin install / uninstall / toggle
+  | 'reasoning-effort'; // #324 — Anthropic-protocol effort is a query()-spawn option, needs respawn
 
 // Deferred config restart: config changes during an active turn / pre-warm
 // stage set a reason in this set instead of aborting immediately. Two consumers
@@ -1030,6 +1032,12 @@ let currentPermissionMode: PermissionMode = 'auto';
 let prePlanPermissionMode: PermissionMode | null = null;
 // Current model for the session (updates on each user message if changed)
 let currentModel: string | undefined = undefined;
+// #324 — current reasoning effort, NORMALIZED: undefined = default (pre-#324
+// behavior: SDK effort 'high', bridge omits reasoning fields). Set via
+// setSessionReasoningEffort (desktop push), enqueue payload, or
+// switchToSession restore. Read live by resolveActiveSessionUpstreamConfig
+// (OpenAI bridge) and at query() spawn (Anthropic-protocol effort option).
+let currentReasoningEffort: string | undefined = undefined;
 // Provider environment config (baseUrl, apiKey, authType) for third-party providers
 export type ProviderEnv = {
   baseUrl?: string;
@@ -1137,6 +1145,9 @@ function resolveActiveSessionUpstreamConfig(): UpstreamBridgeConfig {
     maxOutputTokens: currentProviderEnv?.maxOutputTokens,
     maxOutputTokensParamName: currentProviderEnv?.maxOutputTokensParamName,
     upstreamFormat: currentProviderEnv?.upstreamFormat,
+    // #324 — read live so a mid-session effort change applies to the very
+    // next upstream request without any subprocess restart.
+    reasoningEffort: currentReasoningEffort,
   };
 }
 
@@ -2596,6 +2607,54 @@ export function setSessionModel(model: string, opts?: { imConfigSync?: boolean }
       schedulePreWarm();
     }
   }
+}
+
+/**
+ * #324 — set the session's reasoning effort. `value` is the UI/persisted
+ * setting ('default' | level); stored normalized (undefined = default).
+ *
+ * Application strategy mirrors setSessionModel's env-baked branch:
+ *  - OpenAI-protocol provider: nothing to do beyond the state write — the
+ *    bridge resolver (resolveActiveSessionUpstreamConfig) reads
+ *    `currentReasoningEffort` live per upstream request.
+ *  - Anthropic protocol (official + third-party): `effort` is a query()-spawn
+ *    option with no live SDK setter (sdk.d.ts has setModel/setMaxThinkingTokens
+ *    only), so a live subprocess needs a respawn. Mid-turn → deferred restart
+ *    (drains at turn end); idle/pre-warm → abort + re-warm now so the user's
+ *    next message doesn't pay the restart latency.
+ *
+ * Desktop-picker only (no IM router caller), so no #327 imConfigSync guard —
+ * the desktop push is authoritative and updates the snapshot itself, same as
+ * the model picker.
+ */
+export function setSessionReasoningEffort(value: string | null | undefined): void {
+  const normalized = normalizeReasoningEffort(value);
+  if (normalized === currentReasoningEffort) return;
+
+  const old = currentReasoningEffort;
+  currentReasoningEffort = normalized;
+  console.log(`[agent] session reasoning effort set: ${old ?? 'default'} -> ${normalized ?? 'default'}`);
+
+  if (currentProviderEnv?.apiProtocol === 'openai') {
+    // Live bridge resolver picks it up on the next request — no respawn.
+    return;
+  }
+
+  if (querySession) {
+    if (isTurnInFlight()) {
+      console.log('[agent] reasoning effort changed during active turn -> schedule deferred restart to reapply query() effort');
+      scheduleDeferredRestart('reasoning-effort');
+    } else {
+      console.log('[agent] reasoning effort changed while idle/pre-warming -> aborting session to reapply query() effort');
+      abortPersistentSession();
+      schedulePreWarm();
+    }
+  }
+}
+
+/** #324 — current normalized reasoning effort (undefined = default). */
+export function getSessionReasoningEffort(): string | undefined {
+  return currentReasoningEffort;
 }
 
 /** Get current provider env (used by heartbeat/memory-update to preserve provider across internal calls). */
@@ -6593,6 +6652,16 @@ export async function initializeAgent(
         currentModel = resolved.model;
         console.log(`[agent] self-resolved model: ${resolved.model}`);
       }
+      // #324 — same builtin-only gate as model: headless builtin sessions
+      // (IM bot / cron new-session / crash-restarted sidecar) have no desktop
+      // push effect, so this self-resolve is their ONLY effort source. External
+      // runtimes resolve effort from runtimeConfig in their own start paths.
+      if (!currentReasoningEffort && resolved.reasoningEffort && !isExternalRuntime(getCurrentRuntimeType())) {
+        currentReasoningEffort = normalizeReasoningEffort(resolved.reasoningEffort);
+        if (currentReasoningEffort) {
+          console.log(`[agent] self-resolved reasoning effort: ${currentReasoningEffort}`);
+        }
+      }
       if (resolved.permissionMode && !isExternalRuntime(getCurrentRuntimeType())) {
         if (resolved.permissionMode !== currentPermissionMode) {
           console.log(`[agent] self-resolved permissionMode: ${resolved.permissionMode}`);
@@ -6756,7 +6825,11 @@ export async function switchToSession(targetSessionId: string): Promise<boolean>
       // window and any non-renderer caller.
       currentModel = resolved.model;
       currentProviderEnv = resolved.providerEnv;
-      console.log(`[agent] switchToSession: restored model=${resolved.model ?? 'default'}, provider=${resolved.providerEnv?.baseUrl ?? 'subscription/none'}`);
+      // #324: restore reasoning effort with the same unconditional-replace
+      // rationale as model/env — otherwise the prior session's effort leaks
+      // into this session's next query() spawn.
+      currentReasoningEffort = normalizeReasoningEffort(resolved.reasoningEffort);
+      console.log(`[agent] switchToSession: restored model=${resolved.model ?? 'default'}, provider=${resolved.providerEnv?.baseUrl ?? 'subscription/none'}, effort=${currentReasoningEffort ?? 'default'}`);
     } catch (error) {
       console.warn('[agent] switchToSession: config self-resolution failed:', error);
     }
@@ -6782,7 +6855,7 @@ export async function switchToSession(targetSessionId: string): Promise<boolean>
  * Apply runtime configuration changes to the active session.
  * Calls SDK setModel/setPermissionMode if config has changed.
  */
-async function applySessionConfig(newModel?: string, newPermissionMode?: PermissionMode): Promise<void> {
+async function applySessionConfig(newModel?: string, newPermissionMode?: PermissionMode, newReasoningEffort?: string): Promise<void> {
   if (!querySession) {
     return;
   }
@@ -6821,6 +6894,38 @@ async function applySessionConfig(newModel?: string, newPermissionMode?: Permiss
     } catch {
       // dispatchSetModelToSdk already logged; we still want to proceed —
       // a stale setModel failure doesn't block the rest of config sync.
+    }
+  }
+
+  // #324 — apply reasoning-effort change from the send payload (the desktop
+  // /api/reasoning-effort/set push normally lands first; this is the
+  // send-time safety net, mirroring the model parameter below). `undefined`
+  // means "not provided" (cron/IM callers) → leave the current value alone.
+  // OpenAI-protocol: state write only, the bridge resolver reads it live.
+  // Anthropic protocol: query()-spawn option → restart with resume (same
+  // shape as the aliasEnvChanged branch below; sessionRegistered makes the
+  // next spawn resume, so no context loss).
+  if (newReasoningEffort !== undefined) {
+    const normalizedEffort = normalizeReasoningEffort(newReasoningEffort);
+    if (normalizedEffort !== currentReasoningEffort) {
+      currentReasoningEffort = normalizedEffort;
+      if (currentProviderEnv?.apiProtocol !== 'openai') {
+        // Carry a simultaneous model change along — the restarted subprocess
+        // spawns from currentModel, so updating it here covers both knobs in
+        // one respawn.
+        if (newModel && newModel !== currentModel) {
+          currentModel = newModel;
+        }
+        console.log(`[agent] reasoning effort changed at send (${normalizedEffort ?? 'default'}) -> restarting session to reapply query() effort`);
+        abortPersistentSession();
+        await awaitSessionTermination(10_000, 'applySessionConfig/reasoningEffortChange');
+        querySession = null;
+        isProcessing = false;
+        setSessionState('idle');
+        resetAbortFlag();
+        return;
+      }
+      console.log(`[agent] reasoning effort changed at send (${normalizedEffort ?? 'default'}) -> live bridge update (openai protocol)`);
     }
   }
 
@@ -6928,6 +7033,7 @@ async function consumePendingContinueAfterAbort(
   permissionMode: PermissionMode | undefined,
   model: string | undefined,
   providerEnv: ProviderEnv | 'subscription' | undefined,
+  reasoningEffort: string | undefined,
   trigger: 'next-enqueue' | 'watchdog-auto',
   allowMissingPendingFlag = false,
 ): Promise<boolean> {
@@ -6981,6 +7087,7 @@ async function consumePendingContinueAfterAbort(
           permissionMode,   // inherit caller/current permission mode
           model,            // inherit caller/current model
           providerEnv,      // inherit caller/current provider env
+          reasoningEffort,  // inherit caller/current reasoning effort
           undefined,        // metadata - synthetic, no source attribution
           undefined,        // requestId - synthetic, no IM trace
           undefined,        // inboxMeta - synthetic, no inbox pushback
@@ -7048,6 +7155,7 @@ function scheduleWatchdogAutoResumeAfterAbort(
         currentPermissionMode,
         currentModel,
         undefined, // undefined means "keep current provider env"
+        undefined, // undefined means "keep current reasoning effort"
         'watchdog-auto',
         opts.allowMissingPendingFlag === true,
       );
@@ -7068,6 +7176,9 @@ export async function enqueueUserMessage(
   permissionMode?: PermissionMode,
   model?: string,
   providerEnv?: ProviderEnv | 'subscription',
+  // #324 — reasoning effort setting ('default' | level). undefined = caller
+  // doesn't manage effort (cron/IM/heartbeat) → current session value stays.
+  reasoningEffort?: string,
   metadata?: { source: SessionSource; sourceId?: string; senderName?: string },
   // Pattern A — IM trace ID. Forwarded from /api/im/chat (Rust generates at edge).
   // Desktop / cron / heartbeat callers omit this — those paths get no IM identity.
@@ -7139,6 +7250,7 @@ export async function enqueueUserMessage(
     permissionMode,
     model,
     providerEnv,
+    reasoningEffort,
     'next-enqueue',
   );
   const holdForWatchdogRecovery = scheduledWatchdogAutoResumeSessions.has(sessionIdSnapshot)
@@ -7285,7 +7397,7 @@ export async function enqueueUserMessage(
   // Apply runtime config changes if session is active (model/permission changes don't require restart)
   // Skip for queued messages — config is locked to the current session while streaming
   if (!isSessionBusy) {
-    await applySessionConfig(model, permissionMode);
+    await applySessionConfig(model, permissionMode, reasoningEffort);
 
     // Update local tracking even if SDK call is skipped (e.g., first message before pre-warm).
     // Same shared transition as applySessionConfig so a first-message payload of
@@ -7299,6 +7411,13 @@ export async function enqueueUserMessage(
     if (model && model !== currentModel) {
       currentModel = model;
       if (isDebugMode) console.log(`[agent] model set to: ${model}`);
+    }
+    if (reasoningEffort !== undefined) {
+      const normalizedEffort = normalizeReasoningEffort(reasoningEffort);
+      if (normalizedEffort !== currentReasoningEffort) {
+        currentReasoningEffort = normalizedEffort;
+        if (isDebugMode) console.log(`[agent] reasoning effort set to: ${normalizedEffort ?? 'default'}`);
+      }
     }
   } else if (shouldAbortSession) {
     // Session is being restarted (abort for MCP/agents config change). Stage permission/model
@@ -7316,6 +7435,13 @@ export async function enqueueUserMessage(
     if (model && model !== currentModel) {
       currentModel = model;
       if (isDebugMode) console.log(`[agent] model staged for restart: ${model}`);
+    }
+    if (reasoningEffort !== undefined) {
+      const normalizedEffort = normalizeReasoningEffort(reasoningEffort);
+      if (normalizedEffort !== currentReasoningEffort) {
+        currentReasoningEffort = normalizedEffort;
+        if (isDebugMode) console.log(`[agent] reasoning effort staged for restart: ${normalizedEffort ?? 'default'}`);
+      }
     }
   }
 
@@ -8922,10 +9048,20 @@ async function startStreamingSession(preWarm = false): Promise<void> {
     frozenSdkMcpFingerprint = mcpKeyFingerprint(sdkMcpServersInitial);
 
     // Build common query options (shared between normal start and "already in use" fallback)
+    // #324 — user-selected reasoning effort. Anthropic protocol only: the SDK
+    // EffortLevel union excludes OpenAI-side values like 'minimal', and for
+    // OpenAI-protocol providers the effort is injected at the bridge per
+    // request (resolveActiveSessionUpstreamConfig) — the SDK-side option
+    // stays at the historical 'high' there. 'high' === omitting the param
+    // per Anthropic docs, so 'default' keeps pre-#324 wire behavior exactly.
+    const sdkEffort = currentProviderEnv?.apiProtocol !== 'openai' && isSdkEffortLevel(currentReasoningEffort)
+      ? currentReasoningEffort
+      : ('high' as const);
+
     const commonQueryOptions = {
       enableFileCheckpointing: true,
       thinking: thinkingConfig,
-      effort: 'high' as const,
+      effort: sdkEffort,
       // Load settings from project scope only (.claude/)
       // User-level skills are synced as symlinks into <cwd>/.claude/skills/ by syncProjectUserConfig()
       // CLAUDE_CONFIG_DIR is NOT set — preserves Anthropic subscription Keychain lookup

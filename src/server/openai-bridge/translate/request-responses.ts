@@ -11,6 +11,9 @@ export interface TranslateRequestResponsesOptions {
   modelMapping?: BridgeConfig['modelMapping'];
   modelOverride?: string;
   imageSaver?: ToolImageSaver;
+  /** #324 — user-selected reasoning effort (NORMALIZED level). Injected as
+   *  `reasoning: { effort }`; absent = field omitted entirely. */
+  reasoningEffort?: string;
 }
 
 /** Translate Anthropic Messages API request → OpenAI Responses API request */
@@ -77,9 +80,12 @@ export function translateRequestToResponses(
     responsesReq.stream = true;
   }
 
-  // 8. Thinking → reasoning: intentionally omitted.
-  // Many OpenAI-compatible providers don't support reasoning/reasoning_effort,
-  // and custom providers would return 400 "Unrecognized request argument".
+  // 8. Reasoning effort (#324): forwarded ONLY when the user explicitly
+  // selected a non-default effort — same omit-by-default rationale as the
+  // Chat Completions translator (unknown args → 400 on strict providers).
+  if (options?.reasoningEffort) {
+    responsesReq.reasoning = { effort: options.reasoningEffort };
+  }
 
   return responsesReq;
 }

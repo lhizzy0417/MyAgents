@@ -196,6 +196,10 @@ export interface RuntimeEnvPolicy {
 export interface RuntimeConfig {
   model?: string;            // Runtime-specific model selection
   permissionMode?: string;   // Runtime-specific permission mode
+  /** #324 — reasoning effort setting ('default' | level). Vocabulary is
+   *  per-runtime (CC: low..max, Codex: minimal..xhigh — see
+   *  shared/reasoningEffort.ts), hence NOT portable across runtimes. */
+  reasoningEffort?: string;
   additionalArgs?: string[]; // Extra CLI arguments
   /**
    * Issue #194 — per-agent env policy. When omitted, runtime treats it as
@@ -226,6 +230,7 @@ export interface RuntimeConfig {
 export const RUNTIME_CONFIG_PER_RUNTIME_FIELDS = [
   'model',
   'permissionMode',
+  'reasoningEffort',
   'additionalArgs',
 ] as const satisfies readonly (keyof RuntimeConfig)[];
 

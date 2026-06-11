@@ -15,6 +15,9 @@ export interface TranslateRequestOptions {
   modelOverride?: string;
   /** Callback to save tool result images to disk (returns relative path) */
   imageSaver?: ToolImageSaver;
+  /** #324 — user-selected reasoning effort (NORMALIZED level). Injected as
+   *  top-level `reasoning_effort`; absent = field omitted entirely. */
+  reasoningEffort?: string;
 }
 
 /** Translate Anthropic Messages API request → OpenAI Chat Completions request */
@@ -75,9 +78,15 @@ export function translateRequest(
     openaiReq.stream_options = { include_usage: true };
   }
 
-  // 6. Thinking → reasoning_effort: intentionally omitted.
-  // Many OpenAI-compatible providers don't support reasoning_effort,
-  // and custom providers would return 400 "Unrecognized request argument".
+  // 6. Reasoning effort (#324): forwarded ONLY when the user explicitly
+  // selected a non-default effort in the 推理强度 picker. The default omits
+  // the field entirely — many OpenAI-compatible providers reject unknown
+  // args with 400 "Unrecognized request argument", so unsolicited injection
+  // is never safe. The SDK's own `thinking` field is NOT mapped (an
+  // Anthropic-side knob with no portable OpenAI equivalent).
+  if (options?.reasoningEffort) {
+    openaiReq.reasoning_effort = options.reasoningEffort;
+  }
 
   return openaiReq;
 }

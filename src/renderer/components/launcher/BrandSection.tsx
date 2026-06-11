@@ -54,6 +54,9 @@ interface BrandSectionProps {
     selectedModel?: string;
     onProviderChange?: (id: string, targetModel?: string) => void;
     onModelChange?: (id: string) => void;
+    /** #324 — 推理强度 (pass-through to SimpleChatInput) */
+    reasoningEffort?: string;
+    onReasoningEffortChange?: (effort: string) => void;
     permissionMode?: PermissionMode;
     onPermissionModeChange?: (mode: PermissionMode) => void;
     apiKeys?: Record<string, string>;
@@ -99,6 +102,8 @@ export default memo(function BrandSection({
     selectedModel,
     onProviderChange,
     onModelChange,
+    reasoningEffort,
+    onReasoningEffortChange,
     permissionMode,
     onPermissionModeChange,
     apiKeys,
@@ -475,6 +480,8 @@ export default memo(function BrandSection({
                                 selectedModel={selectedModel}
                                 onProviderChange={onProviderChange}
                                 onModelChange={onModelChange}
+                                reasoningEffort={reasoningEffort}
+                                onReasoningEffortChange={onReasoningEffortChange}
                                 permissionMode={permissionMode}
                                 onPermissionModeChange={onPermissionModeChange}
                                 /* PRD 0.2.7: workspace_files invokes need a path; selectedProject

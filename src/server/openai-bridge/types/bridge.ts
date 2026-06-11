@@ -48,4 +48,8 @@ export interface UpstreamConfig {
    * this single request. Same shape as `BridgeConfig.modelMapping`.
    */
   modelMapping?: Record<string, string> | ((model: string) => string | undefined);
+  /** #324 — user-selected reasoning effort (NORMALIZED level). When set, the
+   *  translators inject `reasoning_effort` (chat_completions) /
+   *  `reasoning.effort` (responses); absent = omitted entirely. */
+  reasoningEffort?: string;
 }

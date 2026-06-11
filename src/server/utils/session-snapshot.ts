@@ -34,11 +34,21 @@ export type OwnedSessionSnapshot = Pick<
   SessionMetadata,
   | 'runtime'
   | 'model'
+  | 'reasoningEffort'
   | 'permissionMode'
   | 'mcpEnabledServers'
   | 'providerId'
   | 'providerEnvJson'
 >;
+// #324 — `reasoningEffort` is a DOCUMENTED divergence from the Rust mirror
+// (`runtime_change.rs::OwnedSessionSnapshot` does NOT carry it): Rust never
+// tracks effort state (it is deliberately not part of sync_ai_config, same
+// one-direction design as #327), so the runtime-change freeze path cannot
+// supply it. That is safe: the freeze endpoint skips absent fields (never
+// clears), and a live-follow session being frozen falls back to
+// `agent.reasoningEffort`, which survives a runtime change un-scrubbed —
+// the resolved value is identical. Desktop/cron creation (this file) is the
+// path that must capture it, and does.
 
 /**
  * IM (Agent channel) owner — live-follow policy (D4).
@@ -93,6 +103,8 @@ export function snapshotForOwnedSession(
   return {
     runtime,
     model: isExternal ? agent.runtimeConfig?.model : agent.model,
+    // #324 — same runtime-aware dispatch as model (issue #224 rationale).
+    reasoningEffort: isExternal ? agent.runtimeConfig?.reasoningEffort : agent.reasoningEffort,
     permissionMode: isExternal ? agent.runtimeConfig?.permissionMode : agent.permissionMode,
     mcpEnabledServers: agent.mcpEnabledServers ? [...agent.mcpEnabledServers] : undefined,
     providerId: agent.providerId,

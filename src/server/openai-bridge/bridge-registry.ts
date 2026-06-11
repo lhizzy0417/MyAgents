@@ -61,6 +61,10 @@ export interface UpstreamBridgeConfig {
   maxOutputTokens?: number;
   maxOutputTokensParamName?: 'max_tokens' | 'max_completion_tokens' | 'max_output_tokens';
   upstreamFormat?: 'chat_completions' | 'responses';
+  /** #324 — user-selected reasoning effort (NORMALIZED level; undefined =
+   *  default → the translators omit reasoning fields entirely, preserving
+   *  the historical wire shape). May change over time for session bridges. */
+  reasoningEffort?: string;
 }
 
 interface Entry {

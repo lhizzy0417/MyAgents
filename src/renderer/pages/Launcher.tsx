@@ -167,6 +167,9 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
     const [launcherPermissionMode, setLauncherPermissionMode] = useState<PermissionMode>(config.defaultPermissionMode);
     const [launcherProviderId, setLauncherProviderId] = useState<string | undefined>();
     const [launcherSelectedModel, setLauncherSelectedModel] = useState<string | undefined>();
+    // #324 — 推理强度 setting ('default' | level). Seeded from the agent in the
+    // workspace-sync effect below; persisted via persistInputOptionChange.
+    const [launcherReasoningEffort, setLauncherReasoningEffort] = useState<string>('default');
 
     // Runtime state — adapts model/permission selectors when workspace uses external runtime
     const multiAgentRuntimeEnabled = !!config.multiAgentRuntime;
@@ -355,6 +358,7 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
     // Extract runtimeConfig primitives for stable useEffect deps (avoid object reference)
     const agentRuntimeModel = (selectedAgent?.runtimeConfig as { model?: string } | undefined)?.model;
     const agentRuntimePermMode = (selectedAgent?.runtimeConfig as { permissionMode?: string } | undefined)?.permissionMode;
+    const agentRuntimeReasoningEffort = (selectedAgent?.runtimeConfig as { reasoningEffort?: string } | undefined)?.reasoningEffort;
 
     // Sync launcher settings from selected workspace's per-project config.
     // Declared AFTER launcherLastUsed effect so project settings take priority on initial load.
@@ -373,14 +377,16 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
         if (isExternalRuntime) {
             setLauncherSelectedModel(agentRuntimeModel ?? undefined);
             setLauncherPermissionMode((agentRuntimePermMode as PermissionMode | undefined) ?? config.defaultPermissionMode);
+            setLauncherReasoningEffort(agentRuntimeReasoningEffort ?? 'default');
         } else {
             setLauncherPermissionMode((selectedAgent?.permissionMode as PermissionMode | undefined) ?? selectedWorkspace.permissionMode ?? config.defaultPermissionMode);
             setLauncherSelectedModel(selectedAgent?.model ?? selectedWorkspace.model ?? undefined);
+            setLauncherReasoningEffort(selectedAgent?.reasoningEffort ?? 'default');
         }
         setLauncherProviderId(selectedAgent?.providerId ?? selectedWorkspace.providerId ?? undefined);
         setLauncherWorkspaceMcpEnabled(selectedAgent?.mcpEnabledServers ?? selectedWorkspace.mcpEnabledServers ?? []);
     // eslint-disable-next-line react-hooks/exhaustive-deps -- depend on specific agent/project fields, not object ref
-    }, [isLoading, selectedWorkspace?.id, selectedAgent?.permissionMode, selectedAgent?.model, selectedAgent?.providerId, selectedAgent?.mcpEnabledServers, selectedAgent?.runtime, agentRuntimeModel, agentRuntimePermMode, selectedWorkspace?.permissionMode, selectedWorkspace?.model, selectedWorkspace?.providerId, selectedWorkspace?.mcpEnabledServers, config.defaultPermissionMode, multiAgentRuntimeEnabled, isExternalRuntime]);
+    }, [isLoading, selectedWorkspace?.id, selectedAgent?.permissionMode, selectedAgent?.model, selectedAgent?.providerId, selectedAgent?.mcpEnabledServers, selectedAgent?.runtime, selectedAgent?.reasoningEffort, agentRuntimeModel, agentRuntimePermMode, agentRuntimeReasoningEffort, selectedWorkspace?.permissionMode, selectedWorkspace?.model, selectedWorkspace?.providerId, selectedWorkspace?.mcpEnabledServers, config.defaultPermissionMode, multiAgentRuntimeEnabled, isExternalRuntime]);
 
     // Write-back handlers: persist Launcher setting changes to the selected project
 
@@ -411,6 +417,25 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
                 fields: isExternalRuntime
                     ? { runtimeModel: model ?? null }
                     : { builtinModel: model ?? null },
+                patchProject,
+                patchAgentConfig,
+            });
+        }
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- narrowed deps; runtimeConfigRef is a ref
+    }, [selectedWorkspace?.id, patchProject, isExternalRuntime]);
+
+    // #324 — 推理强度 write-back. Same dual-write shape as model/permission;
+    // no live sidecar in launcher, so disk persistence is the whole job (the
+    // handed-off Chat tab seeds from the agent and pushes on connect).
+    const handleLauncherReasoningEffortChange = useCallback((effort: string) => {
+        setLauncherReasoningEffort(effort);
+        if (selectedWorkspace) {
+            void persistInputOptionChange({
+                workspaceId: selectedWorkspace.id,
+                agentId: selectedWorkspace.agentId ?? null,
+                isExternalRuntime,
+                currentRuntimeConfig: runtimeConfigRef.current,
+                fields: { reasoningEffort: effort },
                 patchProject,
                 patchAgentConfig,
             });
@@ -529,6 +554,9 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
             ...(carriedEnabledPlugins.length > 0 ? { enabledPluginIds: carriedEnabledPlugins } : {}),
             ...(builtinSelection ? { builtinSelection } : {}),
             ...(runtimeModel ? { runtimeModel } : {}),
+            // #324 — hand-carry: don't bet the async agent-config write wins
+            // the race against the new tab's mount/seed.
+            ...(launcherReasoningEffort !== 'default' ? { reasoningEffort: launcherReasoningEffort } : {}),
             ...(cron ? { cron } : {}),
         };
 
@@ -630,7 +658,7 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
 
         onLaunchProject(selectedWorkspace, undefined, initialMessage);
     }, [selectedWorkspace, launcherProvider, launcherPermissionMode,
-        launcherSelectedModel, launcherWorkspaceMcpEnabled, launcherGlobalMcpEnabled,
+        launcherSelectedModel, launcherReasoningEffort, launcherWorkspaceMcpEnabled, launcherGlobalMcpEnabled,
         launcherEnabledPlugins, config.plugins, config.enabledPlugins,
         isExternalRuntime, launcherRuntime,
         touchProject, onLaunchProject, updateConfig]);
@@ -849,6 +877,8 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
                         selectedModel={launcherSelectedModel}
                         onProviderChange={handleLauncherProviderChange}
                         onModelChange={handleLauncherModelChange}
+                        reasoningEffort={launcherReasoningEffort}
+                        onReasoningEffortChange={handleLauncherReasoningEffortChange}
                         permissionMode={launcherPermissionMode}
                         onPermissionModeChange={handleLauncherPermissionModeChange}
                         apiKeys={apiKeys}

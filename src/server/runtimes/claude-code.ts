@@ -11,6 +11,7 @@ import { writeFileSync , existsSync, unlinkSync, readdirSync, statSync } from 'f
 import { join } from 'path';
 import type { RuntimeDetection, RuntimeModelInfo, RuntimePermissionMode, RuntimeType } from '../../shared/types/runtime';
 import { CC_PERMISSION_MODES } from '../../shared/types/runtime';
+import { isSdkEffortLevel } from '../../shared/reasoningEffort';
 import type { AgentRuntime, RuntimeProcess, SessionStartOptions, UnifiedEvent, UnifiedEventCallback, ImagePayload } from './types';
 import { augmentedProcessEnv, resolveCommand, stripAnsi } from './env-utils';
 import { ensureDirSync } from '../utils/fs-utils';
@@ -367,6 +368,16 @@ export class ClaudeCodeRuntime implements AgentRuntime {
     // Model
     if (options.model) {
       args.push('--model', options.model);
+    }
+
+    // #324 — reasoning effort. CC's `--effort` vocabulary is exactly the SDK
+    // EffortLevel set (low/medium/high/xhigh/max, per `claude --help`); gate
+    // defensively so a cross-runtime stale value (e.g. Codex's 'minimal')
+    // never reaches the CLI as an invalid flag value. Omitted = CC default.
+    // CC -p mode spawns per turn, so a changed value applies on the next turn
+    // without any explicit restart handling.
+    if (options.reasoningEffort && isSdkEffortLevel(options.reasoningEffort)) {
+      args.push('--effort', options.reasoningEffort);
     }
 
     // Session management
