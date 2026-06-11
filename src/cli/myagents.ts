@@ -71,7 +71,8 @@ function parseArgs(args: string[]): { positional: string[]; flags: Record<string
         key === 'full' ||
         key === 'no-reply' ||
         key === 'clear-provider-override' ||
-        key === 'clear-runtime-override'
+        key === 'clear-runtime-override' ||
+        key === 'purge'
       ) {
         flags[camelCase(key)] = true;
         i++;
@@ -192,6 +193,7 @@ Usage: myagents <command> [options]
 
 Commands:
   mcp       Manage MCP tool servers
+  tool      Manage registered CLI tools (list/add/remove/enable/disable/info/env)
   model     Manage model providers
   agent     Manage agents & channels (+ 'agent show <id>' for effective defaults)
   runtime   Inspect Agent Runtimes (list installed + describe models/modes)
@@ -223,6 +225,10 @@ Examples:
   myagents mcp enable playwright --scope both
   myagents mcp oauth discover notion-mcp
   myagents mcp oauth start notion-mcp
+  myagents tool list
+  myagents tool add ~/.myagents/tools/md-merge
+  myagents tool env video-brief set VIDEO_API_KEY=sk-xxx
+  myagents tool remove md-merge --purge
   myagents model list
   myagents model set-key deepseek sk-xxx
   myagents skill list
@@ -353,6 +359,28 @@ function printResult(group: string, action: string, result: Record<string, unkno
   }
   if (group === 'mcp' && action === 'show') {
     printMcpShow(result.data as Record<string, unknown>);
+    return;
+  }
+  if (group === 'tool' && action === 'list') {
+    const data = result.data as { tools?: Array<Record<string, unknown>> } | undefined;
+    printToolList(data?.tools ?? []);
+    if (result.hint) console.log(`\n${result.hint}`);
+    return;
+  }
+  if (group === 'tool' && action === 'env') {
+    const data = (result.data as Record<string, unknown>) ?? {};
+    const env = (data.env as Record<string, unknown>) ?? {};
+    if (Object.keys(env).length > 0) {
+      console.log(formatObject(env));
+    } else {
+      console.log('(no env vars set)');
+    }
+    const missing = data.missingKeys as string[] | undefined;
+    if (missing && missing.length > 0) {
+      console.log(`\nDeclared but unconfigured: ${missing.join(', ')}`);
+      console.log(`  → Run: myagents tool env ${String(data.name)} set ${missing[0]}=<value>`);
+    }
+    if (result.hint) console.log(`\n${result.hint}`);
     return;
   }
   if (group === 'model' && action === 'list') {
@@ -923,6 +951,24 @@ function printTaskDispatchResult(
   if (id) console.log(`  task_id:  ${id}`);
   console.log(`  runtime:  ${runtime}`);
   console.log(`  model:    ${model}`);
+}
+
+function printToolList(tools: Array<Record<string, unknown>>): void {
+  if (!tools || tools.length === 0) {
+    console.log('No CLI tools registered.');
+    return;
+  }
+  const pad = (s: string, n: number) => s.padEnd(n);
+  console.log(pad('NAME', 22) + pad('KIND', 8) + pad('STATUS', 10) + 'DESCRIPTION');
+  for (const t of tools) {
+    const status = t.enabled ? 'enabled' : 'disabled';
+    const desc = String(t.description ?? '').replace(/\s+/g, ' ');
+    const missing = (t.missingEnvKeys as string[] | undefined) ?? [];
+    const warn = missing.length > 0 ? `  [missing env: ${missing.join(', ')}]` : '';
+    console.log(pad(String(t.name), 22) + pad(String(t.kind ?? ''), 8) + pad(status, 10) + desc.slice(0, 80) + warn);
+  }
+  const enabled = tools.filter(t => t.enabled).length;
+  console.log(`\n${tools.length} CLI tools (${enabled} in AI context)`);
 }
 
 function printMcpList(servers: Array<Record<string, unknown>>): void {
@@ -1717,6 +1763,33 @@ function buildRequestBody(
   rest: string[],
   flags: Record<string, unknown>,
 ): Record<string, unknown> {
+  // CLI tool registry commands (PRD 0.2.36)
+  if (group === 'tool') {
+    if (action === 'add') {
+      // `myagents tool add <dir>` — dir is positional; --dir also accepted
+      return { dir: rest[0] ?? flags.dir, dryRun: flags.dryRun };
+    }
+    if (action === 'env') {
+      // Same surface as `mcp env`: tool env <name> set|get|delete KEY[=VALUE]...
+      const toolName = rest[0];
+      const subAction = rest[1] ?? 'get';
+      const envPairs = rest.slice(2);
+      const envInput = subAction === 'delete'
+        ? envPairs.map(k => (k.includes('=') ? k : `${k}=`))
+        : envPairs;
+      return {
+        name: toolName,
+        action: subAction,
+        env: parseEnvFlags(envInput.length > 0 ? envInput : (flags.env as string[] | undefined)),
+      };
+    }
+    if (action === 'remove') {
+      return { name: rest[0], purge: flags.purge };
+    }
+    // list / info / enable / disable / readme — single positional name (or none)
+    return rest[0] ? { name: rest[0] } : {};
+  }
+
   // MCP commands
   if (group === 'mcp') {
     if (action === 'add') {

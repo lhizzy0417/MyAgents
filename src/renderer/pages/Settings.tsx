@@ -11,6 +11,7 @@ import { useCloseLayer } from '@/hooks/useCloseLayer';
 import OverlayBackdrop from '@/components/OverlayBackdrop';
 import { apiFetch, apiGetJson, apiPostJson } from '@/api/apiFetch';
 import { useToast } from '@/components/Toast';
+import { CliToolsSection } from '@/components/CliToolsSection';
 import CustomSelect from '@/components/CustomSelect';
 import { UnifiedLogsPanel } from '@/components/UnifiedLogsPanel';
 import GlobalSkillsPanel from '@/components/GlobalSkillsPanel';
@@ -34,7 +35,6 @@ import {
     type McpServerDefinition,
     type McpServerType,
     type McpEnableError,
-    MCP_DISCOVERY_LINKS,
     isVerifyExpired,
     SUBSCRIPTION_PROVIDER_ID,
     PROXY_DEFAULTS,
@@ -2576,7 +2576,7 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                             : 'text-[var(--ink-muted)] hover:text-[var(--ink)]'
                             }`}
                     >
-                        工具 MCP
+                        工具箱
                     </button>
                     <button
                         onClick={() => setActiveSection('agent')}
@@ -2855,11 +2855,23 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                     </div>
                 )}
 
-                {/* MCP section uses wider layout */}
+                {/* 工具箱 section（原 MCP tab 原位改造，PRD 0.2.36：section id 保持 'mcp' 深链接零迁移）。
+                    纵向两分区：MCP（现状内容）+ CLI 工具（注册表）。视觉以
+                    specs/playgrounds/toolbox_settings_tab.html 定稿版为准。 */}
                 {activeSection === 'mcp' && (
                     <div className="mx-auto max-w-4xl px-8 py-8">
-                        <div className="mb-8 flex items-center justify-between">
-                            <h2 className="text-lg font-semibold text-[var(--ink)]">工具 MCP</h2>
+                        <h2 className="mb-7 text-xl font-semibold text-[var(--ink)]">工具箱</h2>
+
+                        {/* 分区 1：MCP */}
+                        <div className="flex items-center gap-2.5">
+                            <h3 className="flex items-center gap-2 text-[17px] font-semibold text-[var(--ink)]">
+                                <Globe className="h-4 w-4 text-[var(--ink-muted)]" />
+                                MCP
+                                <span className="rounded-full bg-[var(--paper-inset)] px-2 py-0.5 text-xs font-medium text-[var(--ink-muted)]">
+                                    {mcpServers.length}
+                                </span>
+                            </h3>
+                            <div className="flex-1" />
                             <button
                                 onClick={() => { resetMcpForm(); setShowMcpForm(true); }}
                                 className="flex items-center gap-1.5 rounded-lg bg-[var(--button-primary-bg)] px-3 py-1.5 text-sm font-medium text-[var(--button-primary-text)] transition-colors hover:bg-[var(--button-primary-bg-hover)]"
@@ -2869,8 +2881,8 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                             </button>
                         </div>
 
-                        <p className="mb-6 text-sm text-[var(--ink-muted)]">
-                            MCP (Model Context Protocol) 扩展能力让 Agent 可以使用更多工具
+                        <p className="mb-4 mt-1 text-[13px] text-[var(--ink-muted)]">
+                            MCP (Model Context Protocol) 标准协议工具，适合接入现成的第三方服务
                         </p>
 
                         {/* MCP Server list */}
@@ -2949,24 +2961,8 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                             })}
                         </div>
 
-                        {/* Discovery links */}
-                        <div className="mt-8 rounded-xl border border-dashed border-[var(--line)] bg-[var(--paper-elevated)] p-4">
-                            <p className="text-sm text-[var(--ink-muted)]">
-                                更多 MCP 可以在以下网站寻找：
-                            </p>
-                            <div className="mt-2 flex flex-wrap gap-3">
-                                {MCP_DISCOVERY_LINKS.map((link) => (
-                                    <ExternalLink
-                                        key={link.url}
-                                        href={link.url}
-                                        className="inline-flex items-center gap-1.5 rounded-lg bg-[var(--paper-elevated)] px-3 py-1.5 text-sm font-medium text-[var(--ink)] shadow-sm transition-colors hover:bg-[var(--info-bg)] hover:text-[var(--info)]"
-                                    >
-                                        {link.name}
-                                        <ExternalLinkIcon className="h-3 w-3" />
-                                    </ExternalLink>
-                                ))}
-                            </div>
-                        </div>
+                        {/* 分区 2：CLI 工具注册表（发现链接区已按工具箱定稿移除，减少无用信息） */}
+                        <CliToolsSection />
                     </div>
                 )}
 

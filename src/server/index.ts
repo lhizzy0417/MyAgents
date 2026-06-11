@@ -986,6 +986,12 @@ const SYSTEM_SKILLS: readonly string[] = [
   // plugin / widget / im / config) to every AI session in the product.
   // Force-synced because SKILL.md must track CLI changes in lockstep.
   'myagents-cli',
+  // v18: tool-creator — meta-skill for the CLI tool registry (PRD 0.2.36).
+  // Teaches AI to author standards-compliant Agent-CLI tools and register
+  // them via `myagents tool add`. Force-synced because its contract (eight
+  // rules / description cap / readme template) must track registry
+  // validation in lockstep.
+  'tool-creator',
 ];
 
 /**
@@ -1326,6 +1332,16 @@ async function routeAdminApi(pathname: string, payload: Record<string, unknown>)
   if (route === 'mcp/oauth/start') return await api.handleMcpOAuthStart(payload as Parameters<typeof api.handleMcpOAuthStart>[0]);
   if (route === 'mcp/oauth/status') return await api.handleMcpOAuthStatus(payload as Parameters<typeof api.handleMcpOAuthStatus>[0]);
   if (route === 'mcp/oauth/revoke') return await api.handleMcpOAuthRevoke(payload as Parameters<typeof api.handleMcpOAuthRevoke>[0]);
+
+  // CLI tool registry commands (PRD 0.2.36)
+  if (route === 'tool/list') return api.handleToolList();
+  if (route === 'tool/info') return api.handleToolInfo(payload as Parameters<typeof api.handleToolInfo>[0]);
+  if (route === 'tool/add') return await api.handleToolAdd(payload as Parameters<typeof api.handleToolAdd>[0]);
+  if (route === 'tool/remove') return await api.handleToolRemove(payload as Parameters<typeof api.handleToolRemove>[0]);
+  if (route === 'tool/enable') return await api.handleToolEnable(payload as Parameters<typeof api.handleToolEnable>[0]);
+  if (route === 'tool/disable') return await api.handleToolDisable(payload as Parameters<typeof api.handleToolDisable>[0]);
+  if (route === 'tool/readme') return await api.handleToolReadme(payload as Parameters<typeof api.handleToolReadme>[0]);
+  if (route === 'tool/env') return await api.handleToolEnv(payload as Parameters<typeof api.handleToolEnv>[0]);
 
   // Model commands
   if (route === 'model/list') return api.handleModelList();

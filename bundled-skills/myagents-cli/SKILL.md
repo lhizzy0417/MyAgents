@@ -76,6 +76,33 @@ myagents mcp oauth revoke <id>                          # 撤销授权
 - "X 工具用不了，是不是登录过期了" → `mcp oauth status <id>`，过期就重跑 `oauth start`
 - "给 fetch 加个 API Key 环境变量" → `mcp env fetch set FETCH_API_KEY=sk-xxx`
 
+### CLI 工具注册表（tool） — PRD 0.2.36
+
+注册的 CLI 工具会投 shim 到 `~/.myagents/bin/`（全 runtime + 终端的 PATH 上），
+description 自动注入所有新 session 的上下文——未来的 AI 会自己发现并使用它。
+**写一个新工具**用 `tool-creator` skill（钉死 Agent-CLI 契约：非交互 / 退出码 /
+--json / readme 子命令 / ≤800 字 description）；这里只管注册与管理。
+
+```bash
+myagents tool list                       # 注册表总览（含 enabled 状态 + 缺失 env key）
+myagents tool add <dir>                  # 注册（dir 须含 tool.json + 入口脚本；不在
+                                         #  ~/.myagents/tools/ 下会自动拷入）[--dry-run]
+myagents tool info <name>                # 看 manifest + enabled + 缺失 env
+myagents tool enable <name>              # 进新 session 的上下文
+myagents tool disable <name>             # 从上下文隐藏（shim 仍在 PATH，可手动调）
+myagents tool remove <name> [--purge]    # 反注册（--purge 连工具目录一起删）
+myagents tool env <name> set KEY=val     # 设 per-tool 环境变量（API key；工具启动时读）
+myagents tool env <name> get             # 读（值已脱敏）
+myagents tool env <name> delete KEY      # 删
+```
+
+**何时用：**
+- 用户说"把这个脚本/能力注册成工具、以后直接用" → 先走 `tool-creator` skill 把它规范化，再 `tool add`
+- "我有哪些自己的工具" → `tool list`
+- 工具报缺 API key（退出码 3）→ `tool env <name> set KEY=<用户提供的值>`
+- 注册名撞系统命令会被打回（`~/.myagents/bin` 在 PATH 前列，重名会遮蔽系统命令）→ 换带领域前缀的名字
+- 注册成功后 MUST 在回复中告知用户：工具名 + 干什么 + 可在 设置 → 工具箱 管理
+
 ### 模型 Provider（model）
 
 ```bash

@@ -1000,7 +1000,7 @@ pub fn cmd_sync_admin_agent<R: Runtime>(
 
 // ============= CLI Sync =============
 
-const CLI_VERSION: &str = "19";
+const CLI_VERSION: &str = "20";
 
 /// Sync the CLI script from bundled resources to ~/.myagents/bin/.
 /// Version-gated: only runs when CLI_VERSION changes.
@@ -1161,7 +1161,7 @@ pub fn cmd_sync_cli<R: Runtime>(
 // matching exclusion list in src/server/index.ts::seedBundledSkills
 // MUST be kept in sync (comment there points back here).
 
-const SYSTEM_SKILLS_VERSION: &str = "17";
+const SYSTEM_SKILLS_VERSION: &str = "18";
 
 /// Skills that ship with the app and MUST stay at the bundled version —
 /// the app's flows depend on them, users are not meant to customise.
@@ -1189,6 +1189,13 @@ const SYSTEM_SKILLS: &[&str] = &[
     // skills, widgets) through the CLI. SKILL.md changes track CLI surface
     // changes, so it must force-overwrite on version bumps.
     "myagents-cli",
+    // v18: tool-creator — meta-skill for the CLI tool registry (PRD 0.2.36
+    // cli_first_tool_registry). Teaches AI to author standards-compliant
+    // Agent-CLI tools (tool.json + entry + readme/--help contract) and
+    // register them via `myagents tool add`. System skill because its
+    // contract must track the registry's server-side validation (800-char
+    // description cap, reserved names) in lockstep.
+    "tool-creator",
 ];
 
 /// Skills unavailable on certain platforms due to upstream bugs.

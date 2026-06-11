@@ -27,6 +27,9 @@ const CLI_COMMANDS: &[&str] = &[
     // packaged Tauri binary launches the GUI when invoked with just `diagnose ...`.
     // `runtime diagnose <type>` still works via the "runtime" entry above.
     "diagnose",
+    // PRD 0.2.36 — CLI tool registry. Without this, `myagents tool list` via the
+    // packaged binary silently launches the GUI instead of CLI mode.
+    "tool",
 ];
 
 /// Check if the given args indicate CLI mode.

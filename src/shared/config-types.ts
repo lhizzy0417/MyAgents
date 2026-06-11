@@ -595,6 +595,13 @@ export interface AppConfig {
   // undefined = never customized, [] = user explicitly cleared
   mcpServerArgs?: Record<string, string[]>;
 
+  // ===== CLI Tool Registry (PRD 0.2.36) =====
+  // Per-tool environment variables (API keys etc.) for registered CLI tools
+  // (~/.myagents/tools/). Same shape as mcpServerEnv. The ~/.myagents/bin
+  // launcher shims read this at runtime, so env changes apply on next launch
+  // without re-registration.
+  cliToolEnv?: Record<string, Record<string, string>>;
+
   // ===== Network Proxy (General) =====
   // HTTP/SOCKS5 proxy settings for external network requests
   proxySettings?: ProxySettings;

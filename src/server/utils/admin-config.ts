@@ -69,6 +69,10 @@ export interface AdminAppConfig {
   mcpEnabledServers?: string[];
   mcpServerEnv?: Record<string, Record<string, string>>;
   mcpServerArgs?: Record<string, string[]>;
+  // CLI tool registry (PRD 0.2.36): per-tool env (API keys etc.), same shape as
+  // mcpServerEnv. Read at launch by the ~/.myagents/bin shims — env changes
+  // need no shim rewrite.
+  cliToolEnv?: Record<string, Record<string, string>>;
   // Provider
   defaultProviderId?: string;
   providerApiKeys?: Record<string, string>;

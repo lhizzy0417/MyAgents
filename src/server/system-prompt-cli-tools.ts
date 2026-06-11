@@ -22,6 +22,7 @@
  */
 
 import type { InteractionScenario } from './system-prompt';
+import { getUserToolsPromptSection } from './utils/cli-tools-registry';
 
 // ===== Capability sections =====
 //
@@ -209,6 +210,18 @@ export function buildCliToolsAppend(scenario: InteractionScenario): string {
   // human user to capture for, so the section is suppressed there.
   if (scenario.type === 'desktop' || scenario.type === 'im' || scenario.type === 'agent-channel') {
     parts.push(SECTION_THOUGHT);
+  }
+
+  // User-registered CLI tools — universal (PRD 0.2.36 cli_first_tool_registry).
+  // Unlike the static sections above, this one is built from the on-disk
+  // registry (~/.myagents/tools/registry.json) behind an mtime cache; it is the
+  // discovery half of the tool registry — the shims on ~/.myagents/bin are the
+  // execution half. Empty registry → empty string → no section emitted.
+  // Registry changes take effect at the next session start / pre-warm (system
+  // prompts are immutable for a live session by design).
+  const userTools = getUserToolsPromptSection();
+  if (userTools) {
+    parts.push(userTools);
   }
 
   return parts.join('\n\n');

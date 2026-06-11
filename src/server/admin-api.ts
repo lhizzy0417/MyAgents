@@ -10,9 +10,26 @@
  *   6. Return result
  */
 
+import { execFile } from 'node:child_process';
+import { lstatSync, mkdirSync } from 'node:fs';
+import { cp as fsCp } from 'node:fs/promises';
+import { promisify } from 'node:util';
 import type { McpServerDefinition } from '../shared/config-types';
+import { deriveCliToolKind, type CliToolRegistryEntry } from '../shared/types/cliTools';
 import { workspacePathsEqual } from '../shared/workspacePath';
 import { SDK_RESERVED_MCP_NAMES } from './agent-session';
+import {
+  findMissingEnvKeys,
+  findPathCollision,
+  getCliToolsBinDir,
+  getCliToolsDir,
+  modifyCliToolsRegistry,
+  readCliToolManifest,
+  readCliToolsRegistry,
+  removeCliToolDir,
+  removeCliToolShim,
+  writeCliToolShim,
+} from './utils/cli-tools-registry';
 import {
   loadConfig,
   atomicModifyConfig,
@@ -31,6 +48,7 @@ import {
   type ChannelConfigSlim,
 } from './utils/admin-config';
 import { cancellableFetch } from './utils/cancellation';
+import { ensureShellPath } from './utils/shell';
 import { buildCronScope } from './utils/cron-scope';
 import { readLoopbackJson } from './utils/loopback-response';
 
@@ -1183,7 +1201,7 @@ export async function handleConfigSet(payload: { key: string; value: unknown; dr
   }
 
   // Protect structural/sensitive keys that have dedicated commands
-  const protectedKeys = ['providerApiKeys', 'providerVerifyStatus', 'agents', 'mcpServers', 'mcpEnabledServers', 'mcpServerEnv', 'mcpServerArgs', 'imBotConfigs'];
+  const protectedKeys = ['providerApiKeys', 'providerVerifyStatus', 'agents', 'mcpServers', 'mcpEnabledServers', 'mcpServerEnv', 'mcpServerArgs', 'imBotConfigs', 'cliToolEnv'];
   const rootKey = key.split('.')[0];
   if (protectedKeys.includes(rootKey)) {
     return { success: false, error: `Cannot set '${key}' via config set. Use dedicated commands (e.g., 'myagents mcp', 'myagents agent', 'myagents model set-key').` };
@@ -1613,6 +1631,34 @@ Commands:
                              MyAgents. Optional interop only — errors "directory not
                              found" when Claude Code is not installed; your own skills
                              always live under ~/.myagents/skills/ regardless.`,
+
+  tool: `myagents tool — CLI tool registry (user tools live under ~/.myagents/tools/)
+
+Registered tools get a shim on ~/.myagents/bin (already on PATH in every agent
+session and terminal) and their description is injected into every new
+session's context, so future AI sessions discover them automatically.
+Create standards-compliant tools with the tool-creator skill.
+
+Commands:
+  list                       List registered tools + enabled state [--json]
+  add <dir>                  Register a tool dir (must contain tool.json + entry)
+                             [--dry-run]. Copies the dir into ~/.myagents/tools/
+                             unless it is already there.
+  remove <name>              Unregister (keeps the tool dir; --purge deletes it)
+  enable <name>              Show the tool in new sessions' context
+  disable <name>             Hide from context (shim stays on PATH)
+  info <name>                Show manifest + enabled state + missing env keys
+  readme <name>              Run the tool's readme subcommand (full usage doc)
+  env <name> get             Show configured env (values redacted)
+  env <name> set KEY=VALUE   Set per-tool env (API keys etc.; tool reads at launch)
+  env <name> delete KEY      Remove env keys
+
+Notes:
+  - Tool names must not shadow existing commands (~/.myagents/bin precedes
+    system paths on PATH) — add rejects collisions.
+  - description in tool.json is capped at 800 chars (it goes into the system
+    prompt of every session).
+  - Registry changes affect other sessions at their next start.`,
 
   diagnose: `myagents diagnose — Diagnostic helpers
 
@@ -3870,7 +3916,7 @@ async function modifyAgent(
 
 /** Keys and patterns that contain secrets and must be redacted in config get */
 const SENSITIVE_KEY_PATTERNS = /apikey|api_key|secret|token|password/i;
-const SENSITIVE_TOP_KEYS = new Set(['providerApiKeys', 'mcpServerEnv']);
+const SENSITIVE_TOP_KEYS = new Set(['providerApiKeys', 'mcpServerEnv', 'cliToolEnv']);
 
 /** Recursively redact sensitive values in config output */
 function redactSensitiveValues(key: string, value: unknown): unknown {
@@ -3935,4 +3981,433 @@ function setNestedValue(obj: AdminAppConfig, key: string, value: unknown): Admin
   const [first, ...rest] = parts;
   const child = (obj[first] ?? {}) as Record<string, unknown>;
   return { ...obj, [first]: setNestedValue(child as AdminAppConfig, rest.join('.'), value) };
+}
+
+// ---------------------------------------------------------------------------
+// CLI tool registry (PRD 0.2.36 cli_first_tool_registry)
+//
+// `myagents tool …` + Settings 工具箱 both land here. Registry truth lives on
+// disk (~/.myagents/tools/), per-tool env lives in config.cliToolEnv (same
+// shape as mcpServerEnv). Prompt injection reads the registry independently
+// (system-prompt-cli-tools.ts) — these handlers only mutate disk state, and
+// changes take effect for other sessions at their next start / pre-warm.
+// ---------------------------------------------------------------------------
+
+const execFileAsync = promisify(execFile);
+
+/** Registry entry + derived display state (kind badge, unconfigured env keys) */
+function enrichCliTool(entry: CliToolRegistryEntry, config?: AdminAppConfig) {
+  const cfg = config ?? loadConfig();
+  return {
+    ...entry,
+    kind: deriveCliToolKind(entry.envKeys),
+    missingEnvKeys: findMissingEnvKeys(entry, cfg.cliToolEnv),
+  };
+}
+
+export function handleToolList(): AdminResponse {
+  const registry = readCliToolsRegistry();
+  const config = loadConfig();
+  return {
+    success: true,
+    data: { tools: registry.tools.map((t) => enrichCliTool(t, config)) },
+    hint: registry.tools.length === 0
+      ? 'No CLI tools registered yet. Create one with the tool-creator skill, then `myagents tool add <dir>`.'
+      : undefined,
+  };
+}
+
+export function handleToolInfo(payload: { name?: string }): AdminResponse {
+  const { name } = payload;
+  if (!name) return { success: false, error: 'Missing required field: name' };
+  const entry = readCliToolsRegistry().tools.find((t) => t.name === name);
+  if (!entry) {
+    return {
+      success: false,
+      error: `CLI tool '${name}' is not registered`,
+      recoveryHint: { recoveryCommand: 'myagents tool list', message: 'See registered tools.' },
+    };
+  }
+  return { success: true, data: { tool: enrichCliTool(entry) } };
+}
+
+export async function handleToolAdd(payload: { dir?: string; dryRun?: boolean }): Promise<AdminResponse> {
+  const { dir, dryRun } = payload;
+  if (!dir) {
+    return {
+      success: false,
+      error: 'Missing required field: dir (path to the tool directory containing tool.json)',
+      recoveryHint: {
+        recoveryCommand: 'myagents tool add ~/.myagents/tools/<name>',
+        message: 'The dir must contain tool.json + the entry script (see the tool-creator skill).',
+      },
+    };
+  }
+  const srcDir = resolve(dir);
+
+  const read = readCliToolManifest(srcDir);
+  if (!read.ok) {
+    return {
+      success: false,
+      error: `[${read.code}] ${read.error}`,
+      recoveryHint: read.recovery ? { message: read.recovery } : undefined,
+    };
+  }
+  const manifest = read.manifest;
+  const destDir = resolve(join(getCliToolsDir(), manifest.name));
+  const needsCopy = srcDir !== destDir;
+  const toolDir = needsCopy ? destDir : srcDir;
+  const entryPath = join(toolDir, manifest.entry);
+
+  // Re-add of an already-registered name from its canonical dir = REFRESH:
+  // re-read manifest into the registry entry (description/version/envKeys/deps),
+  // keep enabled + registeredAt + cliToolEnv, rewrite the shim. This is the
+  // edit-then-re-add flow; without it the only path was remove→add, which by
+  // design drops the tool's stored API keys.
+  const existing = readCliToolsRegistry().tools.find((t) => t.name === manifest.name);
+  if (existing) {
+    if (srcDir !== destDir && srcDir !== resolve(existing.dir)) {
+      return {
+        success: false,
+        error: `CLI tool '${manifest.name}' is already registered (dir: ${existing.dir})`,
+        recoveryHint: {
+          recoveryCommand: `myagents tool info ${manifest.name}`,
+          message: `To update it, edit the tool at ${existing.dir} and re-run tool add there; to replace it, remove first (note: remove drops stored env keys).`,
+        },
+      };
+    }
+    if (dryRun) {
+      return { success: true, dryRun: true, preview: { name: manifest.name, action: 'refresh', dir: existing.dir } };
+    }
+    let refreshed: CliToolRegistryEntry | undefined;
+    await modifyCliToolsRegistry((reg) => {
+      const idx = reg.tools.findIndex((t) => t.name === manifest.name);
+      if (idx === -1) return null;
+      const tools = [...reg.tools];
+      refreshed = {
+        ...tools[idx],
+        description: manifest.description,
+        version: manifest.version,
+        envKeys: manifest.envKeys,
+        deps: manifest.deps,
+        entryPath: join(tools[idx].dir, manifest.entry),
+      };
+      tools[idx] = refreshed;
+      // 锁内重写 shim：与并发 remove 的 shim 删除在同一锁下互斥
+      writeCliToolShim(manifest.name, refreshed.entryPath);
+      return { ...reg, tools };
+    });
+    if (!refreshed) {
+      return { success: false, error: `CLI tool '${manifest.name}' disappeared during refresh (concurrent remove?)`, recoveryHint: { recoveryCommand: 'myagents tool add ' + srcDir, message: 'Re-run to register it fresh.' } };
+    }
+    return {
+      success: true,
+      data: { tool: enrichCliTool(refreshed), refreshed: true },
+      hint: 'Refreshed manifest data (description/version/envKeys) and rewrote the shim. Stored env keys and enabled state preserved.',
+    };
+  }
+
+  // PATH shadow check: ~/.myagents/bin precedes system paths in agent sessions,
+  // so a colliding name silently hijacks an existing command everywhere.
+  // ensureShellPath(): the sidecar's own PATH is the launchd minimal set under
+  // GUI launch — it misses /opt/homebrew/bin etc. and would let brew-installed
+  // commands (ffmpeg/jq/gh) slip through the check.
+  const collision = findPathCollision(manifest.name, await ensureShellPath());
+  if (collision) {
+    return {
+      success: false,
+      error: `[NAME_SHADOWS] Tool name '${manifest.name}' collides with an existing executable (${collision}); registering it would shadow that command in every agent session and terminal`,
+      recoveryHint: { message: 'Rename the tool with a domain prefix (update tool.json "name") and re-run tool add.' },
+    };
+  }
+
+  if (needsCopy) {
+    // lstat probe (not existsSync): a broken symlink at dest reads as "absent"
+    // to existsSync and then crashes recursive copy (CLAUDE.md v0.2.5 red line).
+    let destOccupied = false;
+    try {
+      lstatSync(destDir);
+      destOccupied = true;
+    } catch {
+      destOccupied = false;
+    }
+    if (destOccupied) {
+      return {
+        success: false,
+        error: `[DEST_OCCUPIED] ${destDir} already exists but '${manifest.name}' is not registered (leftover from a failed add?)`,
+        recoveryHint: { message: `Inspect/remove ${destDir} manually, or register in place by running tool add on that directory.` },
+      };
+    }
+  }
+
+  if (dryRun) {
+    return {
+      success: true,
+      dryRun: true,
+      preview: {
+        name: manifest.name,
+        dir: toolDir,
+        wouldCopy: needsCopy,
+        shim: join(getCliToolsBinDir(), process.platform === 'win32' ? `${manifest.name}.cmd` : manifest.name),
+        envKeys: manifest.envKeys ?? [],
+      },
+    };
+  }
+
+  const entry: CliToolRegistryEntry = {
+    name: manifest.name,
+    description: manifest.description,
+    version: manifest.version,
+    envKeys: manifest.envKeys,
+    deps: manifest.deps,
+    dir: toolDir,
+    entryPath,
+    enabled: true,
+    registeredAt: new Date().toISOString(),
+  };
+
+  // Reserve the name + write the shim inside the registry lock BEFORE copying —
+  // the duplicate check is only authoritative there, copying first would let two
+  // concurrent adds of the same name interleave writes into destDir, and keeping
+  // shim writes under the same lock serializes them against concurrent remove.
+  // Copy failure rolls the reservation + shim back.
+  let duplicate = false;
+  await modifyCliToolsRegistry((reg) => {
+    if (reg.tools.some((t) => t.name === manifest.name)) {
+      duplicate = true;
+      return null;
+    }
+    writeCliToolShim(manifest.name, entryPath);
+    return { ...reg, tools: [...reg.tools, entry] };
+  });
+  if (duplicate) {
+    return {
+      success: false,
+      error: `CLI tool '${manifest.name}' is already registered`,
+      recoveryHint: { recoveryCommand: `myagents tool info ${manifest.name}`, message: 'Remove it first if you want to re-register.' },
+    };
+  }
+
+  if (needsCopy) {
+    try {
+      mkdirSync(getCliToolsDir(), { recursive: true });
+      // dereference: 把 symlink 固化为真实文件——注册产物必须自包含，
+      // 不能留指向工具箱之外、事后可被静默替换的链接
+      await fsCp(srcDir, destDir, { recursive: true, dereference: true });
+    } catch (e) {
+      // Roll back the reservation + shim + partial copy so a failed add leaves no trace.
+      await modifyCliToolsRegistry((reg) => {
+        removeCliToolShim(manifest.name);
+        return { ...reg, tools: reg.tools.filter((t) => t.name !== manifest.name) };
+      });
+      removeCliToolDir(manifest.name);
+      return {
+        success: false,
+        error: `[COPY_FAILED] Failed to copy tool dir into ${destDir}: ${(e as Error).message}`,
+        recoveryHint: { message: 'Check the source dir is readable (broken symlinks inside fail dereferenced copy), then re-run tool add.' },
+      };
+    }
+  }
+
+  const envHint = (manifest.envKeys ?? []).length > 0
+    ? ` It declares env keys [${(manifest.envKeys ?? []).join(', ')}] — set them via \`myagents tool env ${manifest.name} set KEY=value\`.`
+    : '';
+  return {
+    success: true,
+    data: { tool: enrichCliTool(entry) },
+    hint: `Registered. '${manifest.name}' is on PATH now; other sessions discover it on their next start.${envHint} Tell the user it is manageable under 设置 → 工具箱.`,
+  };
+}
+
+export async function handleToolRemove(payload: { name?: string; purge?: boolean }): Promise<AdminResponse> {
+  const { name, purge } = payload;
+  if (!name) return { success: false, error: 'Missing required field: name' };
+  let removed: CliToolRegistryEntry | undefined;
+  await modifyCliToolsRegistry((reg) => {
+    removed = reg.tools.find((t) => t.name === name);
+    if (!removed) return null;
+    // shim 删除收进同一把锁：与并发 add/refresh 的 shim 写入互斥，
+    // 防止 remove 误删一个刚被并发 add 重建的 shim
+    removeCliToolShim(name);
+    return { ...reg, tools: reg.tools.filter((t) => t.name !== name) };
+  });
+  if (!removed) {
+    return {
+      success: false,
+      error: `CLI tool '${name}' is not registered`,
+      recoveryHint: { recoveryCommand: 'myagents tool list', message: 'See registered tools.' },
+    };
+  }
+  // Drop stored env values with the registration — no stale secrets in config.
+  await atomicModifyConfig((c) => {
+    if (!c.cliToolEnv?.[name]) return c;
+    const cliToolEnv = { ...c.cliToolEnv };
+    delete cliToolEnv[name];
+    return { ...c, cliToolEnv };
+  });
+  // Containment guard: only delete dirs at the canonical registry location.
+  // entry.dir is invariantly ~/.myagents/tools/<name> today, but a registry
+  // file edited by hand could point anywhere — never rm outside our dir.
+  const canonicalDir = resolve(join(getCliToolsDir(), name));
+  const purgeable = resolve(removed.dir) === canonicalDir;
+  if (purge && purgeable) {
+    removeCliToolDir(name);
+  }
+  return {
+    success: true,
+    data: { name, purged: Boolean(purge && purgeable) },
+    hint: purge
+      ? (purgeable ? undefined : `Tool dir ${removed.dir} is outside ~/.myagents/tools — not deleted; remove it manually if intended.`)
+      : `Tool dir kept at ${removed.dir} (pass --purge to delete it too).`,
+  };
+}
+
+async function setToolEnabled(name: string | undefined, enabled: boolean): Promise<AdminResponse> {
+  if (!name) return { success: false, error: 'Missing required field: name' };
+  let found = false;
+  await modifyCliToolsRegistry((reg) => {
+    const idx = reg.tools.findIndex((t) => t.name === name);
+    if (idx === -1) return null;
+    found = true;
+    if (reg.tools[idx].enabled === enabled) return null;
+    const tools = [...reg.tools];
+    tools[idx] = { ...tools[idx], enabled };
+    return { ...reg, tools };
+  });
+  if (!found) {
+    return {
+      success: false,
+      error: `CLI tool '${name}' is not registered`,
+      recoveryHint: { recoveryCommand: 'myagents tool list', message: 'See registered tools.' },
+    };
+  }
+  return {
+    success: true,
+    data: { name, enabled },
+    hint: enabled
+      ? 'Tool will appear in new sessions\' context. (It was on PATH the whole time.)'
+      : 'Tool hidden from new sessions\' context; the shim stays on PATH for manual use.',
+  };
+}
+
+export async function handleToolEnable(payload: { name?: string }): Promise<AdminResponse> {
+  return setToolEnabled(payload.name, true);
+}
+
+export async function handleToolDisable(payload: { name?: string }): Promise<AdminResponse> {
+  return setToolEnabled(payload.name, false);
+}
+
+/**
+ * Run `<tool> readme` and return its stdout — feeds the Settings 工具箱 detail
+ * view so humans read the exact doc the AI reads. Async execFile (never a sync
+ * spawn: this runs on the sidecar event loop) with a hard timeout.
+ */
+export async function handleToolReadme(payload: { name?: string }): Promise<AdminResponse> {
+  const { name } = payload;
+  if (!name) return { success: false, error: 'Missing required field: name' };
+  const entry = readCliToolsRegistry().tools.find((t) => t.name === name);
+  if (!entry) {
+    return {
+      success: false,
+      error: `CLI tool '${name}' is not registered`,
+      recoveryHint: { recoveryCommand: 'myagents tool list', message: 'See registered tools.' },
+    };
+  }
+  try {
+    const { stdout } = await execFileAsync(process.execPath, [entry.entryPath, 'readme'], {
+      timeout: 10_000,
+      maxBuffer: 512 * 1024,
+    });
+    return { success: true, data: { name, readme: stdout } };
+  } catch (e) {
+    const err = e as { stderr?: string; message?: string };
+    return {
+      success: false,
+      error: `Failed to run '${name} readme': ${(err.stderr || err.message || 'unknown error').slice(0, 500)}`,
+      recoveryHint: { message: 'The tool may be broken — check its entry script, or remove and re-register it.' },
+    };
+  }
+}
+
+/** Same contract as handleMcpEnv, but against config.cliToolEnv. */
+export async function handleToolEnv(payload: {
+  name?: string;
+  action?: 'set' | 'get' | 'delete';
+  env?: Record<string, string>;
+}): Promise<AdminResponse> {
+  const { name, action, env } = payload;
+  if (!name) return { success: false, error: 'Missing required field: name' };
+  const entry = readCliToolsRegistry().tools.find((t) => t.name === name);
+  if (!entry) {
+    return {
+      success: false,
+      error: `CLI tool '${name}' is not registered`,
+      recoveryHint: { recoveryCommand: 'myagents tool list', message: 'See registered tools.' },
+    };
+  }
+
+  if (action === 'get' || action === undefined) {
+    const config = loadConfig();
+    const toolEnv = (config.cliToolEnv ?? {})[name] ?? {};
+    const redacted: Record<string, string> = {};
+    for (const [k, v] of Object.entries(toolEnv)) {
+      redacted[k] = redactSecret(v);
+    }
+    return {
+      success: true,
+      data: { name, env: redacted, declaredKeys: entry.envKeys ?? [], missingKeys: findMissingEnvKeys(entry, config.cliToolEnv) },
+    };
+  }
+
+  if (action === 'set') {
+    if (!env || Object.keys(env).length === 0) {
+      return { success: false, error: 'No environment variables provided' };
+    }
+    // The launcher merges these over process.env — overriding process-level
+    // vars would confusingly break the tool's own subprocesses (PATH) or its
+    // Node runtime (NODE_OPTIONS). No legitimate tool config needs them.
+    const forbidden = Object.keys(env).filter((k) => ['PATH', 'NODE_OPTIONS', 'HOME', 'USERPROFILE'].includes(k.toUpperCase()));
+    if (forbidden.length > 0) {
+      return {
+        success: false,
+        error: `Refusing to set process-level variables for a tool: ${forbidden.join(', ')}`,
+        recoveryHint: { message: 'Tool env is for API keys and tool-specific config declared in tool.json envKeys.' },
+      };
+    }
+    await atomicModifyConfig((c) => {
+      const cliToolEnv = { ...(c.cliToolEnv || {}) };
+      cliToolEnv[name] = { ...(cliToolEnv[name] || {}), ...env };
+      return { ...c, cliToolEnv };
+    });
+    return {
+      success: true,
+      data: { name, keys: Object.keys(env) },
+      hint: 'Environment variables updated. The tool reads them at launch — no re-registration needed.',
+    };
+  }
+
+  if (action === 'delete') {
+    if (!env || Object.keys(env).length === 0) {
+      return { success: false, error: 'No keys specified for deletion' };
+    }
+    await atomicModifyConfig((c) => {
+      const cliToolEnv = { ...(c.cliToolEnv || {}) };
+      if (cliToolEnv[name]) {
+        const toolEnv = { ...cliToolEnv[name] };
+        for (const key of Object.keys(env)) {
+          delete toolEnv[key];
+        }
+        if (Object.keys(toolEnv).length === 0) {
+          delete cliToolEnv[name];
+        } else {
+          cliToolEnv[name] = toolEnv;
+        }
+      }
+      return { ...c, cliToolEnv };
+    });
+    return { success: true, data: { name, deletedKeys: Object.keys(env) } };
+  }
+
+  return { success: false, error: `Unknown action: ${String(action)}. Use 'set', 'get', or 'delete'.` };
 }
