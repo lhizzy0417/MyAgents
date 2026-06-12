@@ -95,6 +95,30 @@ describe('shouldSkipHistoryReplay', () => {
             }),
         ).toBe(true);
     });
+
+    it('skips reset-birth cold-history without suppressing the live user echo', () => {
+        expect(
+            shouldSkipHistoryReplay({
+                isNewSession: false,
+                isLoadingSession: false,
+                isColdHistoryReplay: true,
+                isResetBirthPending: true,
+                restoredSessionId: null,
+                currentSessionId: SID,
+            }),
+        ).toBe(true);
+
+        expect(
+            shouldSkipHistoryReplay({
+                isNewSession: false,
+                isLoadingSession: false,
+                isColdHistoryReplay: false,
+                isResetBirthPending: true,
+                restoredSessionId: null,
+                currentSessionId: SID,
+            }),
+        ).toBe(false);
+    });
 });
 
 describe('shouldClearHistoryOnInit', () => {

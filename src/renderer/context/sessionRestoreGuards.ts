@@ -45,17 +45,21 @@ export function isRestoredSession(
  * truncates it. A LIVE echo must ALWAYS render, otherwise a new user message
  * sent after a restore disappears from the UI while the assistant streams.
  *
- * (The pre-existing new-session / load-in-flight suppression is unchanged; it
- * guards the cold-history race and never coincides with a live user echo.)
+ * Reset-session birth has one extra transient: `/chat/reset` can synchronize
+ * the renderer/Rust to the freshly minted backend id before the later
+ * `chat:system-init` confirms it. During that window, cold-history replay must
+ * still stay out of the empty new tab, but live echoes must render.
  */
 export function shouldSkipHistoryReplay(p: {
     isNewSession: boolean;
     isLoadingSession: boolean;
     isColdHistoryReplay: boolean;
+    isResetBirthPending?: boolean;
     restoredSessionId: string | null;
     currentSessionId: string | null;
 }): boolean {
     if (p.isNewSession || p.isLoadingSession) return true;
+    if (p.isColdHistoryReplay && p.isResetBirthPending) return true;
     return (
         p.isColdHistoryReplay &&
         isRestoredSession(p.restoredSessionId, p.currentSessionId)

@@ -132,7 +132,7 @@ interface TabProviderProps {
     /** Callback when generating state changes (for close confirmation) */
     onGeneratingChange?: (isGenerating: boolean) => void;
     /** Callback when sessionId changes (e.g., backend creates real session from pending-xxx) */
-    onSessionIdChange?: (newSessionId: string) => void;
+    onSessionIdChange?: (newSessionId: string) => void | Promise<void>;
     /** Callback when session title changes (auto-generated or renamed) */
     onTitleChange?: (title: string) => void;
     /** Callback when unread state changes (message completed on non-active tab) */
@@ -637,22 +637,28 @@ export default function TabProvider({
         setRuntimeDiagnostics(null);
         clearInteractiveState();
         // NOTE: Do NOT clear currentSessionId here. The old session ID is the only way
-        // to find the ready sidecar port via getSessionPort(). Setting it to null
-        // causes all subsequent API calls to fail ("No running sidecar for tab") because
-        // getBaseUrl skips session-centric lookup when sessionId is null, and the tab-based
-        // fallback also fails. The history dropdown naturally shows no selection when the
-        // old session is deleted from the list, so no UI impact.
-        // The session ID will be upgraded to the new value when chat:system-init arrives.
+        // to find the ready sidecar port for the /chat/reset call. Once the backend
+        // returns its freshly-minted sessionId we adopt it immediately; chat:system-init
+        // remains the fallback confirmation path.
 
         // Reset tab title so SortableTabItem falls back to folder name
         onTitleChangeRef.current?.('New Chat');
 
         // 2. Tell backend to reset (this will also broadcast chat:init)
         try {
-            const response = await postJson<{ success: boolean; error?: string }>('/chat/reset');
+            const response = await postJson<{ success: boolean; sessionId?: string; error?: string }>('/chat/reset');
             if (!response.success) {
                 console.error(`[TabProvider ${tabId}] resetSession failed:`, response.error);
                 return false;
+            }
+            if (response.sessionId) {
+                resetBirthSessionIdRef.current = response.sessionId;
+                if (currentSessionIdRef.current !== response.sessionId) {
+                    console.log(`[TabProvider ${tabId}] resetSession adopting backend sessionId: ${currentSessionIdRef.current ?? 'none'} -> ${response.sessionId}`);
+                    currentSessionIdRef.current = response.sessionId;
+                    setCurrentSessionId(response.sessionId);
+                    await onSessionIdChangeRef.current?.(response.sessionId);
+                }
             }
             console.log(`[TabProvider ${tabId}] resetSession complete`);
 
@@ -741,8 +747,21 @@ export default function TabProvider({
         // will detect the prop change on next render and reconnect.
         currentSessionIdRef.current = newSessionId;
         setCurrentSessionId(newSessionId);
-        onSessionIdChangeRef.current?.(newSessionId);
+        void onSessionIdChangeRef.current?.(newSessionId);
     }, [tabId, setStreamingMessage, clearInteractiveState, clearSessionActive, resetPaginationState]);
+
+    const trackSessionNewForBirth = useCallback((newSessionId: string, fallback: Surface) => {
+        const surface = consumePendingSurface(tabId, fallback);
+        const meta = analyticsMetaRef.current;
+        track('session_new', {
+            session_id: newSessionId,
+            tab_id: tabId,
+            triggered_by: surface,
+            runtime: meta.runtime,
+            has_initial_message: surface !== 'new_chat_button',
+            agent_hash: meta.agentHash,
+        });
+    }, [tabId]);
 
     // Append log
     const appendLog = useCallback((line: string) => {
@@ -1297,10 +1316,17 @@ export default function TabProvider({
                 // ALWAYS render, else a new user message vanishes after a restore (#0608
                 // Codex review).
                 const isColdHistoryReplay = payload.replayKind === 'cold-history';
+                const isResetBirthReplayPending =
+                    resetBirthPendingRef.current &&
+                    (
+                        resetBirthSessionIdRef.current === null ||
+                        resetBirthSessionIdRef.current === currentSessionIdRef.current
+                    );
                 if (shouldSkipHistoryReplay({
                     isNewSession: isNewSessionRef.current,
                     isLoadingSession: isLoadingSessionRef.current,
                     isColdHistoryReplay,
+                    isResetBirthPending: isResetBirthReplayPending,
                     restoredSessionId: restoredSessionIdRef.current,
                     currentSessionId: currentSessionIdRef.current,
                 })) {
@@ -2154,7 +2180,7 @@ export default function TabProvider({
                         setCurrentSessionId(newSessionId);
                         // Notify parent (App.tsx) to update Tab.sessionId for Session singleton constraint
                         // This ensures history dropdown can detect if this session is already open
-                        onSessionIdChangeRef.current?.(newSessionId);
+                        void onSessionIdChangeRef.current?.(newSessionId);
 
                         if (isSessionBirth) {
                             // Fallback policy:
@@ -2164,25 +2190,19 @@ export default function TabProvider({
                             //   - otherwise → organic mint via launcher input (most common
                             //     case where caller didn't setPendingSurface)
                             const fallback: Surface = isNewSessionRef.current ? 'new_chat_button' : 'launcher_input';
-                            const surface = consumePendingSurface(tabId, fallback);
-                            const meta = analyticsMetaRef.current;
-                            // has_initial_message: 'new_chat_button' creates an empty session
-                            // (user must type after); the other surfaces all carry a first
-                            // message (either typed in launcher or piggybacked on agent_card).
-                            const hasInitialMessage = surface !== 'new_chat_button';
-                            // Explicit tab_id — this track call is inside an SSE handler
-                            // that may fire on a backgrounded tab; without an explicit value
-                            // it would inherit the foreground tab's tab_id from Active Context.
-                            // (cross-review fix matching trackTabEvent's behavior.)
-                            track('session_new', {
-                                session_id: newSessionId,
-                                tab_id: tabId,
-                                triggered_by: surface,
-                                runtime: meta.runtime,
-                                has_initial_message: hasInitialMessage,
-                                agent_hash: meta.agentHash,
-                            });
+                            trackSessionNewForBirth(newSessionId, fallback);
                         }
+                    } else if (
+                        newSessionId &&
+                        resetBirthPendingRef.current &&
+                        resetBirthSessionIdRef.current === newSessionId
+                    ) {
+                        // /chat/reset already synchronized the renderer/Rust identity.
+                        // The later system-init confirms the same id and completes the
+                        // reset-birth analytics/guard lifecycle without waiting for an
+                        // artificial id change.
+                        resetBirthPendingRef.current = false;
+                        trackSessionNewForBirth(newSessionId, 'new_chat_button');
                     }
                 }
                 break;
@@ -2751,7 +2771,7 @@ export default function TabProvider({
                 }
             }
         }
-    }, [appendLog, appendUnifiedLog, tabId, moveStreamingToHistory, beginFreshStreamIfNeeded, setStreamingMessage, postJson, clearInteractiveState, flushPendingTextNow, startRevealLoop, flushAllPendingToolDeltas, flushPendingToolInputDelta, flushPendingToolResultDelta, flushPendingSubagentToolInputDelta, flushPendingSubagentToolResultDelta, clearSessionActive, resetPaginationState, trackTabEvent]);
+    }, [appendLog, appendUnifiedLog, tabId, moveStreamingToHistory, beginFreshStreamIfNeeded, setStreamingMessage, postJson, clearInteractiveState, flushPendingTextNow, startRevealLoop, flushAllPendingToolDeltas, flushPendingToolInputDelta, flushPendingToolResultDelta, flushPendingSubagentToolInputDelta, flushPendingSubagentToolResultDelta, clearSessionActive, resetPaginationState, trackTabEvent, trackSessionNewForBirth]);
 
     // Recovery guard — prevents concurrent recovery from both SSE failed + session-sidecar:restarted
     const recoveryInFlightRef = useRef(false);
@@ -3862,7 +3882,7 @@ export default function TabProvider({
         // Exception 1: if resetSession was just called (isNewSessionRef=true), the session
         // upgrade (old→new) arrives via system:init. Messages are already streaming via SSE,
         // so calling loadSession would flash isLoading=false. Skip and let SSE handle it.
-        if (isNewSessionRef.current && resetSessionBirth) {
+        if (resetSessionBirth) {
             console.log(`[TabProvider ${tabId}] SessionId upgraded to ${sessionId} after resetSession, skipping loadSession (messages arriving via SSE)`);
             initialSessionLoadedRef.current = true;
             return;

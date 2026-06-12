@@ -2721,7 +2721,7 @@ async function main() {
             await stopExternalSession();
           }
           await resetSession();
-          return jsonResponse({ success: true });
+          return jsonResponse({ success: true, sessionId: getSessionId() });
         } catch (error) {
           return jsonResponse(
             { success: false, error: error instanceof Error ? error.message : 'Unknown error' },
