@@ -19,7 +19,7 @@ interface AttachmentPreviewListProps {
   className?: string;
   cardClassName?: string;
   imageDimensions?: string;
-  compact?: boolean; // Compact mode for 5-per-row grid
+  compact?: boolean; // Compact mode for sent-message attachment strips
 }
 
 export default function AttachmentPreviewList({
@@ -28,7 +28,7 @@ export default function AttachmentPreviewList({
   onPreview,
   className = '',
   cardClassName = '',
-  imageDimensions = 'h-16 w-16',
+  imageDimensions,
   compact = false
 }: AttachmentPreviewListProps) {
   const [previewErrorIds, setPreviewErrorIds] = useState<string[]>([]);
@@ -50,31 +50,44 @@ export default function AttachmentPreviewList({
     return null;
   }
 
-  // Use grid layout for compact mode (5 items per row)
+  const resolvedImageDimensions = imageDimensions ?? (compact ? 'h-24' : 'h-16 w-16');
+
+  // Sent-message attachments use a horizontal strip: images keep a fixed
+  // height and intrinsic width, so screenshots and portrait images are not
+  // cropped into square thumbnails.
   const containerClass = compact
-    ? `grid grid-cols-5 gap-1.5 ${className}`
+    ? `flex max-w-full flex-nowrap gap-2 overflow-x-auto pb-1 ${className}`
     : `flex flex-wrap gap-3 ${className}`;
+  const cardRadiusClass = compact ? 'rounded-lg' : 'rounded-2xl';
+  const imageFrameClass = compact
+    ? `relative flex max-w-full items-center justify-center overflow-hidden ${cardRadiusClass} ${resolvedImageDimensions} cursor-pointer`
+    : `relative overflow-hidden ${cardRadiusClass} ${resolvedImageDimensions} cursor-pointer`;
+  const imageClass = compact
+    ? 'block h-full w-auto max-w-full object-contain'
+    : 'h-full w-full object-cover';
 
   return (
     <div className={containerClass}>
       {attachments.map((attachment) => {
         const showImagePreview =
-          attachment.isImage && attachment.previewUrl && !previewErrorIdSet.has(attachment.id);
+          attachment.isImage &&
+          attachment.previewUrl &&
+          !previewErrorIdSet.has(attachment.id);
 
         return (
           <div
             key={attachment.id}
-            className={`relative ${compact ? 'rounded-lg' : 'rounded-2xl'} border border-[var(--line)] bg-[var(--paper-elevated)] shadow-lg ${cardClassName}`}
+            className={`relative ${compact ? 'w-fit max-w-full shrink-0' : ''} ${cardRadiusClass} border border-[var(--line)] bg-[var(--paper-elevated)] shadow-lg ${cardClassName}`}
           >
-            {showImagePreview ?
+            {showImagePreview ? (
               <div
-                className={`relative overflow-hidden ${compact ? 'rounded-lg' : 'rounded-2xl'} ${imageDimensions} cursor-pointer`}
+                className={imageFrameClass}
                 onClick={() => onPreview?.(attachment.previewUrl!, attachment.name)}
               >
                 <img
                   src={attachment.previewUrl}
                   alt={attachment.name}
-                  className="h-full w-full object-cover"
+                  className={imageClass}
                   onError={() => markPreviewError(attachment.id)}
                   loading="lazy"
                 />
@@ -84,7 +97,8 @@ export default function AttachmentPreviewList({
                   </div>
                 )}
               </div>
-              : <div className="flex min-w-[14rem] items-center gap-3 px-3 py-2">
+            ) : (
+              <div className="flex min-w-[14rem] items-center gap-3 px-3 py-2">
                 <div className="rounded-full bg-[var(--paper-inset)] p-2 text-[var(--ink)]">
                   <Paperclip className="h-4 w-4" />
                 </div>
@@ -105,7 +119,7 @@ export default function AttachmentPreviewList({
                   ))}
                 </div>
               </div>
-            }
+            )}
             {onRemove && (
               <button
                 type="button"
