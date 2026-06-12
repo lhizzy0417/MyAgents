@@ -533,10 +533,14 @@ export interface AppConfig {
   floatingBallDevGate?: boolean;
   /** 悬浮球本体显隐开关（总门控开启后才有意义）。 */
   floatingBallEnabled?: boolean;
-  /** 桌面渠道持久 session id（伴侣窗自铸 UUID v4；按天轮换，PRD §6.2）。 */
+  /** 桌面渠道持久 session id（伴侣窗自铸 UUID v4；轮换见下两个字段，PRD §6.2）。 */
   floatingBallSessionId?: string;
   /** 上述 session 的铸造日期（本地 YYYY-MM-DD）。与今天不同时轮换新 session。 */
   floatingBallSessionDate?: string;
+  /** 上述 session 绑定的工作区路径。session 身份是 (id, workspace, date) 三元组——
+   *  SDK 的对话树按工作区落盘，跨工作区 resume 必然 "No conversation found"；
+   *  默认工作区变更时必须轮换新 session（验收实战教训）。 */
+  floatingBallSessionWorkspace?: string;
   /** 开发者：定期从 LiteLLM (GitHub) 拉取 model_prices_and_context_window.json，
    *  作为模型 contextLength/maxOutputTokens 的最低优先级兜底数据源。缺省视同 true。
    *  抓取在 Rust 侧（启动条件检查 + 24h interval，ETag/If-None-Match 增量）。 */

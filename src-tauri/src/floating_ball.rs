@@ -107,7 +107,7 @@ mod imp {
         WebviewWindowBuilder,
     };
     use tauri_nspanel::{tauri_panel, CollectionBehavior, ManagerExt, PanelLevel, StyleMask,
-        TrackingAreaOptions, WebviewWindowExt};
+        WebviewWindowExt};
 
     pub const BALL_LABEL: &str = "fb-ball";
     pub const COMPANION_LABEL: &str = "fb-companion";
@@ -120,31 +120,17 @@ mod imp {
 
     tauri_panel! {
         // The ball never takes keyboard focus — pure visual + mouse target.
-        // tracking_area is load-bearing: while our app is INACTIVE (the normal
-        // state — nonactivating panels never activate it), WKWebView does not
-        // receive hover/mouseMoved events, so DOM mouseenter never fires. The
-        // NSTrackingArea with active_always is the only reliable hover signal
-        // (user-verified symptom: hover did nothing until click).
         panel!(FbBallPanel {
             config: {
                 can_become_key_window: false,
                 can_become_main_window: false,
                 is_floating_panel: true
             }
-            with: {
-                tracking_area: {
-                    options: TrackingAreaOptions::new()
-                        .active_always()
-                        .mouse_entered_and_exited(),
-                    auto_resize: true
-                }
-            }
         })
 
         // The companion can become key (so the user can type) but only when we
         // explicitly call make_key_window — `becomes_key_only_if_needed` keeps
-        // order_front_regardless (peek) from stealing focus. Same tracking-area
-        // rationale: the peek-grace timer needs to know the mouse is inside.
+        // order_front_regardless (peek) from stealing focus.
         panel!(FbCompanionPanel {
             config: {
                 can_become_key_window: true,
@@ -152,37 +138,114 @@ mod imp {
                 becomes_key_only_if_needed: true,
                 is_floating_panel: true
             }
-            with: {
-                tracking_area: {
-                    options: TrackingAreaOptions::new()
-                        .active_always()
-                        .mouse_entered_and_exited(),
-                    auto_resize: true
-                }
-            }
         })
-
-        panel_event!(FbPanelEvent {})
     }
 
-    /// Wire native mouse enter/exit to a `fb:native-hover` event on the
-    /// panel's own webview — the JS layer keeps owning the hover semantics
-    /// (debounce / grace / pin checks), Rust only supplies the raw signal.
-    fn attach_hover_events(
-        app: &AppHandle,
-        panel: &std::sync::Arc<dyn tauri_nspanel::Panel>,
-        label: &'static str,
-    ) {
-        let handler = FbPanelEvent::new();
-        let enter_app = app.clone();
-        handler.on_mouse_entered(move |_event| {
-            let _ = enter_app.emit_to(label, "fb:native-hover", serde_json::json!({ "inside": true }));
+    // ── Hover detection: NSEvent.mouseLocation polling ──
+    //
+    // Why polling and not NSTrackingArea / DOM mouseenter: while our app is
+    // inactive (the PERMANENT state for nonactivating panels) WKWebView gets
+    // no hover/mouseMoved events, so DOM mouseenter never fires. tauri-nspanel
+    // tracking areas are owned by the content view (= the WKWebView), whose
+    // own mouseEntered: override swallows events instead of bubbling them to
+    // the panel subclass — user-verified dead end. NSEvent.mouseLocation is a
+    // permission-free class-property query (NOT an event tap / NOT Input
+    // Monitoring), and an 8Hz main-thread peek is unmeasurable CPU-wise.
+    static HOVER_POLLER_RUNNING: std::sync::atomic::AtomicBool =
+        std::sync::atomic::AtomicBool::new(false);
+
+    fn mouse_in_window(win: &tauri::WebviewWindow, mouse_top_left: (f64, f64)) -> bool {
+        let Ok(scale) = win.scale_factor() else { return false };
+        let Ok(pos) = win.outer_position() else { return false };
+        let Ok(size) = win.outer_size() else { return false };
+        let pos = pos.to_logical::<f64>(scale);
+        let size = size.to_logical::<f64>(scale);
+        let (mx, my) = mouse_top_left;
+        mx >= pos.x && mx <= pos.x + size.width && my >= pos.y && my <= pos.y + size.height
+    }
+
+    /// Current mouse position in Tauri's coordinate space (top-left origin,
+    /// logical points). NSEvent.mouseLocation is bottom-left-origin global
+    /// points; flip Y against the primary screen height.
+    fn mouse_location_top_left() -> Option<(f64, f64)> {
+        // Only ever called from run_on_main_thread — marker acquisition is a
+        // checked no-op there.
+        let mtm = tauri_nspanel::objc2::MainThreadMarker::new()?;
+        let loc = tauri_nspanel::objc2_app_kit::NSEvent::mouseLocation();
+        let screens = tauri_nspanel::objc2_app_kit::NSScreen::screens(mtm);
+        let primary = screens.iter().next()?;
+        let height = primary.frame().size.height;
+        Some((loc.x, height - loc.y))
+    }
+
+    fn start_hover_poller(app: &AppHandle) {
+        use std::sync::atomic::Ordering;
+        if HOVER_POLLER_RUNNING.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let app = app.clone();
+        tauri::async_runtime::spawn(async move {
+            let mut ball_inside = false;
+            let mut comp_inside = false;
+            loop {
+                if !HOVER_POLLER_RUNNING.load(Ordering::SeqCst) {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(120)).await;
+                let app2 = app.clone();
+                let (tx, rx) = std::sync::mpsc::channel::<(Option<bool>, Option<bool>)>();
+                let dispatched = app
+                    .run_on_main_thread(move || {
+                        let mouse = mouse_location_top_left();
+                        let ball = app2
+                            .get_webview_window(BALL_LABEL)
+                            .filter(|w| w.is_visible().unwrap_or(false));
+                        let comp = app2
+                            .get_webview_window(COMPANION_LABEL)
+                            .filter(|w| w.is_visible().unwrap_or(false));
+                        let ball_in = match (&mouse, &ball) {
+                            (Some(m), Some(w)) => Some(mouse_in_window(w, *m)),
+                            _ => ball.map(|_| false),
+                        };
+                        let comp_in = match (&mouse, &comp) {
+                            (Some(m), Some(w)) => Some(mouse_in_window(w, *m)),
+                            _ => comp.map(|_| false),
+                        };
+                        let _ = tx.send((ball_in, comp_in));
+                    })
+                    .is_ok();
+                if !dispatched {
+                    break;
+                }
+                let Ok((ball_in, comp_in)) = rx.recv() else { break };
+                if let Some(inside) = ball_in {
+                    if inside != ball_inside {
+                        ball_inside = inside;
+                        let _ = app.emit_to(
+                            BALL_LABEL,
+                            "fb:native-hover",
+                            serde_json::json!({ "inside": inside }),
+                        );
+                    }
+                }
+                if let Some(inside) = comp_in {
+                    if inside != comp_inside {
+                        comp_inside = inside;
+                        let _ = app.emit_to(
+                            COMPANION_LABEL,
+                            "fb:native-hover",
+                            serde_json::json!({ "inside": inside }),
+                        );
+                    }
+                }
+            }
+            ulog_info!("[fb] hover poller stopped");
         });
-        let exit_app = app.clone();
-        handler.on_mouse_exited(move |_event| {
-            let _ = exit_app.emit_to(label, "fb:native-hover", serde_json::json!({ "inside": false }));
-        });
-        panel.set_event_handler(Some(handler.as_ref()));
+        ulog_info!("[fb] hover poller started");
+    }
+
+    fn stop_hover_poller() {
+        HOVER_POLLER_RUNNING.store(false, std::sync::atomic::Ordering::SeqCst);
     }
 
     fn placement_path() -> Option<PathBuf> {
@@ -249,7 +312,6 @@ mod imp {
             let panel = win
                 .to_panel::<FbBallPanel>()
                 .map_err(|e| format!("[fb] ball to_panel: {e}"))?;
-            attach_hover_events(app, &panel, BALL_LABEL);
             panel.set_level(PanelLevel::Floating.value());
             panel.set_style_mask(StyleMask::empty().nonactivating_panel().into());
             panel.set_collection_behavior(
@@ -298,7 +360,6 @@ mod imp {
             let panel = win
                 .to_panel::<FbCompanionPanel>()
                 .map_err(|e| format!("[fb] companion to_panel: {e}"))?;
-            attach_hover_events(app, &panel, COMPANION_LABEL);
             panel.set_level(PanelLevel::Floating.value());
             panel.set_style_mask(StyleMask::empty().nonactivating_panel().into());
             panel.set_collection_behavior(
@@ -326,6 +387,7 @@ mod imp {
         // sidecar owner + SSE. On the very first enable the companion webview
         // may not have listeners yet — harmless, its boot path covers that.
         let _ = app.emit_to(COMPANION_LABEL, "fb:lifecycle", serde_json::json!({ "active": true }));
+        start_hover_poller(app);
         ulog_info!("[fb] floating ball enabled");
         Ok(())
     }
@@ -347,6 +409,7 @@ mod imp {
             "fb:lifecycle",
             serde_json::json!({ "active": false }),
         );
+        stop_hover_poller();
         ulog_info!("[fb] floating ball disabled");
     }
 

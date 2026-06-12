@@ -145,6 +145,11 @@ export function useFloatingSession(modeRef: React.MutableRefObject<'hidden' | 'p
     }, [busy]);
     const sessionDateRef = useRef<string | null>(null);
     const workspaceRef = useRef<{ path: string } | null>(null);
+    // SSE handler 里要触发轮换（会话失效自愈），但 rotateTo 声明在其后——
+    // 经 ref 解耦（effect 同步，见 rotateTo 定义处）。
+    const rotateToRef = useRef<(today: string, ws: { path: string; name?: string }) => Promise<void>>(
+        async () => undefined,
+    );
     // Gate-aware runtime for analytics: with multiAgentRuntime off (default)
     // every session is builtin by construction; with the gate on the actual
     // runtime depends on Mino's agent config which the companion deliberately
@@ -318,7 +323,18 @@ export function useFloatingSession(modeRef: React.MutableRefObject<'hidden' | 'p
                     const msg = typeof data === 'string' ? data : 'Agent 出错了，点 ↗ 去主窗口查看';
                     finalizeStream();
                     setBusy(false);
-                    setError(msg);
+                    // 会话失效自愈：SDK 在当前工作区找不到这条对话（典型：persisted
+                    // sid 的 SDK 数据被清理）。直接轮换新 session，别让用户卡死在
+                    // 一条永远发不出去的会话里。
+                    if (msg.includes('No conversation found')) {
+                        setError('上一条会话已失效，已为你开启新对话');
+                        const ws = workspaceRef.current;
+                        if (ws) {
+                            void rotateToRef.current(localDate(), { path: ws.path });
+                        }
+                    } else {
+                        setError(msg);
+                    }
                     break;
                 }
                 case 'ask-user-question:request': {
@@ -335,14 +351,18 @@ export function useFloatingSession(modeRef: React.MutableRefObject<'hidden' | 'p
     const handleSseEventRef = useRef(handleSseEvent);
     handleSseEventRef.current = handleSseEvent;
 
-    /** Mint a fresh channel session id and persist it (PRD §6.2 rotation —
-     *  same "self-minted UUID + persist" shape as cron rotate_new_session_id). */
-    const mintSession = useCallback(async (today: string): Promise<string> => {
+    /** Mint a fresh channel session id and persist the FULL identity triple
+     *  (id, workspace, date) — PRD §6.2 rotation, cron rotate_new_session_id
+     *  shape. Workspace binding is load-bearing: SDK conversation trees live
+     *  under per-workspace project dirs, so resuming an old sid in a new
+     *  workspace fails with "No conversation found". */
+    const mintSession = useCallback(async (today: string, workspace: string): Promise<string> => {
         const sid = crypto.randomUUID();
         await atomicModifyConfig((c) => ({
             ...c,
             floatingBallSessionId: sid,
             floatingBallSessionDate: today,
+            floatingBallSessionWorkspace: workspace,
         }));
         sessionDateRef.current = today;
         // Provenance anchor (PRD §11.2 / D11): downstream session-scoped events
@@ -406,13 +426,19 @@ export function useFloatingSession(modeRef: React.MutableRefObject<'hidden' | 'p
                 }
                 workspaceRef.current = { path: mino.path };
 
-                // Session 轮换（PRD §6.2）：按天轮换；跨 session 的"懂我"由
-                // Mino 记忆系统承载，不靠 session 连续性。
+                // Session 轮换（PRD §6.2）：身份三元组 (id, workspace, date)。
+                // 日期翻篇 **或** 默认工作区变更都轮换——后者是硬约束（SDK 对话
+                // 树按工作区落盘，跨工作区 resume 必 "No conversation found"）。
+                // 跨 session 的"懂我"由 Mino 记忆系统承载，不靠 session 连续性。
                 const today = localDate();
                 let sid = cfg.floatingBallSessionId;
-                const rotated = !sid || cfg.floatingBallSessionDate !== today;
+                const rotated =
+                    !sid
+                    || cfg.floatingBallSessionDate !== today
+                    || !cfg.floatingBallSessionWorkspace
+                    || !workspacePathsEqual(cfg.floatingBallSessionWorkspace, mino.path);
                 if (rotated) {
-                    sid = await mintSession(today);
+                    sid = await mintSession(today, mino.path);
                 } else {
                     sessionDateRef.current = cfg.floatingBallSessionDate ?? today;
                 }
@@ -462,30 +488,55 @@ export function useFloatingSession(modeRef: React.MutableRefObject<'hidden' | 'p
         // eslint-disable-next-line react-hooks/exhaustive-deps -- boot-once; helpers are stable useCallbacks
     }, []);
 
-    /** Summon-time rotation check（架构 review 发现 #4）：fb 窗口随 enable 常驻、
-     *  永不重载，boot-only 的轮换在跨午夜长跑时失效。每次显式唤起时再评估：
-     *  日期翻篇且空闲 → 轮换到新 session（运行中不打断当轮）。 */
-    const rotateIfStale = useCallback(async () => {
-        const today = localDate();
-        if (!ready) return;
-        if (busyRef.current) return;
-        if (sessionDateRef.current === today) return;
-        const workspace = workspaceRef.current;
-        if (!workspace) return;
-        try {
-            const sid = await mintSession(today);
+    /** 轮换到一条全新 session（清空会话区 + ensure 新 sidecar + 重连 SSE）。 */
+    const rotateTo = useCallback(
+        async (today: string, workspace: { path: string; name?: string }) => {
+            const sid = await mintSession(today, workspace.path);
+            workspaceRef.current = { path: workspace.path };
+            setWorkspacePath(workspace.path);
+            if (workspace.name) setWorkspaceName(workspace.name);
             setMessages([]);
             setActivities([]);
             streamRef.current = null;
             setStreamText(null);
             setPermReq(null);
             setUnread(0);
+            setError(null);
             await connectSession(sid, workspace.path);
-            console.info(`[fb] session rotated at summon · session=${sid}`);
+            console.info(`[fb] session rotated · session=${sid} workspace=${workspace.path}`);
+        },
+        [mintSession, connectSession],
+    );
+
+    useEffect(() => {
+        rotateToRef.current = rotateTo;
+    }, [rotateTo]);
+
+    /** Summon-time rotation check：每次显式唤起时重新解析默认工作区并评估
+     *  三元组（boot-only 检查在"跨午夜长跑"和"运行期间改默认工作区"两种
+     *  情形下都会失效）。运行中不打断当轮。 */
+    const rotateIfStale = useCallback(async () => {
+        if (!ready) return;
+        if (busyRef.current) return;
+        try {
+            const today = localDate();
+            const [cfg, projects] = await Promise.all([loadAppConfig(), loadProjects()]);
+            const target =
+                (cfg.defaultWorkspacePath
+                    ? projects.find((p) => workspacePathsEqual(p.path, cfg.defaultWorkspacePath))
+                    : undefined)
+                ?? projects.find((p) => p.path.replace(/\\/g, '/').endsWith('/mino'))
+                ?? projects[0];
+            if (!target) return;
+            const current = workspaceRef.current;
+            const dateStale = sessionDateRef.current !== today;
+            const wsStale = !current || !workspacePathsEqual(current.path, target.path);
+            if (!dateStale && !wsStale) return;
+            await rotateTo(today, { path: target.path, name: target.name });
         } catch (err) {
             console.warn('[fb] summon-time rotation failed:', err);
         }
-    }, [ready, mintSession, connectSession]);
+    }, [ready, rotateTo]);
 
     // ── send ──
     const sendingRef = useRef(false);
