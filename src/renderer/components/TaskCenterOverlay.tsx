@@ -404,7 +404,7 @@ export default memo(function TaskCenterOverlay({
                                             onClick={openDirectMatch}
                                             className="group flex w-full cursor-pointer items-center gap-2.5 rounded-lg border border-[var(--accent)]/30 px-3 py-2.5 text-left transition-all hover:bg-[var(--hover-bg)]"
                                         >
-                                            <div className="flex w-14 shrink-0 items-center gap-1 text-xs text-[var(--ink-muted)]/50">
+                                            <div className="flex w-16 shrink-0 items-center gap-1 text-xs text-[var(--ink-muted)]/50">
                                                 <Clock className="h-2.5 w-2.5" />
                                                 <span>{formatTime(directSessionMatch.session.lastActiveAt)}</span>
                                             </div>
@@ -471,7 +471,7 @@ export default memo(function TaskCenterOverlay({
                                                     onClick={() => onOpenTask(session, project)}
                                                     className="group relative flex w-full cursor-pointer items-center gap-2.5 rounded-lg px-3 py-2 text-left transition-all hover:bg-[var(--hover-bg)]"
                                                 >
-                                                    <div className="flex w-14 shrink-0 items-center gap-1 text-xs text-[var(--ink-muted)]/50">
+                                                    <div className="flex w-16 shrink-0 items-center gap-1 text-xs text-[var(--ink-muted)]/50">
                                                         <Clock className="h-2.5 w-2.5" />
                                                         <span>{formatTime(session.lastActiveAt)}</span>
                                                     </div>

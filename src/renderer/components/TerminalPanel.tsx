@@ -137,7 +137,7 @@ export function TerminalPanel({
     const term = new Terminal({
       theme: isDark ? TERMINAL_DARK_THEME : TERMINAL_LIGHT_THEME,
       fontFamily: "'SF Mono', 'Cascadia Code', 'Consolas', 'Monaco', 'PingFang SC', 'Microsoft YaHei', monospace",
-      fontSize: 13,
+      fontSize: 14,
       lineHeight: 1.3,
       cursorBlink: true,
       cursorStyle: 'bar',

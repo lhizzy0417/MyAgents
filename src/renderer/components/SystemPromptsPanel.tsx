@@ -589,7 +589,7 @@ const SystemPromptsPanel = forwardRef<SystemPromptsPanelRef, SystemPromptsPanelP
                                                 <span className="rounded-full bg-[var(--accent-warm-subtle)] px-2 py-0.5 text-xs font-medium text-[var(--accent)]">推荐</span>
                                             </div>
                                             <p className="text-sm leading-relaxed text-[var(--ink-muted)]">
-                                                AI 分析当前项目结构，自动生成贴合的 CLAUDE.md（运行 <code className="rounded bg-[var(--paper-inset)] px-1 text-2sm">/init</code>）
+                                                AI 分析当前项目结构，自动生成贴合的 CLAUDE.md（运行 <code className="rounded bg-[var(--paper-inset)] px-1 text-xs">/init</code>）
                                             </p>
                                         </button>
                                     )}

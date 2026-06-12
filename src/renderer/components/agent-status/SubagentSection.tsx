@@ -50,7 +50,7 @@ function SubagentRow({ subagent, onJumpToTool }: SubagentRowProps) {
       className="group flex w-full items-center gap-2 px-3 py-1.5 text-left transition-colors hover:bg-[var(--paper-inset)]/60"
     >
       <SubagentRunningIcon />
-      <div className="flex min-w-0 flex-1 items-baseline gap-1.5 text-2sm">
+      <div className="flex min-w-0 flex-1 items-baseline gap-1.5 text-xs">
         <span className="shrink-0 font-medium text-[var(--ink)]">
           {subagent.agentType}
         </span>

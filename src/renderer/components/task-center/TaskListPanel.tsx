@@ -564,7 +564,7 @@ export function TaskListPanel({ highlightTaskId, refreshKey, pendingIntent }: Pr
               type="button"
               onClick={() => setShowCreateModal(true)}
               aria-label="新建任务"
-              className="inline-flex h-7 items-center gap-1 rounded-full px-2.5 text-2sm text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
+              className="inline-flex h-7 items-center gap-1 rounded-full px-2.5 text-xs text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
             >
               <Plus className="h-3.5 w-3.5" strokeWidth={1.75} />
               新建
@@ -707,7 +707,7 @@ export function TaskListPanel({ highlightTaskId, refreshKey, pendingIntent }: Pr
 }
 
 /**
- * Bucket header — 11px uppercase label + muted count + flex-1 hairline
+ * Bucket header — 12px (text-xs) uppercase label + muted count + flex-1 hairline
  * rule, per the v0.1.69 visual mockup. Quiet enough to read as a
  * section divider rather than a page heading; the task cards below
  * carry the actual visual weight.

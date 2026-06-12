@@ -55,7 +55,7 @@ export function ModeSegment({
   // thumb), `shadow-xs` for the subtle macOS-style lift, and full ink
   // for the label. Inactive state stays ink-muted and relies on a soft
   // hover → ink-secondary step for feedback.
-  // v0.1.69 polish: sized one tier down (14px → 13px, px-3.5 → px-3,
+  // v0.1.69 polish: sized down (px-3.5 → px-3,（v2.5 字阶合并后文字回到 ui 档 14px）
   // icons 3.5 → 3) so the toggle reads as an affordance above the
   // input rather than a second-tier headline competing with the brand
   // group above it.

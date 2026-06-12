@@ -401,7 +401,7 @@ export function TaskDetailOverlay({
               </h2>
             </div>
             {task.description && !editing && (
-              <p className="mt-1 text-2sm text-[var(--ink-muted)]">
+              <p className="mt-1 text-xs text-[var(--ink-muted)]">
                 {task.description}
               </p>
             )}
@@ -478,7 +478,7 @@ export function TaskDetailOverlay({
         )}
 
         {err && (
-          <div className="border-b border-[var(--error)]/30 bg-[var(--error-bg)] px-6 py-2 text-2sm text-[var(--error)]">
+          <div className="border-b border-[var(--error)]/30 bg-[var(--error-bg)] px-6 py-2 text-xs text-[var(--error)]">
             {err}
           </div>
         )}
@@ -659,7 +659,7 @@ function NotificationSummary({ task }: { task: Task }) {
         <Bell className="h-3.5 w-3.5" />
         通知
       </div>
-      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-2sm">
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs">
         <span className={desktop ? 'text-[var(--ink)]' : 'text-[var(--ink-muted)]'}>
           桌面通知 {desktop ? '✓ 开启' : '✗ 关闭'}
         </span>

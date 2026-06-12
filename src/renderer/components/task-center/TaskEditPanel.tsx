@@ -631,7 +631,7 @@ export function TaskEditPanel({
         >
           <DocPathRow path={`~/.myagents/tasks/${task.id}/task.md`} />
           {taskMdReadState === 'failed' ? (
-            <div className="rounded-[var(--radius-md)] border border-[var(--error)]/30 bg-[var(--error-bg)] px-3 py-2.5 text-2sm text-[var(--error)]">
+            <div className="rounded-[var(--radius-md)] border border-[var(--error)]/30 bg-[var(--error-bg)] px-3 py-2.5 text-xs text-[var(--error)]">
               task.md 读取失败。为避免覆盖原内容，编辑已锁定。请关闭重试，或检查磁盘权限后再打开此任务。
             </div>
           ) : (
@@ -649,7 +649,7 @@ export function TaskEditPanel({
                 }
                 className={`${INPUT_CLS} resize-y font-mono text-sm`}
               />
-              <p className="mt-1.5 text-2sm text-[var(--ink-muted)]">
+              <p className="mt-1.5 text-xs text-[var(--ink-muted)]">
                 AI 执行时看到的 prompt。保存时原子写入上方路径。
               </p>
             </>
@@ -667,7 +667,7 @@ export function TaskEditPanel({
         >
           <DocPathRow path={`~/.myagents/tasks/${task.id}/verify.md`} />
           {verifyMdReadState === 'failed' ? (
-            <div className="rounded-[var(--radius-md)] border border-[var(--error)]/30 bg-[var(--error-bg)] px-3 py-2.5 text-2sm text-[var(--error)]">
+            <div className="rounded-[var(--radius-md)] border border-[var(--error)]/30 bg-[var(--error-bg)] px-3 py-2.5 text-xs text-[var(--error)]">
               verify.md 读取失败。为避免覆盖原内容，编辑已锁定。
             </div>
           ) : (
@@ -685,7 +685,7 @@ export function TaskEditPanel({
                 }
                 className={`${INPUT_CLS} resize-y font-mono text-sm`}
               />
-              <p className="mt-1.5 text-2sm text-[var(--ink-muted)]">
+              <p className="mt-1.5 text-xs text-[var(--ink-muted)]">
                 任务进入「验证中」阶段时 AI 读取此清单判定是否完成。留空则跳过验证阶段。
               </p>
             </>

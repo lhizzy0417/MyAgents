@@ -82,7 +82,7 @@ export default function SheetViewer({ bytes, onError, onEmpty }: RichDocSubViewe
     <div className="flex h-full flex-col bg-[var(--paper-elevated)]">
       <div className="flex-1 overflow-auto overscroll-contain p-3">
         {current.truncated && (
-          <div className="mb-2 rounded-[var(--radius-sm)] bg-[var(--paper-inset)] px-3 py-1.5 text-2sm text-[var(--ink-muted)]">
+          <div className="mb-2 rounded-[var(--radius-sm)] bg-[var(--paper-inset)] px-3 py-1.5 text-xs text-[var(--ink-muted)]">
             表格较大，已截断显示前 {MAX_ROWS} 行 × {MAX_COLS} 列。完整内容请「用默认程序打开」。
           </div>
         )}
@@ -98,7 +98,7 @@ export default function SheetViewer({ bytes, onError, onEmpty }: RichDocSubViewe
               key={s.name}
               type="button"
               onClick={() => setActive(i)}
-              className={`flex-shrink-0 rounded-[var(--radius-sm)] px-2.5 py-1 text-2sm font-medium transition-colors ${
+              className={`flex-shrink-0 rounded-[var(--radius-sm)] px-2.5 py-1 text-xs font-medium transition-colors ${
                 i === active
                   ? 'bg-[var(--paper-inset)] text-[var(--ink)]'
                   : 'text-[var(--ink-muted)] hover:text-[var(--ink)]'

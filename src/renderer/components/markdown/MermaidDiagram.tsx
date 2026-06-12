@@ -13,7 +13,8 @@ import { AlertCircle, Check, Code, Copy, Eye, RefreshCw } from 'lucide-react';
 import mermaid from 'mermaid';
 import { useCallback, useEffect, useId, useRef, useState } from 'react';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
-import { oneDark } from 'react-syntax-highlighter/dist/esm/styles/prism';
+
+import { codeBlockSyntaxTheme } from './CodeBlock';
 
 // Track mermaid initialization and dark mode state
 let mermaidInitialized = false;
@@ -62,24 +63,14 @@ function initMermaid(force = false) {
     lastDarkMode = dark;
 }
 
-// Reuse CodeBlock's theme for consistent code styling
+// Share CodeBlock's theme（单一真相源）——此前这里是一份手写复制品，CodeBlock
+// 字号 token 化后复制品停在 13px，同一条消息里代码块/源码视图字号分叉。
+// 只覆写 borderRadius（源码视图嵌在自带圆角的容器里）。
 const codeTheme = {
-    ...oneDark,
+    ...codeBlockSyntaxTheme,
     'pre[class*="language-"]': {
-        ...oneDark['pre[class*="language-"]'],
-        background: 'var(--code-bg)',
+        ...codeBlockSyntaxTheme['pre[class*="language-"]'],
         borderRadius: 0,
-        padding: '1rem',
-        margin: 0,
-        fontSize: '13px',
-        lineHeight: '1.6',
-    },
-    'code[class*="language-"]': {
-        ...oneDark['code[class*="language-"]'],
-        background: 'transparent',
-        fontSize: '13px',
-        lineHeight: '1.6',
-        fontFamily: 'var(--font-code)',
     },
 };
 

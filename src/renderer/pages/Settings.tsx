@@ -2881,7 +2881,7 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                             </button>
                         </div>
 
-                        <p className="mb-4 mt-1 text-2sm text-[var(--ink-muted)]">
+                        <p className="mb-4 mt-1 text-xs text-[var(--ink-muted)]">
                             MCP (Model Context Protocol) 标准协议工具，适合接入现成的第三方服务
                         </p>
 
@@ -2973,7 +2973,7 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                         <div className="space-y-6">
                             <div>
                                 <h2 className="text-lg font-semibold text-[var(--ink)]">快捷键</h2>
-                                <p className="mt-1 text-2sm text-[var(--ink-muted)]">
+                                <p className="mt-1 text-xs text-[var(--ink-muted)]">
                                     管理消息发送与全局唤起快捷键
                                 </p>
                             </div>
@@ -3104,7 +3104,7 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                         <div className="space-y-6">
                             <div>
                                 <h2 className="text-lg font-semibold text-[var(--ink)]">通用设置</h2>
-                                <p className="mt-1 text-2sm text-[var(--ink-muted)]">
+                                <p className="mt-1 text-xs text-[var(--ink-muted)]">
                                     配置应用程序的通用行为
                                 </p>
                             </div>

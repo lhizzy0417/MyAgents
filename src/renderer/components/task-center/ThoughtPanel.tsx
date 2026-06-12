@@ -565,7 +565,7 @@ export function ThoughtPanel({
             <button
               type="button"
               onClick={() => setActiveTag(null)}
-              className="flex items-center gap-1 rounded-[var(--radius-md)] bg-[var(--accent-warm-muted)] px-2 py-0.5 text-2sm text-[var(--accent-warm)]"
+              className="flex items-center gap-1 rounded-[var(--radius-md)] bg-[var(--accent-warm-muted)] px-2 py-0.5 text-xs text-[var(--accent-warm)]"
               title="清除筛选"
             >
               #{activeTag}

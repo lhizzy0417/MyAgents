@@ -21,7 +21,7 @@
 // Design Guideline Sections (loaded on-demand by `myagents widget readme`)
 // ===================================================================
 
-// 本节引用的字号契约（headings 20/18/16/14·600、.text-* 11-22、body 16px/1.7）
+// 本节引用的字号契约（headings 20/18/16/14·600、.text-* 12-22、body 16px/1.7）
 // 与 src/renderer/components/tools/widgetSandboxHtml.ts 的沙箱 CSS 是同一契约的
 // 两份手写拷贝——改任意一侧 MUST 同步另一侧（0.2.34 cross-review 实证过一次
 // body 行高漂移：宿主升 1.7 而沙箱留在 1.6）。
@@ -47,7 +47,7 @@ HTML streams token by token. Structure for progressive rendering:
 - 2 font weights only: 400 regular, 600 semibold. Never 700.
 - No gradients, drop shadows, blur, glow (they flash during streaming DOM diffs)
 - No HTML comments, CSS comments (waste tokens, break streaming)
-- No font-size below 11px
+- No font-size below 12px
 - No emoji — use CSS shapes or SVG paths
 - No position:fixed (iframe viewport auto-sizes to content height)
 - No tabs, carousels, display:none during streaming
@@ -62,7 +62,7 @@ The widget sandbox provides pre-styled form elements and layout utilities:
 - For a big standalone number use .stat-value (24px), not a heading or .text-2xl
 - Button with class "primary" gets accent color: \`<button class="primary">Submit</button>\`
 - Layout classes available: .flex, .flex-col, .grid, .grid-2, .grid-3, .grid-4, .gap-2/3/4/6, .p-2/3/4, .w-full, .text-center, .rounded, .rounded-lg, .border, .bg-elevated, .bg-inset, .text-muted, .text-secondary, .text-accent, .stat-card, .stat-value, .stat-label
-- Text size classes mirror the host app: .text-xs=11, .text-sm=13, .text-lg=18, .text-xl=20, .text-2xl=22
+- Text size classes mirror the host app: .text-xs=12, .text-sm=14, .text-lg=18, .text-xl=20, .text-2xl=22
 - Use these classes freely — they are scoped to the widget iframe
 
 ## CSS variables (auto light/dark — always use these, never hardcode colors)
@@ -196,12 +196,12 @@ Font: system-ui. Use <defs> for markers. One SVG per widget.
 
 ## Node styling
 - Fill: palette 50 stop. Stroke: palette 500 stop, 1.5px. rx=12 for rounded corners
-- Title: 13px, 600 weight, palette 800 stop. Subtitle: 11px, palette 700 stop
+- Title: 14px, 600 weight, palette 800 stop. Subtitle: 12px, palette 700 stop
 - Node width >= (chars × 8 + 40) px. Max 5 words per subtitle
 
 ## Connectors
 - Stroke: 1.5px, palette 300 stop. Curved paths (cubic bezier) preferred
-- marker-end="url(#a)" for arrows. Labels: 10px, palette 600 stop
+- marker-end="url(#a)" for arrows. Labels: 12px, palette 600 stop
 
 ## Diagram type catalog — pick the best fit
 
@@ -232,13 +232,13 @@ const SECTION_INTERACTIVE = `# Interactive — UI component patterns
 
 ## Component tokens
 - Card: var(--widget-bg-elevated), 1px solid var(--widget-border), var(--widget-radius) border-radius, 16px padding
-- Button primary: var(--widget-accent) bg, white text, 8px radius, 8px 16px padding, 13px 600 weight
+- Button primary: var(--widget-accent) bg, white text, 8px radius, 8px 16px padding, 14px 600 weight
 - Button secondary: var(--widget-bg-inset) bg, var(--widget-text) text
-- Input: var(--widget-bg) bg, 1px solid var(--widget-border), 8px radius, 8px 12px padding, 13px
+- Input: var(--widget-bg) bg, 1px solid var(--widget-border), 8px radius, 8px 12px padding, 14px
 - Input focus: border-color var(--widget-accent)
 - Slider: accent-color var(--widget-accent) (native range input)
 - Toggle: 40x22px, var(--widget-border) off, var(--widget-accent) on, white knob
-- Badge/tag: var(--widget-bg-inset) bg, var(--widget-text-secondary) text, 4px 10px padding, 9999px radius, 11px
+- Badge/tag: var(--widget-bg-inset) bg, var(--widget-text-secondary) text, 4px 10px padding, 9999px radius, 12px
 
 ## Interactive explainer pattern
 Use when: "explain how X works", "teach me about Y", "show me how Z works"
@@ -258,7 +258,7 @@ Use when: "compare X vs Y", "help me choose", "pricing comparison"
 Use when: "show me the contact card", "create a receipt", "display the record"
 - Single card, centered, max-width 400px
 - Header: colored stripe using palette 500 stop, white text, 12px 16px padding
-- Field rows: label (11px, var(--widget-text-muted)) + value (13px, var(--widget-text)), 8px row gap`;
+- Field rows: label (12px, var(--widget-text-muted)) + value (14px, var(--widget-text)), 8px row gap`;
 
 const SECTION_ART = `# Art and illustration
 

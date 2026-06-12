@@ -252,7 +252,7 @@ function ActivityBar({ message }: { message: string }) {
   // entire class of overflow bug.
   return (
     <div
-      className="block w-full min-w-0 truncate rounded-r-[var(--radius-sm)] border-l-2 border-[var(--line)] px-2.5 py-1 text-2sm leading-snug text-[var(--ink-muted)]"
+      className="block w-full min-w-0 truncate rounded-r-[var(--radius-sm)] border-l-2 border-[var(--line)] px-2.5 py-1 text-xs leading-snug text-[var(--ink-muted)]"
       style={{
         backgroundColor:
           'color-mix(in srgb, var(--paper-inset) 35%, var(--paper-elevated))',
@@ -351,7 +351,7 @@ export function ViewSessionButton({ task }: { task?: Task }) {
         type="button"
         onClick={handleClick}
         aria-label="查看会话详情"
-        className="flex items-center gap-1 rounded-[var(--radius-md)] px-2 py-0.5 text-2sm text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--accent-cool)]"
+        className="flex items-center gap-1 rounded-[var(--radius-md)] px-2 py-0.5 text-xs text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--accent-cool)]"
       >
         <MessageCircle className="h-3.5 w-3.5" strokeWidth={1.5} />
         会话详情

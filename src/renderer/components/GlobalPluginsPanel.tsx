@@ -372,7 +372,7 @@ function PluginCard({
         {item.description || '暂无描述'}
       </p>
       {item.warning && (
-        <p className="text-2sm text-amber-600 dark:text-amber-500">
+        <p className="text-xs text-amber-600 dark:text-amber-500">
           ⚠ {item.warning}
         </p>
       )}
@@ -531,7 +531,7 @@ function MetaRow({
   return (
     <>
       <dt className="text-[var(--ink-muted)]">{label}</dt>
-      <dd className={`break-all text-[var(--ink)] ${mono ? 'font-mono text-2sm' : ''}`}>
+      <dd className={`break-all text-[var(--ink)] ${mono ? 'font-mono text-xs' : ''}`}>
         {renderAsLink ? (
           <a
             href={value}
@@ -595,7 +595,7 @@ function ComponentBlock({
         {count === 0 ? <span className="text-[var(--ink-muted)]">— 无</span> : `${count} 个`}
       </div>
       {count > 0 && (
-        <div className="mt-1 line-clamp-2 text-2sm text-[var(--ink-muted)]">
+        <div className="mt-1 line-clamp-2 text-xs text-[var(--ink-muted)]">
           {items.join(', ')}
         </div>
       )}
@@ -931,14 +931,14 @@ function InputView({
     <>
       <div className="border-b border-[var(--line)] px-5 py-4">
         <h2 className="text-lg font-semibold text-[var(--ink)]">安装插件</h2>
-        <p className="mt-1 text-2sm text-[var(--ink-muted)]">
+        <p className="mt-1 text-xs text-[var(--ink-muted)]">
           支持：GitHub 仓库（<code className="text-xs">owner/repo</code>、<code className="text-xs">github.com/...</code> 或完整 URL）、直链 <code className="text-xs">.zip</code>、本地文件夹绝对路径（如 <code className="text-xs">/Users/me/dev/plugin</code> 或 <code className="text-xs">C:\dev\plugin</code>）
         </p>
       </div>
 
       <div className="space-y-3 px-5 py-4">
         <label className="block">
-          <span className="text-2sm text-[var(--ink-muted)]">来源地址</span>
+          <span className="text-xs text-[var(--ink-muted)]">来源地址</span>
           <input
             type="text"
             value={sourceUrl}
@@ -962,7 +962,7 @@ function InputView({
         </div>
 
         {phase && (
-          <div className="rounded-lg border border-[var(--line)] px-3 py-2 text-2sm">
+          <div className="rounded-lg border border-[var(--line)] px-3 py-2 text-xs">
             <div className="flex items-center gap-2">
               {phase !== 'done' && phase !== 'failed' && <Loader2 className="h-3 w-3 animate-spin" />}
               <span className="font-medium text-[var(--ink)]">{phaseLabel(phase)}</span>
@@ -1021,10 +1021,10 @@ function SelectingView({
     <>
       <div className="border-b border-[var(--line)] px-5 py-4">
         <h2 className="text-lg font-semibold text-[var(--ink)]">选择要安装的插件</h2>
-        <p className="mt-1 text-2sm text-[var(--ink-muted)]">
+        <p className="mt-1 text-xs text-[var(--ink-muted)]">
           来源：<span className="break-all">{sourceUrl}</span>
         </p>
-        <p className="mt-0.5 text-2sm text-[var(--ink-muted)]">
+        <p className="mt-0.5 text-xs text-[var(--ink-muted)]">
           检测到 <b className="text-[var(--ink)]">{candidates.length}</b> 个插件
           {badCount > 0 && `（其中 ${badCount} 个 manifest 无效，已跳过）`}
           ，默认全选。
@@ -1068,12 +1068,12 @@ function SelectingView({
                       )}
                     </div>
                     {cand.manifest?.description && (
-                      <p className="mt-0.5 text-2sm text-[var(--ink-muted)]">
+                      <p className="mt-0.5 text-xs text-[var(--ink-muted)]">
                         {cand.manifest.description}
                       </p>
                     )}
                     {cand.manifestError && (
-                      <p className="mt-0.5 text-2sm text-amber-700 dark:text-amber-500">
+                      <p className="mt-0.5 text-xs text-amber-700 dark:text-amber-500">
                         ⚠ {cand.manifestError}
                       </p>
                     )}
@@ -1157,7 +1157,7 @@ function InstallingView({
         <h2 className="text-lg font-semibold text-[var(--ink)]">
           {done ? '安装完成' : '正在批量安装'}
         </h2>
-        <p className="mt-1 text-2sm text-[var(--ink-muted)]">
+        <p className="mt-1 text-xs text-[var(--ink-muted)]">
           {done
             ? `共 ${total} 个：成功 ${okCount}${failedCount > 0 ? `，失败 ${failedCount}` : ''}`
             : `第 ${Math.min(completed + 1, total)} / ${total} 个 · ${currentName}`}
@@ -1173,7 +1173,7 @@ function InstallingView({
           />
         </div>
 
-        <ul className="max-h-[40vh] space-y-1 overflow-y-auto text-2sm">
+        <ul className="max-h-[40vh] space-y-1 overflow-y-auto text-xs">
           {queue.map((cand, i) => {
             const result = results.find(r => r.rootPath === cand.rootPath);
             const name = cand.manifest?.name ?? cand.rootPath;

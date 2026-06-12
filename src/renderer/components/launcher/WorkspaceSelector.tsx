@@ -112,7 +112,7 @@ export default function WorkspaceSelector({
                 className="w-72 rounded-xl bg-[var(--paper)]"
             >
                 {/* Header — fixed at the top above the scroll region. */}
-                <div className="border-b border-[var(--line)] px-3 py-2 text-2sm font-semibold text-[var(--ink-muted)]">
+                <div className="border-b border-[var(--line)] px-3 py-2 text-xs font-semibold text-[var(--ink-muted)]">
                     Agent 工作区
                 </div>
                 {/* Scroll region — see CustomSelect.tsx pit-of-failure note:

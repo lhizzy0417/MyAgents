@@ -124,16 +124,16 @@ export function TaskSessionsList({ task, onBeforeOpen }: Props) {
           an eyebrow label hidden between larger doc blocks. */}
       <div className="mb-2 flex items-baseline gap-2">
         <h3 className="text-sm font-semibold text-[var(--ink)]">任务执行</h3>
-        <span className="text-2sm tabular-nums text-[var(--ink-muted)]">
+        <span className="text-xs tabular-nums text-[var(--ink-muted)]">
           {task.sessionIds.length}
         </span>
       </div>
       {loading ? (
-        <div className="py-3 text-2sm text-[var(--ink-muted)]/60">
+        <div className="py-3 text-xs text-[var(--ink-muted)]/60">
           加载中…
         </div>
       ) : sessions.length === 0 ? (
-        <div className="py-3 text-2sm text-[var(--ink-muted)]/60">
+        <div className="py-3 text-xs text-[var(--ink-muted)]/60">
           {task.sessionIds.length === 0 ? '尚未执行过' : '相关 session 记录已不存在'}
         </div>
       ) : (

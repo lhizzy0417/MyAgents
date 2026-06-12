@@ -45,7 +45,7 @@ export function StatusHistoryList({ task, defaultCollapsed = false }: Props) {
 
   if (history.length === 0) {
     return (
-      <div className="py-6 text-center text-2sm text-[var(--ink-muted)]">
+      <div className="py-6 text-center text-xs text-[var(--ink-muted)]">
         暂无状态变更记录
       </div>
     );
@@ -80,7 +80,7 @@ export function StatusHistoryList({ task, defaultCollapsed = false }: Props) {
         <button
           type="button"
           onClick={() => setExpanded(true)}
-          className="flex items-center gap-1 self-center rounded-[var(--radius-md)] px-3 py-1 text-2sm text-[var(--accent-warm)] transition-colors hover:bg-[var(--accent-warm-subtle)]"
+          className="flex items-center gap-1 self-center rounded-[var(--radius-md)] px-3 py-1 text-xs text-[var(--accent-warm)] transition-colors hover:bg-[var(--accent-warm-subtle)]"
         >
           <ChevronRight className="h-3 w-3" />
           查看全部 {ordered.length} 条
@@ -90,7 +90,7 @@ export function StatusHistoryList({ task, defaultCollapsed = false }: Props) {
         <button
           type="button"
           onClick={() => setVisibleCount((c) => c + PAGE_SIZE)}
-          className="self-center rounded-[var(--radius-md)] px-3 py-1 text-2sm text-[var(--accent-warm)] transition-colors hover:bg-[var(--accent-warm-subtle)]"
+          className="self-center rounded-[var(--radius-md)] px-3 py-1 text-xs text-[var(--accent-warm)] transition-colors hover:bg-[var(--accent-warm-subtle)]"
         >
           加载更多(剩余 {ordered.length - visibleCount})
         </button>
@@ -114,7 +114,7 @@ function TransitionRow({ t }: { t: StatusTransition }) {
         className="absolute left-1 top-2.5 inline-block h-2 w-2 rounded-full bg-[var(--accent-warm)]"
         aria-hidden
       />
-      <div className="flex-1 text-2sm">
+      <div className="flex-1 text-xs">
         <div className="flex items-center gap-1.5 text-[var(--ink)]">
           {selfLoop ? (
             <span className="font-medium">{to}</span>

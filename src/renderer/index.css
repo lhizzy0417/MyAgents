@@ -38,19 +38,17 @@
   --font-sans: var(--font-body);
   --font-mono: var(--font-code);
 
-  /* Type Scale — 单一真相源（PRD 0.2.34 字体字号统一，唯一档位表见 DESIGN.md §2.2）。
-     注意：覆盖了 Tailwind 默认值 —— text-xs=11px(官方12)、text-sm=13px(官方14)、
-     text-2xl=22px(官方24)。凭 Tailwind 肌肉记忆估字号会踩坑，以这里为准。
-     每档唯一职责（micro/caption/ui/dense/prose）写在注释里；新场景先归档位，
-     禁止 text-[Npx] 任意字面量（eslint 强制，含 12px/14px 等"看着合理"的值）。 */
-  --text-xs: 11px; /* micro: 时间戳、badge、计数、快捷键、分类头(uppercase) */
-  --text-xs--line-height: 1.4;
-  --text-2sm: 12px; /* caption: 标题下描述行、hint、meta 信息、次级标签 */
-  --text-2sm--line-height: 1.45;
-  --text-sm: 13px; /* ui: 按钮、菜单项、树节点、tab、工具卡标题、工具/控制台输出 */
+  /* Type Scale — 单一真相源（PRD 0.2.34 Part 1-3，唯一档位表见 DESIGN.md §2.2）。
+     v2.5 终局七档（等距 2px 步进至 18）：12/14/16/18/20/22/28。
+     Part 3 双合并：11(micro)+12(caption)→12；13(ui)+14(dense)→14——
+     text-xs/text-sm 自此回归 Tailwind 官方值，同名异值仅剩两条：text-2xl=22(官方24)、text-3xl=28(官方30)。
+     已删除档位：--text-2xs(10)、--text-2sm(12)、--text-md(14)——类名已死，
+     写了等于没样式（eslint 封禁防静默腐坏）。
+     新场景先归档位，禁止 text-[Npx] 任意字面量（eslint 强制）。 */
+  --text-xs: 12px; /* micro/caption: 时间戳、badge、描述行、hint、分类头(uppercase) */
+  --text-xs--line-height: 1.45;
+  --text-sm: 14px; /* ui/dense: 按钮、菜单、树节点、tab、工具卡、控制台、Markdown 表格 */
   --text-sm--line-height: 1.5;
-  --text-md: 14px; /* dense: 嵌在 16px 正文里的密集内容（Markdown 表格等） */
-  --text-md--line-height: 1.55;
   --text-base: 16px; /* prose: AI 正文、用户气泡、输入框、widget body */
   --text-base--line-height: 1.7;
   --text-lg: 18px; /* Markdown H3、弹窗标题 */
@@ -175,7 +173,7 @@
      --font-code. */
 
   /* Typography Size token 已迁入文件顶部 @theme 块（单一真相源，
-     同时驱动 text-xs/sm/md/base/... utility）。 */
+     同时驱动 text-xs/sm/base/lg/... utility）。 */
 
   /* ========== Colors: Ink (Text) ========== */
   --ink: #1c1612;

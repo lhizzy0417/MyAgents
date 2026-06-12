@@ -356,7 +356,7 @@ export default function CronExpressionInput({
                         key={label}
                         type="button"
                         onClick={() => toggleWeekday(cronDay)}
-                        className={`flex h-7 w-7 items-center justify-center rounded-full text-2sm font-medium transition-colors ${
+                        className={`flex h-7 w-7 items-center justify-center rounded-full text-xs font-medium transition-colors ${
                           isSelected
                             ? 'bg-[var(--accent)] text-white'
                             : 'bg-[var(--paper)] border border-[var(--line)] text-[var(--ink-muted)] hover:border-[var(--line-strong)]'

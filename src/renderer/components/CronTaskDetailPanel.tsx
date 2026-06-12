@@ -54,7 +54,7 @@ function SectionHeader({ icon: Icon, children }: { icon?: typeof Clock; children
 }
 
 function DetailTag({ label }: { label: string }) {
-    return <span className="rounded-lg border border-[var(--line)] px-2.5 py-1 text-2sm text-[var(--ink-muted)]">{label}</span>;
+    return <span className="rounded-lg border border-[var(--line)] px-2.5 py-1 text-xs text-[var(--ink-muted)]">{label}</span>;
 }
 
 function ToggleSwitch({ enabled, onChange }: { enabled: boolean; onChange: (v: boolean) => void }) {
@@ -235,7 +235,7 @@ export default function CronTaskDetailPanel({ task, botInfo, onClose, onDelete, 
                             <h3 className="min-w-0 truncate text-lg font-semibold text-[var(--ink)]">
                                 {isEditing ? '编辑定时任务' : displayName}
                             </h3>
-                            {!isEditing && <span className={`shrink-0 text-2sm font-medium ${getCronStatusColor(task.status)}`}>{getCronStatusText(task.status)}</span>}
+                            {!isEditing && <span className={`shrink-0 text-xs font-medium ${getCronStatusColor(task.status)}`}>{getCronStatusText(task.status)}</span>}
                         </div>
                         <button onClick={() => isEditing ? setIsEditing(false) : onClose()} className="ml-2 shrink-0 rounded-lg p-1.5 text-[var(--ink-muted)] hover:bg-[var(--paper-inset)] hover:text-[var(--ink)] transition-colors">
                             <X className="h-4 w-4" />
@@ -374,7 +374,7 @@ export default function CronTaskDetailPanel({ task, botInfo, onClose, onDelete, 
                                     <SectionHeader icon={Clock}>执行计划</SectionHeader>
                                     <div className="mt-2 flex items-center justify-between rounded-lg border border-[var(--line)] px-3.5 py-3">
                                         <span className="text-sm font-medium text-[var(--ink)]">{scheduleDesc}</span>
-                                        <span className={`text-2sm ${task.status === 'running' ? 'text-[var(--ink-secondary)]' : 'text-[var(--ink-muted)]/50'}`}>
+                                        <span className={`text-xs ${task.status === 'running' ? 'text-[var(--ink-secondary)]' : 'text-[var(--ink-muted)]/50'}`}>
                                             {task.status === 'running' ? `下次: ${nextExec}` : '已停止'}
                                         </span>
                                     </div>
@@ -415,21 +415,21 @@ export default function CronTaskDetailPanel({ task, botInfo, onClose, onDelete, 
                                     <SectionHeader icon={BarChart2}>运行统计</SectionHeader>
                                     <div className="mt-2 grid grid-cols-3 gap-3">
                                         <div>
-                                            <span className="text-2sm text-[var(--ink-muted)]">执行次数</span>
+                                            <span className="text-xs text-[var(--ink-muted)]">执行次数</span>
                                             <p className="mt-0.5 text-sm font-medium text-[var(--ink)]">{task.endConditions.maxExecutions ? `${task.executionCount} / ${task.endConditions.maxExecutions}` : `${task.executionCount} 次`}</p>
                                         </div>
                                         <div>
-                                            <span className="text-2sm text-[var(--ink-muted)]">上次执行</span>
+                                            <span className="text-xs text-[var(--ink-muted)]">上次执行</span>
                                             <p className="mt-0.5 text-sm font-medium text-[var(--ink)]">{task.lastExecutedAt ? new Date(task.lastExecutedAt).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }) : '—'}</p>
                                         </div>
                                         {task.exitReason && (
                                             <div>
-                                                <span className="text-2sm text-[var(--ink-muted)]">退出原因</span>
+                                                <span className="text-xs text-[var(--ink-muted)]">退出原因</span>
                                                 <p className="mt-0.5 text-sm font-medium text-[var(--ink)]">{task.exitReason}</p>
                                             </div>
                                         )}
                                     </div>
-                                    {task.lastError && <p className="mt-2 text-2sm text-[var(--error)]">{task.lastError}</p>}
+                                    {task.lastError && <p className="mt-2 text-xs text-[var(--error)]">{task.lastError}</p>}
                                 </div>
 
                                 <div className="border-t border-[var(--line)]" />
@@ -485,7 +485,7 @@ export default function CronTaskDetailPanel({ task, botInfo, onClose, onDelete, 
                                             className="flex items-center gap-1.5 rounded-lg bg-[var(--accent)] px-5 py-2 text-sm font-medium text-white hover:bg-[var(--accent-warm-hover)] disabled:opacity-50 transition-colors">
                                             <Play className="h-3.5 w-3.5" />{isResuming ? '恢复中...' : '恢复'}
                                         </button>
-                                    ) : <span className="text-2sm text-[var(--ink-muted)]/50">{resumeCheck.reason}</span>)}
+                                    ) : <span className="text-xs text-[var(--ink-muted)]/50">{resumeCheck.reason}</span>)}
                                 </div>
                             </>
                         )}

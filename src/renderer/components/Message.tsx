@@ -336,7 +336,7 @@ const Message = memo(function Message({ message, isLoading = false, onRewind, on
       const displayText = taskNotif.description || taskNotif.summary || taskNotif.taskId || '后台任务';
       return (
         <div className="flex justify-start w-full px-4 py-1.5 select-none">
-          <div className="flex items-center gap-2 rounded-lg px-3 py-2 text-2sm text-[var(--ink-muted)]">
+          <div className="flex items-center gap-2 rounded-lg px-3 py-2 text-xs text-[var(--ink-muted)]">
             <StatusIcon className="h-3.5 w-3.5 flex-shrink-0" style={{ color: statusColor }} />
             <span>后台任务</span>
             <span className="font-medium text-[var(--ink-secondary)]">&ldquo;{displayText}&rdquo;</span>

@@ -80,6 +80,24 @@ const GLOBAL_RESTRICTED_SYNTAX = [
       "AssignmentExpression[operator='='][left.name='shouldAbortSession'][right.type='Literal'][right.value=true]",
     message:
       'Direct `shouldAbortSession = true` skips the abort cleanup chain (pending request rescue, IM bus notification, generator wake) — pending IM replies hang forever. Call abortPersistentSession() instead. CLAUDE.md red-line.'
+  },
+  // PRD 0.2.34 Part 3: tiers `text-2xs`(10) / `text-2sm`(12) / `text-md`(14)
+  // were DELETED (merged into text-xs=12 / text-sm=14). No @theme token →
+  // Tailwind generates NO utility → the class compiles fine and silently
+  // renders with NO font-size (静默腐坏). GLOBAL (not renderer-only) because
+  // the widget design contract (src/server/tools/generative-ui-tool.ts) and
+  // sandbox template (widgetSandboxHtml.ts) embed class names in strings —
+  // a dead name there teaches the MODEL to emit dead classes in widgets
+  // (P3 cross-review: server side was an unguarded gap).
+  {
+    selector: 'Literal[value=/\\btext-(?:2xs|2sm|md)\\b/]',
+    message:
+      '`text-2xs`/`text-2sm`/`text-md` 是已删除的档位（PRD 0.2.34 Part 3 合并：2xs/2sm→text-xs=12px，md→text-sm=14px）。这些类名已无 @theme token，Tailwind 不会为其生成任何 CSS——写了编译不报错但字号静默失效；出现在 widget 契约/沙箱模板字符串里则会教模型产出死类名。改用现行七档：text-xs(12 meta/描述)/text-sm(14 UI/表格)/text-base(16 正文)/text-lg(18 弹窗标题)/text-xl(20)/text-2xl(22)/text-3xl(28)。',
+  },
+  {
+    selector: 'TemplateElement[value.raw=/\\btext-(?:2xs|2sm|md)\\b/]',
+    message:
+      '`text-2xs`/`text-2sm`/`text-md` 是已删除的档位（PRD 0.2.34 Part 3 合并：2xs/2sm→text-xs=12px，md→text-sm=14px）。这些类名已无 @theme token，Tailwind 不会为其生成任何 CSS——写了编译不报错但字号静默失效；出现在 widget 契约/沙箱模板字符串里则会教模型产出死类名。改用现行七档：text-xs(12 meta/描述)/text-sm(14 UI/表格)/text-base(16 正文)/text-lg(18 弹窗标题)/text-xl(20)/text-2xl(22)/text-3xl(28)。',
   }
 ];
 
@@ -274,12 +292,11 @@ export default defineConfig(
         },
         // PRD 0.2.34: arbitrary px font-size literals (`text-[13px]`) bypass
         // the Type Scale and are the root cause of the "字号大小不一" user
-        // complaint — ghost tiers (12px ×138, 10px ×155, 9/10.5/12.5/15px
-        // one-offs) grew to ~700 callsites before the 0.2.34 unification.
-        // The scale lives in index.css `@theme` (single source of truth);
-        // NOTE its values intentionally differ from Tailwind defaults
-        // (text-xs=11px, text-sm=13px, text-2xl=22px), so "I know what
-        // text-sm is" muscle memory is exactly how the drift started.
+        // complaint — ghost tiers grew to ~700 callsites before the
+        // unification. The scale lives in index.css `@theme` (single source
+        // of truth). Since Part 3 the ladder is 12/14/16/18/20/22/28 —
+        // text-xs/sm/base/lg/xl now MATCH Tailwind defaults; the only
+        // remaining divergence is text-2xl=22px (official 24).
         //
         // Known escape surface (accepted, do NOT widen the regex without
         // re-reading DESIGN.md §2.2 边界): rem/em arbitrary values
@@ -292,27 +309,16 @@ export default defineConfig(
         // Banning ALL `text-[...]` would false-positive on the color form
         // `text-[var(--ink)]` — px-only is the deliberate scope.
         //
-        // PRD 0.2.34 Part 2: `text-md` (14px dense) has exactly ONE
-        // legitimate role — dense content embedded in 16px prose (today:
-        // Markdown tables). The Part-2 audit found 76% (22/29) of its
-        // uses had drifted onto card titles / section headers / dialog
-        // titles. Ban the class everywhere; legitimate dense sites carry
-        // inline disables (same narrow-exemption pattern as BrandSection).
-        {
-          selector: 'Literal[value=/\\btext-md\\b/]',
-          message: '`text-md`(14px dense 档) 仅限"嵌在 16px 正文里的密集内容"（如 Markdown 表格，白名单点带行内 disable 立档）。Part 2 审计显示 76% 的 text-md 被误用在卡片标题/小节标题/弹窗标题上——按 DESIGN.md §2.2 职责表：卡片/小节标题用 text-sm(13)、弹窗标题用 text-lg(18)、正文用 text-base(16)。确属 dense 场景再对单行 eslint-disable 并注明理由。',
-        },
-        {
-          selector: 'TemplateElement[value.raw=/\\btext-md\\b/]',
-          message: '`text-md`(14px dense 档) 仅限"嵌在 16px 正文里的密集内容"（如 Markdown 表格，白名单点带行内 disable 立档）。Part 2 审计显示 76% 的 text-md 被误用在卡片标题/小节标题/弹窗标题上——按 DESIGN.md §2.2 职责表：卡片/小节标题用 text-sm(13)、弹窗标题用 text-lg(18)、正文用 text-base(16)。确属 dense 场景再对单行 eslint-disable 并注明理由。',
-        },
+        // 死类名封禁（text-2xs/2sm/md）已上移至 GLOBAL_RESTRICTED_SYNTAX —
+        // P3 cross-review 指出 server 侧（widget 契约 generative-ui-tool.ts）
+        // 同样需要设防，renderer-only 是缺口。
         {
           selector: 'Literal[value=/\\btext-\\[[0-9]+(?:\\.[0-9]+)?px\\]/]',
-          message: '任意 px 字号 `text-[Npx]` 被禁止（PRD 0.2.34）：绕过 Type Scale 会重新长出 12px/14px 这类幽灵字阶，正是"字号大小不一"投诉的根因。改用字阶 utility：text-xs(11 micro)/text-2sm(12 caption)/text-sm(13 ui)/text-md(14 dense，已全域封禁、仅 Markdown 表格等白名单可用)/text-base(16 prose)/text-lg(18)/text-xl(20)/text-2xl(22)/text-3xl(28)。注意本项目 text-sm=13px、text-xs=11px，与 Tailwind 官方值不同（index.css @theme 覆盖）。确需离阶值的展示型场景（如品牌字）先在 DESIGN.md 立档，再对单行 eslint-disable 并注明出处。',
+          message: '任意 px 字号 `text-[Npx]` 被禁止（PRD 0.2.34）：绕过 Type Scale 会重新长出幽灵字阶，正是"字号大小不一"投诉的根因。改用七档梯子：text-xs(12 meta/描述)/text-sm(14 UI/表格)/text-base(16 正文)/text-lg(18 弹窗标题)/text-xl(20 H2)/text-2xl(22 H1)/text-3xl(28 大数字)。xs/sm/base/lg/xl 与 Tailwind 官方值一致，唯 text-2xl=22px（官方 24）与 text-3xl=28px（官方 30）。确需离阶值的展示型场景（如品牌字）先在 DESIGN.md 立档，再对单行 eslint-disable 并注明出处。',
         },
         {
           selector: 'TemplateElement[value.raw=/\\btext-\\[[0-9]+(?:\\.[0-9]+)?px\\]/]',
-          message: '任意 px 字号 `text-[Npx]` 被禁止（PRD 0.2.34）：绕过 Type Scale 会重新长出 12px/14px 这类幽灵字阶，正是"字号大小不一"投诉的根因。改用字阶 utility：text-xs(11 micro)/text-2sm(12 caption)/text-sm(13 ui)/text-md(14 dense，已全域封禁、仅 Markdown 表格等白名单可用)/text-base(16 prose)/text-lg(18)/text-xl(20)/text-2xl(22)/text-3xl(28)。注意本项目 text-sm=13px、text-xs=11px，与 Tailwind 官方值不同（index.css @theme 覆盖）。确需离阶值的展示型场景（如品牌字）先在 DESIGN.md 立档，再对单行 eslint-disable 并注明出处。',
+          message: '任意 px 字号 `text-[Npx]` 被禁止（PRD 0.2.34）：绕过 Type Scale 会重新长出幽灵字阶，正是"字号大小不一"投诉的根因。改用七档梯子：text-xs(12 meta/描述)/text-sm(14 UI/表格)/text-base(16 正文)/text-lg(18 弹窗标题)/text-xl(20 H2)/text-2xl(22 H1)/text-3xl(28 大数字)。xs/sm/base/lg/xl 与 Tailwind 官方值一致，唯 text-2xl=22px（官方 24）与 text-3xl=28px（官方 30）。确需离阶值的展示型场景（如品牌字）先在 DESIGN.md 立档，再对单行 eslint-disable 并注明出处。',
         },
         ...[
           '/api/files/import-base64',

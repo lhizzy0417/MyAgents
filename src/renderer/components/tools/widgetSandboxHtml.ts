@@ -50,7 +50,7 @@ input[type="range"]::-webkit-slider-thumb {
   box-shadow: 0 1px 3px rgba(0,0,0,0.15);
 }
 button {
-  font-family: inherit; font-size: 13px; font-weight: 600; cursor: pointer;
+  font-family: inherit; font-size: 14px; font-weight: 600; cursor: pointer;
   padding: 8px 16px; border-radius: 8px; border: 1px solid var(--widget-border);
   background: var(--widget-bg-elevated); color: var(--widget-text);
   transition: all 0.15s;
@@ -83,10 +83,11 @@ p { margin: 0 0 8px; }
 .px-3 { padding-left: 12px; padding-right: 12px; } .py-2 { padding-top: 8px; padding-bottom: 8px; }
 .m-0 { margin: 0; } .mt-2 { margin-top: 8px; } .mt-4 { margin-top: 16px; } .mb-2 { margin-bottom: 8px; } .mb-4 { margin-bottom: 16px; }
 .w-full { width: 100%; } .text-center { text-align: center; }
-/* Text utilities mirror the host app's type scale (xl=20 / 2xl=22) so widget
-   text never reads a tier larger than the same class in the host UI. Big
-   stand-alone numbers should use .stat-value, not .text-2xl. */
-.text-sm { font-size: 13px; } .text-xs { font-size: 11px; } .text-lg { font-size: 18px; } .text-xl { font-size: 20px; } .text-2xl { font-size: 22px; }
+/* Text utilities mirror the host app's type scale (v2.5: xs=12 / sm=14 /
+   lg=18 / xl=20 / 2xl=22) so widget text never reads a tier different from
+   the same class in the host UI. Big stand-alone numbers should use
+   .stat-value, not .text-2xl. */
+.text-sm { font-size: 14px; } .text-xs { font-size: 12px; } .text-lg { font-size: 18px; } .text-xl { font-size: 20px; } .text-2xl { font-size: 22px; }
 .font-semibold { font-weight: 600; } .font-normal { font-weight: 400; }
 .rounded { border-radius: 8px; } .rounded-lg { border-radius: 12px; }
 .border { border: 1px solid var(--widget-border); }
@@ -103,7 +104,7 @@ p { margin: 0 0 8px; }
 /* Stat card pattern */
 .stat-card { background: var(--widget-bg-elevated); border-radius: 12px; padding: 16px; border: 1px solid var(--widget-border); }
 .stat-value { font-size: 24px; font-weight: 600; color: var(--widget-text); }
-.stat-label { font-size: 11px; color: var(--widget-text-muted); margin-top: 4px; }
+.stat-label { font-size: 12px; color: var(--widget-text-muted); margin-top: 4px; }
 </style>
 </head>
 <body>

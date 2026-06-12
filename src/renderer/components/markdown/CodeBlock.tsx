@@ -14,9 +14,13 @@ interface CodeBlockProps {
     className?: string;
 }
 
-// Custom theme based on oneDark with warm tones to match app aesthetic
-// Uses CSS variable --font-code for consistent font across all code rendering
-const customTheme = {
+// Custom theme based on oneDark with warm tones to match app aesthetic.
+// Uses CSS variables --font-code / --text-sm so all code rendering follows the
+// type scale (改 token 自动跟随)。Exported as the SINGLE syntax-highlight theme
+// source — MermaidDiagram 复用并只覆写 borderRadius。此前 Mermaid 持有一份
+// 复制品，CodeBlock 字号 token 化后复制品停在 13px → 同一条消息里代码块 14px、
+// mermaid 源码 13px（Part 3 cross-review 抓出的 sibling 漂移）。
+export const codeBlockSyntaxTheme = {
     ...oneDark,
     'pre[class*="language-"]': {
         ...oneDark['pre[class*="language-"]'],
@@ -24,17 +28,18 @@ const customTheme = {
         borderRadius: '0.5rem',
         padding: '1rem',
         margin: 0,
-        fontSize: '13px',
+        fontSize: 'var(--text-sm)', // 与字阶 ui 档同源（v2.5=14px）
         lineHeight: '1.6',
     },
     'code[class*="language-"]': {
         ...oneDark['code[class*="language-"]'],
         background: 'transparent',
-        fontSize: '13px',
+        fontSize: 'var(--text-sm)', // 与字阶 ui 档同源（v2.5=14px）
         lineHeight: '1.6',
         fontFamily: 'var(--font-code)',
     },
 };
+const customTheme = codeBlockSyntaxTheme;
 
 export default function CodeBlock({ children, language, className }: CodeBlockProps) {
     const [copied, setCopied] = useState(false);

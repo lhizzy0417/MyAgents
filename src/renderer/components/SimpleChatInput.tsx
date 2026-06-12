@@ -2617,7 +2617,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                     >
                       <Gauge className="h-3.5 w-3.5 shrink-0 text-[var(--ink-muted)]" />
                       <span className="flex-1">推理强度</span>
-                      <span className={`text-2sm ${
+                      <span className={`text-xs ${
                         reasoningEffort !== REASONING_EFFORT_DEFAULT
                           ? 'font-medium text-[var(--accent)]'
                           : 'text-[var(--ink-muted)]'
@@ -2778,7 +2778,7 @@ function MentionTabButton({
     <button
       type="button"
       onClick={onClick}
-      className={`rounded-full px-3 py-1 text-2sm transition-colors ${
+      className={`rounded-full px-3 py-1 text-xs transition-colors ${
         active
           ? 'bg-[var(--paper-elevated)] text-[var(--ink)] shadow-sm'
           : 'text-[var(--ink-muted)] hover:bg-[var(--hover-bg)]'

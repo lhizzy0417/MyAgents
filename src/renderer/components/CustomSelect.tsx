@@ -29,7 +29,7 @@ interface CustomSelectProps {
     className?: string;
     /**
      * Trigger size — controls the closed-state padding + font size:
-     *   'compact' (default when `compact={true}`): 11px / px-2 py-1
+     *   'compact' (default when `compact={true}`): 12px / px-2 py-1
      *   'sm'      (default): 12px / px-3 py-2 — fine-print fields, dense forms
      *   'md':                14px / px-3 py-2.5 — primary fields the user
      *                        focuses on (e.g. workspace picker in dispatch
@@ -127,9 +127,9 @@ export default function CustomSelect({
                                 type="button"
                                 onClick={() => handleSelect(option.value)}
                                 // Item font size mirrors the trigger's: `size='md'`
-                                // → `text-sm` (13px) so options read at parity with
+                                // → `text-sm` (14px) so options read at parity with
                                 // what the closed trigger shows. Default `size='sm'`
-                                // keeps the legacy `text-xs` (11px) for dense forms.
+                                // keeps the legacy `text-xs` (12px) for dense forms.
                                 className={`flex w-full items-center gap-2 px-3 py-1.5 text-left transition-colors ${
                                     size === 'md' ? 'text-sm' : 'text-xs'
                                 } ${

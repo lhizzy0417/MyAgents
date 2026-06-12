@@ -69,7 +69,7 @@ export default class AppErrorBoundary extends Component<Props, State> {
                     </h2>
                     <p style={{
                         margin: '0 0 20px',
-                        fontSize: 13,
+                        fontSize: 14,
                         color: 'var(--ink-muted, #666)',
                         lineHeight: 1.5,
                     }}>

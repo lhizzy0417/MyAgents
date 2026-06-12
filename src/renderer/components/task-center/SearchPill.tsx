@@ -89,7 +89,7 @@ export function SearchPill({
           }
         }}
         placeholder={placeholder}
-        className="min-w-0 flex-1 bg-transparent text-2sm text-[var(--ink)] placeholder:text-[var(--ink-muted)] focus:outline-none"
+        className="min-w-0 flex-1 bg-transparent text-xs text-[var(--ink)] placeholder:text-[var(--ink-muted)] focus:outline-none"
       />
       {value && onClear && (
         <button

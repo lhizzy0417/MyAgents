@@ -174,7 +174,7 @@ export default memo(function FileSearchResults({
                                         <div
                                             key={`${hit.path}-${match.lineNumber}-${idx}`}
                                             role="button"
-                                            className={`group flex min-h-6 items-start py-0.5 pr-3 pl-[30px] text-2sm hover:text-[var(--ink)] cursor-pointer text-[var(--ink-secondary)] transition-colors ${
+                                            className={`group flex min-h-6 items-start py-0.5 pr-3 pl-[30px] text-xs hover:text-[var(--ink)] cursor-pointer text-[var(--ink-secondary)] transition-colors ${
                                                 isActiveMatch ? 'bg-[var(--accent-warm-subtle)]' : 'hover:bg-[var(--hover-bg)]'
                                             }`}
                                             onClick={() => onMatchClick(hit, match)}

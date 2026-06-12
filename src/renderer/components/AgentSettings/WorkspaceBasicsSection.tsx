@@ -270,7 +270,7 @@ export default function WorkspaceBasicsSection({ project, agent, agentDir }: Wor
     <div className="space-y-3">
       {/* Name + Icon — single row: [label] [icon] [input] */}
       <div className="relative flex items-center gap-3">
-        <label className="w-14 shrink-0 text-sm text-[var(--ink-muted)]">名称</label>
+        <label className="w-16 shrink-0 text-sm text-[var(--ink-muted)]">名称</label>
         <button
           className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border transition-colors ${
             openPopup === 'icon'
@@ -331,7 +331,7 @@ export default function WorkspaceBasicsSection({ project, agent, agentDir }: Wor
 
       {/* Workspace path — read-only */}
       <div className="flex items-center gap-3">
-        <label className="w-14 shrink-0 text-sm text-[var(--ink-muted)]">工作区</label>
+        <label className="w-16 shrink-0 text-sm text-[var(--ink-muted)]">工作区</label>
         <span className="flex-1 truncate rounded-lg px-3 py-1.5 text-sm text-[var(--ink-subtle)]" title={agentDir}>
           {agentDir}
         </span>
@@ -341,7 +341,7 @@ export default function WorkspaceBasicsSection({ project, agent, agentDir }: Wor
       {config.multiAgentRuntime && (
         <>
           <div className="flex items-center gap-3">
-            <label className="w-14 shrink-0 text-sm text-[var(--ink-muted)]">运行环境</label>
+            <label className="w-16 shrink-0 text-sm text-[var(--ink-muted)]">运行环境</label>
             <div className="flex-1">
               <RuntimeSelector
                 value={currentRuntime}
@@ -421,7 +421,7 @@ export default function WorkspaceBasicsSection({ project, agent, agentDir }: Wor
 
             return (
               <div className="flex items-start gap-3">
-                <label className="w-14 shrink-0 pt-2 text-sm text-[var(--ink-muted)]">网络代理</label>
+                <label className="w-16 shrink-0 pt-2 text-sm text-[var(--ink-muted)]">网络代理</label>
                 <div className="flex-1 grid grid-cols-1 gap-2 sm:grid-cols-2">
                   {radio('myagents', 'MyAgents 代理', '使用 MyAgents 设置里的代理（默认）')}
                   {radio('terminal', '跟随终端', '等同于在你电脑的终端里手动启动——继承 shell 里 export 的代理变量')}
@@ -435,7 +435,7 @@ export default function WorkspaceBasicsSection({ project, agent, agentDir }: Wor
       {/* Model — hidden when external runtime (they manage their own models) */}
       {currentRuntime === 'builtin' && (
       <div className="relative flex items-center gap-3">
-        <label className="w-14 shrink-0 text-sm text-[var(--ink-muted)]">模型</label>
+        <label className="w-16 shrink-0 text-sm text-[var(--ink-muted)]">模型</label>
         <button
           className="flex flex-1 items-center justify-between rounded-lg border border-[var(--line)] px-3 py-1.5 text-left text-sm text-[var(--ink)] transition-colors hover:border-[var(--line-strong)]"
           onClick={() => setOpenPopup(openPopup === 'model' ? null : 'model')}
@@ -502,7 +502,7 @@ export default function WorkspaceBasicsSection({ project, agent, agentDir }: Wor
       {/* Permission — hidden when external runtime */}
       {currentRuntime === 'builtin' && (
       <div className="relative flex items-center gap-3">
-        <label className="w-14 shrink-0 text-sm text-[var(--ink-muted)]">权限</label>
+        <label className="w-16 shrink-0 text-sm text-[var(--ink-muted)]">权限</label>
         <button
           className="flex flex-1 items-center justify-between rounded-lg border border-[var(--line)] px-3 py-1.5 text-left text-sm text-[var(--ink)] transition-colors hover:border-[var(--line-strong)]"
           onClick={() => setOpenPopup(openPopup === 'permission' ? null : 'permission')}
@@ -541,7 +541,7 @@ export default function WorkspaceBasicsSection({ project, agent, agentDir }: Wor
       {/* #324 推理强度 — hidden when external runtime (configured via chat toolbar there) */}
       {currentRuntime === 'builtin' && (
       <div className="relative flex items-center gap-3">
-        <label className="w-14 shrink-0 text-sm text-[var(--ink-muted)]">推理强度</label>
+        <label className="w-16 shrink-0 text-sm text-[var(--ink-muted)]">推理强度</label>
         <button
           className="flex flex-1 items-center justify-between rounded-lg border border-[var(--line)] px-3 py-1.5 text-left text-sm text-[var(--ink)] transition-colors hover:border-[var(--line-strong)]"
           onClick={() => setOpenPopup(openPopup === 'effort' ? null : 'effort')}
@@ -580,7 +580,7 @@ export default function WorkspaceBasicsSection({ project, agent, agentDir }: Wor
       {/* MCP Tools — hidden when external runtime */}
       {currentRuntime === 'builtin' && (
       <div className="relative flex items-center gap-3">
-        <label className="w-14 shrink-0 text-sm text-[var(--ink-muted)]">工具</label>
+        <label className="w-16 shrink-0 text-sm text-[var(--ink-muted)]">工具</label>
         <button
           className="flex flex-1 items-center justify-between rounded-lg border border-[var(--line)] px-3 py-1.5 text-left text-sm text-[var(--ink)] transition-colors hover:border-[var(--line-strong)]"
           onClick={() => setOpenPopup(openPopup === 'mcp' ? null : 'mcp')}
@@ -633,7 +633,7 @@ export default function WorkspaceBasicsSection({ project, agent, agentDir }: Wor
        *  empty "未启用插件" row for users who haven't installed any. */}
       {currentRuntime === 'builtin' && visiblePlugins.length > 0 && (
       <div className="relative flex items-center gap-3">
-        <label className="w-14 shrink-0 text-sm text-[var(--ink-muted)]">插件</label>
+        <label className="w-16 shrink-0 text-sm text-[var(--ink-muted)]">插件</label>
         <button
           className="flex flex-1 items-center justify-between rounded-lg border border-[var(--line)] px-3 py-1.5 text-left text-sm text-[var(--ink)] transition-colors hover:border-[var(--line-strong)]"
           onClick={() => setOpenPopup(openPopup === 'plugins' ? null : 'plugins')}

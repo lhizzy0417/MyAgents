@@ -55,7 +55,7 @@ export function ThoughtBulkBar({
         role="toolbar"
         aria-label="想法多选操作"
       >
-        <span className="px-3 text-2sm tabular-nums text-[var(--ink-muted)]">
+        <span className="px-3 text-xs tabular-nums text-[var(--ink-muted)]">
           已选 {count}
         </span>
         <div className="h-5 w-px bg-[var(--line)]" />

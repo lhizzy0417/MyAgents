@@ -136,7 +136,7 @@ export default function ContextUsageIndicator({ onCompact }: ContextUsageIndicat
         >
           {/* 头部：标题 + 智能压缩入口（builtin only） */}
           <div className="mb-3 flex min-h-[24px] items-center justify-between">
-            <span className="text-2sm font-semibold text-[var(--ink-muted)]">上下文用量</span>
+            <span className="text-xs font-semibold text-[var(--ink-muted)]">上下文用量</span>
             {showCompact && (
               <Tip label="智能压缩上下文，提供更大可用空间" position="top" align="end">
                 <button
@@ -161,13 +161,13 @@ export default function ContextUsageIndicator({ onCompact }: ContextUsageIndicat
               <div className="text-3xl font-bold leading-none tracking-tight tabular-nums text-[var(--ink)]">
                 {usedPercent.toFixed(1)}%
               </div>
-              <div className="mt-1.5 text-2sm text-[var(--ink-muted)]">已用 context 窗口</div>
+              <div className="mt-1.5 text-xs text-[var(--ink-muted)]">已用 context 窗口</div>
             </div>
             <Ring percent={usedPercent} size={44} stroke={3.5} />
           </div>
 
           {/* tokens 行 */}
-          <div className="mb-1 text-2sm tabular-nums text-[var(--ink-muted)]">
+          <div className="mb-1 text-xs tabular-nums text-[var(--ink-muted)]">
             <span className="font-semibold text-[var(--ink-secondary)]">{formatTokens(contextTokens)}</span>
             {' / '}
             {formatTokens(contextWindow)} tokens

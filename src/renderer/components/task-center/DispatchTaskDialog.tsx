@@ -412,7 +412,7 @@ export function DispatchTaskDialog({
                   placeholder="选择工作区"
                   size="md"
                 />
-                <p className="mt-1.5 text-2sm text-[var(--ink-muted)]">
+                <p className="mt-1.5 text-xs text-[var(--ink-muted)]">
                   默认使用该 Agent 的 runtime / 模型 / 权限 / MCP 工具。可在下方「高级配置」单独覆盖。
                 </p>
               </div>
@@ -444,7 +444,7 @@ export function DispatchTaskDialog({
                   rows={12}
                   className={`${INPUT_CLS} resize-y font-mono text-sm`}
                 />
-                <p className="mt-1.5 text-2sm text-[var(--ink-muted)]">
+                <p className="mt-1.5 text-xs text-[var(--ink-muted)]">
                   AI 执行时看到的 prompt，默认取自想法原文。你可以补充细节、目标、约束。
                 </p>
               </div>
@@ -466,7 +466,7 @@ export function DispatchTaskDialog({
                     <ChevronRight className="h-3.5 w-3.5" />
                   )}
                   验收清单 verify.md
-                  <span className="text-2sm font-normal text-[var(--ink-muted)]/80">
+                  <span className="text-xs font-normal text-[var(--ink-muted)]/80">
                     （可选 · AI 在 verifying 阶段读取）
                   </span>
                 </button>
@@ -479,7 +479,7 @@ export function DispatchTaskDialog({
                       placeholder="例如:&#10;- curl /health 返回 200&#10;- npm test 全绿"
                       className={`${INPUT_CLS} resize-y font-mono text-sm`}
                     />
-                    <p className="mt-1.5 text-2sm text-[var(--ink-muted)]">
+                    <p className="mt-1.5 text-xs text-[var(--ink-muted)]">
                       留空则跳过验证阶段。创建后也可以随时编辑。
                     </p>
                   </div>

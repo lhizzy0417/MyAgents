@@ -231,16 +231,15 @@ const TableRowComponent: Components['tr'] = ({ children }) => (
   </tr>
 );
 
-// 表格用 dense 档（14px）而非 ui 档：表格是嵌在 16px 正文里的密集内容，
-// 13px 会在同一条消息内造成肉眼可见的字号跳变（PRD 0.2.34 P0-1）。
-// 这里是全仓 text-md 的唯一白名单点（lint 全域封禁，见 eslint.config.js）。
+// 表格 = text-sm(14px)：嵌在 16px 正文里的密集内容比正文低一档（13px 会造成
+// 肉眼可见跳变，PRD 0.2.34 P0-1 定为 14）。v2.5 起 ui 档本身就是 14px，原 dense
+// 专用档（text-md）与其 lint 白名单机制已随 Part 3 合并删除。
 const TableCellComponent: Components['td'] = ({ children }) => (
-  // eslint-disable-next-line no-restricted-syntax -- Markdown 表格 = dense 档唯一立档场景
-  <td className="px-4 py-2.5 text-md">{children}</td>
+  <td className="px-4 py-2.5 text-sm">{children}</td>
 );
 
 const TableHeaderComponent: Components['th'] = ({ children }) => (
-  <th className="px-4 py-2.5 text-left text-2sm font-semibold uppercase tracking-wide text-[var(--ink-muted)]">
+  <th className="px-4 py-2.5 text-left text-xs font-semibold uppercase tracking-wide text-[var(--ink-muted)]">
     {children}
   </th>
 );

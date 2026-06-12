@@ -86,7 +86,7 @@ interface Props {
 export function TaskStatusBadge({ status, compact }: Props) {
   const style = STATUS_STYLE[status];
   const label = STATUS_LABEL[status];
-  const size = compact ? 'text-xs' : 'text-xs';
+  const size = 'text-xs'; // compact 与常规已同档（Part 1 合并 10→11→12 的遗留三元塌缩）
   // Fixed height + leading-none so TaskStatusBadge and TaskCategoryBadge
   // render at identical pixel sizes side-by-side. TaskCategoryBadge
   // carries an h-3 icon which stretches its intrinsic line height; we

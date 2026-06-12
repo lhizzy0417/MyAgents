@@ -79,7 +79,7 @@ const WorkspaceTreeEmptyHintRow = memo(function WorkspaceTreeEmptyHintRow({
       ref={setNodeRef}
       data-tree-row
       data-tree-path={parentDir}
-      className="flex items-center gap-2 px-3 text-2sm italic text-[var(--ink-subtle)] select-none"
+      className="flex items-center gap-2 px-3 text-xs italic text-[var(--ink-subtle)] select-none"
       style={{ height: rowHeight, paddingLeft: `${12 + depth * 16 + 20}px` }}
       onContextMenu={(e) => onContextMenu(parentDir, e)}
     >

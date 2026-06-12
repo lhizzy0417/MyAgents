@@ -261,7 +261,7 @@ export function ThoughtCard({
           iteration) so status reads first, before the user commits to
           reading the full body.
 
-          Row height is driven by the 11px text (≈ 20px with the 14px
+          Row height is driven by the 12px text (≈ 20px row with the 14px
           icon). The `⋯` button is `h-5 w-5` (20px) rather than the
           toolbar default `h-6 w-6`; larger would force the whole row
           taller than the text needs, pushing the body down and making
@@ -342,7 +342,7 @@ export function ThoughtCard({
                 </div>
                 <div className="max-h-[280px] overflow-y-auto py-1">
                   {pickableWorkspaces.length === 0 ? (
-                    <div className="px-3 py-4 text-2sm text-[var(--ink-muted)]">
+                    <div className="px-3 py-4 text-xs text-[var(--ink-muted)]">
                       暂无工作区
                     </div>
                   ) : (
@@ -514,7 +514,7 @@ export function ThoughtCard({
         <button
           type="button"
           onClick={() => setExpanded((v) => !v)}
-          className="mt-1 text-2sm text-[var(--accent-warm)] hover:underline"
+          className="mt-1 text-xs text-[var(--accent-warm)] hover:underline"
         >
           {expanded ? '收起' : '展开全文'}
         </button>

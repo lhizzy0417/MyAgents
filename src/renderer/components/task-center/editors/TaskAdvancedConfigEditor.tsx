@@ -436,7 +436,7 @@ export function TaskAdvancedConfigEditor(props: Props) {
         <Settings2 className="h-4 w-4 text-[var(--ink-muted)]" strokeWidth={1.5} />
         <span className="flex-1 text-sm font-medium text-[var(--ink)]">
           高级配置
-          <span className="ml-1.5 text-2sm font-normal text-[var(--ink-muted)]">
+          <span className="ml-1.5 text-xs font-normal text-[var(--ink-muted)]">
             （可选 — 覆盖本次任务的 runtime / 模型 / 权限 / MCP）
           </span>
         </span>
@@ -476,7 +476,7 @@ export function TaskAdvancedConfigEditor(props: Props) {
               permission can be overridden per-task. Mirrors
               WorkspaceBasicsSection's treatment of the same situation. */}
           {!isBuiltin && (
-            <p className="rounded-[var(--radius-md)] bg-[var(--accent-warm-subtle)] px-3.5 py-2.5 text-2sm leading-relaxed text-[var(--ink-muted)]">
+            <p className="rounded-[var(--radius-md)] bg-[var(--accent-warm-subtle)] px-3.5 py-2.5 text-xs leading-relaxed text-[var(--ink-muted)]">
               当前任务的运行环境为
               <span className="mx-1 font-medium text-[var(--ink-secondary)]">{effectiveRuntimeLabel}</span>
               ，MCP 工具由 {effectiveRuntimeLabel} 自身管理。下方模型 / 权限模式为该 runtime 的可选项，可单独覆盖。
@@ -552,7 +552,7 @@ export function TaskAdvancedConfigEditor(props: Props) {
           {isBuiltin && (
             <FieldRow label="MCP 工具">
               {mcpCatalogue.length === 0 ? (
-                <div className="rounded-[var(--radius-md)] border border-dashed border-[var(--line)] px-3 py-3 text-2sm text-[var(--ink-muted)]">
+                <div className="rounded-[var(--radius-md)] border border-dashed border-[var(--line)] px-3 py-3 text-xs text-[var(--ink-muted)]">
                   尚未在「设置 → MCP 工具」中安装任何 MCP，无法在此覆盖。
                 </div>
               ) : (
@@ -565,7 +565,7 @@ export function TaskAdvancedConfigEditor(props: Props) {
                       return (
                         <label
                           key={s.id}
-                          className={`flex cursor-pointer items-center gap-2 rounded-[var(--radius-sm)] border border-transparent px-2 py-1 text-2sm text-[var(--ink-secondary)] hover:bg-[var(--hover-bg)] ${
+                          className={`flex cursor-pointer items-center gap-2 rounded-[var(--radius-sm)] border border-transparent px-2 py-1 text-xs text-[var(--ink-secondary)] hover:bg-[var(--hover-bg)] ${
                             checked
                               ? 'border-[var(--accent-warm)]/30 bg-[var(--accent-warm-subtle)] text-[var(--ink)]'
                               : ''
@@ -582,7 +582,7 @@ export function TaskAdvancedConfigEditor(props: Props) {
                       );
                     })}
                   </div>
-                  <div className="mt-2 flex items-center justify-between gap-3 text-2sm leading-snug text-[var(--ink-muted)]">
+                  <div className="mt-2 flex items-center justify-between gap-3 text-xs leading-snug text-[var(--ink-muted)]">
                     <span>
                       {mcpEnabledServers === undefined
                         ? '当前跟随 Agent 工作区的 MCP 启用列表'
@@ -626,7 +626,7 @@ function FieldRow({
       </div>
       {children}
       {hint && (
-        <p className="mt-1.5 text-2sm leading-snug text-[var(--ink-muted)]">
+        <p className="mt-1.5 text-xs leading-snug text-[var(--ink-muted)]">
           {hint}
         </p>
       )}
@@ -789,7 +789,7 @@ function ModelPicker(props: {
                     : '跟随 Agent 工作区'}
                 </button>
                 {availableProviders.length === 0 ? (
-                  <div className="px-3 py-3 text-2sm leading-relaxed text-[var(--ink-muted)]">
+                  <div className="px-3 py-3 text-xs leading-relaxed text-[var(--ink-muted)]">
                     还没有可用的供应商 — 请先到「设置 → 模型供应商」添加 API Key 或完成订阅登录。
                   </div>
                 ) : (
@@ -829,7 +829,7 @@ function ModelPicker(props: {
                       || model
                       || '';
                     return (
-                      <div className="mt-2 rounded-[var(--radius-sm)] border border-dashed border-[var(--warning)]/50 bg-[var(--warning-subtle)]/40 px-3 py-2 text-2sm leading-relaxed text-[var(--ink-muted)]">
+                      <div className="mt-2 rounded-[var(--radius-sm)] border border-dashed border-[var(--warning)]/50 bg-[var(--warning-subtle)]/40 px-3 py-2 text-xs leading-relaxed text-[var(--ink-muted)]">
                         <div className="font-medium text-[var(--ink)]">
                           ⚠ 当前选中：{providerLabel}{modelLabel ? ` / ${modelLabel}` : ''}
                         </div>
@@ -856,7 +856,7 @@ function ModelPicker(props: {
                   跟随 Agent 当前模型
                 </button>
                 {externalRuntimeModels.length === 0 ? (
-                  <div className="px-3 py-3 text-2sm leading-relaxed text-[var(--ink-muted)]">
+                  <div className="px-3 py-3 text-xs leading-relaxed text-[var(--ink-muted)]">
                     {effectiveRuntime === 'codex' || effectiveRuntime === 'gemini'
                       ? '正在向 CLI 查询模型列表…'
                       : '该 runtime 暂未提供模型列表。'}

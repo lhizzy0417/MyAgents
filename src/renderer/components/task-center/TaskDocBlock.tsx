@@ -149,7 +149,7 @@ export function TaskDocBlock({
 
   return (
     <section className="mt-4">
-      {/* Title — text-sm(13px) semibold ink, matches the edit panel's section
+      {/* Title — text-sm(14px) semibold ink, matches the edit panel's section
           headers so the preview ↔ edit mental model is identical. */}
       <h3 className="text-sm font-semibold text-[var(--ink)]">{title}</h3>
       {/* Path + 打开文件夹 on a dedicated row below the title. */}
@@ -172,7 +172,7 @@ export function TaskDocBlock({
       </div>
 
       {!loaded ? (
-        <div className="rounded-[var(--radius-lg)] border border-[var(--line-subtle)] bg-[var(--paper)] p-3 text-2sm text-[var(--ink-muted)]">
+        <div className="rounded-[var(--radius-lg)] border border-[var(--line-subtle)] bg-[var(--paper)] p-3 text-xs text-[var(--ink-muted)]">
           加载中…
         </div>
       ) : content ? (
@@ -190,9 +190,8 @@ export function TaskDocBlock({
           >
             <div ref={contentRef} className="p-4">
               {/* `compact` drops Markdown's body from text-base (16px)
-                  to text-sm (14px), bringing it in line with the
-                  edit-mode textareas (13px font-mono). The 1px delta is
-                  fine — both are in the "dense content" band, so
+                  to text-sm (14px), matching the
+                  edit-mode textareas (同为 text-sm=14px font-mono).
                   preview → edit feels continuous rather than a
                   font-size jump. */}
               <Markdown compact>{content}</Markdown>
@@ -227,7 +226,7 @@ export function TaskDocBlock({
           )}
         </div>
       ) : (
-        <div className="rounded-[var(--radius-lg)] border border-dashed border-[var(--line)] bg-[var(--paper)] p-3 text-2sm text-[var(--ink-muted)]">
+        <div className="rounded-[var(--radius-lg)] border border-dashed border-[var(--line)] bg-[var(--paper)] p-3 text-xs text-[var(--ink-muted)]">
           {emptyHint}
         </div>
       )}
