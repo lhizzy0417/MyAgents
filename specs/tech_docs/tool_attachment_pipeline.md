@@ -106,7 +106,7 @@
            │ ToolAttachmentGallery → ToolImageAttachment      │
            │   useAttachmentUrl(attachment, sessionId)        │
            │     state: pending | loading | ready | error     │
-           │     ready:   <img src={baseUrl + refPath}>       │
+           │     ready:   <img src={resolved attachment URL}> │
            │     pending: loading skeleton                    │
            │     error:   "⚠️ Image failed: <code>"            │
            └──────────────┬───────────────────────────────────┘
@@ -133,8 +133,8 @@
 export interface ToolAttachment {
   kind: 'image' | 'audio' | 'pdf' | 'file';
   mimeType: string;
-  /** 相对路径形态 `/api/attachment/tool/<sid>/<tid>/<file>` — 前端运行时拼当前 sidecar baseUrl。
-   *  不存绝对 URL：sidecar 端口 dynamic，session resume 后端口已变。 */
+  /** 相对路径形态 `/api/attachment/tool/<sid>/<tid>/<file>`。
+   *  前端运行时解析为 app-owned attachment protocol；不存绝对 URL。 */
   refPath: string;
   /** 落盘绝对路径（trusted-root 副本），仅 sessionOwner sidecar 写。渲染/重启走它。 */
   savedPath?: string;
@@ -303,6 +303,7 @@ attachment。任何触发这种路径的入口视为 bug。
 | `src/server/runtimes/codex.ts` | parseNotification 9 case 改造 + scheduleAttachmentSave |
 | `src/server/runtimes/external-session.ts` | tool_result attachments 写持久化；tool_attachment_update SSE 转发；session resume 重 register |
 | `src/server/index.ts` | `/api/attachment/tool/<sid>/<tid>/<file>` endpoint |
+| `src/renderer/utils/myagentsProtocol.ts` | Tauri custom-protocol URL 形态：macOS/Linux = `myagents://...`；Windows/WebView2 = `http://myagents.localhost/...` |
 | `src/renderer/utils/toolAttachment.ts` | `useAttachmentUrl` hook + `resolveToolAttachmentUrl` |
 | `src/renderer/components/tools/ToolAttachmentGallery.tsx` | 归一化容器 |
 | `src/renderer/components/tools/ToolImageAttachment.tsx` | 单张图片渲染 + placeholder / error 状态 |

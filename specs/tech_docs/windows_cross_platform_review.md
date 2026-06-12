@@ -52,7 +52,7 @@
   2. 触发一次工具产图（让 AI 调 Codex `image_generation` 或 gemini-image）。
   3. 看工具卡是否显示图 + console 是否有 `img-src` 拒绝。
   4. 对照：同一操作在 macOS 上能显示（确认是跨端差异而非全坏）。
-- **确认后的修法（第零原则，Δcomplexity 负）**：把工具产物的 URL **从 `http://127.0.0.1:PORT` 改走已存在的 `myagents://attachment/<rel>` 自定义协议**（`src-tauri/src/attachment_protocol.rs`；两端 `img-src`/`media-src` 都已列 `myagents:` + `http://myagents.localhost`，Rust handler 对两种 URL 形式都有测试），与用户上传路径（`attachmentUrl.ts`）同源。顺带删掉 per-session 端口查找（`getSessionPort`）。
+- **确认后的修法（第零原则，Δcomplexity 负）**：把工具产物的 URL **从 `http://127.0.0.1:PORT` 改走已存在的 app-owned attachment protocol**（`src-tauri/src/attachment_protocol.rs`）：macOS/Linux 输出 `myagents://tool-attachment/<rel>`，Windows/WebView2 输出 Tauri 2 custom-protocol 的实际子资源形态 `http://myagents.localhost/tool-attachment/<rel>`；两端 `img-src`/`media-src` 都已列 `myagents:` + `http://myagents.localhost`，Rust handler 对两种 URL 形式都有测试。与用户上传路径（`attachmentUrl.ts`）同源。顺带删掉 per-session 端口查找（`getSessionPort`）。
 - **D 不变量**：Mac 工具图逐像素不变；attachment-aware 权限/路径安全不被绕过；pending/error sentinel 行为不变。
 
 ---
@@ -110,7 +110,7 @@
 - PdfViewer DPR（`PdfViewer.tsx`/`pdfMetrics.ts` 正确读 `devicePixelRatio` + clamp + `deviceCanvasSize`，1.5× 不糊）；OS 浏览器 bounds（`browser.rs` 用 `LogicalPosition/LogicalSize`，分数 DPR 安全）。
 - 键盘快捷键（`appShortcuts.ts` 用 `modHeld(e,isMac)`、`isMac` 取自 `navigator.platform`）；close-layer（按平台 close-tab 触发）；发送键 + IME（W3C composition 三重守卫，Windows 拼音/微软 IME 一致）。
 - 字体栈（`index.css` 含 `Segoe UI` / `Cascadia Code`/`Consolas` / `Microsoft YaHei`，Windows 有正确 fallback、无 tofu）。
-- 媒体：音频走 `blob:`（`media-src` 含）；用户上传走 `myagents://`（两端 img-src/media-src 覆盖）；`/refs/:id` 走 `connect-src` + `Access-Control-Allow-Origin:*`；pdf worker 同源 `script-src 'self'`。无 `convertFileSrc`/`asset://`/`tauri://` 硬编码。
+- 媒体：音频走 `blob:`（`media-src` 含）；用户上传走 app-owned attachment protocol（macOS/Linux `myagents://attachment/...`，Windows/WebView2 `http://myagents.localhost/attachment/...`；两端 img-src/media-src 覆盖）；`/refs/:id` 走 `connect-src` + `Access-Control-Allow-Origin:*`；pdf worker 同源 `script-src 'self'`。无 `convertFileSrc`/`asset://`/`tauri://` 硬编码。
 
 ## 4. 环境性 / 预存（不修，仅记录）
 
