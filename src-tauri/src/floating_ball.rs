@@ -117,6 +117,12 @@ mod imp {
     const COMPANION_W: f64 = 440.0;
     const COMPANION_H: f64 = 660.0;
     const COMPANION_GAP: f64 = 10.0;
+    /// Peek translucency lives at the NSWindow level (alphaValue), NOT in CSS:
+    /// the NSVisualEffectView vibrancy layer under the DOM is itself fairly
+    /// opaque, so CSS background-alpha differences get visually crushed —
+    /// user-verified symptom: "hover 出现的就是点击后的效果". Window alpha
+    /// dims the vibrancy layer along with everything else.
+    const PEEK_ALPHA: f64 = 0.62;
 
     tauri_panel! {
         // The ball never takes keyboard focus — pure visual + mouse target.
@@ -463,6 +469,7 @@ mod imp {
             .map_err(|_| "[fb] companion panel missing".to_string())?;
         match mode {
             "pin" => {
+                panel.set_alpha_value(1.0);
                 panel.order_front_regardless();
                 panel.show();
                 // Keyboard focus moves to the panel; the user's app stays
@@ -470,7 +477,9 @@ mod imp {
                 panel.make_key_window();
             }
             _ => {
-                // Peek: visible but never key — D1.
+                // Peek: visible but never key — D1. 半透明在窗口层（见
+                // PEEK_ALPHA 注释——CSS 透明度被毛玻璃层吃掉）。
+                panel.set_alpha_value(PEEK_ALPHA);
                 panel.order_front_regardless();
                 panel.show();
             }
@@ -483,6 +492,7 @@ mod imp {
         let panel = app
             .get_webview_panel(COMPANION_LABEL)
             .map_err(|_| "[fb] companion panel missing".to_string())?;
+        panel.set_alpha_value(1.0);
         panel.order_front_regardless();
         panel.show();
         panel.make_key_window();
