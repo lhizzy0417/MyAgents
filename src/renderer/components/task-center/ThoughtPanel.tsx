@@ -409,7 +409,7 @@ export function ThoughtPanel({
                   className="relative top-[1px] h-4 w-4 shrink-0 text-[var(--ink-muted)]"
                   strokeWidth={1.5}
                 />
-                <span className="whitespace-nowrap text-[16px] font-semibold text-[var(--ink)]">
+                <span className="whitespace-nowrap text-base font-semibold text-[var(--ink)]">
                   想法
                 </span>
               </div>
@@ -442,7 +442,7 @@ export function ThoughtPanel({
                 >
                   <FolderOpen className="h-3.5 w-3.5" strokeWidth={1.75} />
                 </button>
-                <span className="pointer-events-none absolute left-1/2 top-full z-50 mt-1.5 -translate-x-1/2 whitespace-nowrap rounded-md bg-[var(--ink)] px-2 py-1 text-[11px] font-medium text-[var(--paper)] opacity-0 shadow-md transition-opacity duration-150 group-hover/openDir:opacity-100">
+                <span className="pointer-events-none absolute left-1/2 top-full z-50 mt-1.5 -translate-x-1/2 whitespace-nowrap rounded-md bg-[var(--ink)] px-2 py-1 text-xs font-medium text-[var(--paper)] opacity-0 shadow-md transition-opacity duration-150 group-hover/openDir:opacity-100">
                   打开想法存储的文件夹
                 </span>
               </div>
@@ -485,7 +485,7 @@ export function ThoughtPanel({
               'max-height 220ms cubic-bezier(0.22, 1, 0.36, 1), opacity 160ms ease-out',
           }}
         >
-          <div className="px-3 pb-1 pt-2 text-[10px] font-semibold uppercase tracking-wider text-[var(--ink-muted)]/60">
+          <div className="px-3 pb-1 pt-2 text-xs font-semibold uppercase tracking-wider text-[var(--ink-muted)]/60">
             按标签筛选
           </div>
           <div className="flex max-h-[190px] flex-wrap gap-1.5 overflow-y-auto px-2 pb-2">
@@ -500,7 +500,7 @@ export function ThoughtPanel({
                   setActiveTag(tag);
                   searchInputRef.current?.blur();
                 }}
-                className="rounded-[var(--radius-md)] bg-[var(--paper-inset)] px-2 py-0.5 text-[11px] text-[var(--ink-muted)] transition-colors hover:bg-[var(--accent-warm-subtle)] hover:text-[var(--accent-warm)]"
+                className="rounded-[var(--radius-md)] bg-[var(--paper-inset)] px-2 py-0.5 text-xs text-[var(--ink-muted)] transition-colors hover:bg-[var(--accent-warm-subtle)] hover:text-[var(--accent-warm)]"
               >
                 #{tag}
                 <span className="ml-1 text-[var(--ink-muted)]/60">{n}</span>
@@ -559,13 +559,13 @@ export function ThoughtPanel({
       <div className="flex min-h-[34px] items-center justify-between px-4 py-1.5">
         {activeTag ? (
           <div className="flex items-center gap-2">
-            <span className="text-[11px] font-semibold uppercase tracking-[0.12em] text-[var(--ink-muted)]">
+            <span className="text-xs font-semibold uppercase tracking-[0.12em] text-[var(--ink-muted)]">
               筛选
             </span>
             <button
               type="button"
               onClick={() => setActiveTag(null)}
-              className="flex items-center gap-1 rounded-[var(--radius-md)] bg-[var(--accent-warm-muted)] px-2 py-0.5 text-[12px] text-[var(--accent-warm)]"
+              className="flex items-center gap-1 rounded-[var(--radius-md)] bg-[var(--accent-warm-muted)] px-2 py-0.5 text-2sm text-[var(--accent-warm)]"
               title="清除筛选"
             >
               #{activeTag}
@@ -573,7 +573,7 @@ export function ThoughtPanel({
             </button>
           </div>
         ) : (
-          <span className="text-[11px] font-semibold uppercase tracking-[0.12em] text-[var(--ink-muted)]">
+          <span className="text-xs font-semibold uppercase tracking-[0.12em] text-[var(--ink-muted)]">
             想法 <span className="text-[var(--ink-muted)]/60">({thoughts.length})</span>
           </span>
         )}
@@ -603,7 +603,7 @@ export function ThoughtPanel({
                   setSelectMode(false);
                   setSelectedIds(new Set());
                 }}
-                className={`rounded-full px-2.5 py-0.5 text-[11px] transition-colors ${
+                className={`rounded-full px-2.5 py-0.5 text-xs transition-colors ${
                   isActive
                     ? 'bg-[var(--paper-elevated)] font-medium text-[var(--ink)] shadow-sm'
                     : 'text-[var(--ink-muted)] hover:text-[var(--ink)]'
@@ -620,11 +620,11 @@ export function ThoughtPanel({
       {/* List */}
       <div className="flex-1 overflow-y-auto px-4 py-3">
         {loading ? (
-          <div className="py-8 text-center text-[13px] text-[var(--ink-muted)]">
+          <div className="py-8 text-center text-sm text-[var(--ink-muted)]">
             加载中…
           </div>
         ) : filtered.length === 0 ? (
-          <div className="py-12 text-center text-[13px] text-[var(--ink-muted)]">
+          <div className="py-12 text-center text-sm text-[var(--ink-muted)]">
             {thoughts.length === 0
               ? viewMode === 'archived'
                 ? '还没有已归档的想法'

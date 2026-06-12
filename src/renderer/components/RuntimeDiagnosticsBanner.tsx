@@ -157,7 +157,7 @@ export default function RuntimeDiagnosticsBanner({
   if (dismissed) return null;
 
   return (
-    <div className="relative z-10 flex-shrink-0 border-b border-[var(--line)] bg-[var(--warning-bg)] px-4 py-2 text-[11px] text-[var(--ink)]">
+    <div className="relative z-10 flex-shrink-0 border-b border-[var(--line)] bg-[var(--warning-bg)] px-4 py-2 text-xs text-[var(--ink)]">
       <div className="mx-auto flex max-w-3xl items-start gap-2">
         <AlertTriangle className="mt-0.5 h-4 w-4 flex-shrink-0 text-[var(--warning)]" />
         <div className="flex-1 min-w-0">
@@ -240,7 +240,7 @@ export default function RuntimeDiagnosticsBanner({
 
               <div>
                 <div className="font-semibold">Effective env</div>
-                <div className="text-[var(--ink-muted)] font-mono text-[10px] leading-tight">
+                <div className="text-[var(--ink-muted)] font-mono text-xs leading-tight">
                   <div>cwd: {diagnostics.effectiveEnv.cwd}</div>
                   <div>HTTP_PROXY:  {diagnostics.effectiveEnv.proxy?.http ?? '(unset)'}</div>
                   <div>HTTPS_PROXY: {diagnostics.effectiveEnv.proxy?.https ?? '(unset)'}</div>
@@ -257,7 +257,7 @@ export default function RuntimeDiagnosticsBanner({
                 </div>
               </div>
 
-              <div className="text-[10px] text-[var(--ink-muted)] italic">
+              <div className="text-xs text-[var(--ink-muted)] italic">
                 诊断快照：{diagnostics.timestamp}。命令行同步信息：
                 <code className="ml-1">myagents diagnose runtime {diagnostics.runtime}</code>
               </div>

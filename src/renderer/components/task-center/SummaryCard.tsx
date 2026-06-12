@@ -137,11 +137,11 @@ export function SummaryCard({ task, stats }: Props) {
       <div className="flex items-start gap-2.5">
         <ScheduleIcon className="mt-0.5 h-4 w-4 shrink-0 text-[var(--accent-warm)]" />
         <div className="min-w-0 flex-1">
-          <div className="text-[14px] font-medium leading-snug text-[var(--ink)]">
+          <div className="text-md font-medium leading-snug text-[var(--ink)]">
             {schedule?.title ?? `${modeMeta.label} · 计算中…`}
           </div>
           {schedule?.next && (
-            <div className="mt-0.5 text-[12px] text-[var(--ink-muted)]">
+            <div className="mt-0.5 text-2sm text-[var(--ink-muted)]">
               {schedule.next}
               {schedule.timezone && (
                 <span className="ml-1 text-[var(--ink-muted)]/70">
@@ -161,7 +161,7 @@ export function SummaryCard({ task, stats }: Props) {
           show empty 「最近执行 —」 stubs.
           Removed rows (v0.1.69 polish): 「工作区」(redundant with
           Agent), 「调度器」(internal CronTask state, not a user fact). */}
-      <dl className="mt-3 grid grid-cols-[auto_1fr] gap-x-5 gap-y-1.5 border-t border-[var(--line-subtle)] pt-3 text-[12px]">
+      <dl className="mt-3 grid grid-cols-[auto_1fr] gap-x-5 gap-y-1.5 border-t border-[var(--line-subtle)] pt-3 text-2sm">
         {agentLabel && <MetaRow k="Agent" v={agentLabel} />}
         {(stats?.executionCount ?? 0) > 0 && (
           <MetaRow k="累计执行" v={`${stats!.executionCount} 次`} />
@@ -176,7 +176,7 @@ export function SummaryCard({ task, stats }: Props) {
                 {task.tags.map((t) => (
                   <span
                     key={t}
-                    className="rounded-[var(--radius-sm)] bg-[var(--paper-inset)] px-1.5 py-0.5 text-[11px] text-[var(--ink-muted)]"
+                    className="rounded-[var(--radius-sm)] bg-[var(--paper-inset)] px-1.5 py-0.5 text-xs text-[var(--ink-muted)]"
                   >
                     #{t}
                   </span>
@@ -194,7 +194,7 @@ export function SummaryCard({ task, stats }: Props) {
       <button
         type="button"
         onClick={toggleDetails}
-        className="mt-2.5 flex items-center gap-1 text-[12px] text-[var(--ink-muted)]/70 transition-colors hover:text-[var(--ink-muted)]"
+        className="mt-2.5 flex items-center gap-1 text-2sm text-[var(--ink-muted)]/70 transition-colors hover:text-[var(--ink-muted)]"
       >
         {detailsOpen ? (
           <ChevronDown className="h-3 w-3" />
@@ -205,7 +205,7 @@ export function SummaryCard({ task, stats }: Props) {
       </button>
 
       {detailsOpen && (
-        <dl className="mt-2 grid grid-cols-[auto_1fr] gap-x-5 gap-y-1.5 border-t border-[var(--line-subtle)] pt-2 text-[12px]">
+        <dl className="mt-2 grid grid-cols-[auto_1fr] gap-x-5 gap-y-1.5 border-t border-[var(--line-subtle)] pt-2 text-2sm">
           <MetaRow k="创建于" v={new Date(task.createdAt).toLocaleString()} />
           <MetaRow k="最近更新" v={new Date(task.updatedAt).toLocaleString()} />
           <MetaRow

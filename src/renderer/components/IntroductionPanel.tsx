@@ -220,9 +220,9 @@ const IntroductionPanel = forwardRef<IntroductionPanelRef, IntroductionPanelProp
                 >
                   <div className="flex items-center gap-2">
                     <Edit2 className="h-4 w-4 shrink-0 text-amber-500" />
-                    <h4 className="text-[15px] font-semibold text-[var(--ink)]">手动创建</h4>
+                    <h4 className="text-base font-semibold text-[var(--ink)]">手动创建</h4>
                   </div>
-                  <p className="text-[13px] leading-relaxed text-[var(--ink-muted)]">
+                  <p className="text-sm leading-relaxed text-[var(--ink-muted)]">
                     自己写一份 INTRODUCTION.md，进入编辑器从空白开始
                   </p>
                 </button>

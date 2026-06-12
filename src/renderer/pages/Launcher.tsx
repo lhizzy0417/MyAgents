@@ -925,14 +925,14 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
                     {/* Workspaces Header */}
                     <div className="mx-6 border-t border-[var(--line)]" />
                     <div className="flex flex-shrink-0 items-center justify-between px-6 py-4">
-                        <h2 className="text-[13px] font-semibold tracking-[0.04em] text-[var(--ink-muted)]">
+                        <h2 className="text-sm font-semibold tracking-[0.04em] text-[var(--ink-muted)]">
                             Agent 工作区
                         </h2>
                         <div className="flex items-center gap-3">
                             {config.showDevTools && (
                                 <button
                                     onClick={() => setShowLogs(true)}
-                                    className="rounded-lg px-2.5 py-1.5 text-[13px] font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]"
+                                    className="rounded-lg px-2.5 py-1.5 text-sm font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]"
                                     title="查看 Rust 日志"
                                 >
                                     Logs
@@ -952,27 +952,27 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
                         {isLoading ? (
                             <div className="flex flex-col items-center justify-center py-16">
                                 <Loader2 className="h-5 w-5 animate-spin text-[var(--ink-muted)]/50" />
-                                <p className="mt-4 text-[13px] text-[var(--ink-muted)]/70">加载中...</p>
+                                <p className="mt-4 text-sm text-[var(--ink-muted)]/70">加载中...</p>
                             </div>
                         ) : visibleProjects.length === 0 ? (
                             <div className="flex flex-col items-center justify-center py-16 text-center">
-                                <h3 className="mb-1.5 text-[14px] font-medium text-[var(--ink)]">
+                                <h3 className="mb-1.5 text-md font-medium text-[var(--ink)]">
                                     还没有工作区
                                 </h3>
-                                <p className="mb-6 max-w-[220px] text-[13px] leading-relaxed text-[var(--ink-muted)]/60">
+                                <p className="mb-6 max-w-[220px] text-sm leading-relaxed text-[var(--ink-muted)]/60">
                                     添加本地项目文件夹，或从模板快速创建
                                 </p>
                                 <div className="flex items-center gap-3">
                                     <button
                                         onClick={handleAddProject}
-                                        className="flex items-center gap-1.5 rounded-full bg-[var(--button-secondary-bg)] px-4 py-2.5 text-[13px] font-medium text-[var(--button-secondary-text)] transition-all hover:bg-[var(--button-secondary-bg-hover)] hover:shadow-sm"
+                                        className="flex items-center gap-1.5 rounded-full bg-[var(--button-secondary-bg)] px-4 py-2.5 text-sm font-medium text-[var(--button-secondary-text)] transition-all hover:bg-[var(--button-secondary-bg-hover)] hover:shadow-sm"
                                     >
                                         <FolderPlus className="h-3.5 w-3.5" />
                                         添加文件夹
                                     </button>
                                     <button
                                         onClick={handleOpenTemplateDialog}
-                                        className="flex items-center gap-1.5 rounded-full bg-[var(--button-primary-bg)] px-4 py-2.5 text-[13px] font-medium text-[var(--button-primary-text)] transition-all hover:bg-[var(--button-primary-bg-hover)] hover:shadow-sm"
+                                        className="flex items-center gap-1.5 rounded-full bg-[var(--button-primary-bg)] px-4 py-2.5 text-sm font-medium text-[var(--button-primary-text)] transition-all hover:bg-[var(--button-primary-bg-hover)] hover:shadow-sm"
                                     >
                                         <LayoutTemplate className="h-3.5 w-3.5" />
                                         从模板创建

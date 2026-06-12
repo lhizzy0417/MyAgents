@@ -96,12 +96,12 @@ function ItemTooltip({ scope, description, children }: {
                     style={{ left: pos.x, top: pos.y, width: pos.width, transform: 'translateY(-100%)' }}
                 >
                     {scope && (
-                        <span className="mb-1 inline-block rounded bg-[var(--paper-inset)] px-1.5 py-0.5 text-[10px] text-[var(--ink-muted)]">
+                        <span className="mb-1 inline-block rounded bg-[var(--paper-inset)] px-1.5 py-0.5 text-xs text-[var(--ink-muted)]">
                             {scope === 'user' ? '全局' : scope === 'project' ? '项目' : scope}
                         </span>
                     )}
                     {description && (
-                        <p className="text-[11px] leading-relaxed text-[var(--ink-muted)]">{description}</p>
+                        <p className="text-xs leading-relaxed text-[var(--ink-muted)]">{description}</p>
                     )}
                 </div>
             )}
@@ -273,7 +273,7 @@ export default memo(function AgentCapabilitiesPanel({
                 </button>
                 {isExpanded && (
                     <div className="px-4 pb-3 text-center">
-                        <p className="text-[13px] text-[var(--ink-muted)]">
+                        <p className="text-sm text-[var(--ink-muted)]">
                             在项目设置中配置 Agent 能力
                         </p>
                     </div>
@@ -304,7 +304,7 @@ export default memo(function AgentCapabilitiesPanel({
                     {/* Commands Group */}
                     {commandsCount > 0 && (
                         <div>
-                            <p className="px-1 text-[11px] font-medium uppercase tracking-wider text-[var(--ink-muted)]/60">
+                            <p className="px-1 text-xs font-medium uppercase tracking-wider text-[var(--ink-muted)]/60">
                                 Commands ({commandsCount})
                             </p>
                             <div className="mt-0.5 space-y-0.5">
@@ -320,7 +320,7 @@ export default memo(function AgentCapabilitiesPanel({
                                             className="flex w-full items-center gap-2 rounded-md px-2 py-1 text-left hover:bg-[var(--hover-bg)] transition-colors"
                                         >
                                             <Terminal className="h-3 w-3 shrink-0 text-[var(--success)]" />
-                                            <p className="min-w-0 flex-1 truncate text-[13px] text-[var(--ink)]">{item.name}</p>
+                                            <p className="min-w-0 flex-1 truncate text-sm text-[var(--ink)]">{item.name}</p>
                                         </button>
                                     </ItemTooltip>
                                 ))}
@@ -331,7 +331,7 @@ export default memo(function AgentCapabilitiesPanel({
                     {/* Skills Group */}
                     {skillsCount > 0 && (
                         <div>
-                            <p className="px-1 text-[11px] font-medium uppercase tracking-wider text-[var(--ink-muted)]/60">
+                            <p className="px-1 text-xs font-medium uppercase tracking-wider text-[var(--ink-muted)]/60">
                                 Skills ({skillsCount})
                             </p>
                             <div className="mt-0.5 space-y-0.5">
@@ -345,7 +345,7 @@ export default memo(function AgentCapabilitiesPanel({
                                             className="flex w-full items-center gap-2 rounded-md px-2 py-1 text-left hover:bg-[var(--hover-bg)] transition-colors"
                                         >
                                             <Sparkles className="h-3 w-3 shrink-0 text-amber-500" />
-                                            <p className="min-w-0 flex-1 truncate text-[13px] text-[var(--ink)]">{item.name}</p>
+                                            <p className="min-w-0 flex-1 truncate text-sm text-[var(--ink)]">{item.name}</p>
                                         </button>
                                     </ItemTooltip>
                                 ))}
@@ -356,7 +356,7 @@ export default memo(function AgentCapabilitiesPanel({
                     {/* Sub-Agents Group */}
                     {agentCount > 0 && (
                         <div>
-                            <p className="px-1 text-[11px] font-medium uppercase tracking-wider text-[var(--ink-muted)]/60">
+                            <p className="px-1 text-xs font-medium uppercase tracking-wider text-[var(--ink-muted)]/60">
                                 Sub-Agents ({agentCount})
                             </p>
                             <div className="mt-0.5 space-y-0.5">
@@ -368,9 +368,9 @@ export default memo(function AgentCapabilitiesPanel({
                                             className="flex w-full items-center gap-2 rounded-md px-2 py-1 text-left hover:bg-[var(--hover-bg)] transition-colors"
                                         >
                                             <Bot className="h-3 w-3 shrink-0 text-violet-500" />
-                                            <p className="min-w-0 flex-1 truncate text-[13px] text-[var(--ink)]">{item.name}</p>
+                                            <p className="min-w-0 flex-1 truncate text-sm text-[var(--ink)]">{item.name}</p>
                                             {item.model && (
-                                                <span className="shrink-0 rounded bg-[var(--paper-inset)] px-1 py-0.5 text-[10px] text-[var(--ink-muted)]">
+                                                <span className="shrink-0 rounded bg-[var(--paper-inset)] px-1 py-0.5 text-xs text-[var(--ink-muted)]">
                                                     {item.model}
                                                 </span>
                                             )}

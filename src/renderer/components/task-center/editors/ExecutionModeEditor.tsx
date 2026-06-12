@@ -141,7 +141,7 @@ export function ExecutionModeEditor({
               type="button"
               disabled={disabled}
               onClick={() => setExecutionMode(t.value)}
-              className={`flex flex-1 items-center justify-center gap-1.5 rounded-[var(--radius-sm)] px-3 py-2 text-[13px] font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${
+              className={`flex flex-1 items-center justify-center gap-1.5 rounded-[var(--radius-sm)] px-3 py-2 text-sm font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${
                 active
                   ? 'bg-[var(--paper-elevated)] text-[var(--ink)] shadow-xs'
                   : 'text-[var(--ink-muted)] hover:text-[var(--ink)]'
@@ -153,11 +153,11 @@ export function ExecutionModeEditor({
           );
         })}
       </div>
-      <p className="mt-2.5 text-[13px] text-[var(--ink-muted)]">{currentDescription}</p>
+      <p className="mt-2.5 text-sm text-[var(--ink-muted)]">{currentDescription}</p>
 
       {isScheduled && (
         <div className="mt-5">
-          <label className="mb-2 block text-[13px] font-medium text-[var(--ink-secondary)]">
+          <label className="mb-2 block text-sm font-medium text-[var(--ink-secondary)]">
             执行时间
           </label>
           <input
@@ -193,7 +193,7 @@ export function ExecutionModeEditor({
 
       {showSessionStrategy && (
         <div className="mt-5">
-          <label className="mb-2 block text-[13px] font-medium text-[var(--ink-secondary)]">
+          <label className="mb-2 block text-sm font-medium text-[var(--ink-secondary)]">
             会话策略
           </label>
           {isLoop ? (
@@ -218,7 +218,7 @@ export function ExecutionModeEditor({
                   连续对话
                 </PillButton>
               </div>
-              <p className="mt-2 text-[13px] text-[var(--ink-muted)]">
+              <p className="mt-2 text-sm text-[var(--ink-muted)]">
                 {runMode === 'new-session'
                   ? '每次执行创建新会话，无历史记忆，上下文干净'
                   : '所有轮次复用同一会话，AI 能记住之前内容'}

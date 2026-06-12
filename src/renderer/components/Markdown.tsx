@@ -231,12 +231,14 @@ const TableRowComponent: Components['tr'] = ({ children }) => (
   </tr>
 );
 
+// 表格用 dense 档（14px）而非 ui 档：表格是嵌在 16px 正文里的密集内容，
+// 13px 会在同一条消息内造成肉眼可见的字号跳变（PRD 0.2.34 P0-1）。
 const TableCellComponent: Components['td'] = ({ children }) => (
-  <td className="px-4 py-2.5 text-sm">{children}</td>
+  <td className="px-4 py-2.5 text-md">{children}</td>
 );
 
 const TableHeaderComponent: Components['th'] = ({ children }) => (
-  <th className="px-4 py-2.5 text-left text-xs font-semibold uppercase tracking-wide text-[var(--ink-muted)]">
+  <th className="px-4 py-2.5 text-left text-2sm font-semibold uppercase tracking-wide text-[var(--ink-muted)]">
     {children}
   </th>
 );
@@ -250,37 +252,37 @@ const BlockquoteComponent: Components['blockquote'] = ({ children }) => (
 
 // Custom heading components - H1:22px H2:20px H3:18px H4-H6:16px
 const H1Component: Components['h1'] = ({ children }) => (
-  <h1 className="mb-4 mt-6 text-[22px] leading-[1.3] font-bold text-[var(--ink)]">
+  <h1 className="mb-4 mt-6 text-2xl leading-[1.3] font-bold text-[var(--ink)]">
     {children}
   </h1>
 );
 
 const H2Component: Components['h2'] = ({ children }) => (
-  <h2 className="mb-3 mt-5 text-[20px] leading-[1.4] font-semibold text-[var(--ink)]">
+  <h2 className="mb-3 mt-5 text-xl leading-[1.4] font-semibold text-[var(--ink)]">
     {children}
   </h2>
 );
 
 const H3Component: Components['h3'] = ({ children }) => (
-  <h3 className="mb-2 mt-4 text-[18px] leading-[1.5] font-semibold text-[var(--ink)]">
+  <h3 className="mb-2 mt-4 text-lg leading-[1.5] font-semibold text-[var(--ink)]">
     {children}
   </h3>
 );
 
 const H4Component: Components['h4'] = ({ children }) => (
-  <h4 className="mb-2 mt-3 text-[16px] leading-[1.5] font-semibold text-[var(--ink-secondary)]">
+  <h4 className="mb-2 mt-3 text-base leading-[1.5] font-semibold text-[var(--ink-secondary)]">
     {children}
   </h4>
 );
 
 const H5Component: Components['h5'] = ({ children }) => (
-  <h5 className="mb-2 mt-3 text-[16px] leading-[1.5] font-medium text-[var(--ink-secondary)]">
+  <h5 className="mb-2 mt-3 text-base leading-[1.5] font-medium text-[var(--ink-secondary)]">
     {children}
   </h5>
 );
 
 const H6Component: Components['h6'] = ({ children }) => (
-  <h6 className="mb-2 mt-3 text-[16px] leading-[1.5] font-medium text-[var(--ink-muted)]">
+  <h6 className="mb-2 mt-3 text-base leading-[1.5] font-medium text-[var(--ink-muted)]">
     {children}
   </h6>
 );

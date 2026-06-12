@@ -48,7 +48,7 @@ export default function BindQrPanel({
                 <QrCode className="h-4 w-4 text-[var(--ink-muted)]" />
                 <h3 className="text-sm font-semibold text-[var(--ink)]">快速绑定</h3>
                 {!hasWhitelistUsers && (
-                    <span className="rounded-full bg-[var(--info-bg)] px-2 py-0.5 text-[10px] font-medium text-[var(--info)]">
+                    <span className="rounded-full bg-[var(--info-bg)] px-2 py-0.5 text-xs font-medium text-[var(--info)]">
                         推荐
                     </span>
                 )}
@@ -74,24 +74,24 @@ export default function BindQrPanel({
                 <div className="flex-1 space-y-3">
                     <div className="space-y-2 text-xs text-[var(--ink-muted)]">
                         <div className="flex items-start gap-2">
-                            <span className="mt-0.5 flex h-4 w-4 flex-shrink-0 items-center justify-center rounded-full bg-[var(--button-primary-bg)] text-[10px] font-bold text-[var(--button-primary-text)]">1</span>
+                            <span className="mt-0.5 flex h-4 w-4 flex-shrink-0 items-center justify-center rounded-full bg-[var(--button-primary-bg)] text-xs font-bold text-[var(--button-primary-text)]">1</span>
                             <span>手机相机 或 Telegram 扫描二维码</span>
                         </div>
                         <div className="flex items-start gap-2">
-                            <span className="mt-0.5 flex h-4 w-4 flex-shrink-0 items-center justify-center rounded-full bg-[var(--button-primary-bg)] text-[10px] font-bold text-[var(--button-primary-text)]">2</span>
+                            <span className="mt-0.5 flex h-4 w-4 flex-shrink-0 items-center justify-center rounded-full bg-[var(--button-primary-bg)] text-xs font-bold text-[var(--button-primary-text)]">2</span>
                             <span>点击「Start」发送绑定指令</span>
                         </div>
                         <div className="flex items-start gap-2">
-                            <span className="mt-0.5 flex h-4 w-4 flex-shrink-0 items-center justify-center rounded-full bg-[var(--button-primary-bg)] text-[10px] font-bold text-[var(--button-primary-text)]">3</span>
+                            <span className="mt-0.5 flex h-4 w-4 flex-shrink-0 items-center justify-center rounded-full bg-[var(--button-primary-bg)] text-xs font-bold text-[var(--button-primary-text)]">3</span>
                             <span>绑定成功后即可开始对话</span>
                         </div>
                     </div>
 
                     {/* Deep link for desktop Telegram users */}
                     <div className="pt-1">
-                        <p className="mb-1 text-[10px] text-[var(--ink-muted)]">或在桌面版 Telegram 中直接打开：</p>
+                        <p className="mb-1 text-xs text-[var(--ink-muted)]">或在桌面版 Telegram 中直接打开：</p>
                         <div className="flex items-center gap-1.5 overflow-hidden">
-                            <code className="min-w-0 flex-1 truncate rounded bg-[var(--paper-inset)] px-2 py-1 text-[11px] text-[var(--ink)]">
+                            <code className="min-w-0 flex-1 truncate rounded bg-[var(--paper-inset)] px-2 py-1 text-xs text-[var(--ink)]">
                                 {bindUrl}
                             </code>
                             <button

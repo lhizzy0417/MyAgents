@@ -121,11 +121,11 @@ export default memo(function WorkspaceCard({
 
                 {/* Text + channel tags */}
                 <div className="min-w-0 flex-1">
-                    <h3 className="flex items-center gap-1.5 text-[13px] font-medium text-[var(--ink)]">
+                    <h3 className="flex items-center gap-1.5 text-sm font-medium text-[var(--ink)]">
                         <span className="truncate">{displayName}</span>
                         {isProactive && <HeartPulse className="h-3 w-3 shrink-0 text-[var(--heartbeat)]" />}
                     </h3>
-                    <p className="mt-0.5 truncate text-[11px] text-[var(--ink-muted)]">
+                    <p className="mt-0.5 truncate text-xs text-[var(--ink-muted)]">
                         {shortenPathForDisplay(project.path)}
                     </p>
                     {isProactive && state !== 'pending' && (
@@ -137,7 +137,7 @@ export default memo(function WorkspaceCard({
                                 return (
                                     <span
                                         key={ch.id}
-                                        className={`inline-flex items-center gap-[3px] rounded-[3px] px-1 py-[1px] text-[10px] leading-[14px] ${
+                                        className={`inline-flex items-center gap-[3px] rounded-[3px] px-1 py-[1px] text-xs leading-[14px] ${
                                             isErr
                                                 ? 'text-[var(--error)]'
                                                 : isOn
@@ -178,7 +178,7 @@ export default memo(function WorkspaceCard({
                         }}
                     >
                         <SlidersHorizontal className="h-4 w-4" strokeWidth={2.2} />
-                        <span className="pointer-events-none absolute -bottom-7 left-1/2 -translate-x-1/2 whitespace-nowrap rounded-md bg-[var(--button-dark-bg)] px-2 py-0.5 text-[11px] text-[var(--button-primary-text)] opacity-0 shadow-lg transition-opacity group-hover/btn:opacity-100">
+                        <span className="pointer-events-none absolute -bottom-7 left-1/2 -translate-x-1/2 whitespace-nowrap rounded-md bg-[var(--button-dark-bg)] px-2 py-0.5 text-xs text-[var(--button-primary-text)] opacity-0 shadow-lg transition-opacity group-hover/btn:opacity-100">
                             Agent 设置
                         </span>
                     </div>
@@ -201,7 +201,7 @@ export default memo(function WorkspaceCard({
                             setContextMenu(null);
                             onAgentSettings(project);
                         }}
-                        className="flex w-full items-center gap-2.5 px-3 py-2 text-left text-[13px] text-[var(--ink)] transition-colors hover:bg-[var(--hover-bg)]"
+                        className="flex w-full items-center gap-2.5 px-3 py-2 text-left text-sm text-[var(--ink)] transition-colors hover:bg-[var(--hover-bg)]"
                     >
                         <Settings2 className="h-3.5 w-3.5 text-[var(--ink-muted)]" />
                         Agent 设置
@@ -213,7 +213,7 @@ export default memo(function WorkspaceCard({
                             setContextMenu(null);
                             onRemove(project);
                         }}
-                        className="flex w-full items-center gap-2.5 px-3 py-2 text-left text-[13px] text-[var(--error)] transition-colors hover:bg-[var(--hover-bg)]"
+                        className="flex w-full items-center gap-2.5 px-3 py-2 text-left text-sm text-[var(--error)] transition-colors hover:bg-[var(--hover-bg)]"
                     >
                         <Trash2 className="h-3.5 w-3.5" />
                         移除

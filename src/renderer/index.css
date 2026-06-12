@@ -35,6 +35,32 @@
   /* Tailwind v4 utility aliases — `font-sans` / `font-mono` read these */
   --font-sans: var(--font-body);
   --font-mono: var(--font-code);
+
+  /* Type Scale — 单一真相源（PRD 0.2.34 字体字号统一，唯一档位表见 DESIGN.md §2.2）。
+     注意：覆盖了 Tailwind 默认值 —— text-xs=11px(官方12)、text-sm=13px(官方14)、
+     text-2xl=22px(官方24)。凭 Tailwind 肌肉记忆估字号会踩坑，以这里为准。
+     每档唯一职责（micro/caption/ui/dense/prose）写在注释里；新场景先归档位，
+     禁止 text-[Npx] 任意字面量（eslint 强制，含 12px/14px 等"看着合理"的值）。 */
+  --text-xs: 11px; /* micro: 时间戳、badge、计数、快捷键、分类头(uppercase) */
+  --text-xs--line-height: 1.4;
+  --text-2sm: 12px; /* caption: 标题下描述行、hint、meta 信息、次级标签 */
+  --text-2sm--line-height: 1.45;
+  --text-sm: 13px; /* ui: 按钮、菜单项、树节点、tab、工具卡标题、工具/控制台输出 */
+  --text-sm--line-height: 1.5;
+  --text-md: 14px; /* dense: 嵌在 16px 正文里的密集内容（Markdown 表格等） */
+  --text-md--line-height: 1.55;
+  --text-base: 16px; /* prose: AI 正文、用户气泡、输入框、widget body */
+  --text-base--line-height: 1.7;
+  --text-lg: 18px; /* Markdown H3、弹窗标题 */
+  --text-lg--line-height: 1.5;
+  --text-xl: 20px; /* Markdown H2 */
+  --text-xl--line-height: 1.4;
+  --text-2xl: 22px; /* Markdown H1 */
+  --text-2xl--line-height: 1.3;
+  --text-3xl: 28px; /* stat: 数据大数字（占用率百分比等）、页面大标题 */
+  --text-3xl--line-height: 1.2;
+  --text-brand: 56px; /* 品牌展示（Launcher） */
+  --text-brand--line-height: 1.1;
 }
 
 /* Custom titlebar styles for frameless window */
@@ -146,17 +172,8 @@
      with Chinese fallback). Public tokens: --font-body, --font-display,
      --font-code. */
 
-  /* ========== Typography: Size ========== */
-  /* 基于 16px 正文的字号体系 */
-  --text-2xs: 10px;   /* 时间戳、极小辅助文字 */
-  --text-xs: 11px;    /* 工具调用详情、badge */
-  --text-sm: 13px;    /* 按钮、标签、次要内容 */
-  --text-base: 16px;  /* 正文主体 - AI 回答内容 */
-  --text-lg: 18px;    /* H3 标题 */
-  --text-xl: 20px;    /* H2 标题 */
-  --text-2xl: 22px;   /* H1 标题 */
-  --text-3xl: 28px;   /* 页面大标题 */
-  --text-brand: 56px; /* 品牌展示 */
+  /* Typography Size token 已迁入文件顶部 @theme 块（单一真相源，
+     同时驱动 text-xs/sm/md/base/... utility）。 */
 
   /* ========== Colors: Ink (Text) ========== */
   --ink: #1c1612;
@@ -439,50 +456,6 @@ body::before {
   color: var(--ink-muted);
 }
 
-.tree-item {
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
-  padding: 0.35rem 0.5rem;
-  border-radius: 0.8rem;
-  color: var(--ink-muted);
-  font-size: 13px;
-  cursor: pointer;
-  user-select: none;
-  transition:
-    background 0.2s ease,
-    color 0.2s ease,
-    box-shadow 0.2s ease;
-}
-
-.tree-item:hover {
-  background: var(--paper-elevated);
-  color: var(--ink);
-}
-
-.tree-item.selected {
-  background: var(--paper-elevated);
-  color: var(--ink);
-  box-shadow: inset 0 0 0 1px var(--line);
-}
-
-.tree-item-label {
-  flex: 1;
-  min-width: 0;
-  font-weight: 500;
-  color: inherit;
-}
-
-.tree-item-meta {
-  border: 1px solid var(--line);
-  background: var(--paper-inset);
-  border-radius: 999px;
-  padding: 0.1rem 0.35rem;
-  font-size: 10px;
-  letter-spacing: 0.08em;
-  color: var(--ink-muted);
-}
-
 .action-button {
   display: inline-flex;
   align-items: center;
@@ -645,7 +618,7 @@ button:disabled {
 /* Terminal-like monospace typography for tool calls */
 .tool-input {
   font-family: var(--font-code);
-  font-size: 13px;
+  font-size: var(--text-sm);
   line-height: 1.6;
   letter-spacing: -0.01em;
   font-feature-settings:
@@ -658,7 +631,7 @@ button:disabled {
 /* Clean code block styling */
 pre code {
   font-family: var(--font-code);
-  font-size: 13px;
+  font-size: var(--text-sm);
   line-height: 1.6;
   letter-spacing: -0.01em;
 }
@@ -1008,15 +981,19 @@ code {
 /* Everything here should feel lighter than real AI messages — backdrop,    */
 /* not content. Real messages use --ink; this layer stays at --ink-muted    */
 /* and below so the hierarchy is unambiguous once the user starts chatting. */
+/* De-emphasis is carried by the muted PALETTE, not by font-size: body uses */
+/* the same prose tier (16px) as real AI replies — a second prose base      */
+/* (formerly 14px) read as "字号大小不一" across the welcome→chat transition  */
+/* (PRD 0.2.34 P0-2). */
 .introduction-content {
-  font-size: 14px;
-  line-height: 1.75;
+  font-size: var(--text-base);
+  line-height: 1.7;
   color: var(--ink-muted);
 }
 
-/* H1 acts as a "nameplate", not a document title — lighter and smaller */
+/* H1 acts as a "nameplate", not a document title — lighter weight on purpose */
 .introduction-content h1 {
-  font-size: 22px;
+  font-size: var(--text-2xl);
   font-weight: 500;
   letter-spacing: -0.01em;
   color: var(--ink-muted);
@@ -1024,9 +1001,11 @@ code {
   text-align: center;
 }
 
-/* H2/H3 match H1 color — all guide-layer titles stay at --ink-muted */
+/* H2/H3 match H1 color — all guide-layer titles stay at --ink-muted.        */
+/* Sizes follow the Markdown heading ladder (18/16) so the guide layer and   */
+/* real replies share one scale; h3 sits at body size, weight carries it.    */
 .introduction-content h2 {
-  font-size: 16px;
+  font-size: var(--text-lg);
   font-weight: 600;
   color: var(--ink-muted);
   margin-top: 28px;
@@ -1034,8 +1013,8 @@ code {
 }
 
 .introduction-content h3 {
-  font-size: 15px;
-  font-weight: 500;
+  font-size: var(--text-base);
+  font-weight: 600;
   color: var(--ink-muted);
   margin-top: 16px;
   margin-bottom: 6px;

@@ -657,7 +657,7 @@ export function InstallFromUrlDialog({ onInstall, onCancel, onInstalled }: Insta
                                         )}
                                     </div>
                                     {c.description && <p className="mt-0.5 text-xs text-[var(--ink-muted)]">{c.description}</p>}
-                                    <p className="mt-0.5 font-mono text-[10px] text-[var(--ink-muted)]/70">{c.rootPath}</p>
+                                    <p className="mt-0.5 font-mono text-xs text-[var(--ink-muted)]/70">{c.rootPath}</p>
                                     {c.conflict && (
                                         <label className="mt-1 inline-flex items-center gap-1 text-xs text-[var(--ink-muted)]">
                                             <input

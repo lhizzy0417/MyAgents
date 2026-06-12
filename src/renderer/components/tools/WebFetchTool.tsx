@@ -26,12 +26,12 @@ export default function WebFetchTool({ tool }: WebFetchToolProps) {
           target="_blank"
           rel="noopener noreferrer"
           onClick={(e) => e.stopPropagation()}
-          className="rounded border border-[var(--line-subtle)] bg-[var(--paper-inset)]/50 px-1.5 py-0.5 font-mono text-[10px] text-[var(--accent)] hover:text-[var(--accent-warm-hover)] hover:underline"
+          className="rounded border border-[var(--line-subtle)] bg-[var(--paper-inset)]/50 px-1.5 py-0.5 font-mono text-xs text-[var(--accent)] hover:text-[var(--accent-warm-hover)] hover:underline"
         >
           {input.url}
         </a>
         {input.prompt && (
-          <span className="text-[10px] text-[var(--ink-muted)]">{input.prompt}</span>
+          <span className="text-xs text-[var(--ink-muted)]">{input.prompt}</span>
         )}
       </div>
 

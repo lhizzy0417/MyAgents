@@ -57,7 +57,7 @@ export default function FeedbackPopover({ open, onClose, onOpenBugReport, trigge
         >
             {/* Header */}
             <div className="flex items-center justify-between px-4 pt-3.5 pb-2">
-                <span className="text-[11px] font-semibold uppercase tracking-[0.12em] text-[var(--ink-muted)]">
+                <span className="text-xs font-semibold uppercase tracking-[0.12em] text-[var(--ink-muted)]">
                     帮助与反馈
                 </span>
                 <button
@@ -83,8 +83,8 @@ export default function FeedbackPopover({ open, onClose, onOpenBugReport, trigge
                             <Bot className="h-4 w-4 text-[var(--accent-warm)]" />
                         </div>
                         <div className="min-w-0">
-                            <p className="text-[13px] font-medium text-[var(--ink)]">AI 小助理</p>
-                            <p className="mt-0.5 text-[11px] leading-relaxed text-[var(--ink-muted)]">
+                            <p className="text-sm font-medium text-[var(--ink)]">AI 小助理</p>
+                            <p className="mt-0.5 text-xs leading-relaxed text-[var(--ink-muted)]">
                                 不会使用，反馈问题，意见建议快来找小助理！
                             </p>
                         </div>
@@ -101,8 +101,8 @@ export default function FeedbackPopover({ open, onClose, onOpenBugReport, trigge
                                 <Users className="h-4 w-4 text-[var(--accent-warm)]" />
                             </div>
                             <div className="min-w-0">
-                                <p className="text-[13px] font-medium text-[var(--ink)]">加入用户交流群</p>
-                                <p className="mt-0.5 text-[11px] leading-relaxed text-[var(--ink-muted)]">
+                                <p className="text-sm font-medium text-[var(--ink)]">加入用户交流群</p>
+                                <p className="mt-0.5 text-xs leading-relaxed text-[var(--ink-muted)]">
                                     扫码加入，交流使用心得
                                 </p>
                             </div>

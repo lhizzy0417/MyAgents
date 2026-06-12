@@ -78,15 +78,15 @@ export default function GeminiImageTool({ tool }: GeminiImageToolProps) {
     <div className="flex items-center gap-1.5">
       <ToolHeader tool={tool} toolName={tool.name} label={toolLabel} />
       {isGenerating && (
-        <span className="text-[10px] text-[var(--ink-muted)] animate-pulse">生成中...</span>
+        <span className="text-xs text-[var(--ink-muted)] animate-pulse">生成中...</span>
       )}
       {parsed.isEdit && parsed.editCount && (
-        <span className="rounded bg-[var(--paper-inset)] px-1.5 py-0.5 text-[10px] text-[var(--ink-muted)]">
+        <span className="rounded bg-[var(--paper-inset)] px-1.5 py-0.5 text-xs text-[var(--ink-muted)]">
           #{parsed.editCount}
         </span>
       )}
       {parsed.description && (
-        <span className="truncate text-[10px] text-[var(--ink-muted)] max-w-[300px]">
+        <span className="truncate text-xs text-[var(--ink-muted)] max-w-[300px]">
           {parsed.description}
         </span>
       )}
@@ -97,7 +97,7 @@ export default function GeminiImageTool({ tool }: GeminiImageToolProps) {
     <div className="space-y-2 mt-1">
       {/* Parameters */}
       {tool.inputJson && (
-        <div className="text-[10px] text-[var(--ink-muted)] font-mono">
+        <div className="text-xs text-[var(--ink-muted)] font-mono">
           {(() => {
             try {
               const input = JSON.parse(tool.inputJson);
@@ -157,7 +157,7 @@ export default function GeminiImageTool({ tool }: GeminiImageToolProps) {
 
       {/* Metadata */}
       {parsed.contextId && (
-        <div className="text-[10px] text-[var(--ink-muted)] space-y-0.5 mt-1">
+        <div className="text-xs text-[var(--ink-muted)] space-y-0.5 mt-1">
           {parsed.resolution && <div>分辨率: {parsed.resolution} {parsed.aspectRatio && `| 宽高比: ${parsed.aspectRatio}`}</div>}
           {parsed.model && <div>模型: {parsed.model}</div>}
           {parsed.filePath && <div className="font-mono opacity-60 break-all">文件: {parsed.filePath}</div>}

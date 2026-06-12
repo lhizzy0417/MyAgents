@@ -94,10 +94,10 @@ function ProviderOrderRow({ provider, index, isLast, enabled, onMove, onToggle }
             <div className="min-w-0 flex-1">
                 <div className="flex min-w-0 items-center gap-2">
                     <p className="truncate text-sm font-medium text-[var(--ink)]">{provider.name}</p>
-                    <span className="shrink-0 rounded bg-[var(--paper-inset)] px-1.5 py-0.5 text-[10px] font-medium text-[var(--ink-muted)]">
+                    <span className="shrink-0 rounded bg-[var(--paper-inset)] px-1.5 py-0.5 text-xs font-medium text-[var(--ink-muted)]">
                         {provider.cloudProvider}
                     </span>
-                    <span className="shrink-0 rounded bg-[var(--paper-inset)] px-1.5 py-0.5 text-[10px] font-medium text-[var(--ink-muted)]">
+                    <span className="shrink-0 rounded bg-[var(--paper-inset)] px-1.5 py-0.5 text-xs font-medium text-[var(--ink-muted)]">
                         {provider.type === 'subscription' ? '订阅' : 'API'}
                     </span>
                 </div>

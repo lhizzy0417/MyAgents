@@ -472,7 +472,7 @@ export default function SessionHistoryDropdown({
                                         <div className="min-w-0 flex-1">
                                             <div className="flex items-center gap-2">
                                                 {isCurrent && (
-                                                    <span className="flex-shrink-0 rounded bg-[var(--accent)]/20 px-1.5 py-0.5 text-[10px] font-medium text-[var(--accent)]">
+                                                    <span className="flex-shrink-0 rounded bg-[var(--accent)]/20 px-1.5 py-0.5 text-xs font-medium text-[var(--accent)]">
                                                         当前
                                                     </span>
                                                 )}

@@ -26,7 +26,7 @@ export default function GlobTool({ tool }: GlobToolProps) {
       <div className="flex flex-wrap items-center gap-1.5 text-sm">
         <InlineCode>{input.pattern}</InlineCode>
         {input.path && (
-          <span className="text-[10px] text-[var(--ink-muted)]">in {input.path}</span>
+          <span className="text-xs text-[var(--ink-muted)]">in {input.path}</span>
         )}
         {summary}
       </div>

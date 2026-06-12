@@ -305,7 +305,7 @@ export function UnifiedLogsPanel({ sseLogs, isVisible, onClose, onClearAll }: Un
                             />
                             {searchQuery && (
                                 <>
-                                    <span className="text-[10px] text-[var(--ink-muted)] tabular-nums">
+                                    <span className="text-xs text-[var(--ink-muted)] tabular-nums">
                                         {matchIndices.length > 0 ? `${activeMatchIndex + 1}/${matchIndices.length}` : '0/0'}
                                     </span>
                                     <button onClick={() => navigateMatch('prev')} className="rounded p-0.5 text-[var(--ink-muted)] hover:bg-[var(--paper-inset)]" title="上一个 (Shift+Enter)">
@@ -360,13 +360,13 @@ export function UnifiedLogsPanel({ sseLogs, isVisible, onClose, onClearAll }: Un
                 <div className="flex flex-wrap items-center gap-4 border-b border-[var(--line)] px-6 py-2">
                     {/* 范围 (单选) */}
                     <div className="flex items-center gap-1.5">
-                        <span className="text-[10px] font-semibold uppercase tracking-wider text-[var(--ink-muted)]/60">范围</span>
+                        <span className="text-xs font-semibold uppercase tracking-wider text-[var(--ink-muted)]/60">范围</span>
                         <div className="flex gap-0.5">
                             {SOURCE_FILTERS.map(({ value, label }) => (
                                 <button
                                     key={value}
                                     onClick={() => setFilter(value)}
-                                    className={`rounded px-2 py-0.5 text-[11px] font-medium transition-colors ${filter === value
+                                    className={`rounded px-2 py-0.5 text-xs font-medium transition-colors ${filter === value
                                         ? 'bg-[var(--accent)] text-white'
                                         : 'bg-[var(--paper-inset)] text-[var(--ink-muted)] hover:bg-[var(--line)]'
                                         }`}
@@ -381,13 +381,13 @@ export function UnifiedLogsPanel({ sseLogs, isVisible, onClose, onClearAll }: Un
 
                     {/* 类型 (单选) */}
                     <div className="flex items-center gap-1.5">
-                        <span className="text-[10px] font-semibold uppercase tracking-wider text-[var(--ink-muted)]/60">类型</span>
+                        <span className="text-xs font-semibold uppercase tracking-wider text-[var(--ink-muted)]/60">类型</span>
                         <div className="flex gap-0.5">
                             {LEVEL_FILTERS.map(({ value, label }) => (
                                 <button
                                     key={value}
                                     onClick={() => setLevelFilter(value)}
-                                    className={`rounded px-2 py-0.5 text-[11px] font-medium transition-colors ${levelFilter === value
+                                    className={`rounded px-2 py-0.5 text-xs font-medium transition-colors ${levelFilter === value
                                         ? 'bg-[var(--button-dark-bg)] text-[var(--button-primary-text)]'
                                         : 'bg-[var(--paper-inset)] text-[var(--ink-muted)] hover:bg-[var(--line)]'
                                         }`}
@@ -402,13 +402,13 @@ export function UnifiedLogsPanel({ sseLogs, isVisible, onClose, onClearAll }: Un
 
                     {/* 隐藏 (多选) */}
                     <div className="flex items-center gap-1.5">
-                        <span className="text-[10px] font-semibold uppercase tracking-wider text-[var(--ink-muted)]/60">隐藏</span>
+                        <span className="text-xs font-semibold uppercase tracking-wider text-[var(--ink-muted)]/60">隐藏</span>
                         <div className="flex gap-1">
                             {HIDE_FILTERS.map(({ value, label }) => (
                                 <button
                                     key={value}
                                     onClick={() => toggleHideFilter(value)}
-                                    className={`rounded px-2 py-0.5 text-[11px] font-medium transition-colors ${hideFilters.has(value)
+                                    className={`rounded px-2 py-0.5 text-xs font-medium transition-colors ${hideFilters.has(value)
                                         ? 'bg-[var(--warning)]/15 text-[var(--warning)]'
                                         : 'bg-[var(--paper-inset)] text-[var(--ink-muted)] hover:bg-[var(--line)]'
                                         }`}
@@ -443,7 +443,7 @@ export function UnifiedLogsPanel({ sseLogs, isVisible, onClose, onClearAll }: Un
                                     >
                                         {/* Source badge */}
                                         <span
-                                            className={`flex-shrink-0 rounded px-1.5 py-0.5 text-[10px] font-bold ${SOURCE_COLORS[log.source]}`}
+                                            className={`flex-shrink-0 rounded px-1.5 py-0.5 text-xs font-bold ${SOURCE_COLORS[log.source]}`}
                                         >
                                             {SOURCE_LABELS[log.source]}
                                         </span>
@@ -483,7 +483,7 @@ export function UnifiedLogsPanel({ sseLogs, isVisible, onClose, onClearAll }: Un
                         <span className="text-[var(--ink-muted)]">Total: {allLogs.length}</span>
                     </div>
                     <div>
-                        Press <kbd className="rounded bg-[var(--paper-elevated)] px-1.5 py-0.5 font-mono text-[10px]">ESC</kbd> to close
+                        Press <kbd className="rounded bg-[var(--paper-elevated)] px-1.5 py-0.5 font-mono text-xs">ESC</kbd> to close
                     </div>
                 </div>
             </div>

@@ -24,7 +24,12 @@ export function buildSandboxHtml(cssVarsBlock: string): string {
 ${cssVarsBlock}
 *, *::before, *::after { box-sizing: border-box; }
 html, body { margin: 0; padding: 0; background: transparent; overflow: hidden; }
-body { font-family: system-ui, -apple-system, 'PingFang SC', 'Microsoft YaHei', sans-serif; font-size: 16px; line-height: 1.6; color: var(--widget-text); }
+/* body = host prose tier (16px/1.7, DESIGN.md §2.2) — keep in lockstep with
+   --text-base / --text-base--line-height in index.css @theme. The size values
+   below (headings + .text-* utilities) are ALSO quoted in the widget design
+   contract prompt (src/server/tools/generative-ui-tool.ts SECTION_CORE);
+   change one → sync the other. */
+body { font-family: system-ui, -apple-system, 'PingFang SC', 'Microsoft YaHei', sans-serif; font-size: 16px; line-height: 1.7; color: var(--widget-text); }
 #root { min-height: 20px; }
 
 /* Pre-styled form elements — AI writes bare tags, they look polished */
@@ -57,6 +62,17 @@ button.primary {
 button.primary:hover { opacity: 0.9; }
 label { font-size: 12px; font-weight: 600; color: var(--widget-text-secondary); display: block; margin-bottom: 4px; }
 
+/* Heading reset — widgets are embedded cards, one step below the host's
+   Markdown heading ladder (host H1=22). Without this, a bare <h1>/<h2> falls
+   through to browser defaults (h1=2em/700) — larger than the host app's own
+   H1 and violating the widget design contract's "never 700" weight rule. */
+h1, h2, h3, h4, h5, h6 { font-weight: 600; margin: 0 0 8px; line-height: 1.3; color: var(--widget-text); }
+h1 { font-size: 20px; }
+h2 { font-size: 18px; }
+h3 { font-size: 16px; }
+h4, h5, h6 { font-size: 14px; }
+p { margin: 0 0 8px; }
+
 /* Layout utilities — AI can use these classes */
 .flex { display: flex; } .flex-col { flex-direction: column; }
 .items-center { align-items: center; } .justify-center { justify-content: center; } .justify-between { justify-content: space-between; }
@@ -67,7 +83,10 @@ label { font-size: 12px; font-weight: 600; color: var(--widget-text-secondary); 
 .px-3 { padding-left: 12px; padding-right: 12px; } .py-2 { padding-top: 8px; padding-bottom: 8px; }
 .m-0 { margin: 0; } .mt-2 { margin-top: 8px; } .mt-4 { margin-top: 16px; } .mb-2 { margin-bottom: 8px; } .mb-4 { margin-bottom: 16px; }
 .w-full { width: 100%; } .text-center { text-align: center; }
-.text-sm { font-size: 13px; } .text-xs { font-size: 11px; } .text-lg { font-size: 18px; } .text-xl { font-size: 22px; } .text-2xl { font-size: 28px; }
+/* Text utilities mirror the host app's type scale (xl=20 / 2xl=22) so widget
+   text never reads a tier larger than the same class in the host UI. Big
+   stand-alone numbers should use .stat-value, not .text-2xl. */
+.text-sm { font-size: 13px; } .text-xs { font-size: 11px; } .text-lg { font-size: 18px; } .text-xl { font-size: 20px; } .text-2xl { font-size: 22px; }
 .font-semibold { font-weight: 600; } .font-normal { font-weight: 400; }
 .rounded { border-radius: 8px; } .rounded-lg { border-radius: 12px; }
 .border { border: 1px solid var(--widget-border); }

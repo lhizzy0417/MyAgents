@@ -167,7 +167,7 @@ export default memo(function RecentTasks({
             <div className="mb-8">
                 <TabHeader activeTab={activeTab} onTabChange={handleTabChange} onOpenOverlay={onOpenOverlay} onOpenTaskCenter={handleOpenTaskCenter} />
                 <div className={`${LIST_MIN_HEIGHT} flex items-center`}>
-                    <div className="py-4 text-[13px] text-[var(--ink-muted)]/70">加载中...</div>
+                    <div className="py-4 text-sm text-[var(--ink-muted)]/70">加载中...</div>
                 </div>
             </div>
         );
@@ -180,10 +180,10 @@ export default memo(function RecentTasks({
                 <div className={`${LIST_MIN_HEIGHT} flex items-center justify-center`}>
                     <div className="rounded-xl border border-dashed border-[var(--line)] px-4 py-5 text-center">
                         <AlertCircle className="mx-auto mb-2 h-4 w-4 text-amber-500/70" />
-                        <p className="mb-2 text-[13px] text-[var(--ink-muted)]">{error}</p>
+                        <p className="mb-2 text-sm text-[var(--ink-muted)]">{error}</p>
                         <button
                             onClick={handleRetry}
-                            className="inline-flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-[13px] text-[var(--ink-muted)] transition-colors hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]"
+                            className="inline-flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-sm text-[var(--ink-muted)] transition-colors hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]"
                         >
                             <RefreshCw className="h-3.5 w-3.5" />
                             重试
@@ -205,7 +205,7 @@ export default memo(function RecentTasks({
                         <div className={`${LIST_MIN_HEIGHT} flex items-center justify-center`}>
                             <div className="rounded-xl border border-dashed border-[var(--line)] px-4 py-5 text-center">
                                 <MessageSquare className="mx-auto mb-2 h-4 w-4 text-[var(--ink-muted)]/50" />
-                                <p className="text-[13px] text-[var(--ink-muted)]/70">暂无对话记录</p>
+                                <p className="text-sm text-[var(--ink-muted)]/70">暂无对话记录</p>
                             </div>
                         </div>
                     ) : (
@@ -225,22 +225,22 @@ export default memo(function RecentTasks({
                                         onClick={() => onOpenTask(session, project)}
                                         className="group relative flex w-full cursor-pointer items-center gap-2.5 rounded-lg px-3 py-2 text-left transition-all hover:bg-[var(--hover-bg)]"
                                     >
-                                        <div className="flex w-14 shrink-0 items-center gap-1 text-[11px] text-[var(--ink-muted)]/50">
+                                        <div className="flex w-14 shrink-0 items-center gap-1 text-xs text-[var(--ink-muted)]/50">
                                             <Clock className="h-2.5 w-2.5" />
                                             <span>{formatTime(session.lastActiveAt)}</span>
                                         </div>
                                         {tags.map((tag, i) => (
                                             <SessionTagBadge key={i} tag={tag} />
                                         ))}
-                                        <span className="min-w-0 flex-1 truncate text-[13px] text-[var(--ink-secondary)] transition-colors group-hover:text-[var(--ink)]">
+                                        <span className="min-w-0 flex-1 truncate text-sm text-[var(--ink-secondary)] transition-colors group-hover:text-[var(--ink)]">
                                             {displayText}
                                             {msgCount && (
-                                                <span className="ml-1.5 text-[11px] text-[var(--ink-muted)]/40">
+                                                <span className="ml-1.5 text-xs text-[var(--ink-muted)]/40">
                                                     {msgCount}
                                                 </span>
                                             )}
                                         </span>
-                                        <div className="flex shrink-0 items-center gap-1.5 text-[11px] text-[var(--ink-muted)]/45">
+                                        <div className="flex shrink-0 items-center gap-1.5 text-xs text-[var(--ink-muted)]/45">
                                             <WorkspaceIcon icon={project.icon} size={14} />
                                             <span className="max-w-[80px] truncate">
                                                 {getFolderName(project.path)}
@@ -298,7 +298,7 @@ export default memo(function RecentTasks({
                          both surfaces agree on the "+" semantics. */}
                     <button
                         onClick={() => setShowCreateModal(true)}
-                        className="mb-1.5 flex w-full items-center justify-center gap-1.5 rounded-lg border border-dashed border-[var(--line)] py-2 text-[13px] font-medium text-[var(--ink-muted)] hover:border-[var(--line-strong)] hover:bg-[var(--hover-bg)] hover:text-[var(--ink)] transition-colors"
+                        className="mb-1.5 flex w-full items-center justify-center gap-1.5 rounded-lg border border-dashed border-[var(--line)] py-2 text-sm font-medium text-[var(--ink-muted)] hover:border-[var(--line-strong)] hover:bg-[var(--hover-bg)] hover:text-[var(--ink)] transition-colors"
                     >
                         <Plus className="h-3.5 w-3.5" />
                         新建任务
@@ -307,7 +307,7 @@ export default memo(function RecentTasks({
                         <div className="flex items-center justify-center py-6">
                             <div className="text-center">
                                 <Sparkles className="mx-auto mb-2 h-4 w-4 text-[var(--ink-muted)]/50" />
-                                <p className="text-[13px] text-[var(--ink-muted)]/70">暂无任务</p>
+                                <p className="text-sm text-[var(--ink-muted)]/70">暂无任务</p>
                             </div>
                         </div>
                     ) : (
@@ -331,14 +331,14 @@ export default memo(function RecentTasks({
                                         className="group flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-left transition-all hover:bg-[var(--hover-bg)]"
                                     >
                                         <span
-                                            className={`w-14 shrink-0 text-[11px] font-medium ${style.className}`}
+                                            className={`w-14 shrink-0 text-xs font-medium ${style.className}`}
                                         >
                                             {style.label}
                                         </span>
-                                        <span className="min-w-0 flex-1 truncate text-[13px] text-[var(--ink-secondary)] transition-colors group-hover:text-[var(--ink)]">
+                                        <span className="min-w-0 flex-1 truncate text-sm text-[var(--ink-secondary)] transition-colors group-hover:text-[var(--ink)]">
                                             {task.name || '未命名任务'}
                                         </span>
-                                        <div className="flex shrink-0 items-center gap-2 text-[11px] text-[var(--ink-muted)]/50">
+                                        <div className="flex shrink-0 items-center gap-2 text-xs text-[var(--ink-muted)]/50">
                                             <span className="inline-flex items-center gap-1">
                                                 <Folder className="h-2.5 w-2.5" strokeWidth={1.5} />
                                                 <span className="max-w-[80px] truncate">{workspaceName}</span>
@@ -415,7 +415,7 @@ function TabHeader({
             <div className="flex gap-4">
                 <button
                     onClick={() => onTabChange('sessions')}
-                    className={`relative text-[13px] font-semibold tracking-[0.04em] transition-colors ${
+                    className={`relative text-sm font-semibold tracking-[0.04em] transition-colors ${
                         activeTab === 'sessions'
                             ? 'text-[var(--ink-muted)]'
                             : 'text-[var(--ink-muted)]/60 hover:text-[var(--ink-muted)]'
@@ -428,7 +428,7 @@ function TabHeader({
                 </button>
                 <button
                     onClick={() => onTabChange('tasks')}
-                    className={`relative text-[13px] font-semibold tracking-[0.04em] transition-colors ${
+                    className={`relative text-sm font-semibold tracking-[0.04em] transition-colors ${
                         activeTab === 'tasks'
                             ? 'text-[var(--ink-muted)]'
                             : 'text-[var(--ink-muted)]/60 hover:text-[var(--ink-muted)]'
@@ -451,7 +451,7 @@ function TabHeader({
                 </button>
                 <button
                     onClick={handleSeeAll}
-                    className="group flex h-6 items-center gap-1 rounded px-1.5 text-[11px] text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
+                    className="group flex h-6 items-center gap-1 rounded px-1.5 text-xs text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
                 >
                     全部
                     <ArrowRight className="h-3 w-3 opacity-60 transition-transform group-hover:translate-x-0.5 group-hover:opacity-100" />

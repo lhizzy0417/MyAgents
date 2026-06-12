@@ -53,7 +53,7 @@ export function Checkbox({
       type="button"
       onClick={() => onChange(!checked)}
       disabled={disabled}
-      className="flex items-center gap-2.5 text-[13px] text-[var(--ink)] disabled:cursor-not-allowed disabled:opacity-50"
+      className="flex items-center gap-2.5 text-sm text-[var(--ink)] disabled:cursor-not-allowed disabled:opacity-50"
     >
       <span
         className={`flex h-4 w-4 shrink-0 items-center justify-center rounded border transition-colors ${

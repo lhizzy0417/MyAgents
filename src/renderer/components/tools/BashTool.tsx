@@ -99,7 +99,7 @@ export default function BashTool({ tool }: BashToolProps) {
               {input.command}
             </pre>
             {input.run_in_background && (
-              <div className="absolute right-3 top-3 rounded-md border border-[var(--line)] bg-[var(--code-header-bg)] px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wider text-[var(--code-line-number)]">
+              <div className="absolute right-3 top-3 rounded-md border border-[var(--line)] bg-[var(--code-header-bg)] px-1.5 py-0.5 text-xs font-medium uppercase tracking-wider text-[var(--code-line-number)]">
                 Background
               </div>
             )}
@@ -108,7 +108,7 @@ export default function BashTool({ tool }: BashToolProps) {
       )}
 
       {metaItems.length > 0 && (
-        <div className="flex flex-wrap items-center gap-x-3 gap-y-1 px-1 font-mono text-[11px] text-[var(--ink-muted)]">
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-1 px-1 font-mono text-xs text-[var(--ink-muted)]">
           {metaItems.map(item => (
             <span key={item}>{item}</span>
           ))}

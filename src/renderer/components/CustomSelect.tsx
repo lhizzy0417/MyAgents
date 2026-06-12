@@ -75,7 +75,7 @@ export default function CustomSelect({
                 onClick={() => setIsOpen(!isOpen)}
                 className={`flex w-full items-center gap-2 rounded-lg border border-[var(--line)] bg-[var(--paper)] text-left transition-colors hover:border-[var(--ink-subtle)] ${
                     compact
-                        ? 'px-2 py-1 text-[11px]'
+                        ? 'px-2 py-1 text-xs'
                         : size === 'md'
                             ? 'px-3 py-2.5 text-sm'
                             : 'px-3 py-2 text-xs'
@@ -118,7 +118,7 @@ export default function CustomSelect({
                 <div className="max-h-60 overflow-y-auto py-1">
                     {options.map(option =>
                         option.isSeparator ? (
-                            <div key={option.value} className="px-3 pb-1 pt-2 text-[10px] font-semibold uppercase tracking-[0.08em] text-[var(--ink-muted)]/50">
+                            <div key={option.value} className="px-3 pb-1 pt-2 text-xs font-semibold uppercase tracking-wider text-[var(--ink-muted)]/60">
                                 {option.label}
                             </div>
                         ) : (
@@ -127,9 +127,9 @@ export default function CustomSelect({
                                 type="button"
                                 onClick={() => handleSelect(option.value)}
                                 // Item font size mirrors the trigger's: `size='md'`
-                                // → `text-sm` (14px) so options read at parity with
+                                // → `text-sm` (13px) so options read at parity with
                                 // what the closed trigger shows. Default `size='sm'`
-                                // keeps the legacy `text-xs` (12px) for dense forms.
+                                // keeps the legacy `text-xs` (11px) for dense forms.
                                 className={`flex w-full items-center gap-2 px-3 py-1.5 text-left transition-colors ${
                                     size === 'md' ? 'text-sm' : 'text-xs'
                                 } ${

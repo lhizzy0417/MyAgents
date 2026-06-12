@@ -71,7 +71,7 @@ interface Props {
 export function TaskCategoryBadge({ mode, legacy, compact }: Props) {
   const style = CATEGORY_STYLE[mode];
   const Icon = style.icon;
-  const size = compact ? 'text-[10px]' : 'text-[11px]';
+  const size = compact ? 'text-xs' : 'text-xs';
   // Height / padding mirror TaskStatusBadge so the two chips sit
   // perfectly aligned in the card's header row (see status-badge.tsx
   // for the rationale on leading-none + fixed h-5).

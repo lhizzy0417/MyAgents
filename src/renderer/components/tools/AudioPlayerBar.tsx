@@ -46,7 +46,7 @@ export default function AudioPlayerBar({ filePath }: { filePath: string }) {
 
       <div className="flex flex-1 items-center gap-2">
         <SeekBar ratio={ratio} seekable={seekable} onSeek={(r) => seek(r * duration)} className="flex-1" />
-        <span className="text-[10px] tabular-nums text-[var(--ink-muted)] shrink-0">
+        <span className="text-xs tabular-nums text-[var(--ink-muted)] shrink-0">
           {isCurrent ? formatTime(progress) : '0:00'} / {seekable ? formatTime(duration) : '--:--'}
         </span>
       </div>

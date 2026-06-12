@@ -631,7 +631,7 @@ export function TaskEditPanel({
         >
           <DocPathRow path={`~/.myagents/tasks/${task.id}/task.md`} />
           {taskMdReadState === 'failed' ? (
-            <div className="rounded-[var(--radius-md)] border border-[var(--error)]/30 bg-[var(--error-bg)] px-3 py-2.5 text-[12px] text-[var(--error)]">
+            <div className="rounded-[var(--radius-md)] border border-[var(--error)]/30 bg-[var(--error-bg)] px-3 py-2.5 text-2sm text-[var(--error)]">
               task.md 读取失败。为避免覆盖原内容，编辑已锁定。请关闭重试，或检查磁盘权限后再打开此任务。
             </div>
           ) : (
@@ -647,9 +647,9 @@ export function TaskEditPanel({
                     ? '描述任务目标、约束、上下文'
                     : '加载中…'
                 }
-                className={`${INPUT_CLS} resize-y font-mono text-[13px]`}
+                className={`${INPUT_CLS} resize-y font-mono text-sm`}
               />
-              <p className="mt-1.5 text-[12px] text-[var(--ink-muted)]">
+              <p className="mt-1.5 text-2sm text-[var(--ink-muted)]">
                 AI 执行时看到的 prompt。保存时原子写入上方路径。
               </p>
             </>
@@ -667,7 +667,7 @@ export function TaskEditPanel({
         >
           <DocPathRow path={`~/.myagents/tasks/${task.id}/verify.md`} />
           {verifyMdReadState === 'failed' ? (
-            <div className="rounded-[var(--radius-md)] border border-[var(--error)]/30 bg-[var(--error-bg)] px-3 py-2.5 text-[12px] text-[var(--error)]">
+            <div className="rounded-[var(--radius-md)] border border-[var(--error)]/30 bg-[var(--error-bg)] px-3 py-2.5 text-2sm text-[var(--error)]">
               verify.md 读取失败。为避免覆盖原内容，编辑已锁定。
             </div>
           ) : (
@@ -683,9 +683,9 @@ export function TaskEditPanel({
                     ? '验收清单(可选)——如:「curl /health 应返回 200」「npm test 全绿」'
                     : '加载中…'
                 }
-                className={`${INPUT_CLS} resize-y font-mono text-[13px]`}
+                className={`${INPUT_CLS} resize-y font-mono text-sm`}
               />
-              <p className="mt-1.5 text-[12px] text-[var(--ink-muted)]">
+              <p className="mt-1.5 text-2sm text-[var(--ink-muted)]">
                 任务进入「验证中」阶段时 AI 读取此清单判定是否完成。留空则跳过验证阶段。
               </p>
             </>
@@ -812,9 +812,9 @@ function Field({
 }) {
   return (
     <div>
-      <label className="mb-1.5 block text-[13px] font-medium text-[var(--ink-secondary)]">
+      <label className="mb-1.5 block text-sm font-medium text-[var(--ink-secondary)]">
         {label}
-        {hint && <span className="ml-2 text-[11px] text-[var(--ink-muted)]/70">{hint}</span>}
+        {hint && <span className="ml-2 text-xs text-[var(--ink-muted)]/70">{hint}</span>}
         {required && <span className="ml-1 text-[var(--accent-warm)]">*</span>}
       </label>
       {children}
@@ -828,7 +828,7 @@ function DocPathRow({ path }: { path: string }) {
   return (
     <div className="mb-2 flex items-center gap-2">
       <span
-        className="min-w-0 flex-1 truncate font-mono text-[11px] text-[var(--ink-muted)]/70"
+        className="min-w-0 flex-1 truncate font-mono text-xs text-[var(--ink-muted)]/70"
         title={path}
       >
         {path}
@@ -843,7 +843,7 @@ function OpenFolderButton({ onClick }: { onClick: () => void }) {
       type="button"
       onClick={onClick}
       title="在文件管理器中打开该任务的文档目录"
-      className="inline-flex shrink-0 items-center gap-1 rounded-[var(--radius-md)] px-2 py-0.5 text-[11px] text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
+      className="inline-flex shrink-0 items-center gap-1 rounded-[var(--radius-md)] px-2 py-0.5 text-xs text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
     >
       <FolderOpen className="h-3 w-3" />
       打开文件夹

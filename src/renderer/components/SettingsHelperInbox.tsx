@@ -215,7 +215,7 @@ export default function SettingsHelperInbox({
                     type="button"
                     onMouseDown={(e) => e.stopPropagation()}
                     onClick={handleHistoryClick}
-                    className={`flex items-center gap-1.5 whitespace-nowrap rounded-lg px-2 py-1.5 text-[13px] font-medium transition-colors ${
+                    className={`flex items-center gap-1.5 whitespace-nowrap rounded-lg px-2 py-1.5 text-sm font-medium transition-colors ${
                         showHistory
                             ? 'bg-[var(--paper-inset)] text-[var(--ink)]'
                             : 'text-[var(--ink-muted)] hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]'
@@ -247,6 +247,9 @@ export default function SettingsHelperInbox({
                 {...dragHandlers}
             >
                 <div className="px-5 pt-5 pb-3">
+                    {/* text-base（非 text-[var(--text-base)]——后者被 Tailwind 解析成
+                        color 而非 font-size，字号声明静默失效，cross-review 编译产物取证）；
+                        maxHeight 用配对行高 var 与字阶同源，token 调整自动跟随 */}
                     <textarea
                         value={text}
                         onChange={(e) => setText(e.target.value)}
@@ -256,8 +259,8 @@ export default function SettingsHelperInbox({
                         onPaste={pasteHandler}
                         placeholder={PLACEHOLDER}
                         rows={4}
-                        className="w-full resize-none overflow-y-auto border-0 bg-transparent text-[var(--text-base)] leading-[1.6] text-[var(--ink)] caret-[var(--accent-warm)] placeholder:text-[var(--ink-muted)] focus:outline-none"
-                        style={{ maxHeight: 'calc(8 * 1.6 * var(--text-base))' }}
+                        className="w-full resize-none overflow-y-auto border-0 bg-transparent text-base text-[var(--ink)] caret-[var(--accent-warm)] placeholder:text-[var(--ink-muted)] focus:outline-none"
+                        style={{ maxHeight: 'calc(8 * var(--text-base--line-height) * var(--text-base))' }}
                     />
 
                     {images.length > 0 && (
@@ -332,7 +335,7 @@ export default function SettingsHelperInbox({
                                 type="button"
                                 onClick={handleSend}
                                 disabled={!canSend}
-                                className="flex items-center gap-1.5 rounded-full bg-[var(--button-primary-bg)] px-3.5 py-1.5 text-[13px] font-medium text-[var(--button-primary-text)] transition-colors hover:bg-[var(--button-primary-bg-hover)] disabled:cursor-not-allowed disabled:opacity-50"
+                                className="flex items-center gap-1.5 rounded-full bg-[var(--button-primary-bg)] px-3.5 py-1.5 text-sm font-medium text-[var(--button-primary-text)] transition-colors hover:bg-[var(--button-primary-bg-hover)] disabled:cursor-not-allowed disabled:opacity-50"
                             >
                                 {isSending ? (
                                     <Loader2 className="h-3.5 w-3.5 animate-spin" />

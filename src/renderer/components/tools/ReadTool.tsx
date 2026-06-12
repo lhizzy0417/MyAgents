@@ -23,12 +23,12 @@ export default function ReadTool({ tool }: ReadToolProps) {
       <div className="flex flex-wrap items-center gap-1.5 text-sm">
         <FilePath path={input.file_path} />
         {input.offset !== undefined && (
-          <span className="rounded border border-[var(--line-subtle)] bg-[var(--paper-inset)]/50 px-1.5 py-0.5 text-[10px] font-medium tracking-wide text-[var(--ink-muted)] uppercase">
+          <span className="rounded border border-[var(--line-subtle)] bg-[var(--paper-inset)]/50 px-1.5 py-0.5 text-xs font-medium tracking-wide text-[var(--ink-muted)] uppercase">
             offset {input.offset}
           </span>
         )}
         {input.limit !== undefined && (
-          <span className="rounded border border-[var(--line-subtle)] bg-[var(--paper-inset)]/50 px-1.5 py-0.5 text-[10px] font-medium tracking-wide text-[var(--ink-muted)] uppercase">
+          <span className="rounded border border-[var(--line-subtle)] bg-[var(--paper-inset)]/50 px-1.5 py-0.5 text-xs font-medium tracking-wide text-[var(--ink-muted)] uppercase">
             limit {input.limit}
           </span>
         )}

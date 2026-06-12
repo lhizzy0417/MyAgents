@@ -381,7 +381,7 @@ export function TaskDetailOverlay({
           <div className="min-w-0 flex-1">
             <div className="flex items-center gap-2">
               {editing ? (
-                <span className="rounded-[var(--radius-sm)] bg-[var(--accent)]/10 px-1.5 py-0.5 text-[11px] font-medium text-[var(--accent)]">
+                <span className="rounded-[var(--radius-sm)] bg-[var(--accent)]/10 px-1.5 py-0.5 text-xs font-medium text-[var(--accent)]">
                   编辑中
                 </span>
               ) : (
@@ -396,12 +396,12 @@ export function TaskDetailOverlay({
                   )}
                 </>
               )}
-              <h2 className="min-w-0 truncate text-[18px] font-semibold leading-snug text-[var(--ink)]">
+              <h2 className="min-w-0 truncate text-lg font-semibold leading-snug text-[var(--ink)]">
                 {task.name}
               </h2>
             </div>
             {task.description && !editing && (
-              <p className="mt-1 text-[12px] text-[var(--ink-muted)]">
+              <p className="mt-1 text-2sm text-[var(--ink-muted)]">
                 {task.description}
               </p>
             )}
@@ -478,7 +478,7 @@ export function TaskDetailOverlay({
         )}
 
         {err && (
-          <div className="border-b border-[var(--error)]/30 bg-[var(--error-bg)] px-6 py-2 text-[12px] text-[var(--error)]">
+          <div className="border-b border-[var(--error)]/30 bg-[var(--error-bg)] px-6 py-2 text-2sm text-[var(--error)]">
             {err}
           </div>
         )}
@@ -655,11 +655,11 @@ function NotificationSummary({ task }: { task: Task }) {
 
   return (
     <div>
-      <div className="mb-1.5 flex items-center gap-1.5 text-[14px] font-semibold text-[var(--ink)]">
+      <div className="mb-1.5 flex items-center gap-1.5 text-md font-semibold text-[var(--ink)]">
         <Bell className="h-3.5 w-3.5" />
         通知
       </div>
-      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[12px]">
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-2sm">
         <span className={desktop ? 'text-[var(--ink)]' : 'text-[var(--ink-muted)]'}>
           桌面通知 {desktop ? '✓ 开启' : '✗ 关闭'}
         </span>
@@ -697,7 +697,7 @@ function ActionBtn({
   // 态视觉" feedback; without the override the hover background still
   // flashed on mouse-over).
   const base =
-    'flex items-center gap-1.5 rounded-[var(--radius-md)] px-2.5 py-1.5 text-[13px] font-medium transition-colors disabled:cursor-not-allowed disabled:text-[var(--ink-subtle)] disabled:hover:bg-transparent';
+    'flex items-center gap-1.5 rounded-[var(--radius-md)] px-2.5 py-1.5 text-sm font-medium transition-colors disabled:cursor-not-allowed disabled:text-[var(--ink-subtle)] disabled:hover:bg-transparent';
   const variantCls =
     variant === 'danger'
       ? 'text-[var(--ink-muted)] hover:bg-[var(--error-bg)] hover:text-[var(--error)] disabled:hover:text-[var(--ink-subtle)]'

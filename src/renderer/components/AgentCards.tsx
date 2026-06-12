@@ -19,20 +19,20 @@ export function AgentCard({ agent, onClick }: { agent: AgentItem; onClick: () =>
             onClick={onClick}
         >
             <div className="flex items-center gap-2">
-                <h4 className="min-w-0 flex-1 truncate text-[14px] font-semibold text-[var(--ink)]">
+                <h4 className="min-w-0 flex-1 truncate text-md font-semibold text-[var(--ink)]">
                     {agent.name}
                 </h4>
                 <Bot className="h-3.5 w-3.5 shrink-0 text-violet-500" />
-                <span className="shrink-0 rounded-full bg-[var(--paper-inset)] px-2 py-0.5 text-[10px] font-medium tracking-[0.04em] text-[var(--ink-muted)]">
+                <span className="shrink-0 rounded-full bg-[var(--paper-inset)] px-2 py-0.5 text-xs font-medium tracking-[0.04em] text-[var(--ink-muted)]">
                     {agent.scope === 'user' ? '全局' : '项目'}
                 </span>
                 {agent.synced && (
-                    <span className="shrink-0 rounded-full bg-[var(--info-bg)] px-2 py-0.5 text-[10px] font-medium tracking-[0.04em] text-[var(--info)]">
+                    <span className="shrink-0 rounded-full bg-[var(--info-bg)] px-2 py-0.5 text-xs font-medium tracking-[0.04em] text-[var(--info)]">
                         Claude Code
                     </span>
                 )}
             </div>
-            <p className="line-clamp-2 min-h-[2.6em] text-[13px] leading-relaxed text-[var(--ink-muted)]">
+            <p className="line-clamp-2 min-h-[2.6em] text-sm leading-relaxed text-[var(--ink-muted)]">
                 {agent.description || '暂无描述'}
             </p>
         </div>

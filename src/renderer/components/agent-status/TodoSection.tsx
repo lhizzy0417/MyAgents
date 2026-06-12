@@ -51,10 +51,10 @@ const TodoSection = memo(function TodoSection({ todos }: TodoSectionProps) {
   return (
     <div className="border-b border-[var(--line-subtle)] py-1.5 last:border-b-0">
       <div className="flex items-center justify-between px-3 pb-1 pt-0.5">
-        <span className="text-[10px] font-semibold uppercase tracking-wider text-[var(--ink-muted)]">
+        <span className="text-xs font-semibold uppercase tracking-wider text-[var(--ink-muted)]">
           Todo
         </span>
-        <span className="text-[11px] tabular-nums text-[var(--ink-muted)]">
+        <span className="text-xs tabular-nums text-[var(--ink-muted)]">
           {completed}/{todos.length}
         </span>
       </div>

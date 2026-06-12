@@ -500,12 +500,12 @@ export function SkillCard({ skill, onClick, onToggleEnabled }: {
                 the name, so the eye doesn't have to travel to the footer
                 to read "is this on?". */}
             <div className="flex items-center gap-2">
-                <h4 className="min-w-0 flex-1 truncate text-[14px] font-semibold text-[var(--ink)]">
+                <h4 className="min-w-0 flex-1 truncate text-md font-semibold text-[var(--ink)]">
                     {skill.name}
                 </h4>
                 <Sparkles className="h-3.5 w-3.5 shrink-0 text-amber-500" />
                 {skill.author && (
-                    <span className="shrink-0 rounded-full bg-[var(--paper-inset)] px-2 py-0.5 text-[10px] font-medium tracking-[0.04em] text-[var(--ink-muted)]">
+                    <span className="shrink-0 rounded-full bg-[var(--paper-inset)] px-2 py-0.5 text-xs font-medium tracking-[0.04em] text-[var(--ink-muted)]">
                         {skill.author}
                     </span>
                 )}
@@ -532,7 +532,7 @@ export function SkillCard({ skill, onClick, onToggleEnabled }: {
             </div>
             {/* Description — `min-h-[2.6em]` reserves the 2-line height even
                 for short descriptions so cards in the same grid row align. */}
-            <p className="line-clamp-2 min-h-[2.6em] text-[13px] leading-relaxed text-[var(--ink-muted)]">
+            <p className="line-clamp-2 min-h-[2.6em] text-sm leading-relaxed text-[var(--ink-muted)]">
                 {skill.description || '暂无描述'}
             </p>
         </div>
@@ -549,17 +549,17 @@ export function CommandCard({ command, onClick }: { command: CommandItem; onClic
             onClick={onClick}
         >
             <div className="flex items-center gap-2">
-                <h4 className="min-w-0 flex-1 truncate text-[14px] font-semibold text-[var(--ink)]">
+                <h4 className="min-w-0 flex-1 truncate text-md font-semibold text-[var(--ink)]">
                     {command.name}
                 </h4>
                 <Terminal className="h-3.5 w-3.5 shrink-0 text-sky-500" />
                 {command.author && (
-                    <span className="shrink-0 rounded-full bg-[var(--paper-inset)] px-2 py-0.5 text-[10px] font-medium tracking-[0.04em] text-[var(--ink-muted)]">
+                    <span className="shrink-0 rounded-full bg-[var(--paper-inset)] px-2 py-0.5 text-xs font-medium tracking-[0.04em] text-[var(--ink-muted)]">
                         {command.author}
                     </span>
                 )}
             </div>
-            <p className="line-clamp-2 min-h-[2.6em] text-[13px] leading-relaxed text-[var(--ink-muted)]">
+            <p className="line-clamp-2 min-h-[2.6em] text-sm leading-relaxed text-[var(--ink-muted)]">
                 {command.description || '暂无描述'}
             </p>
         </div>

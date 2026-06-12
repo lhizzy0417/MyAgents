@@ -3568,7 +3568,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
             <button
               type="button"
               onClick={handleNewSession}
-              className="flex items-center gap-1.5 whitespace-nowrap rounded-lg px-2 py-1.5 text-[13px] font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]"
+              className="flex items-center gap-1.5 whitespace-nowrap rounded-lg px-2 py-1.5 text-sm font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]"
               title="新建对话"
             >
               <Plus className="h-3.5 w-3.5 flex-shrink-0" />
@@ -3580,7 +3580,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
               type="button"
               onMouseDown={(e) => e.stopPropagation()}
               onClick={() => setShowHistory((prev) => !prev)}
-              className={`flex items-center gap-1.5 whitespace-nowrap rounded-lg px-2 py-1.5 text-[13px] font-medium transition-colors ${showHistory
+              className={`flex items-center gap-1.5 whitespace-nowrap rounded-lg px-2 py-1.5 text-sm font-medium transition-colors ${showHistory
                 ? 'bg-[var(--paper-inset)] text-[var(--ink)]'
                 : 'text-[var(--ink-muted)] hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]'
                 }`}
@@ -3604,7 +3604,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
                 <button
                   type="button"
                   onClick={() => setShowLogs((prev) => !prev)}
-                  className={`rounded-lg px-2.5 py-1 text-[13px] font-medium transition-colors ${showLogs
+                  className={`rounded-lg px-2.5 py-1 text-sm font-medium transition-colors ${showLogs
                     ? 'bg-[var(--paper-inset)] text-[var(--ink)]'
                     : 'text-[var(--ink-muted)] hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]'
                     }`}
@@ -3679,7 +3679,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
             }
             const canRetry = !!lastUserMsg && !isLoading;
             return (
-            <div className="relative z-10 flex-shrink-0 border-b border-[var(--line)] bg-[var(--paper-inset)] px-4 py-2 text-[11px] text-[var(--ink)]">
+            <div className="relative z-10 flex-shrink-0 border-b border-[var(--line)] bg-[var(--paper-inset)] px-4 py-2 text-xs text-[var(--ink)]">
               <div className="mx-auto flex max-w-3xl items-start gap-2">
                 <AlertTriangle className="mt-0.5 h-4 w-4 flex-shrink-0 text-[var(--accent)]" />
                 <div className="flex-1">
@@ -3706,7 +3706,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
                     <button
                       type="button"
                       onClick={handleRetryLastUserMessage}
-                      className="flex items-center gap-1 rounded-md px-2 py-0.5 text-[10px] font-medium text-[var(--accent)] transition-colors hover:bg-[var(--accent-warm-subtle)]"
+                      className="flex items-center gap-1 rounded-md px-2 py-0.5 text-sm font-medium text-[var(--accent)] transition-colors hover:bg-[var(--accent-warm-subtle)]"
                     >
                       <RotateCcw className="h-3 w-3" />
                       重新发送
@@ -3976,7 +3976,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
                   <button
                     type="button"
                     onClick={() => setSplitActiveView('file')}
-                    className={`group relative flex items-center gap-1 rounded-md px-2.5 py-1 text-[12px] font-medium transition-colors ${
+                    className={`group relative flex items-center gap-1 rounded-md px-2.5 py-1 text-2sm font-medium transition-colors ${
                       splitActiveView === 'file'
                         ? 'text-[var(--ink)]'
                         : 'text-[var(--ink-muted)] hover:text-[var(--ink)]'
@@ -3994,7 +3994,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
                       className="ml-0.5 flex h-5 w-5 items-center justify-center rounded opacity-0 transition-opacity hover:bg-[var(--paper-inset)] group-hover:opacity-100"
                       title="关闭文件"
                     >
-                      <span className="text-[13px] leading-none text-[var(--ink-muted)]">×</span>
+                      <span className="text-sm leading-none text-[var(--ink-muted)]">×</span>
                     </span>
                     {splitActiveView === 'file' && (
                       <div className="absolute inset-x-1 -bottom-[5px] h-[2px] rounded-full bg-[var(--accent-warm)]" />
@@ -4006,7 +4006,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
                   <button
                     type="button"
                     onClick={() => setSplitActiveView('terminal')}
-                    className={`group relative flex items-center gap-1 rounded-md px-2.5 py-1 text-[12px] font-medium transition-colors ${
+                    className={`group relative flex items-center gap-1 rounded-md px-2.5 py-1 text-2sm font-medium transition-colors ${
                       splitActiveView === 'terminal'
                         ? 'text-[var(--ink)]'
                         : 'text-[var(--ink-muted)] hover:text-[var(--ink)]'
@@ -4025,7 +4025,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
                       className="ml-0.5 flex h-5 w-5 items-center justify-center rounded opacity-0 transition-opacity hover:bg-[var(--paper-inset)] group-hover:opacity-100"
                       title="隐藏终端"
                     >
-                      <span className="text-[13px] leading-none text-[var(--ink-muted)]">×</span>
+                      <span className="text-sm leading-none text-[var(--ink-muted)]">×</span>
                     </span>
                     {splitActiveView === 'terminal' && (
                       <div className="absolute inset-x-1 -bottom-[5px] h-[2px] rounded-full bg-[var(--accent-warm)]" />
@@ -4037,7 +4037,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
                   <button
                     type="button"
                     onClick={() => setSplitActiveView('browser')}
-                    className={`group relative flex items-center gap-1 rounded-md px-2.5 py-1 text-[12px] font-medium transition-colors ${
+                    className={`group relative flex items-center gap-1 rounded-md px-2.5 py-1 text-2sm font-medium transition-colors ${
                       splitActiveView === 'browser'
                         ? 'text-[var(--ink)]'
                         : 'text-[var(--ink-muted)] hover:text-[var(--ink)]'
@@ -4073,7 +4073,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
                       className="ml-0.5 flex h-5 w-5 items-center justify-center rounded opacity-0 transition-opacity hover:bg-[var(--paper-inset)] group-hover:opacity-100"
                       title="关闭浏览器"
                     >
-                      <span className="text-[13px] leading-none text-[var(--ink-muted)]">×</span>
+                      <span className="text-sm leading-none text-[var(--ink-muted)]">×</span>
                     </span>
                     {splitActiveView === 'browser' && (
                       <div className="absolute inset-x-1 -bottom-[5px] h-[2px] rounded-full bg-[var(--accent-warm)]" />
@@ -4136,8 +4136,8 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
                   <div className="flex h-9 flex-shrink-0 items-center justify-between bg-[var(--paper)] px-3">
                     <div className="flex items-center gap-1.5">
                       <TerminalSquare className="h-3.5 w-3.5 text-[var(--ink)]" />
-                      <span className="text-[12px] font-medium text-[var(--ink)]">终端</span>
-                      <span className="text-[11px] text-[var(--ink-muted)]">
+                      <span className="text-sm font-medium text-[var(--ink)]">终端</span>
+                      <span className="text-xs text-[var(--ink-muted)]">
                         {agentDir ? `~/${agentDir.split(/[/\\]/).pop()}` : ''}
                       </span>
                     </div>

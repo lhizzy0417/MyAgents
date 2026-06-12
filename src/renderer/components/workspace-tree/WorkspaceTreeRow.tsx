@@ -95,7 +95,7 @@ export const WorkspaceTreeRow = memo(function WorkspaceTreeRow({
       data-tree-path={row.path}
       {...attributes}
       {...listeners}
-      className={`flex cursor-pointer items-center gap-2 px-3 text-[13px] transition-colors select-none ${stateClasses}${
+      className={`flex cursor-pointer items-center gap-2 px-3 text-sm transition-colors select-none ${stateClasses}${
         isFocused && treeActive
           ? " outline outline-1 -outline-offset-1 outline-[var(--accent)]/45"
           : ""

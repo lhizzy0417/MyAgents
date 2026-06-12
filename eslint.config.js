@@ -272,6 +272,33 @@ export default defineConfig(
           selector: 'TemplateElement[value.raw=/(?:linear|radial|conic)-gradient\\(.*\\btransparent\\b/]',
           message: 'CSS gradient with a `transparent` stop is forbidden (#333): `transparent` = rgba(0,0,0,0) and buggy gradient interpolation (macOS 27 beta WebKit, oklab path) renders the ramp through BLACK as a gray smear band. Fade to the same color at alpha 0 instead — use the `--*-a0` twin tokens from index.css, e.g. `linear-gradient(to right, var(--paper), var(--paper-a0))`.',
         },
+        // PRD 0.2.34: arbitrary px font-size literals (`text-[13px]`) bypass
+        // the Type Scale and are the root cause of the "字号大小不一" user
+        // complaint — ghost tiers (12px ×138, 10px ×155, 9/10.5/12.5/15px
+        // one-offs) grew to ~700 callsites before the 0.2.34 unification.
+        // The scale lives in index.css `@theme` (single source of truth);
+        // NOTE its values intentionally differ from Tailwind defaults
+        // (text-xs=11px, text-sm=13px, text-2xl=22px), so "I know what
+        // text-sm is" muscle memory is exactly how the drift started.
+        //
+        // Known escape surface (accepted, do NOT widen the regex without
+        // re-reading DESIGN.md §2.2 边界): rem/em arbitrary values
+        // (`text-[2.5rem]` brand title, `text-[0.9em]` inline code) are
+        // legitimate relative/display forms; `style={{fontSize}}` API
+        // configs (Monaco/xterm/syntax-highlighter) are out of Tailwind's
+        // reach anyway; `.css` files aren't linted (fb.css tracked under
+        // PRD 0.2.35); dynamic `text-[${n}px]` escapes the lint but
+        // Tailwind JIT never generates CSS for it, so it self-neutralizes.
+        // Banning ALL `text-[...]` would false-positive on the color form
+        // `text-[var(--ink)]` — px-only is the deliberate scope.
+        {
+          selector: 'Literal[value=/\\btext-\\[[0-9]+(?:\\.[0-9]+)?px\\]/]',
+          message: '任意 px 字号 `text-[Npx]` 被禁止（PRD 0.2.34）：绕过 Type Scale 会重新长出 12px/14px 这类幽灵字阶，正是"字号大小不一"投诉的根因。改用字阶 utility：text-xs(11 micro)/text-2sm(12 caption)/text-sm(13 ui)/text-md(14 dense)/text-base(16 prose)/text-lg(18)/text-xl(20)/text-2xl(22)/text-3xl(28)。注意本项目 text-sm=13px、text-xs=11px，与 Tailwind 官方值不同（index.css @theme 覆盖）。确需离阶值的展示型场景（如品牌字）先在 DESIGN.md 立档，再对单行 eslint-disable 并注明出处。',
+        },
+        {
+          selector: 'TemplateElement[value.raw=/\\btext-\\[[0-9]+(?:\\.[0-9]+)?px\\]/]',
+          message: '任意 px 字号 `text-[Npx]` 被禁止（PRD 0.2.34）：绕过 Type Scale 会重新长出 12px/14px 这类幽灵字阶，正是"字号大小不一"投诉的根因。改用字阶 utility：text-xs(11 micro)/text-2sm(12 caption)/text-sm(13 ui)/text-md(14 dense)/text-base(16 prose)/text-lg(18)/text-xl(20)/text-2xl(22)/text-3xl(28)。注意本项目 text-sm=13px、text-xs=11px，与 Tailwind 官方值不同（index.css @theme 覆盖）。确需离阶值的展示型场景（如品牌字）先在 DESIGN.md 立档，再对单行 eslint-disable 并注明出处。',
+        },
         ...[
           '/api/files/import-base64',
           '/api/files/copy',

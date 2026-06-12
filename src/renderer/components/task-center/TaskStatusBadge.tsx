@@ -86,7 +86,7 @@ interface Props {
 export function TaskStatusBadge({ status, compact }: Props) {
   const style = STATUS_STYLE[status];
   const label = STATUS_LABEL[status];
-  const size = compact ? 'text-[10px]' : 'text-[11px]';
+  const size = compact ? 'text-xs' : 'text-xs';
   // Fixed height + leading-none so TaskStatusBadge and TaskCategoryBadge
   // render at identical pixel sizes side-by-side. TaskCategoryBadge
   // carries an h-3 icon which stretches its intrinsic line height; we

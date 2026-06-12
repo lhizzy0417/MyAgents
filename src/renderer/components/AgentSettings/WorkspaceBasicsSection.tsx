@@ -446,7 +446,7 @@ export default function WorkspaceBasicsSection({ project, agent, agentDir }: Wor
               // Saved provider lost credentials — warn the user inline so
               // they don't hit a runtime error when a message fires.
               <span
-                className="shrink-0 rounded px-1.5 py-0.5 text-[10px] font-medium text-[var(--warning)]"
+                className="shrink-0 rounded px-1.5 py-0.5 text-xs font-medium text-[var(--warning)]"
                 title="该供应商未配置 API Key / 订阅登录，请点击重新选择"
               >
                 ⚠ 暂不可用
@@ -568,7 +568,7 @@ export default function WorkspaceBasicsSection({ project, agent, agentDir }: Wor
                   <span className="text-xs text-[var(--ink-muted)]">{REASONING_EFFORT_DESCRIPTIONS[level] ?? ''}</span>
                 </button>
               ))}
-              <div className="mt-1 whitespace-nowrap border-t border-[var(--line)] px-3 pb-1 pt-2 text-[10px] text-[var(--ink-muted)]/60">
+              <div className="mt-1 whitespace-nowrap border-t border-[var(--line)] px-3 pb-1 pt-2 text-xs text-[var(--ink-muted)]/60">
                 需服务商支持该参数，以实际生效为准
               </div>
             </div>

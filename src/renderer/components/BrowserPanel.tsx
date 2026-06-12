@@ -422,7 +422,7 @@ export default function BrowserPanel({
             ref={urlInputRef}
             autoFocus
             placeholder={URL_PLACEHOLDER}
-            className="ml-1.5 min-w-0 flex-1 rounded-[var(--radius-sm)] border border-[var(--line)] bg-transparent px-2 py-0.5 text-[12px] text-[var(--ink)] outline-none placeholder:text-[var(--ink-faint)] focus:border-[var(--accent)]"
+            className="ml-1.5 min-w-0 flex-1 rounded-[var(--radius-sm)] border border-[var(--line)] bg-transparent px-2 py-0.5 text-2sm text-[var(--ink)] outline-none placeholder:text-[var(--ink-faint)] focus:border-[var(--accent)]"
             value={urlDraft}
             onChange={(e) => setUrlDraft(e.target.value)}
             onKeyDown={handleUrlKeyDown}
@@ -433,7 +433,7 @@ export default function BrowserPanel({
           <button
             type="button"
             onClick={handleUrlClick}
-            className="ml-1.5 min-w-0 flex-1 cursor-text truncate rounded-[var(--radius-sm)] px-2 py-0.5 text-left text-[12px] transition-colors hover:bg-[var(--paper-inset)]"
+            className="ml-1.5 min-w-0 flex-1 cursor-text truncate rounded-[var(--radius-sm)] px-2 py-0.5 text-left text-2sm transition-colors hover:bg-[var(--paper-inset)]"
             title={isBlankPage ? URL_PLACEHOLDER : currentUrl}
           >
             {isBlankPage ? (
@@ -485,7 +485,7 @@ export default function BrowserPanel({
           <div className="flex h-full items-center justify-center">
             <div className="flex flex-col items-center gap-2 text-[var(--ink-subtle)]">
               <Globe className="h-6 w-6" />
-              <span className="text-[12px]">{url ? '加载中...' : ''}</span>
+              <span className="text-2sm">{url ? '加载中...' : ''}</span>
             </div>
           </div>
         )}
@@ -514,10 +514,10 @@ export default function BrowserPanel({
                 />
               </div>
               <div className="flex flex-col items-center gap-1.5">
-                <div className="text-[15px] font-medium tracking-tight text-[var(--ink)]">
+                <div className="text-base font-medium tracking-tight text-[var(--ink)]">
                   新标签页
                 </div>
-                <div className="text-[12px] text-[var(--ink-muted)]">
+                <div className="text-2sm text-[var(--ink-muted)]">
                   在上方地址栏输入网址或粘贴链接
                 </div>
               </div>
@@ -529,7 +529,7 @@ export default function BrowserPanel({
           <div className="absolute inset-0 z-10 flex items-center justify-center bg-[var(--paper)]/80 backdrop-blur-md">
             <div className="flex flex-col items-center gap-2 text-[var(--ink-subtle)]">
               <Globe className="h-5 w-5" />
-              <span className="text-[12px]">{displayUrl}</span>
+              <span className="text-2sm">{displayUrl}</span>
             </div>
           </div>
         )}

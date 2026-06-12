@@ -166,12 +166,12 @@ export default memo(function RuntimeSelector({
         className="w-72 py-1"
       >
         <div className="flex items-center justify-between px-3 pb-0.5 pt-1.5">
-          <span className="text-[10px] font-semibold uppercase tracking-wider text-[var(--ink-muted)]/60">运行环境</span>
+          <span className="text-xs font-semibold uppercase tracking-wider text-[var(--ink-muted)]/60">运行环境</span>
           {onOpenSettings && (
             <button
               type="button"
               onClick={(e) => { e.stopPropagation(); setOpen(false); onOpenSettings(); }}
-              className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
+              className="flex items-center gap-1 rounded px-1.5 py-0.5 text-xs font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
             >
               <Settings className="h-2.5 w-2.5" />
               设置

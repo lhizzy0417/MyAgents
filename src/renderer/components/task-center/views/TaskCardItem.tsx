@@ -218,7 +218,7 @@ function MetaRow({
   }
 
   return (
-    <div className="flex items-center gap-1.5 text-[11px] text-[var(--ink-muted)]">
+    <div className="flex items-center gap-1.5 text-xs text-[var(--ink-muted)]">
       <Folder className="h-3 w-3 shrink-0" strokeWidth={1.5} />
       <span className="truncate">{workspace}</span>
       {parts.map((p, i) => (
@@ -252,7 +252,7 @@ function ActivityBar({ message }: { message: string }) {
   // entire class of overflow bug.
   return (
     <div
-      className="block w-full min-w-0 truncate rounded-r-[var(--radius-sm)] border-l-2 border-[var(--line)] px-2.5 py-1 text-[12px] leading-snug text-[var(--ink-muted)]"
+      className="block w-full min-w-0 truncate rounded-r-[var(--radius-sm)] border-l-2 border-[var(--line)] px-2.5 py-1 text-2sm leading-snug text-[var(--ink-muted)]"
       style={{
         backgroundColor:
           'color-mix(in srgb, var(--paper-inset) 35%, var(--paper-elevated))',
@@ -351,12 +351,12 @@ export function ViewSessionButton({ task }: { task?: Task }) {
         type="button"
         onClick={handleClick}
         aria-label="查看会话详情"
-        className="flex items-center gap-1 rounded-[var(--radius-md)] px-2 py-0.5 text-[12px] text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--accent-cool)]"
+        className="flex items-center gap-1 rounded-[var(--radius-md)] px-2 py-0.5 text-2sm text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--accent-cool)]"
       >
         <MessageCircle className="h-3.5 w-3.5" strokeWidth={1.5} />
         会话详情
       </button>
-      <span className="pointer-events-none absolute -bottom-7 left-1/2 z-30 -translate-x-1/2 whitespace-nowrap rounded-md bg-[var(--button-dark-bg)] px-2 py-0.5 text-[11px] text-[var(--button-primary-text)] opacity-0 shadow-lg transition-opacity group-hover/view-session:opacity-100">
+      <span className="pointer-events-none absolute -bottom-7 left-1/2 z-30 -translate-x-1/2 whitespace-nowrap rounded-md bg-[var(--button-dark-bg)] px-2 py-0.5 text-xs text-[var(--button-primary-text)] opacity-0 shadow-lg transition-opacity group-hover/view-session:opacity-100">
         查看会话详情
       </span>
     </div>

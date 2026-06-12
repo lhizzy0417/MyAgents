@@ -34,7 +34,7 @@ export default function BindCodePanel({
                 <MessageSquare className="h-4 w-4 text-[var(--ink-muted)]" />
                 <h3 className="text-sm font-semibold text-[var(--ink)]">口令绑定</h3>
                 {!hasWhitelistUsers && (
-                    <span className="rounded-full bg-[var(--info-bg)] px-2 py-0.5 text-[10px] font-medium text-[var(--info)]">
+                    <span className="rounded-full bg-[var(--info-bg)] px-2 py-0.5 text-xs font-medium text-[var(--info)]">
                         推荐
                     </span>
                 )}
@@ -61,15 +61,15 @@ export default function BindCodePanel({
             {/* Instructions */}
             <div className="mt-4 space-y-2 text-xs text-[var(--ink-muted)]">
                 <div className="flex items-start gap-2">
-                    <span className="mt-0.5 flex h-4 w-4 flex-shrink-0 items-center justify-center rounded-full bg-[var(--button-primary-bg)] text-[10px] font-bold text-[var(--button-primary-text)]">1</span>
+                    <span className="mt-0.5 flex h-4 w-4 flex-shrink-0 items-center justify-center rounded-full bg-[var(--button-primary-bg)] text-xs font-bold text-[var(--button-primary-text)]">1</span>
                     <span>在{platformName}中找到并打开 Bot 的私聊</span>
                 </div>
                 <div className="flex items-start gap-2">
-                    <span className="mt-0.5 flex h-4 w-4 flex-shrink-0 items-center justify-center rounded-full bg-[var(--button-primary-bg)] text-[10px] font-bold text-[var(--button-primary-text)]">2</span>
+                    <span className="mt-0.5 flex h-4 w-4 flex-shrink-0 items-center justify-center rounded-full bg-[var(--button-primary-bg)] text-xs font-bold text-[var(--button-primary-text)]">2</span>
                     <span>发送上方口令（点击复制按钮）</span>
                 </div>
                 <div className="flex items-start gap-2">
-                    <span className="mt-0.5 flex h-4 w-4 flex-shrink-0 items-center justify-center rounded-full bg-[var(--button-primary-bg)] text-[10px] font-bold text-[var(--button-primary-text)]">3</span>
+                    <span className="mt-0.5 flex h-4 w-4 flex-shrink-0 items-center justify-center rounded-full bg-[var(--button-primary-bg)] text-xs font-bold text-[var(--button-primary-text)]">3</span>
                     <span>绑定成功后即可开始对话</span>
                 </div>
             </div>

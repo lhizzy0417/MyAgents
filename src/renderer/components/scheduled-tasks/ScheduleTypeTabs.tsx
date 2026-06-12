@@ -180,7 +180,7 @@ export default function ScheduleTypeTabs({ value, intervalMinutes, onChange, err
               key={tab.kind}
               type="button"
               onClick={() => handleTabChange(tab.kind)}
-              className={`flex flex-1 items-center justify-center gap-1.5 rounded-[var(--radius-sm)] px-3 py-1.5 text-[13px] font-medium transition-colors ${
+              className={`flex flex-1 items-center justify-center gap-1.5 rounded-[var(--radius-sm)] px-3 py-1.5 text-sm font-medium transition-colors ${
                 isActive
                   ? 'bg-[var(--paper-elevated)] text-[var(--ink)] shadow-xs'
                   : 'text-[var(--ink-muted)] hover:text-[var(--ink)]'

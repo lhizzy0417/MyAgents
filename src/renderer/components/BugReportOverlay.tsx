@@ -118,7 +118,7 @@ export default function BugReportOverlay({
             <div className="glass-panel w-full max-w-md">
                 {/* Header */}
                 <div className="flex items-center justify-between border-b border-[var(--line)] px-5 py-4">
-                    <h2 className="text-[14px] font-semibold text-[var(--ink)]">AI 小助理</h2>
+                    <h2 className="text-md font-semibold text-[var(--ink)]">AI 小助理</h2>
                     <button
                         onClick={onClose}
                         className="rounded-lg p-1 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
@@ -166,7 +166,7 @@ export default function BugReportOverlay({
                             onCompositionEnd={onCompositionEnd}
                             onPaste={pasteHandler}
                             placeholder="描述您遇到的问题、提出您的意见或建议"
-                            className="w-full resize-none border-0 bg-transparent px-4 py-3 text-[13px] text-[var(--ink)] placeholder:text-[var(--ink-muted)]/50 focus:outline-none"
+                            className="w-full resize-none border-0 bg-transparent px-4 py-3 text-sm text-[var(--ink)] placeholder:text-[var(--ink-muted)]/50 focus:outline-none"
                             rows={5}
                         />
 
@@ -208,7 +208,7 @@ export default function BugReportOverlay({
                                     }}
                                     onNavigateToProviders={onNavigateToProviders}
                                     onOpenChange={(open) => { menuOpenRef.current = open; }}
-                                    triggerClassName="flex items-center gap-1 rounded-lg px-2 py-1 text-[12px] text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
+                                    triggerClassName="flex items-center gap-1 rounded-lg px-2 py-1 text-2sm text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
                                 />
                             </div>
 

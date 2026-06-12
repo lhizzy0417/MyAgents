@@ -996,7 +996,7 @@ export default function ChannelWizard({
                                 <div className="flex items-center gap-2">
                                     <p className="text-sm font-semibold text-[var(--ink)]">{openclawPluginName}</p>
                                     {installedPlugin?.packageVersion && (
-                                        <span className="rounded-full bg-[var(--paper-inset)] px-2 py-0.5 text-[11px] font-medium text-[var(--ink-muted)]">
+                                        <span className="rounded-full bg-[var(--paper-inset)] px-2 py-0.5 text-xs font-medium text-[var(--ink-muted)]">
                                             v{installedPlugin.packageVersion}
                                         </span>
                                     )}
@@ -1059,7 +1059,7 @@ export default function ChannelWizard({
                                 <div className="flex items-center gap-2">
                                     <p className="text-sm font-semibold text-[var(--ink)]">{promoted?.name || openclawPluginName}</p>
                                     {installedPlugin?.packageVersion && (
-                                        <span className="rounded-full bg-[var(--paper-inset)] px-2 py-0.5 text-[11px] font-medium text-[var(--ink-muted)]">
+                                        <span className="rounded-full bg-[var(--paper-inset)] px-2 py-0.5 text-xs font-medium text-[var(--ink-muted)]">
                                             v{installedPlugin.packageVersion}
                                         </span>
                                     )}
@@ -1074,7 +1074,7 @@ export default function ChannelWizard({
                     {/* Mode switcher: pill tab */}
                     <div className="flex gap-1 rounded-lg bg-[var(--paper-inset)] p-1">
                         <button
-                            className={`flex-1 rounded-md px-3 py-1.5 text-[13px] font-medium transition-colors ${
+                            className={`flex-1 rounded-md px-3 py-1.5 text-sm font-medium transition-colors ${
                                 dualConfigMode === 'qr'
                                     ? 'bg-[var(--paper-elevated)] text-[var(--ink)] shadow-xs'
                                     : 'text-[var(--ink-muted)] hover:text-[var(--ink)]'
@@ -1084,7 +1084,7 @@ export default function ChannelWizard({
                             扫码添加
                         </button>
                         <button
-                            className={`flex-1 rounded-md px-3 py-1.5 text-[13px] font-medium transition-colors ${
+                            className={`flex-1 rounded-md px-3 py-1.5 text-sm font-medium transition-colors ${
                                 dualConfigMode === 'config'
                                     ? 'bg-[var(--paper-elevated)] text-[var(--ink)] shadow-xs'
                                     : 'text-[var(--ink-muted)] hover:text-[var(--ink)]'
@@ -1247,7 +1247,7 @@ export default function ChannelWizard({
                                 <div className="flex items-center gap-2">
                                     <p className="text-sm font-semibold text-[var(--ink)]">{openclawPluginName}</p>
                                     {installedPlugin?.packageVersion && (
-                                        <span className="rounded-full bg-[var(--paper-inset)] px-2 py-0.5 text-[11px] font-medium text-[var(--ink-muted)]">
+                                        <span className="rounded-full bg-[var(--paper-inset)] px-2 py-0.5 text-xs font-medium text-[var(--ink-muted)]">
                                             v{installedPlugin.packageVersion}
                                         </span>
                                     )}
@@ -1342,7 +1342,7 @@ export default function ChannelWizard({
                                                     <button onClick={() => setOpenclawCustomFields(openclawCustomFields.filter((_, idx) => idx !== i))} className="shrink-0 rounded-lg p-1.5 text-[var(--ink-subtle)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--error)]"><Trash2 className="h-3.5 w-3.5" /></button>
                                                 </div>
                                             ))}
-                                            <button onClick={() => setOpenclawCustomFields([...openclawCustomFields, { key: '', value: '' }])} className="flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-[13px] font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]">
+                                            <button onClick={() => setOpenclawCustomFields([...openclawCustomFields, { key: '', value: '' }])} className="flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-sm font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]">
                                                 <Plus className="h-3.5 w-3.5" />
                                                 添加配置项
                                             </button>
@@ -1358,7 +1358,7 @@ export default function ChannelWizard({
                                             <button onClick={() => setOpenclawCustomFields(openclawCustomFields.filter((_, idx) => idx !== i))} className="shrink-0 rounded-lg p-1.5 text-[var(--ink-subtle)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--error)]"><Trash2 className="h-3.5 w-3.5" /></button>
                                         </div>
                                     ))}
-                                    <button onClick={() => setOpenclawCustomFields([...openclawCustomFields, { key: '', value: '' }])} className="flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-[13px] font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]">
+                                    <button onClick={() => setOpenclawCustomFields([...openclawCustomFields, { key: '', value: '' }])} className="flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-sm font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]">
                                         <Plus className="h-3.5 w-3.5" />
                                         添加配置项
                                     </button>
@@ -1601,7 +1601,7 @@ export default function ChannelWizard({
                             >
                                 {permJsonCopied ? <Check className="h-3.5 w-3.5 text-[var(--success)]" /> : <Copy className="h-3.5 w-3.5" />}
                             </button>
-                            <pre className="overflow-x-auto rounded-lg bg-[var(--paper-inset)] p-3 text-[11px] leading-relaxed text-[var(--ink-muted)]">
+                            <pre className="overflow-x-auto rounded-lg bg-[var(--paper-inset)] p-3 text-xs leading-relaxed text-[var(--ink-muted)]">
                                 {FEISHU_PERMISSIONS_JSON}
                             </pre>
                         </div>
@@ -1613,7 +1613,7 @@ export default function ChannelWizard({
                         <ol className="mt-3 space-y-1.5 text-sm text-[var(--ink-muted)]">
                             <li>左侧菜单进入 <span className="font-medium text-[var(--ink)]">事件与回调</span> &gt; <span className="font-medium text-[var(--ink)]">事件配置</span></li>
                             <li>请求方式选择：<span className="font-medium text-[var(--ink)]">使用长连接接收事件</span>（不需要公网服务器）</li>
-                            <li>添加事件：搜索 <code className="rounded bg-[var(--paper-inset)] px-1.5 py-0.5 text-[11px]">im.message.receive_v1</code>（接收消息），勾选添加</li>
+                            <li>添加事件：搜索 <code className="rounded bg-[var(--paper-inset)] px-1.5 py-0.5 text-xs">im.message.receive_v1</code>（接收消息），勾选添加</li>
                         </ol>
                         <img src={feishuStep2EventImg} alt="飞书事件与回调 - 事件配置" className="mt-4 w-full rounded-lg border border-[var(--line)]" />
                     </div>
@@ -1674,7 +1674,7 @@ export default function ChannelWizard({
                                     >
                                         {permJsonCopied ? <Check className="h-3.5 w-3.5 text-[var(--success)]" /> : <Copy className="h-3.5 w-3.5" />}
                                     </button>
-                                    <pre className="overflow-x-auto rounded-lg bg-[var(--paper-inset)] p-3 text-[11px] leading-relaxed text-[var(--ink-muted)]">
+                                    <pre className="overflow-x-auto rounded-lg bg-[var(--paper-inset)] p-3 text-xs leading-relaxed text-[var(--ink-muted)]">
                                         {FEISHU_PERMISSIONS_JSON}
                                     </pre>
                                 </div>
@@ -1686,7 +1686,7 @@ export default function ChannelWizard({
                                 <ol className="mt-3 space-y-1.5 text-sm text-[var(--ink-muted)]">
                                     <li>左侧菜单进入 <span className="font-medium text-[var(--ink)]">事件与回调</span> &gt; <span className="font-medium text-[var(--ink)]">事件配置</span></li>
                                     <li>请求方式选择：<span className="font-medium text-[var(--ink)]">使用长连接接收事件</span>（不需要公网服务器）</li>
-                                    <li>添加事件：搜索 <code className="rounded bg-[var(--paper-inset)] px-1.5 py-0.5 text-[11px]">im.message.receive_v1</code>（接收消息），勾选添加</li>
+                                    <li>添加事件：搜索 <code className="rounded bg-[var(--paper-inset)] px-1.5 py-0.5 text-xs">im.message.receive_v1</code>（接收消息），勾选添加</li>
                                 </ol>
                                 <img src={feishuStep2EventImg} alt="飞书事件与回调 - 事件配置" className="mt-4 w-full rounded-lg border border-[var(--line)]" />
                             </div>

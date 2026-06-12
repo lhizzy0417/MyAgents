@@ -3267,7 +3267,7 @@ const DirectoryPanel = memo(
                   e.stopPropagation();
                   onOpenConfig();
                 }}
-                className="flex items-center gap-1 rounded-lg px-2 py-1 text-[13px] font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]"
+                className="flex items-center gap-1 rounded-lg px-2 py-1 text-sm font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]"
                 title="打开 Agent 设置"
               >
                 <SlidersHorizontal className="h-4 w-4" />
@@ -3310,7 +3310,7 @@ const DirectoryPanel = memo(
                           value={searchQuery}
                           onChange={(e) => setSearchQuery(e.target.value)}
                           placeholder="搜索文件及内容..."
-                          className="h-7 w-full rounded-md border border-[var(--line)] bg-transparent pl-8 pr-8 text-[12px] text-[var(--ink)] placeholder-[var(--ink-muted)]/50 outline-none transition-colors focus:border-[var(--accent)]"
+                          className="h-7 w-full rounded-md border border-[var(--line)] bg-transparent pl-8 pr-8 text-sm text-[var(--ink)] placeholder-[var(--ink-muted)]/50 outline-none transition-colors focus:border-[var(--accent)]"
                           onKeyDown={(e) => {
                               if (e.key === 'Escape') {
                                   setIsSearchMode(false);
@@ -3338,24 +3338,24 @@ const DirectoryPanel = memo(
                 <div className="min-w-0 flex-1">
                   {/* First row: name, git branch, stats */}
                   <div className="flex items-center gap-2">
-                    <span className="truncate text-[13px] font-medium text-[var(--ink)]">
+                    <span className="truncate text-sm font-medium text-[var(--ink)]">
                       {projectDisplayName || folderName}
                     </span>
                     {gitBranch && (
-                      <span className="flex items-center gap-0.5 rounded-md bg-[var(--accent-warm-subtle)] px-1.5 py-0.5 text-[11px] font-medium text-[var(--ink-muted)]">
+                      <span className="flex items-center gap-0.5 rounded-md bg-[var(--accent-warm-subtle)] px-1.5 py-0.5 text-xs font-medium text-[var(--ink-muted)]">
                         <GitBranch className="h-3 w-3" />
                         {gitBranch}
                       </span>
                     )}
                     {directoryInfo && (
-                      <span className="ml-auto flex-shrink-0 text-[11px] text-[var(--ink-muted)]">
+                      <span className="ml-auto flex-shrink-0 text-xs text-[var(--ink-muted)]">
                         {directoryInfo.summary.totalFiles} 文件 ·{" "}
                         {directoryInfo.summary.totalDirs} 文件夹
                       </span>
                     )}
                   </div>
                   {/* Second row: path */}
-                  <div className="mt-0.5 truncate text-[11px] text-[var(--ink-muted)]">
+                  <div className="mt-0.5 truncate text-xs text-[var(--ink-muted)]">
                     {shortenPathForDisplay(agentDir)}
                   </div>
                 </div>
@@ -3506,7 +3506,7 @@ const DirectoryPanel = memo(
                     {/* Drag overlay — floating preview that follows cursor */}
                     <DragOverlay dropAnimation={null}>
                       {activeDragItem && (
-                        <div className="flex items-center gap-2 rounded-md border border-[var(--line)] bg-[var(--paper-elevated)] px-3 py-1 text-[13px] shadow-lg">
+                        <div className="flex items-center gap-2 rounded-md border border-[var(--line)] bg-[var(--paper-elevated)] px-3 py-1 text-sm shadow-lg">
                           <activeDragItem.icon className="h-3.5 w-3.5 flex-shrink-0 text-[var(--accent-warm)]" />
                           <span className="font-medium text-[var(--ink)]">
                             {activeDragItem.name}

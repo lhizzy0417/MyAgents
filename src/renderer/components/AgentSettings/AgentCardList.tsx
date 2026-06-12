@@ -83,28 +83,28 @@ export default function AgentCardList({ onSelectAgent }: AgentCardListProps) {
                   {displayName}
                 </span>
                 {!agent.enabled && (
-                  <span className="shrink-0 rounded px-1.5 py-0.5 text-[10px] bg-[var(--paper-inset)] text-[var(--ink-subtle)]">
+                  <span className="shrink-0 rounded px-1.5 py-0.5 text-xs bg-[var(--paper-inset)] text-[var(--ink-subtle)]">
                     已禁用
                   </span>
                 )}
               </div>
 
               {/* Workspace path */}
-              <div className="mt-0.5 truncate text-[11px] text-[var(--ink-subtle)]">
+              <div className="mt-0.5 truncate text-xs text-[var(--ink-subtle)]">
                 {shortenPathForDisplay(agent.workspacePath)}
               </div>
 
               {/* Channel badges */}
               <div className="mt-1.5 flex flex-wrap gap-1">
                 {(agent.channels ?? []).map(ch => (
-                  <span key={ch.id} className="rounded px-1.5 py-0.5 text-[10px] bg-[var(--paper-inset)] text-[var(--ink-muted)]">
+                  <span key={ch.id} className="rounded px-1.5 py-0.5 text-xs bg-[var(--paper-inset)] text-[var(--ink-muted)]">
                     {getPlatformLabel(ch.type)}
                   </span>
                 ))}
               </div>
 
               {/* Status + model */}
-              <div className="mt-1.5 flex items-center gap-2 text-[11px] text-[var(--ink-subtle)]">
+              <div className="mt-1.5 flex items-center gap-2 text-xs text-[var(--ink-subtle)]">
                 <span style={{ color: statusColor }}>
                   {onlineChannels > 0 ? `${onlineChannels}/${totalChannels} 在线` : `${totalChannels} 渠道`}
                 </span>

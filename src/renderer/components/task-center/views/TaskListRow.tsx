@@ -57,15 +57,15 @@ export function TaskListRow(props: TaskListRowProps) {
         <TaskStatusBadge status={status} compact />
         <TaskCategoryBadge mode={category} legacy={isLegacy} compact />
       </div>
-      <span className="min-w-0 flex-1 truncate text-[13px] text-[var(--ink)]">
+      <span className="min-w-0 flex-1 truncate text-sm text-[var(--ink)]">
         {name}
       </span>
       {workspace && (
-        <span className="hidden max-w-[110px] shrink-0 truncate text-[11px] text-[var(--ink-muted)] sm:block">
+        <span className="hidden max-w-[110px] shrink-0 truncate text-xs text-[var(--ink-muted)] sm:block">
           {workspace}
         </span>
       )}
-      <span className="w-[80px] shrink-0 text-right text-[11px] text-[var(--ink-muted)]/80">
+      <span className="w-[80px] shrink-0 text-right text-xs text-[var(--ink-muted)]/80">
         {relativeTime(updatedAt)}
       </span>
       <ViewSessionButton task={task} />

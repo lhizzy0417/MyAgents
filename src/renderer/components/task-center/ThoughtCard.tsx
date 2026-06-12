@@ -275,7 +275,7 @@ export function ThoughtCard({
           as the card "jumping". Consistent structure across states
           means no reflow on mode transitions. */}
       <div className="mb-2 flex h-5 items-center justify-between gap-2">
-        <span className="min-w-0 truncate text-[11px] text-[var(--ink-muted)]/60">
+        <span className="min-w-0 truncate text-xs text-[var(--ink-muted)]/60">
           {formatRelative(thought.updatedAt)}
           {convertedCount > 0 && (
             <span className="ml-2 text-[var(--accent-warm)]">
@@ -298,13 +298,13 @@ export function ThoughtCard({
                     ref={discussAnchorRef}
                     type="button"
                     onClick={() => setShowWorkspacePicker((v) => !v)}
-                    className="flex items-center gap-1 rounded-[var(--radius-md)] px-2 py-0.5 text-[12px] text-[var(--ink-muted)] hover:bg-[var(--paper-inset)] hover:text-[var(--accent-cool)]"
+                    className="flex items-center gap-1 rounded-[var(--radius-md)] px-2 py-0.5 text-2sm text-[var(--ink-muted)] hover:bg-[var(--paper-inset)] hover:text-[var(--accent-cool)]"
                   >
                     <MessageSquare className="h-3.5 w-3.5" strokeWidth={1.5} />
                     AI 讨论
                   </button>
                   {!showWorkspacePicker && (
-                    <span className="pointer-events-none absolute -bottom-7 left-1/2 z-30 -translate-x-1/2 whitespace-nowrap rounded-md bg-[var(--button-dark-bg)] px-2 py-0.5 text-[11px] text-[var(--button-primary-text)] opacity-0 shadow-lg transition-opacity group-hover/discuss:opacity-100">
+                    <span className="pointer-events-none absolute -bottom-7 left-1/2 z-30 -translate-x-1/2 whitespace-nowrap rounded-md bg-[var(--button-dark-bg)] px-2 py-0.5 text-xs text-[var(--button-primary-text)] opacity-0 shadow-lg transition-opacity group-hover/discuss:opacity-100">
                       与 AI 讨论或创建任务
                     </span>
                   )}
@@ -315,12 +315,12 @@ export function ThoughtCard({
                   <button
                     type="button"
                     onClick={() => onDispatch(thought)}
-                    className="flex items-center gap-1 rounded-[var(--radius-md)] px-2 py-0.5 text-[12px] text-[var(--ink-muted)] hover:bg-[var(--paper-inset)] hover:text-[var(--accent-warm)]"
+                    className="flex items-center gap-1 rounded-[var(--radius-md)] px-2 py-0.5 text-2sm text-[var(--ink-muted)] hover:bg-[var(--paper-inset)] hover:text-[var(--accent-warm)]"
                   >
                     <Zap className="h-3.5 w-3.5" strokeWidth={1.5} />
                     派发
                   </button>
-                  <span className="pointer-events-none absolute -bottom-7 left-1/2 z-30 -translate-x-1/2 whitespace-nowrap rounded-md bg-[var(--button-dark-bg)] px-2 py-0.5 text-[11px] text-[var(--button-primary-text)] opacity-0 shadow-lg transition-opacity group-hover/dispatch:opacity-100">
+                  <span className="pointer-events-none absolute -bottom-7 left-1/2 z-30 -translate-x-1/2 whitespace-nowrap rounded-md bg-[var(--button-dark-bg)] px-2 py-0.5 text-xs text-[var(--button-primary-text)] opacity-0 shadow-lg transition-opacity group-hover/dispatch:opacity-100">
                     直接派发任务
                   </span>
                 </div>
@@ -337,12 +337,12 @@ export function ThoughtCard({
                 placement="bottom-end"
                 className="min-w-[240px] max-w-[320px] py-1"
               >
-                <div className="px-3 pt-2 pb-1 text-[11px] font-semibold uppercase tracking-[0.12em] text-[var(--ink-muted)]/70">
+                <div className="px-3 pt-2 pb-1 text-xs font-semibold uppercase tracking-[0.12em] text-[var(--ink-muted)]/70">
                   选择 Agent 工作区
                 </div>
                 <div className="max-h-[280px] overflow-y-auto py-1">
                   {pickableWorkspaces.length === 0 ? (
-                    <div className="px-3 py-4 text-[12px] text-[var(--ink-muted)]">
+                    <div className="px-3 py-4 text-2sm text-[var(--ink-muted)]">
                       暂无工作区
                     </div>
                   ) : (
@@ -360,10 +360,10 @@ export function ThoughtCard({
                       >
                         <WorkspaceIcon icon={p.icon} size={20} />
                         <div className="min-w-0 flex-1">
-                          <div className="truncate text-[13px] font-medium text-[var(--ink)]">
+                          <div className="truncate text-sm font-medium text-[var(--ink)]">
                             {p.displayName || getFolderName(p.path)}
                           </div>
-                          <div className="truncate text-[11px] text-[var(--ink-muted)]/70">
+                          <div className="truncate text-xs text-[var(--ink-muted)]/70">
                             {p.path}
                           </div>
                         </div>
@@ -401,7 +401,7 @@ export function ThoughtCard({
                   setShowMenu(false);
                   enterEdit();
                 }}
-                className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[12px] text-[var(--ink-secondary)] hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]"
+                className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-2sm text-[var(--ink-secondary)] hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]"
               >
                 <Pencil className="h-3.5 w-3.5" strokeWidth={1.5} />
                 编辑
@@ -413,7 +413,7 @@ export function ThoughtCard({
                     setShowMenu(false);
                     onEnterSelectMode();
                   }}
-                  className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[12px] text-[var(--ink-secondary)] hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]"
+                  className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-2sm text-[var(--ink-secondary)] hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]"
                 >
                   <CheckSquare className="h-3.5 w-3.5" strokeWidth={1.5} />
                   多选
@@ -423,7 +423,7 @@ export function ThoughtCard({
                 type="button"
                 onClick={() => void handleToggleArchive()}
                 disabled={busy}
-                className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[12px] text-[var(--ink-secondary)] hover:bg-[var(--hover-bg)] hover:text-[var(--ink)] disabled:opacity-50"
+                className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-2sm text-[var(--ink-secondary)] hover:bg-[var(--hover-bg)] hover:text-[var(--ink)] disabled:opacity-50"
               >
                 {isArchived ? (
                   <>
@@ -440,7 +440,7 @@ export function ThoughtCard({
               <button
                 type="button"
                 onClick={() => void handleDelete()}
-                className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[12px] text-[var(--error)] hover:bg-[var(--error-bg)]"
+                className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-2sm text-[var(--error)] hover:bg-[var(--error-bg)]"
               >
                 <Trash2 className="h-3.5 w-3.5" strokeWidth={1.5} />
                 删除
@@ -464,12 +464,12 @@ export function ThoughtCard({
             maxHeight: `${EDIT_MAX_HEIGHT_PX}px`,
             overflowY: 'auto',
           }}
-          className="w-full resize-none rounded-[var(--radius-sm)] bg-transparent text-[14px] leading-[1.6] text-[var(--ink)] focus:outline-none"
+          className="w-full resize-none rounded-[var(--radius-sm)] bg-transparent text-md leading-[1.6] text-[var(--ink)] focus:outline-none"
         />
       ) : (
         <div
           ref={viewRef}
-          className="cursor-text whitespace-pre-wrap break-words text-[14px] leading-[1.6] text-[var(--ink-secondary)]"
+          className="cursor-text whitespace-pre-wrap break-words text-md leading-[1.6] text-[var(--ink-secondary)]"
           style={
             expanded
               ? undefined
@@ -514,14 +514,14 @@ export function ThoughtCard({
         <button
           type="button"
           onClick={() => setExpanded((v) => !v)}
-          className="mt-1 text-[12px] text-[var(--accent-warm)] hover:underline"
+          className="mt-1 text-2sm text-[var(--accent-warm)] hover:underline"
         >
           {expanded ? '收起' : '展开全文'}
         </button>
       )}
 
       {error && (
-        <div className="mt-2 text-[11px] text-[var(--error)]">{error}</div>
+        <div className="mt-2 text-xs text-[var(--error)]">{error}</div>
       )}
 
       {/* Inline edit action bar — only in edit mode. Sits at the bottom
@@ -535,7 +535,7 @@ export function ThoughtCard({
               setEditing(false);
             }}
             disabled={busy}
-            className="rounded-[var(--radius-md)] px-2 py-1 text-[12px] text-[var(--ink-muted)] hover:bg-[var(--paper-inset)]"
+            className="rounded-[var(--radius-md)] px-2 py-1 text-2sm text-[var(--ink-muted)] hover:bg-[var(--paper-inset)]"
           >
             取消
           </button>
@@ -543,7 +543,7 @@ export function ThoughtCard({
             type="button"
             onClick={() => void handleSave()}
             disabled={busy}
-            className="rounded-[var(--radius-md)] bg-[var(--accent-warm)] px-2.5 py-1 text-[12px] font-medium text-white hover:bg-[var(--accent-warm-hover)]"
+            className="rounded-[var(--radius-md)] bg-[var(--accent-warm)] px-2.5 py-1 text-2sm font-medium text-white hover:bg-[var(--accent-warm-hover)]"
           >
             保存
           </button>

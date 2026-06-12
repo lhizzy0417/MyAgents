@@ -76,7 +76,7 @@ export default function TaskRunHistory({ taskId, onOpenSession, sessionId }: Tas
           >
             <div className="flex w-full items-center gap-2">
               {/* Time */}
-              <span className="w-24 flex-shrink-0 text-[11px] text-[var(--ink-muted)]/50">
+              <span className="w-24 flex-shrink-0 text-xs text-[var(--ink-muted)]/50">
                 {date.toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })}
               </span>
               {/* Status icon */}
@@ -86,7 +86,7 @@ export default function TaskRunHistory({ taskId, onOpenSession, sessionId }: Tas
                 <XCircle className="h-3 w-3 flex-shrink-0 text-[var(--error)]" />
               )}
               {/* Duration */}
-              <span className="w-12 flex-shrink-0 text-[11px] text-[var(--ink-muted)]">
+              <span className="w-12 flex-shrink-0 text-xs text-[var(--ink-muted)]">
                 {run.durationMs < 1000 ? `${run.durationMs}ms` : `${(run.durationMs / 1000).toFixed(1)}s`}
               </span>
               {/* Content preview */}

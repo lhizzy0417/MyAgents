@@ -133,7 +133,7 @@ function AutoSaveIndicator({ status }: { status: 'idle' | 'saving' | 'saved' | '
     }
     if (status === 'saving') {
         return (
-            <span className="flex items-center gap-1 text-[11px] text-[var(--ink-muted)]">
+            <span className="flex items-center gap-1 text-xs text-[var(--ink-muted)]">
                 <Loader2 className="h-3 w-3 animate-spin" />
                 保存中
             </span>
@@ -141,14 +141,14 @@ function AutoSaveIndicator({ status }: { status: 'idle' | 'saving' | 'saved' | '
     }
     if (status === 'saved') {
         return (
-            <span className="flex items-center gap-1 text-[11px] text-[var(--success)]">
+            <span className="flex items-center gap-1 text-xs text-[var(--success)]">
                 <Check className="h-3 w-3" />
                 已保存
             </span>
         );
     }
     return (
-        <span className="flex items-center gap-1 text-[11px] text-[var(--error)]">
+        <span className="flex items-center gap-1 text-xs text-[var(--error)]">
             <X className="h-3 w-3" />
             保存失败
         </span>
@@ -198,7 +198,7 @@ function LiveUpdateIndicator({
     const label = pending ? '外部更新' : '已更新';
     return (
         <span
-            className="flex-shrink-0 whitespace-nowrap text-[11px] font-normal text-[var(--ink-subtle)]/80"
+            className="flex-shrink-0 whitespace-nowrap text-xs font-normal text-[var(--ink-subtle)]/80"
             title={pending ? '文件已在外部更新，本地编辑尚未覆盖' : '文件内容已自动更新'}
         >
             {label} {formatFilePreviewUpdateTime(updatedAt)}
@@ -311,8 +311,8 @@ function MdViewSegment({
     compact?: boolean;
 }) {
     const baseBtn = compact
-        ? 'inline-flex items-center gap-1 rounded-[var(--radius-sm)] px-2 py-0.5 text-[11px] font-medium transition-all duration-150'
-        : 'inline-flex items-center gap-1.5 rounded-[var(--radius-sm)] px-3 py-1 text-[12px] font-medium transition-all duration-150';
+        ? 'inline-flex items-center gap-1 rounded-[var(--radius-sm)] px-2 py-0.5 text-xs font-medium transition-all duration-150'
+        : 'inline-flex items-center gap-1.5 rounded-[var(--radius-sm)] px-3 py-1 text-2sm font-medium transition-all duration-150';
     const activeBtn = 'bg-[var(--paper-elevated)] text-[var(--ink)] shadow-xs';
     const inactiveBtn = 'text-[var(--ink-muted)] hover:text-[var(--ink-secondary)]';
     const iconCls = compact ? 'h-3 w-3' : 'h-3 w-3';
@@ -1117,7 +1117,7 @@ export default function FilePreviewModal({
                             onCancel={handleRenameCancel}
                             onStartEdit={handleStartRename}
                             busy={renameInFlight}
-                            className="text-[13px] font-medium text-[var(--ink)]"
+                            className="text-sm font-medium text-[var(--ink)]"
                         />
                         {isDirectEdit && <AutoSaveIndicator status={autoSaveStatus} />}
                         <LiveUpdateIndicator updatedAt={lastExternalUpdateAt} pending={externalUpdatePending} />
@@ -1208,7 +1208,7 @@ export default function FilePreviewModal({
                                     onCancel={handleRenameCancel}
                                     onStartEdit={handleStartRename}
                                     busy={renameInFlight}
-                                    className="text-[13px] font-semibold text-[var(--ink)]"
+                                    className="text-sm font-semibold text-[var(--ink)]"
                                 />
                                 {isDirectEdit && <AutoSaveIndicator status={autoSaveStatus} />}
                                 <LiveUpdateIndicator updatedAt={lastExternalUpdateAt} pending={externalUpdatePending} />
@@ -1221,7 +1221,7 @@ export default function FilePreviewModal({
                                     const sep = workspacePath?.includes('\\') ? '\\' : '/';
                                     const absolute = workspacePath ? `${workspacePath}${sep}${path}` : path;
                                     return (
-                                        <span className="max-w-[400px] truncate text-[11px] text-[var(--ink-muted)]" title={absolute}>
+                                        <span className="max-w-[400px] truncate text-xs text-[var(--ink-muted)]" title={absolute}>
                                             {shortenPathForDisplay(absolute)}
                                         </span>
                                     );
@@ -1262,7 +1262,7 @@ export default function FilePreviewModal({
                         <button
                             type="button"
                             onClick={handleClose}
-                            className="inline-flex items-center justify-center rounded-md border border-[var(--line-strong)] bg-[var(--button-secondary-bg)] px-3 py-1.5 text-[11px] font-semibold text-[var(--ink)] shadow-sm transition-all duration-150 hover:bg-[var(--button-secondary-bg-hover)] hover:shadow-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)] focus-visible:ring-offset-1 active:scale-[0.98]"
+                            className="inline-flex items-center justify-center rounded-md border border-[var(--line-strong)] bg-[var(--button-secondary-bg)] px-3 py-1.5 text-xs font-semibold text-[var(--ink)] shadow-sm transition-all duration-150 hover:bg-[var(--button-secondary-bg-hover)] hover:shadow-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)] focus-visible:ring-offset-1 active:scale-[0.98]"
                         >
                             关闭
                         </button>

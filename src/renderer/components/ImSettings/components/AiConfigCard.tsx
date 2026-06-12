@@ -39,7 +39,7 @@ export default function AiConfigCard({
                     <div className="flex-1 pr-4">
                         <p className="text-sm font-medium text-[var(--ink)]">模型</p>
                         <p className="text-xs text-[var(--ink-muted)]">
-                            可在 Telegram 中使用 <code className="rounded bg-[var(--paper-inset)] px-1 py-0.5 text-[10px]">/model</code> 命令切换
+                            可在 Telegram 中使用 <code className="rounded bg-[var(--paper-inset)] px-1 py-0.5 text-xs">/model</code> 命令切换
                         </p>
                     </div>
                     <CustomSelect

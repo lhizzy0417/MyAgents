@@ -98,7 +98,7 @@ export function ZoomControls({
       <button
         type="button"
         onClick={onReset}
-        className="min-w-[44px] rounded-full px-1 text-center text-[12px] font-medium tabular-nums text-[var(--ink-muted)] transition-colors hover:text-[var(--ink)]"
+        className="min-w-[44px] rounded-full px-1 text-center text-2sm font-medium tabular-nums text-[var(--ink-muted)] transition-colors hover:text-[var(--ink)]"
         title="重置为 100%"
       >
         {Math.round(zoom * 100)}%

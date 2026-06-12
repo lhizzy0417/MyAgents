@@ -546,7 +546,7 @@ export function TaskListPanel({ highlightTaskId, refreshKey, pendingIntent }: Pr
           {/* `relative top-[1px]` keeps optical centering consistent with
               ThoughtPanel's Lightbulb — see the comment there. */}
           <CheckSquare className="relative top-[1px] h-4 w-4 text-[var(--ink-muted)]" strokeWidth={1.5} />
-          <span className="text-[16px] font-semibold text-[var(--ink)]">
+          <span className="text-base font-semibold text-[var(--ink)]">
             任务
           </span>
           {/* v0.1.69 — inline "+ 新建" entry point so users aren't forced
@@ -564,12 +564,12 @@ export function TaskListPanel({ highlightTaskId, refreshKey, pendingIntent }: Pr
               type="button"
               onClick={() => setShowCreateModal(true)}
               aria-label="新建任务"
-              className="inline-flex h-7 items-center gap-1 rounded-full px-2.5 text-[12px] text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
+              className="inline-flex h-7 items-center gap-1 rounded-full px-2.5 text-2sm text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
             >
               <Plus className="h-3.5 w-3.5" strokeWidth={1.75} />
               新建
             </button>
-            <span className="pointer-events-none absolute left-1/2 top-full z-50 mt-1.5 -translate-x-1/2 whitespace-nowrap rounded-md bg-[var(--ink)] px-2 py-1 text-[11px] font-medium text-[var(--paper)] opacity-0 shadow-md transition-opacity duration-150 group-hover/newTask:opacity-100">
+            <span className="pointer-events-none absolute left-1/2 top-full z-50 mt-1.5 -translate-x-1/2 whitespace-nowrap rounded-md bg-[var(--ink)] px-2 py-1 text-xs font-medium text-[var(--paper)] opacity-0 shadow-md transition-opacity duration-150 group-hover/newTask:opacity-100">
               新建任务
             </span>
           </div>
@@ -608,11 +608,11 @@ export function TaskListPanel({ highlightTaskId, refreshKey, pendingIntent }: Pr
           (`TaskListRow`) keeps its own `px-3` for row-internal content. */}
       <div className="@container flex-1 overflow-y-auto px-4 py-3">
         {loading ? (
-          <div className="py-8 text-center text-[13px] text-[var(--ink-muted)]">
+          <div className="py-8 text-center text-sm text-[var(--ink-muted)]">
             加载中…
           </div>
         ) : totalCount === 0 ? (
-          <div className="py-12 text-center text-[13px] text-[var(--ink-muted)]">
+          <div className="py-12 text-center text-sm text-[var(--ink-muted)]">
             还没有任务。在左栏记下想法后点「派发」即可创建任务。
           </div>
         ) : (
@@ -715,10 +715,10 @@ export function TaskListPanel({ highlightTaskId, refreshKey, pendingIntent }: Pr
 function BucketHeader({ label, count }: { label: string; count: number }) {
   return (
     <div className="mb-2 flex items-center gap-2">
-      <span className="text-[11px] font-semibold uppercase tracking-[0.12em] text-[var(--ink-muted)]">
+      <span className="text-xs font-semibold uppercase tracking-[0.12em] text-[var(--ink-muted)]">
         {label}
       </span>
-      <span className="text-[11px] tabular-nums text-[var(--ink-subtle)]">
+      <span className="text-xs tabular-nums text-[var(--ink-subtle)]">
         {count}
       </span>
       <span className="ml-1 h-px flex-1 bg-[var(--line-subtle)]" aria-hidden />

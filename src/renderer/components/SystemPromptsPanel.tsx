@@ -493,7 +493,7 @@ const SystemPromptsPanel = forwardRef<SystemPromptsPanelRef, SystemPromptsPanelP
                                     className="fixed z-50 -translate-x-1/2 whitespace-nowrap rounded-lg border border-[var(--line)] bg-[var(--paper)] px-3 py-2 shadow-lg"
                                     style={{ left: addTipPos.x, top: addTipPos.y }}
                                 >
-                                    <p className="text-[11px] leading-relaxed text-[var(--ink-muted)]">
+                                    <p className="text-xs leading-relaxed text-[var(--ink-muted)]">
                                         添加的规则文件均会自动加载到系统提示词 System Prompt 里面
                                     </p>
                                 </div>
@@ -585,11 +585,11 @@ const SystemPromptsPanel = forwardRef<SystemPromptsPanelRef, SystemPromptsPanelP
                                         >
                                             <div className="flex items-center gap-2">
                                                 <Sparkles className="h-4 w-4 shrink-0 text-amber-500" />
-                                                <h4 className="text-[15px] font-semibold text-[var(--ink)]">智能生成</h4>
-                                                <span className="rounded-full bg-[var(--accent-warm-subtle)] px-2 py-0.5 text-[11px] font-medium text-[var(--accent)]">推荐</span>
+                                                <h4 className="text-base font-semibold text-[var(--ink)]">智能生成</h4>
+                                                <span className="rounded-full bg-[var(--accent-warm-subtle)] px-2 py-0.5 text-xs font-medium text-[var(--accent)]">推荐</span>
                                             </div>
-                                            <p className="text-[13px] leading-relaxed text-[var(--ink-muted)]">
-                                                AI 分析当前项目结构，自动生成贴合的 CLAUDE.md（运行 <code className="rounded bg-[var(--paper-inset)] px-1 text-[12px]">/init</code>）
+                                            <p className="text-sm leading-relaxed text-[var(--ink-muted)]">
+                                                AI 分析当前项目结构，自动生成贴合的 CLAUDE.md（运行 <code className="rounded bg-[var(--paper-inset)] px-1 text-2sm">/init</code>）
                                             </p>
                                         </button>
                                     )}
@@ -600,9 +600,9 @@ const SystemPromptsPanel = forwardRef<SystemPromptsPanelRef, SystemPromptsPanelP
                                     >
                                         <div className="flex items-center gap-2">
                                             <FolderArchive className="h-4 w-4 shrink-0 text-amber-500" />
-                                            <h4 className="text-[15px] font-semibold text-[var(--ink)]">从模板库添加</h4>
+                                            <h4 className="text-base font-semibold text-[var(--ink)]">从模板库添加</h4>
                                         </div>
-                                        <p className="text-[13px] leading-relaxed text-[var(--ink-muted)]">
+                                        <p className="text-sm leading-relaxed text-[var(--ink-muted)]">
                                             挑一个内置或自定义的 Agent 模板，合并到当前工作区（同名文件覆盖）
                                         </p>
                                     </button>
@@ -613,9 +613,9 @@ const SystemPromptsPanel = forwardRef<SystemPromptsPanelRef, SystemPromptsPanelP
                                     >
                                         <div className="flex items-center gap-2">
                                             <Edit2 className="h-4 w-4 shrink-0 text-amber-500" />
-                                            <h4 className="text-[15px] font-semibold text-[var(--ink)]">手动创建</h4>
+                                            <h4 className="text-base font-semibold text-[var(--ink)]">手动创建</h4>
                                         </div>
-                                        <p className="text-[13px] leading-relaxed text-[var(--ink-muted)]">
+                                        <p className="text-sm leading-relaxed text-[var(--ink-muted)]">
                                             自己写一份 CLAUDE.md，进入编辑器从空白开始
                                         </p>
                                     </button>

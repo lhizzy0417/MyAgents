@@ -336,7 +336,7 @@ const Message = memo(function Message({ message, isLoading = false, onRewind, on
       const displayText = taskNotif.description || taskNotif.summary || taskNotif.taskId || '后台任务';
       return (
         <div className="flex justify-start w-full px-4 py-1.5 select-none">
-          <div className="flex items-center gap-2 rounded-lg px-3 py-2 text-[12px] text-[var(--ink-muted)]">
+          <div className="flex items-center gap-2 rounded-lg px-3 py-2 text-2sm text-[var(--ink-muted)]">
             <StatusIcon className="h-3.5 w-3.5 flex-shrink-0" style={{ color: statusColor }} />
             <span>后台任务</span>
             <span className="font-medium text-[var(--ink-secondary)]">&ldquo;{displayText}&rdquo;</span>
@@ -379,16 +379,18 @@ const Message = memo(function Message({ message, isLoading = false, onRewind, on
         <div className="flex w-full flex-col items-end">
           {/* IM source indicator */}
           {isImMessage && (
-            <div className="mr-2 mb-1 flex items-center gap-1 text-[11px] text-[var(--ink-muted)]">
+            <div className="mr-2 mb-1 flex items-center gap-1 text-xs text-[var(--ink-muted)]">
               {imSource?.includes('group') && <span>👥</span>}
               <span>via {SOURCE_LABELS[imSource as MessageSource] ?? imSource}</span>
             </div>
           )}
-          <article className="relative w-fit max-w-[85%] rounded-2xl border border-[var(--line)] bg-[var(--paper-elevated)] p-4 text-base leading-relaxed text-[var(--ink)] shadow-md select-text">
+          {/* text-base 自带 1.7 行高（@theme 配对），与 .ai-message-content 一致 —— 用户气泡
+              与 AI 正文同为 prose 档，行高不再分叉（PRD 0.2.34 P2-5） */}
+          <article className="relative w-fit max-w-[85%] rounded-2xl border border-[var(--line)] bg-[var(--paper-elevated)] p-4 text-base text-[var(--ink)] shadow-md select-text">
             {/* System injection tag badge */}
             {systemTag && (
               <div className="mb-2 -mt-0.5">
-                <span className="inline-block rounded-md bg-[var(--accent-warm-subtle)] px-1.5 py-0.5 text-[11px] font-medium text-[var(--accent-warm)]">
+                <span className="inline-block rounded-md bg-[var(--accent-warm-subtle)] px-1.5 py-0.5 text-xs font-medium text-[var(--accent-warm)]">
                   {systemTag}
                 </span>
               </div>
@@ -421,7 +423,7 @@ const Message = memo(function Message({ message, isLoading = false, onRewind, on
                 <button
                   type="button"
                   onClick={() => setUserExpanded(true)}
-                  className="flex w-full items-center justify-center gap-1 rounded-b-2xl bg-[var(--paper-elevated)] py-1.5 text-[12px] font-medium text-[var(--ink-muted)] transition-colors hover:text-[var(--ink)]"
+                  className="flex w-full items-center justify-center gap-1 rounded-b-2xl bg-[var(--paper-elevated)] py-1.5 text-2sm font-medium text-[var(--ink-muted)] transition-colors hover:text-[var(--ink)]"
                 >
                   <ChevronDown className="size-3.5" />
                   展开
@@ -431,7 +433,7 @@ const Message = memo(function Message({ message, isLoading = false, onRewind, on
           </article>
           {/* 操作栏：时间 + 图标按钮，hover 淡入 */}
           <div className={`mr-2 mt-1 flex items-center gap-2 transition-opacity ${userHovered ? 'opacity-100' : 'opacity-0'}`}>
-            <span className="text-[11px] text-[var(--ink-muted)] mr-1">{formatTimestamp(message.timestamp)}</span>
+            <span className="text-xs text-[var(--ink-muted)] mr-1">{formatTimestamp(message.timestamp)}</span>
             {onRewind && (
               <span data-rewind-btn>
                 <Tip label="时间回溯">

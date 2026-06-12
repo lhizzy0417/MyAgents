@@ -194,7 +194,7 @@ export default function TemplateApplyDialog({ agentDir, onClose, onApplied }: Te
                                                 <div className="flex items-center gap-2">
                                                     <span className="text-sm font-medium text-[var(--ink)]">{t.name}</span>
                                                     {t.isBuiltin && (
-                                                        <span className="rounded px-1.5 py-0.5 text-[10px] text-[var(--ink-muted)] bg-[var(--paper-inset)]">
+                                                        <span className="rounded px-1.5 py-0.5 text-xs text-[var(--ink-muted)] bg-[var(--paper-inset)]">
                                                             内置
                                                         </span>
                                                     )}
@@ -220,7 +220,7 @@ export default function TemplateApplyDialog({ agentDir, onClose, onApplied }: Te
                                         <FileWarning className="h-3.5 w-3.5" />
                                         将覆盖 {preview.overwrite.length} 个文件
                                     </h3>
-                                    <ul className="max-h-[180px] overflow-auto rounded-lg border border-[var(--line)] bg-[var(--paper-inset)] px-3 py-2 font-mono text-[11px] text-[var(--ink-muted)]">
+                                    <ul className="max-h-[180px] overflow-auto rounded-lg border border-[var(--line)] bg-[var(--paper-inset)] px-3 py-2 font-mono text-xs text-[var(--ink-muted)]">
                                         {preview.overwrite.map(f => <li key={f} className="py-0.5">{f}</li>)}
                                     </ul>
                                 </section>
@@ -231,7 +231,7 @@ export default function TemplateApplyDialog({ agentDir, onClose, onApplied }: Te
                                         <FilePlus className="h-3.5 w-3.5" />
                                         将新增 {preview.add.length} 个文件
                                     </h3>
-                                    <ul className="max-h-[180px] overflow-auto rounded-lg border border-[var(--line)] bg-[var(--paper-inset)] px-3 py-2 font-mono text-[11px] text-[var(--ink-muted)]">
+                                    <ul className="max-h-[180px] overflow-auto rounded-lg border border-[var(--line)] bg-[var(--paper-inset)] px-3 py-2 font-mono text-xs text-[var(--ink-muted)]">
                                         {preview.add.map(f => <li key={f} className="py-0.5">{f}</li>)}
                                     </ul>
                                 </section>

@@ -27,7 +27,7 @@ export default memo(function AddWorkspaceMenu({
             <button
                 ref={buttonRef}
                 onClick={toggle}
-                className="flex items-center gap-1.5 rounded-lg bg-[var(--button-primary-bg)] px-2.5 py-1.5 text-[13px] font-medium text-[var(--button-primary-text)] transition-colors hover:bg-[var(--button-primary-bg-hover)]"
+                className="flex items-center gap-1.5 rounded-lg bg-[var(--button-primary-bg)] px-2.5 py-1.5 text-sm font-medium text-[var(--button-primary-text)] transition-colors hover:bg-[var(--button-primary-bg-hover)]"
             >
                 <Plus className="h-3.5 w-3.5" />
                 添加
@@ -43,7 +43,7 @@ export default memo(function AddWorkspaceMenu({
                     type="button"
                     role="menuitem"
                     onClick={() => { setOpen(false); onAddFolder(); }}
-                    className="flex w-full items-center gap-2.5 px-3 py-2 text-left text-[13px] text-[var(--ink)] transition-colors hover:bg-[var(--hover-bg)]"
+                    className="flex w-full items-center gap-2.5 px-3 py-2 text-left text-sm text-[var(--ink)] transition-colors hover:bg-[var(--hover-bg)]"
                 >
                     <FolderPlus className="h-3.5 w-3.5 text-[var(--ink-muted)]" />
                     添加本地文件夹
@@ -52,7 +52,7 @@ export default memo(function AddWorkspaceMenu({
                     type="button"
                     role="menuitem"
                     onClick={() => { setOpen(false); onCreateFromTemplate(); }}
-                    className="flex w-full items-center gap-2.5 px-3 py-2 text-left text-[13px] text-[var(--ink)] transition-colors hover:bg-[var(--hover-bg)]"
+                    className="flex w-full items-center gap-2.5 px-3 py-2 text-left text-sm text-[var(--ink)] transition-colors hover:bg-[var(--hover-bg)]"
                 >
                     <LayoutTemplate className="h-3.5 w-3.5 text-[var(--ink-muted)]" />
                     从模板创建 Agent

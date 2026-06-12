@@ -243,7 +243,7 @@ export default function QueryNavigator({
               >
                 {/* Query text — only visible when expanded */}
                 <span
-                  className={`flex-1 truncate text-[13px] leading-6 transition-opacity duration-200 ${
+                  className={`flex-1 truncate text-sm leading-6 transition-opacity duration-200 ${
                     isExpanded ? 'opacity-100' : 'opacity-0 w-0 overflow-hidden'
                   } ${isActive ? 'text-[var(--accent)] font-medium' : 'text-[var(--ink-muted)]'}`}
                 >

@@ -21,6 +21,10 @@
 // Design Guideline Sections (loaded on-demand by `myagents widget readme`)
 // ===================================================================
 
+// 本节引用的字号契约（headings 20/18/16/14·600、.text-* 11-22、body 16px/1.7）
+// 与 src/renderer/components/tools/widgetSandboxHtml.ts 的沙箱 CSS 是同一契约的
+// 两份手写拷贝——改任意一侧 MUST 同步另一侧（0.2.34 cross-review 实证过一次
+// body 行高漂移：宿主升 1.7 而沙箱留在 1.6）。
 const SECTION_CORE = `# Widget Design System — Core
 
 ## Philosophy
@@ -54,8 +58,11 @@ HTML streams token by token. Structure for progressive rendering:
 ## Pre-styled elements & utility classes
 The widget sandbox provides pre-styled form elements and layout utilities:
 - Form elements (input, select, button, range slider, textarea) are automatically styled — write bare HTML tags
+- Headings are pre-styled to match the host app's type scale (h1=20px, h2=18px, h3=16px, h4-h6=14px, all weight 600) — write bare <h1>–<h3> tags, never set heading font-size/weight yourself
+- For a big standalone number use .stat-value (24px), not a heading or .text-2xl
 - Button with class "primary" gets accent color: \`<button class="primary">Submit</button>\`
 - Layout classes available: .flex, .flex-col, .grid, .grid-2, .grid-3, .grid-4, .gap-2/3/4/6, .p-2/3/4, .w-full, .text-center, .rounded, .rounded-lg, .border, .bg-elevated, .bg-inset, .text-muted, .text-secondary, .text-accent, .stat-card, .stat-value, .stat-label
+- Text size classes mirror the host app: .text-xs=11, .text-sm=13, .text-lg=18, .text-xl=20, .text-2xl=22
 - Use these classes freely — they are scoped to the widget iframe
 
 ## CSS variables (auto light/dark — always use these, never hardcode colors)

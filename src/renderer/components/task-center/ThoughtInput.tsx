@@ -77,7 +77,7 @@ const VARIANTS: Record<ThoughtInputVariant, {
   compact: {
     pxPerLine: 22,           // 14px × 1.6 line-height ≈ 22.4
     verticalPaddingPx: 12,
-    textareaClass: 'text-[14px] leading-relaxed',
+    textareaClass: 'text-md leading-relaxed',
     // Resting `shadow-xs` so the input reads as quietly elevated above
     // the thought stream below; lifts to `shadow-sm` on hover / focus to
     // signal the active write surface. Same idiom as SettingsHelperInbox.
@@ -591,7 +591,7 @@ export const ThoughtInput = forwardRef<ThoughtInputHandle, Props>(function Thoug
           className="w-56 py-1 shadow-md"
         >
           {tagMenu && (
-            <div className="px-3 pb-1 pt-0.5 text-[10px] font-semibold uppercase tracking-wider text-[var(--ink-muted)]/60">
+            <div className="px-3 pb-1 pt-0.5 text-xs font-semibold uppercase tracking-wider text-[var(--ink-muted)]/60">
               {tagMenu.query ? `匹配 #${tagMenu.query}` : '选择标签'}
             </div>
           )}
@@ -605,14 +605,14 @@ export const ThoughtInput = forwardRef<ThoughtInputHandle, Props>(function Thoug
                 insertTag(tag);
               }}
               onMouseEnter={() => setTagIndex(i)}
-              className={`flex w-full items-center justify-between px-3 py-1.5 text-left text-[12px] transition-colors ${
+              className={`flex w-full items-center justify-between px-3 py-1.5 text-left text-2sm transition-colors ${
                 i === tagIndex
                   ? 'bg-[var(--accent-warm-subtle)] text-[var(--accent-warm)]'
                   : 'text-[var(--ink-secondary)] hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]'
               }`}
             >
               <span>#{tag}</span>
-              <span className="text-[10px] text-[var(--ink-muted)]/60">{n}</span>
+              <span className="text-xs text-[var(--ink-muted)]/60">{n}</span>
             </button>
           ))}
         </Popover>
@@ -642,7 +642,7 @@ export const ThoughtInput = forwardRef<ThoughtInputHandle, Props>(function Thoug
         </div>
       </div>
       {error && (
-        <div className="mt-1.5 text-[11px] text-[var(--error)]">{error}</div>
+        <div className="mt-1.5 text-xs text-[var(--error)]">{error}</div>
       )}
     </div>
   );

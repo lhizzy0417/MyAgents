@@ -39,7 +39,7 @@ export function EndConditionsEditor({
           type="button"
           disabled={disabled}
           onClick={() => setMode('forever')}
-          className={`flex flex-1 items-center justify-center rounded-[var(--radius-sm)] px-3 py-1.5 text-[13px] font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${
+          className={`flex flex-1 items-center justify-center rounded-[var(--radius-sm)] px-3 py-1.5 text-sm font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${
             mode === 'forever'
               ? 'bg-[var(--paper-elevated)] text-[var(--ink)] shadow-xs'
               : 'text-[var(--ink-muted)] hover:text-[var(--ink)]'
@@ -51,7 +51,7 @@ export function EndConditionsEditor({
           type="button"
           disabled={disabled}
           onClick={() => setMode('conditional')}
-          className={`flex flex-1 items-center justify-center rounded-[var(--radius-sm)] px-3 py-1.5 text-[13px] font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${
+          className={`flex flex-1 items-center justify-center rounded-[var(--radius-sm)] px-3 py-1.5 text-sm font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${
             mode === 'conditional'
               ? 'bg-[var(--paper-elevated)] text-[var(--ink)] shadow-xs'
               : 'text-[var(--ink-muted)] hover:text-[var(--ink)]'
@@ -132,7 +132,7 @@ export function EndConditionsEditor({
               </div>
             </div>
           </div>
-          <p className="text-[13px] text-[var(--ink-muted)]">
+          <p className="text-sm text-[var(--ink-muted)]">
             可多选，满足任一条件时任务将自动停止
           </p>
         </>

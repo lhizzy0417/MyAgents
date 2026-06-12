@@ -2506,8 +2506,8 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                 ref={errorDetailPopoverRef}
                                 className="absolute right-0 top-6 z-50 w-80 max-w-[90vw] rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] p-3 shadow-lg"
                             >
-                                <p className="mb-1 text-[10px] font-medium uppercase tracking-wider text-[var(--ink-muted)]">错误详情</p>
-                                <pre className="max-h-40 overflow-auto whitespace-pre-wrap break-all font-mono text-[11px] text-[var(--ink-secondary)]">{errObj.detail}</pre>
+                                <p className="mb-1 text-xs font-medium uppercase tracking-wider text-[var(--ink-muted)]">错误详情</p>
+                                <pre className="max-h-40 overflow-auto whitespace-pre-wrap break-all font-mono text-xs text-[var(--ink-secondary)]">{errObj.detail}</pre>
                             </div>
                         )}
                     </div>
@@ -2533,7 +2533,7 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                     {config.showDevTools && (
                         <button
                             onClick={() => setShowLogs(true)}
-                            className="rounded-lg px-2.5 py-1.5 text-[13px] font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
+                            className="rounded-lg px-2.5 py-1.5 text-sm font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
                             title="查看 Rust 日志"
                         >
                             Logs
@@ -2716,11 +2716,11 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                         <div className="min-w-0 flex-1">
                                             <div className="flex items-center gap-2">
                                                 <h3 className="truncate font-semibold text-[var(--ink)]">{provider.name}</h3>
-                                                <span className="shrink-0 rounded bg-[var(--paper-inset)] px-1.5 py-0.5 text-[10px] font-medium text-[var(--ink-muted)]">
+                                                <span className="shrink-0 rounded bg-[var(--paper-inset)] px-1.5 py-0.5 text-xs font-medium text-[var(--ink-muted)]">
                                                     {provider.cloudProvider}
                                                 </span>
                                                 {provider.apiProtocol === 'openai' && (
-                                                    <span className="shrink-0 rounded bg-[var(--paper-inset)] px-1.5 py-0.5 text-[10px] font-medium text-[var(--ink-muted)]">
+                                                    <span className="shrink-0 rounded bg-[var(--paper-inset)] px-1.5 py-0.5 text-xs font-medium text-[var(--ink-muted)]">
                                                         OpenAI 协议
                                                     </span>
                                                 )}
@@ -2783,7 +2783,7 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                                         {/* Email display first; Issue #203: info may be empty
                                                             when the user just did `claude auth login` without
                                                             ever opening the CLI REPL. */}
-                                                        <span className="text-[var(--ink-muted)] font-mono text-[10px]">
+                                                        <span className="text-[var(--ink-muted)] font-mono text-xs">
                                                             {subscriptionStatus.info?.email ?? '已检测到本地 OAuth 凭证'}
                                                         </span>
                                                         {/* Verification status after email */}
@@ -2830,7 +2830,7 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                                         )}
                                                         {/* Error message */}
                                                         {subscriptionStatus.verifyStatus === 'invalid' && subscriptionStatus.verifyError && (
-                                                            <span className="text-[var(--error)] text-[10px] w-full mt-1">
+                                                            <span className="text-[var(--error)] text-xs w-full mt-1">
                                                                 {subscriptionStatus.verifyError}
                                                             </span>
                                                         )}
@@ -2864,7 +2864,7 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
 
                         {/* 分区 1：MCP */}
                         <div className="flex items-center gap-2.5">
-                            <h3 className="flex items-center gap-2 text-[17px] font-semibold text-[var(--ink)]">
+                            <h3 className="flex items-center gap-2 text-lg font-semibold text-[var(--ink)]">
                                 <Globe className="h-4 w-4 text-[var(--ink-muted)]" />
                                 MCP
                                 <span className="rounded-full bg-[var(--paper-inset)] px-2 py-0.5 text-xs font-medium text-[var(--ink-muted)]">
@@ -2881,7 +2881,7 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                             </button>
                         </div>
 
-                        <p className="mb-4 mt-1 text-[13px] text-[var(--ink-muted)]">
+                        <p className="mb-4 mt-1 text-sm text-[var(--ink-muted)]">
                             MCP (Model Context Protocol) 标准协议工具，适合接入现成的第三方服务
                         </p>
 
@@ -2901,12 +2901,12 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                                     <Globe className="h-4 w-4 shrink-0 text-[var(--accent-warm)]/70" />
                                                     <h3 className="truncate font-semibold text-[var(--ink)]" title={server.name}>{server.name}</h3>
                                                     {server.isBuiltin && (
-                                                        <span className="shrink-0 rounded-full border border-[var(--info)]/20 bg-[var(--info-bg)] px-2 py-0.5 text-[10px] font-medium text-[var(--info)]">
+                                                        <span className="shrink-0 rounded-full border border-[var(--info)]/20 bg-[var(--info-bg)] px-2 py-0.5 text-xs font-medium text-[var(--info)]">
                                                             预设
                                                         </span>
                                                     )}
                                                     {server.isFree && (
-                                                        <span className="shrink-0 rounded-full border border-[var(--success)]/20 bg-[var(--success-bg)] px-2 py-0.5 text-[10px] font-medium text-[var(--success)]">
+                                                        <span className="shrink-0 rounded-full border border-[var(--success)]/20 bg-[var(--success-bg)] px-2 py-0.5 text-xs font-medium text-[var(--success)]">
                                                             免费
                                                         </span>
                                                     )}
@@ -2926,7 +2926,7 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                                     </p>
                                                 )}
                                                 {server.command !== '__builtin__' && server.command !== '__bundled_cuse__' && (
-                                                    <p className="mt-2 truncate font-mono text-[10px] text-[var(--ink-muted)]" title={`${server.command} ${server.args?.join(' ') ?? ''}`}>
+                                                    <p className="mt-2 truncate font-mono text-xs text-[var(--ink-muted)]" title={`${server.command} ${server.args?.join(' ') ?? ''}`}>
                                                         {server.command} {server.args?.join(' ')}
                                                     </p>
                                                 )}
@@ -3442,7 +3442,7 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                             </div>
                                         )}
 
-                                        <p className="text-[10px] text-[var(--ink-faint)]">
+                                        <p className="text-xs text-[var(--ink-faint)]">
                                             修改后会自动应用到运行中的会话
                                         </p>
                                     </div>
@@ -3590,7 +3590,7 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                             {/* Product Description — Developer Letter */}
                             <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] px-7 py-6">
                                 <p className="text-xs font-medium uppercase tracking-widest text-[var(--ink-muted)]/50">From the Developer</p>
-                                <div className="mt-4 space-y-5 text-[13px] leading-[1.9] text-[var(--ink-secondary)]">
+                                <div className="mt-4 space-y-5 text-sm leading-[1.9] text-[var(--ink-secondary)]">
                                     <p>
                                         <span className="font-semibold text-[var(--ink)]">MyAgents</span> 是一款住在你电脑里的 AI Agent 桌面客户端，你的个人 AI 中心。基于 Claude Agent SDK 运行，同时支持接入各家大模型与快速切换。所有操作都在本地完成，数据始终留在你的电脑里。
                                     </p>
@@ -3600,7 +3600,7 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                     <p>
                                         不同于每次对话都要重新自我介绍的 AI 工具，MyAgents 里的 Agent 与你的生活、工作深度同步，是一个越来越懂你的搭档。我们希望它成为每个人意图的超级放大器——
                                     </p>
-                                    <p className="text-center text-[14px] font-medium italic tracking-wide text-[var(--ink)]">
+                                    <p className="text-center text-md font-medium italic tracking-wide text-[var(--ink)]">
                                         你有一个想法，And it&apos;s done.
                                     </p>
                                 </div>
@@ -4054,7 +4054,7 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                 <div className="space-y-2">
                                     {Object.entries(builtinMcpSettings.env).map(([key, value]) => (
                                         <div key={key} className="flex items-center gap-2">
-                                            <span className="shrink-0 rounded bg-[var(--paper-inset)] px-2 py-1 font-mono text-[10px] text-[var(--ink)]">
+                                            <span className="shrink-0 rounded bg-[var(--paper-inset)] px-2 py-1 font-mono text-xs text-[var(--ink)]">
                                                 {key}
                                             </span>
                                             <input
@@ -4215,7 +4215,7 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                             }`}
                                         >
                                             <div className="font-medium">{m.label}</div>
-                                            <div className="text-[10px] opacity-70">{m.desc}</div>
+                                            <div className="text-xs opacity-70">{m.desc}</div>
                                         </button>
                                     ))}
                                 </div>
@@ -4462,7 +4462,7 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                         <div className={`text-xs font-medium ${playwrightSettings.mode === 'persistent' ? 'text-[var(--accent)]' : 'text-[var(--ink)]'}`}>
                                             持久化模式
                                         </div>
-                                        <div className="text-[10px] text-[var(--ink-muted)] mt-0.5 leading-tight">
+                                        <div className="text-xs text-[var(--ink-muted)] mt-0.5 leading-tight">
                                             登录态完整保留，同一时间仅一个对话可使用
                                         </div>
                                     </button>
@@ -4477,7 +4477,7 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                         <div className={`text-xs font-medium ${playwrightSettings.mode === 'isolated' ? 'text-[var(--accent)]' : 'text-[var(--ink)]'}`}>
                                             独立模式
                                         </div>
-                                        <div className="text-[10px] text-[var(--ink-muted)] mt-0.5 leading-tight">
+                                        <div className="text-xs text-[var(--ink-muted)] mt-0.5 leading-tight">
                                             多对话可同时使用，登录态通过快照共享
                                         </div>
                                     </button>
@@ -4528,9 +4528,9 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                                     <div className="min-w-0 flex-1">
                                                         <div className="flex items-center gap-1.5">
                                                             <span className="text-xs font-medium text-[var(--ink)] truncate">{cookie.name}</span>
-                                                            <span className="text-[10px] text-[var(--ink-muted)]">{cookie.domain}</span>
+                                                            <span className="text-xs text-[var(--ink-muted)]">{cookie.domain}</span>
                                                         </div>
-                                                        <div className="text-[10px] text-[var(--ink-muted)] truncate mt-0.5 font-mono max-w-[280px]">{cookie.value}</div>
+                                                        <div className="text-xs text-[var(--ink-muted)] truncate mt-0.5 font-mono max-w-[280px]">{cookie.value}</div>
                                                     </div>
                                                     <div className="flex items-center gap-1 shrink-0 ml-2">
                                                         <button
@@ -4560,7 +4560,7 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                             <div className="text-xs text-[var(--ink-muted)]">
                                                 暂无已保存的 Cookie
                                             </div>
-                                            <div className="text-[10px] text-[var(--ink-muted)] mt-0.5">
+                                            <div className="text-xs text-[var(--ink-muted)] mt-0.5">
                                                 AI 使用浏览器登录后会自动保存，也可手动添加
                                             </div>
                                         </div>
@@ -4574,7 +4574,7 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                             </div>
                                             <div className="grid grid-cols-2 gap-2">
                                                 <div>
-                                                    <label className="block text-[10px] text-[var(--ink-muted)] mb-0.5">域名 *</label>
+                                                    <label className="block text-xs text-[var(--ink-muted)] mb-0.5">域名 *</label>
                                                     <input
                                                         type="text"
                                                         value={cookieForm.domain}
@@ -4584,7 +4584,7 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                                     />
                                                 </div>
                                                 <div>
-                                                    <label className="block text-[10px] text-[var(--ink-muted)] mb-0.5">路径</label>
+                                                    <label className="block text-xs text-[var(--ink-muted)] mb-0.5">路径</label>
                                                     <input
                                                         type="text"
                                                         value={cookieForm.path}
@@ -4595,7 +4595,7 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                                 </div>
                                             </div>
                                             <div>
-                                                <label className="block text-[10px] text-[var(--ink-muted)] mb-0.5">名称 *</label>
+                                                <label className="block text-xs text-[var(--ink-muted)] mb-0.5">名称 *</label>
                                                 <input
                                                     type="text"
                                                     value={cookieForm.name}
@@ -4605,7 +4605,7 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                                 />
                                             </div>
                                             <div>
-                                                <label className="block text-[10px] text-[var(--ink-muted)] mb-0.5">值 *</label>
+                                                <label className="block text-xs text-[var(--ink-muted)] mb-0.5">值 *</label>
                                                 <input
                                                     type="text"
                                                     value={cookieForm.value}
@@ -4815,7 +4815,7 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                         {edgeTtsSettings.defaultRate !== 0 && (
                                             <button
                                                 onClick={() => setEdgeTtsSettings(prev => prev ? { ...prev, defaultRate: 0 } : null)}
-                                                className="text-[10px] text-[var(--ink-muted)] hover:text-[var(--accent)]"
+                                                className="text-xs text-[var(--ink-muted)] hover:text-[var(--accent)]"
                                             >
                                                 重置
                                             </button>
@@ -4831,7 +4831,7 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                     onChange={e => setEdgeTtsSettings(prev => prev ? { ...prev, defaultRate: parseInt(e.target.value, 10) } : null)}
                                     className={ttsSliderClass}
                                 />
-                                <div className="flex justify-between text-[10px] text-[var(--ink-muted)] opacity-50">
+                                <div className="flex justify-between text-xs text-[var(--ink-muted)] opacity-50">
                                     <span>-100%</span>
                                     <span>+200%</span>
                                 </div>
@@ -4846,7 +4846,7 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                         {edgeTtsSettings.defaultVolume !== 0 && (
                                             <button
                                                 onClick={() => setEdgeTtsSettings(prev => prev ? { ...prev, defaultVolume: 0 } : null)}
-                                                className="text-[10px] text-[var(--ink-muted)] hover:text-[var(--accent)]"
+                                                className="text-xs text-[var(--ink-muted)] hover:text-[var(--accent)]"
                                             >
                                                 重置
                                             </button>
@@ -4862,7 +4862,7 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                     onChange={e => setEdgeTtsSettings(prev => prev ? { ...prev, defaultVolume: parseInt(e.target.value, 10) } : null)}
                                     className={ttsSliderClass}
                                 />
-                                <div className="flex justify-between text-[10px] text-[var(--ink-muted)] opacity-50">
+                                <div className="flex justify-between text-xs text-[var(--ink-muted)] opacity-50">
                                     <span>-100%</span>
                                     <span>+100%</span>
                                 </div>
@@ -4877,7 +4877,7 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                         {edgeTtsSettings.defaultPitch !== 0 && (
                                             <button
                                                 onClick={() => setEdgeTtsSettings(prev => prev ? { ...prev, defaultPitch: 0 } : null)}
-                                                className="text-[10px] text-[var(--ink-muted)] hover:text-[var(--accent)]"
+                                                className="text-xs text-[var(--ink-muted)] hover:text-[var(--accent)]"
                                             >
                                                 重置
                                             </button>
@@ -4893,7 +4893,7 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                     onChange={e => setEdgeTtsSettings(prev => prev ? { ...prev, defaultPitch: parseInt(e.target.value, 10) } : null)}
                                     className={ttsSliderClass}
                                 />
-                                <div className="flex justify-between text-[10px] text-[var(--ink-muted)] opacity-50">
+                                <div className="flex justify-between text-xs text-[var(--ink-muted)] opacity-50">
                                     <span>-100Hz</span>
                                     <span>+100Hz</span>
                                 </div>
@@ -6046,7 +6046,7 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                     <button
                                         type="button"
                                         onClick={() => setManagingProviderId(editingProvider.provider.id)}
-                                        className="flex items-center gap-1 rounded-lg px-2 py-1 text-[13px] font-medium text-[var(--accent)] transition-colors hover:bg-[var(--accent-warm-subtle)]"
+                                        className="flex items-center gap-1 rounded-lg px-2 py-1 text-sm font-medium text-[var(--accent)] transition-colors hover:bg-[var(--accent-warm-subtle)]"
                                     >
                                         <Settings2 className="h-3.5 w-3.5" />
                                         管理可用模型

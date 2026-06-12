@@ -79,7 +79,7 @@ export default function AttachmentPreviewList({
                   loading="lazy"
                 />
                 {!compact && (
-                  <div className="absolute inset-x-1 bottom-1 rounded-md bg-[var(--ink)]/70 px-1 py-0.5 text-[10px] font-medium text-[var(--paper-elevated)]">
+                  <div className="absolute inset-x-1 bottom-1 rounded-md bg-[var(--ink)]/70 px-1 py-0.5 text-xs font-medium text-[var(--paper-elevated)]">
                     <span className="block truncate">{attachment.name}</span>
                   </div>
                 )}
@@ -92,13 +92,13 @@ export default function AttachmentPreviewList({
                   <p className="truncate text-xs font-medium text-[var(--ink)]">
                     {attachment.name}
                   </p>
-                  <p className="text-[11px] text-[var(--ink-muted)]">
+                  <p className="text-xs text-[var(--ink-muted)]">
                     {formatFileSize(attachment.size)}
                   </p>
                   {attachment.footnoteLines?.map((line, index) => (
                     <p
                       key={`${attachment.id}-footnote-${index}`}
-                      className="text-[11px] text-[var(--ink-muted)]"
+                      className="text-xs text-[var(--ink-muted)]"
                     >
                       {line}
                     </p>

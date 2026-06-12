@@ -57,7 +57,7 @@ const StickyAncestorRow = memo(function StickyAncestorRow({
       tabIndex={0}
       data-tree-row
       data-tree-path={ancestor.path}
-      className={`flex w-full cursor-pointer items-center gap-2 px-3 text-[13px] font-medium transition-colors ${
+      className={`flex w-full cursor-pointer items-center gap-2 px-3 text-sm font-medium transition-colors ${
         isDropTarget
           ? "ring-1 ring-inset ring-[var(--accent)]/40 bg-[var(--accent)]/8 text-[var(--ink)]"
           : "text-[var(--ink-muted)] hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]"

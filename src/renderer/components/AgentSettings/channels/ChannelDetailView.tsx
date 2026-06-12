@@ -94,7 +94,7 @@ function FeishuPermissionsButton() {
             <button
                 type="button"
                 onClick={() => setExpanded(!expanded)}
-                className="flex items-center gap-1.5 self-start rounded-lg px-2.5 py-1.5 text-[13px] font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
+                className="flex items-center gap-1.5 self-start rounded-lg px-2.5 py-1.5 text-sm font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
             >
                 <ChevronDown className={`h-3 w-3 transition-transform ${expanded ? '' : '-rotate-90'}`} />
                 飞书权限 JSON
@@ -108,11 +108,11 @@ function FeishuPermissionsButton() {
                             setCopied(true);
                             setTimeout(() => setCopied(false), 1500);
                         }}
-                        className="absolute right-2 top-2 rounded-md px-2 py-1 text-[11px] font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-elevated)] hover:text-[var(--ink)]"
+                        className="absolute right-2 top-2 rounded-md px-2 py-1 text-xs font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-elevated)] hover:text-[var(--ink)]"
                     >
                         {copied ? '已复制' : '复制'}
                     </button>
-                    <pre className="max-h-[240px] overflow-auto text-[11px] leading-relaxed text-[var(--ink-muted)]">
+                    <pre className="max-h-[240px] overflow-auto text-xs leading-relaxed text-[var(--ink-muted)]">
                         {FEISHU_PERMISSIONS_JSON}
                     </pre>
                 </div>
@@ -753,13 +753,13 @@ export default function ChannelDetailView({
                                         <div className="flex gap-2">
                                             <button
                                                 onClick={startWecomQrRescan}
-                                                className="flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-[13px] font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
+                                                className="flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-sm font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
                                             >
                                                 重新扫码
                                             </button>
                                             <button
                                                 onClick={() => setDualDetailMode('edit')}
-                                                className="flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-[13px] font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
+                                                className="flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-sm font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
                                             >
                                                 编辑凭证
                                             </button>
@@ -1021,7 +1021,7 @@ export default function ChannelDetailView({
                                     </span>
                                 )}
                                 {pendingCount > 0 && (
-                                    <span className="flex h-5 min-w-5 items-center justify-center rounded-full bg-[var(--warning)] px-1.5 text-[10px] font-bold text-white">
+                                    <span className="flex h-5 min-w-5 items-center justify-center rounded-full bg-[var(--warning)] px-1.5 text-xs font-bold text-white">
                                         {pendingCount}
                                     </span>
                                 )}
@@ -1211,7 +1211,7 @@ export default function ChannelDetailView({
                                 <h4 className="text-sm font-medium text-[var(--ink)]">权限模式</h4>
                                 {channel?.overrides?.permissionMode && (
                                     <button
-                                        className="text-[10px] text-[var(--ink-subtle)] hover:text-[var(--ink-muted)] transition-colors"
+                                        className="text-xs text-[var(--ink-subtle)] hover:text-[var(--ink-muted)] transition-colors"
                                         onClick={() => patchOverrides({ permissionMode: undefined })}
                                     >
                                         恢复默认

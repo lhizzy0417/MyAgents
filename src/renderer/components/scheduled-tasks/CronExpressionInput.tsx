@@ -304,7 +304,7 @@ export default function CronExpressionInput({
                 key={opt.value}
                 type="button"
                 onClick={() => handleFreqChange(opt.value)}
-                className={`rounded-lg px-3 py-1.5 text-[13px] font-medium transition ${
+                className={`rounded-lg px-3 py-1.5 text-sm font-medium transition ${
                   freq === opt.value
                     ? 'bg-[var(--accent)] text-white'
                     : 'bg-[var(--paper)] text-[var(--ink)] hover:bg-[var(--paper-inset)]'
@@ -328,7 +328,7 @@ export default function CronExpressionInput({
                 max={MAX_INTERVAL}
                 value={intervalValue}
                 onChange={e => handleIntervalInputChange(e.target.value)}
-                className="w-24 rounded-[var(--radius-sm)] border border-[var(--line)] bg-transparent px-3 py-1.5 text-[13px] text-[var(--ink)] focus:border-[var(--accent)] focus:outline-none"
+                className="w-24 rounded-[var(--radius-sm)] border border-[var(--line)] bg-transparent px-3 py-1.5 text-sm text-[var(--ink)] focus:border-[var(--accent)] focus:outline-none"
               />
               <span className="text-xs text-[var(--ink-muted)]">
                 分钟触发一次(最少 {MIN_INTERVAL} 分钟)
@@ -356,7 +356,7 @@ export default function CronExpressionInput({
                         key={label}
                         type="button"
                         onClick={() => toggleWeekday(cronDay)}
-                        className={`flex h-7 w-7 items-center justify-center rounded-full text-[12px] font-medium transition-colors ${
+                        className={`flex h-7 w-7 items-center justify-center rounded-full text-2sm font-medium transition-colors ${
                           isSelected
                             ? 'bg-[var(--accent)] text-white'
                             : 'bg-[var(--paper)] border border-[var(--line)] text-[var(--ink-muted)] hover:border-[var(--line-strong)]'
@@ -382,7 +382,7 @@ export default function CronExpressionInput({
               <button
                 type="button"
                 onClick={handleSwitchToCustom}
-                className="flex items-center gap-1 text-[11px] text-[var(--ink-muted)]/60 hover:text-[var(--ink-muted)] transition-colors"
+                className="flex items-center gap-1 text-xs text-[var(--ink-muted)]/60 hover:text-[var(--ink-muted)] transition-colors"
               >
                 <Code2 className="h-3 w-3" />
                 使用 Cron 表达式
@@ -416,7 +416,7 @@ export default function CronExpressionInput({
             type="button"
             onClick={handleSwitchToVisual}
             disabled={!canSwitchToVisual}
-            className={`flex items-center gap-1 text-[11px] transition-colors ${
+            className={`flex items-center gap-1 text-xs transition-colors ${
               canSwitchToVisual
                 ? 'text-[var(--ink-muted)]/60 hover:text-[var(--ink-muted)]'
                 : 'text-[var(--ink-subtle)] cursor-not-allowed'
@@ -433,11 +433,11 @@ export default function CronExpressionInput({
       {mode === 'visual' && freq === 'interval' ? null : (
         description && !parseError && (
           <div className="rounded-[var(--radius-sm)] border border-[var(--line)] px-3 py-2">
-            <p className="text-[13px] font-medium text-[var(--ink-secondary)]">{description}</p>
+            <p className="text-sm font-medium text-[var(--ink-secondary)]">{description}</p>
             {nextTimes.length > 0 && (
               <div className="mt-1.5 flex flex-wrap gap-x-3 gap-y-0.5">
                 {nextTimes.map((time, i) => (
-                  <span key={i} className="text-[11px] text-[var(--ink-muted)]">• {time}</span>
+                  <span key={i} className="text-xs text-[var(--ink-muted)]">• {time}</span>
                 ))}
               </div>
             )}

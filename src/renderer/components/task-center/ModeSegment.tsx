@@ -60,7 +60,7 @@ export function ModeSegment({
   // input rather than a second-tier headline competing with the brand
   // group above it.
   const baseBtn =
-    'inline-flex items-center gap-1.5 rounded-[var(--radius-sm)] px-3 py-1 text-[13px] font-medium transition-all duration-150';
+    'inline-flex items-center gap-1.5 rounded-[var(--radius-sm)] px-3 py-1 text-sm font-medium transition-all duration-150';
   const activeBtn =
     'bg-[var(--paper-elevated)] text-[var(--ink)] shadow-xs';
   const inactiveBtn =

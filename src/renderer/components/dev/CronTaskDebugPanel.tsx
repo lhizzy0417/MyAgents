@@ -113,7 +113,7 @@ export default function CronTaskDebugPanel({ isOpen, onClose }: CronTaskDebugPan
           <div className="flex items-center gap-2">
             <Timer className="h-5 w-5 text-[var(--accent)]" />
             <h2 className="text-base font-semibold text-[var(--ink)]">循环任务调试面板</h2>
-            <span className="rounded bg-[var(--paper-inset)] px-1.5 py-0.5 text-[10px] font-medium text-[var(--ink-muted)]">
+            <span className="rounded bg-[var(--paper-inset)] px-1.5 py-0.5 text-xs font-medium text-[var(--ink-muted)]">
               DEV
             </span>
           </div>
@@ -164,7 +164,7 @@ export default function CronTaskDebugPanel({ isOpen, onClose }: CronTaskDebugPan
                     <div className="min-w-0 flex-1">
                       <div className="flex items-center gap-2">
                         <code className="text-xs font-medium text-[var(--ink)]">{task.id}</code>
-                        <span className={`rounded px-1.5 py-0.5 text-[10px] font-medium ${
+                        <span className={`rounded px-1.5 py-0.5 text-xs font-medium ${
                           task.status === 'running'
                             ? 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400'
                             : 'bg-yellow-100 text-yellow-700 dark:bg-yellow-900/30 dark:text-yellow-400'
@@ -218,7 +218,7 @@ export default function CronTaskDebugPanel({ isOpen, onClose }: CronTaskDebugPan
                   </div>
 
                   {/* Task details */}
-                  <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-[11px]">
+                  <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-xs">
                     <div className="flex justify-between">
                       <span className="text-[var(--ink-muted)]">间隔</span>
                       <span className="text-[var(--ink)]">{formatCronInterval(task.intervalMinutes)}</span>
@@ -263,7 +263,7 @@ export default function CronTaskDebugPanel({ isOpen, onClose }: CronTaskDebugPan
 
         {/* Footer */}
         <div className="border-t border-[var(--line)] px-5 py-3">
-          <p className="text-[10px] text-[var(--ink-faint)]">
+          <p className="text-xs text-[var(--ink-faint)]">
             此面板仅供开发调试使用，显示所有运行中或暂停的循环任务
           </p>
         </div>

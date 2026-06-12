@@ -97,13 +97,13 @@ export function LegacyCronOverlay({ legacy, onClose, onChanged, onUpgraded }: Pr
       >
         <div className="flex items-start justify-between border-b border-[var(--line)] px-5 py-4">
           <div>
-            <div className="inline-flex items-center rounded-[var(--radius-sm)] bg-[var(--paper-inset)] px-2 py-0.5 text-[11px] font-medium text-[var(--ink-muted)]">
+            <div className="inline-flex items-center rounded-[var(--radius-sm)] bg-[var(--paper-inset)] px-2 py-0.5 text-xs font-medium text-[var(--ink-muted)]">
               遗留定时任务
             </div>
-            <h2 className="mt-1.5 text-[18px] font-semibold text-[var(--ink)]">
+            <h2 className="mt-1.5 text-lg font-semibold text-[var(--ink)]">
               {name}
             </h2>
-            <p className="mt-1 text-[12px] text-[var(--ink-muted)]">
+            <p className="mt-1 text-2sm text-[var(--ink-muted)]">
               这是 v0.1.69 之前创建的定时任务，不含新任务中心的对齐文档。
             </p>
           </div>
@@ -154,13 +154,13 @@ export function LegacyCronOverlay({ legacy, onClose, onChanged, onUpgraded }: Pr
         </div>
 
         {err && (
-          <div className="border-b border-[var(--error)]/30 bg-[var(--error-bg)] px-5 py-2 text-[12px] text-[var(--error)]">
+          <div className="border-b border-[var(--error)]/30 bg-[var(--error-bg)] px-5 py-2 text-2sm text-[var(--error)]">
             {err}
           </div>
         )}
 
         <div className="flex-1 overflow-y-auto px-5 py-4">
-          <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1.5 text-[12px]">
+          <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1.5 text-2sm">
             <dt className="text-[var(--ink-muted)]/70">状态</dt>
             <dd className="text-[var(--ink)]">{isRunning ? '进行中' : '已暂停'}</dd>
             <dt className="text-[var(--ink-muted)]/70">工作区</dt>
@@ -173,16 +173,16 @@ export function LegacyCronOverlay({ legacy, onClose, onChanged, onUpgraded }: Pr
 
           {prompt && (
             <div className="mt-4 rounded-[var(--radius-lg)] border border-[var(--line)] bg-[var(--paper)] p-3">
-              <div className="mb-1 text-[11px] font-medium uppercase tracking-[0.12em] text-[var(--ink-muted)]">
+              <div className="mb-1 text-xs font-medium uppercase tracking-[0.12em] text-[var(--ink-muted)]">
                 原始 Prompt
               </div>
-              <div className="whitespace-pre-wrap text-[13px] leading-relaxed text-[var(--ink-secondary)]">
+              <div className="whitespace-pre-wrap text-sm leading-relaxed text-[var(--ink-secondary)]">
                 {prompt}
               </div>
             </div>
           )}
 
-          <p className="mt-4 text-[12px] leading-relaxed text-[var(--ink-muted)]">
+          <p className="mt-4 text-2sm leading-relaxed text-[var(--ink-muted)]">
             遗留任务保留原有调度逻辑，执行记录仍可在对话 Tab 的定时面板中查看。
             点击上方「升级为新版任务」即可获得完整的任务详情（可编辑 Prompt /
             调度 / 通知、审计链、验收标准），原调度不中断。
@@ -213,7 +213,7 @@ interface ActionBtnProps {
 
 function ActionBtn({ icon, label, onClick, disabled, variant }: ActionBtnProps) {
   const base =
-    'flex items-center gap-1.5 rounded-[var(--radius-md)] px-2.5 py-1.5 text-[13px] font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-50';
+    'flex items-center gap-1.5 rounded-[var(--radius-md)] px-2.5 py-1.5 text-sm font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-50';
   const variantCls =
     variant === 'danger'
       ? 'text-[var(--ink-muted)] hover:bg-[var(--error-bg)] hover:text-[var(--error)]'

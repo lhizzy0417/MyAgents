@@ -63,7 +63,7 @@ export default function SlashCommandMenu({
                 >
                     <span className="font-medium text-[var(--ink)] whitespace-nowrap">/{cmd.name}</span>
                     {cmd.source === 'skill' && (
-                        <span className="text-[10px] text-[var(--ink-muted)]/60 bg-[var(--paper-inset)] px-1.5 py-0.5 rounded shrink-0">
+                        <span className="text-xs text-[var(--ink-muted)]/60 bg-[var(--paper-inset)] px-1.5 py-0.5 rounded shrink-0">
                             skill
                         </span>
                     )}

@@ -50,12 +50,12 @@ function SubagentRow({ subagent, onJumpToTool }: SubagentRowProps) {
       className="group flex w-full items-center gap-2 px-3 py-1.5 text-left transition-colors hover:bg-[var(--paper-inset)]/60"
     >
       <SubagentRunningIcon />
-      <div className="flex min-w-0 flex-1 items-baseline gap-1.5 text-[12px]">
+      <div className="flex min-w-0 flex-1 items-baseline gap-1.5 text-2sm">
         <span className="shrink-0 font-medium text-[var(--ink)]">
           {subagent.agentType}
         </span>
         {subagent.mode === 'background' && (
-          <span className="shrink-0 rounded-full bg-[var(--accent)]/10 px-1.5 py-0.5 text-[10px] font-medium text-[var(--accent)]">
+          <span className="shrink-0 rounded-full bg-[var(--accent)]/10 px-1.5 py-0.5 text-xs font-medium text-[var(--accent)]">
             后台
           </span>
         )}
@@ -66,7 +66,7 @@ function SubagentRow({ subagent, onJumpToTool }: SubagentRowProps) {
         )}
       </div>
       {elapsed && (
-        <span className="shrink-0 tabular-nums text-[11px] text-[var(--ink-muted)]">
+        <span className="shrink-0 tabular-nums text-xs text-[var(--ink-muted)]">
           {elapsed}
         </span>
       )}
@@ -85,10 +85,10 @@ const SubagentSection = memo(function SubagentSection({ subagents, containerRef:
   return (
     <div className="py-1.5">
       <div className="flex items-center justify-between px-3 pb-1 pt-0.5">
-        <span className="text-[10px] font-semibold uppercase tracking-wider text-[var(--ink-muted)]">
+        <span className="text-xs font-semibold uppercase tracking-wider text-[var(--ink-muted)]">
           SubAgents
         </span>
-        <span className="text-[11px] tabular-nums text-[var(--ink-muted)]">
+        <span className="text-xs tabular-nums text-[var(--ink-muted)]">
           {subagents.length}
         </span>
       </div>

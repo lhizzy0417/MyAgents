@@ -74,7 +74,7 @@ export function RecentThoughtsRow({
       <button
         type="button"
         onClick={onOpenTaskCenter}
-        className="flex shrink-0 items-center gap-1 rounded-[var(--radius-md)] px-2.5 py-1.5 text-[12px] text-[var(--ink-muted)] transition-colors hover:bg-[var(--hover-bg)] hover:text-[var(--accent-warm)]"
+        className="flex shrink-0 items-center gap-1 rounded-[var(--radius-md)] px-2.5 py-1.5 text-2sm text-[var(--ink-muted)] transition-colors hover:bg-[var(--hover-bg)] hover:text-[var(--accent-warm)]"
         title="打开任务中心查看全部想法"
       >
         <span>更多</span>
@@ -100,10 +100,10 @@ function ThoughtChip({ thought, onClick }: ChipProps) {
       className="group flex min-w-0 flex-1 items-center gap-2 rounded-[var(--radius-md)] border border-[var(--line)] bg-[var(--paper-elevated)] px-2.5 py-1.5 text-left transition-all hover:border-[var(--line-strong)] hover:shadow-sm"
       title={thought.content}
     >
-      <span className="min-w-0 flex-1 truncate text-[12px] text-[var(--ink-secondary)] group-hover:text-[var(--ink)]">
+      <span className="min-w-0 flex-1 truncate text-2sm text-[var(--ink-secondary)] group-hover:text-[var(--ink)]">
         {firstLine || '（空想法）'}
       </span>
-      <span className="shrink-0 text-[10px] text-[var(--ink-muted)]/70">
+      <span className="shrink-0 text-xs text-[var(--ink-muted)]/70">
         {relativeTime(thought.createdAt)}
       </span>
     </button>

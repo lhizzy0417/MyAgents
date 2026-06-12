@@ -168,7 +168,7 @@ export function CliToolsSection() {
         <div className="mt-9 border-t border-[var(--line)] pt-7">
             {/* 分区头（字号按 playground 定稿放大） */}
             <div className="flex items-center gap-2.5">
-                <h3 className="flex items-center gap-2 text-[17px] font-semibold text-[var(--ink)]">
+                <h3 className="flex items-center gap-2 text-lg font-semibold text-[var(--ink)]">
                     <SquareTerminal className="h-4 w-4 text-[var(--ink-muted)]" />
                     CLI 工具
                     <span className="rounded-full bg-[var(--paper-inset)] px-2 py-0.5 text-xs font-medium text-[var(--ink-muted)]">
@@ -176,7 +176,7 @@ export function CliToolsSection() {
                     </span>
                 </h3>
             </div>
-            <p className="mb-4 mt-1 text-[13px] text-[var(--ink-muted)]">
+            <p className="mb-4 mt-1 text-sm text-[var(--ink-muted)]">
                 由 AI 创建并注册的命令行工具，全部 Runtime 与终端都能直接调用；开关控制是否让 AI 自动发现。
             </p>
 
@@ -188,14 +188,14 @@ export function CliToolsSection() {
                 /* 空状态：与列表 + 注册指令条互斥，承担"怎么创建"的引导 */
                 <div className="rounded-xl border border-dashed border-[var(--line-strong)] px-8 py-12 text-center">
                     <SquareTerminal className="mx-auto mb-3 h-8 w-8 text-[var(--ink-muted)] opacity-50" />
-                    <p className="mb-2 text-[17px] font-semibold text-[var(--ink)]">还没有 CLI 工具</p>
-                    <p className="mx-auto max-w-xl text-[13px] leading-relaxed text-[var(--ink-muted)]">
+                    <p className="mb-2 text-lg font-semibold text-[var(--ink)]">还没有 CLI 工具</p>
+                    <p className="mx-auto max-w-xl text-sm leading-relaxed text-[var(--ink-muted)]">
                         让 AI 把你常用的需求做成命令行小工具，所有会话随叫随用。试试对 AI 说：
                     </p>
                     <div className="mt-4 flex flex-col items-center gap-2">
                         {EXAMPLE_PROMPTS.map((prompt) => (
                             <div key={prompt} className="flex items-center gap-2">
-                                <span className="rounded-lg bg-[var(--paper-inset)]/45 px-3.5 py-1.5 text-[13px] text-[var(--ink)]">
+                                <span className="rounded-lg bg-[var(--paper-inset)]/45 px-3.5 py-1.5 text-sm text-[var(--ink)]">
                                     &ldquo;{prompt}&rdquo;
                                 </span>
                                 <button
@@ -212,7 +212,7 @@ export function CliToolsSection() {
                         已有现成的 CLI 工具？发这句话给 AI：「{REGISTER_PROMPT.replace(/：$/, '')}」
                         <button
                             onClick={() => void copyText(REGISTER_PROMPT)}
-                            className="flex shrink-0 items-center gap-1 rounded-md border border-[var(--line)] bg-[var(--paper-elevated)] px-2 py-1 text-[11px] text-[var(--ink-muted)] transition-colors hover:border-[var(--ink-muted)] hover:text-[var(--ink)]"
+                            className="flex shrink-0 items-center gap-1 rounded-md border border-[var(--line)] bg-[var(--paper-elevated)] px-2 py-1 text-xs text-[var(--ink-muted)] transition-colors hover:border-[var(--ink-muted)] hover:text-[var(--ink)]"
                         >
                             <Copy className="h-3 w-3" />
                             复制
@@ -230,11 +230,11 @@ export function CliToolsSection() {
                                             <SquareTerminal className="h-4 w-4 shrink-0 text-[var(--accent)]/80" />
                                             <h3 className="truncate font-mono font-semibold text-[var(--ink)]" title={tool.name}>{tool.name}</h3>
                                             {tool.version && (
-                                                <span className="shrink-0 rounded-full bg-[var(--paper-inset)] px-2 py-0.5 text-[10px] font-medium text-[var(--ink-muted)]">
+                                                <span className="shrink-0 rounded-full bg-[var(--paper-inset)] px-2 py-0.5 text-xs font-medium text-[var(--ink-muted)]">
                                                     v{tool.version}
                                                 </span>
                                             )}
-                                            <span className={`shrink-0 rounded-full px-2 py-0.5 text-[10px] font-medium ${tool.kind === 'api'
+                                            <span className={`shrink-0 rounded-full px-2 py-0.5 text-xs font-medium ${tool.kind === 'api'
                                                 ? 'border border-[var(--info)]/20 bg-[var(--info-bg)] text-[var(--info)]'
                                                 : 'border border-[var(--success)]/20 bg-[var(--success-bg)] text-[var(--success)]'
                                                 }`}>
@@ -274,8 +274,8 @@ export function CliToolsSection() {
 
                     {/* 注册指令条（有工具时显示，与空状态互斥） */}
                     <div className="mt-5 flex items-center gap-2.5 rounded-xl border border-dashed border-[var(--line-strong)] px-4 py-3">
-                        <span className="shrink-0 text-[13px] text-[var(--ink-muted)]">已有现成的 CLI 工具？复制这句话发给对话里的 AI：</span>
-                        <span className="min-w-0 flex-1 truncate rounded-lg bg-[var(--paper-inset)]/45 px-3 py-1.5 text-[13px] text-[var(--ink)]">
+                        <span className="shrink-0 text-sm text-[var(--ink-muted)]">已有现成的 CLI 工具？复制这句话发给对话里的 AI：</span>
+                        <span className="min-w-0 flex-1 truncate rounded-lg bg-[var(--paper-inset)]/45 px-3 py-1.5 text-sm text-[var(--ink)]">
                             {REGISTER_PROMPT}&lt;工具路径&gt;
                         </span>
                         <button
@@ -351,7 +351,7 @@ function CliToolDetailModal({
                 <div className="flex items-center justify-between border-b border-[var(--line)] px-6 py-4">
                     <div className="min-w-0">
                         <h2 className="truncate font-mono text-base font-semibold text-[var(--ink)]">{tool.name}</h2>
-                        <p className="mt-0.5 truncate font-mono text-[11px] text-[var(--ink-muted)]" title={tool.dir}>
+                        <p className="mt-0.5 truncate font-mono text-xs text-[var(--ink-muted)]" title={tool.dir}>
                             {tool.dir}{tool.version ? ` · v${tool.version}` : ''} · 注册于 {tool.registeredAt.slice(0, 10)}
                         </p>
                     </div>
@@ -364,7 +364,7 @@ function CliToolDetailModal({
                     <div>
                         <label className="mb-1.5 flex items-baseline justify-between text-sm font-medium text-[var(--ink)]">
                             触发描述（注入 AI 上下文的部分）
-                            <span className="text-[11px] font-normal text-[var(--ink-muted)]">
+                            <span className="text-xs font-normal text-[var(--ink-muted)]">
                                 {tool.description.length} / {CLI_TOOL_DESCRIPTION_MAX_CHARS}
                             </span>
                         </label>
@@ -390,7 +390,7 @@ function CliToolDetailModal({
                                     </div>
                                 ))}
                             </div>
-                            <p className="mt-1.5 text-[11px] text-[var(--ink-muted)]">
+                            <p className="mt-1.5 text-xs text-[var(--ink-muted)]">
                                 未配置时工具会以退出码 3 提示 AI 引导你补齐，不会静默失败
                             </p>
                         </div>

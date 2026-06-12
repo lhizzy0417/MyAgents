@@ -136,7 +136,7 @@ export default function ContextUsageIndicator({ onCompact }: ContextUsageIndicat
         >
           {/* 头部：标题 + 智能压缩入口（builtin only） */}
           <div className="mb-3 flex min-h-[24px] items-center justify-between">
-            <span className="text-[12px] font-semibold text-[var(--ink-muted)]">上下文用量</span>
+            <span className="text-2sm font-semibold text-[var(--ink-muted)]">上下文用量</span>
             {showCompact && (
               <Tip label="智能压缩上下文，提供更大可用空间" position="top" align="end">
                 <button
@@ -146,7 +146,7 @@ export default function ContextUsageIndicator({ onCompact }: ContextUsageIndicat
                     onCompact?.();
                     setOpen(false);
                   }}
-                  className="flex items-center gap-1 rounded-lg border border-[var(--accent-warm-muted)] bg-[var(--accent-warm-subtle)] px-2 py-1 text-[11px] font-semibold leading-none text-[var(--accent)] transition-colors hover:border-[var(--accent)] hover:bg-[var(--accent-warm-muted)] disabled:cursor-not-allowed disabled:opacity-50"
+                  className="flex items-center gap-1 rounded-lg border border-[var(--accent-warm-muted)] bg-[var(--accent-warm-subtle)] px-2 py-1 text-xs font-semibold leading-none text-[var(--accent)] transition-colors hover:border-[var(--accent)] hover:bg-[var(--accent-warm-muted)] disabled:cursor-not-allowed disabled:opacity-50"
                 >
                   <Minimize2 className="h-3 w-3" />
                   智能压缩
@@ -158,23 +158,23 @@ export default function ContextUsageIndicator({ onCompact }: ContextUsageIndicat
           {/* 主体：大号百分比 + 小环 */}
           <div className="mb-2.5 flex items-center gap-3.5">
             <div className="flex-1">
-              <div className="text-[28px] font-bold leading-none tracking-tight tabular-nums text-[var(--ink)]">
+              <div className="text-3xl font-bold leading-none tracking-tight tabular-nums text-[var(--ink)]">
                 {usedPercent.toFixed(1)}%
               </div>
-              <div className="mt-1.5 text-[12px] text-[var(--ink-muted)]">已用 context 窗口</div>
+              <div className="mt-1.5 text-2sm text-[var(--ink-muted)]">已用 context 窗口</div>
             </div>
             <Ring percent={usedPercent} size={44} stroke={3.5} />
           </div>
 
           {/* tokens 行 */}
-          <div className="mb-1 text-[12px] tabular-nums text-[var(--ink-muted)]">
+          <div className="mb-1 text-2sm tabular-nums text-[var(--ink-muted)]">
             <span className="font-semibold text-[var(--ink-secondary)]">{formatTokens(contextTokens)}</span>
             {' / '}
             {formatTokens(contextWindow)} tokens
           </div>
 
           {/* 底部弱灰说明（窗口来源 + 压缩点） */}
-          <div className="mt-2 border-t border-[var(--line)] pt-2 text-[10.5px] leading-relaxed text-[var(--ink-faint)]">
+          <div className="mt-2 border-t border-[var(--line)] pt-2 text-xs leading-relaxed text-[var(--ink-faint)]">
             {footnote}
           </div>
         </div>

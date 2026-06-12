@@ -125,7 +125,7 @@ export default function CronTaskOverlay({
                   : 'bg-[var(--paper-inset)] text-[var(--ink-secondary)]'
               }`}>
                 {timeDisplay.isCountdown && (
-                  <span className="text-[10px] font-normal text-[var(--ink-muted)]">下次</span>
+                  <span className="text-xs font-normal text-[var(--ink-muted)]">下次</span>
                 )}
                 {timeDisplay.text}
               </span>

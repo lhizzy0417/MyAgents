@@ -47,7 +47,7 @@ export const MenuItem = forwardRef<HTMLButtonElement, MenuItemProps>(function Me
             disabled={disabled}
             onClick={onClick}
             title={title}
-            className={`flex w-full items-center gap-2 px-3 py-2 text-left text-[12px] transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${toneClass} ${
+            className={`flex w-full items-center gap-2 px-3 py-2 text-left text-2sm transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${toneClass} ${
                 active ? 'bg-[var(--paper-inset)]' : ''
             }`}
         >

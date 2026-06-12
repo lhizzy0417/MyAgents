@@ -129,7 +129,7 @@ export const WorkspaceTreeEditRow = memo(function WorkspaceTreeEditRow({
           }
         }}
         onBlur={() => settle("commit")}
-        className={`h-5 min-w-0 flex-1 rounded-sm border bg-[var(--paper-elevated)] px-1 text-[13px] text-[var(--ink)] outline-none ${
+        className={`h-5 min-w-0 flex-1 rounded-sm border bg-[var(--paper-elevated)] px-1 text-sm text-[var(--ink)] outline-none ${
           error
             ? "border-[var(--error)]"
             : "border-[var(--accent)]/60 focus:border-[var(--accent)]"

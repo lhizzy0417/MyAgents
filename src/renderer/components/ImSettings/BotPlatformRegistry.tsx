@@ -212,14 +212,14 @@ export default function BotPlatformRegistry() {
                 <div className="flex items-center justify-center gap-1.5">
                   <p className="text-sm font-medium text-[var(--ink)]">{p.name}</p>
                   {p.platformBadge === 'deprecated' && (
-                    <span className="rounded-full bg-[var(--error)]/10 px-1.5 py-0.5 text-[10px] font-medium text-[var(--error)]">
+                    <span className="rounded-full bg-[var(--error)]/10 px-1.5 py-0.5 text-xs font-medium text-[var(--error)]">
                       即将下线
                     </span>
                   )}
                 </div>
                 <p className="mt-0.5 text-xs text-[var(--ink-muted)]">{p.description}</p>
                 {p.deprecationNotice && (
-                  <p className="mt-1 flex items-center justify-center gap-1 text-[10px] text-[var(--warning)]">
+                  <p className="mt-1 flex items-center justify-center gap-1 text-xs text-[var(--warning)]">
                     <span>⚠</span>
                     <span>{p.deprecationNotice}</span>
                   </p>
@@ -227,7 +227,7 @@ export default function BotPlatformRegistry() {
               </div>
               {p.plugin ? (
                 <div className="flex items-center gap-2">
-                  <span className="rounded-full px-2 py-0.5 text-[10px] font-medium text-[var(--success)]"
+                  <span className="rounded-full px-2 py-0.5 text-xs font-medium text-[var(--success)]"
                     style={{ backgroundColor: 'color-mix(in srgb, var(--success) 12%, transparent)' }}
                   >
                     {p.plugin.packageVersion ? `v${p.plugin.packageVersion}` : '已安装'}
@@ -242,7 +242,7 @@ export default function BotPlatformRegistry() {
                   </button>
                 </div>
               ) : (
-                <span className="rounded-full bg-[var(--paper-inset)] px-2 py-0.5 text-[10px] font-medium text-[var(--ink-subtle)]">
+                <span className="rounded-full bg-[var(--paper-inset)] px-2 py-0.5 text-xs font-medium text-[var(--ink-subtle)]">
                   {p.badge}
                 </span>
               )}
@@ -275,7 +275,7 @@ export default function BotPlatformRegistry() {
                   <div className="flex items-center justify-center gap-1.5">
                     <p className="text-sm font-medium text-[var(--ink)]">{pp.name}</p>
                     {pp.badge === 'official' && (
-                      <span className="rounded-full bg-[var(--info-bg)] px-1.5 py-0.5 text-[10px] font-medium text-[var(--info)]">
+                      <span className="rounded-full bg-[var(--info-bg)] px-1.5 py-0.5 text-xs font-medium text-[var(--info)]">
                         官方
                       </span>
                     )}
@@ -284,7 +284,7 @@ export default function BotPlatformRegistry() {
                 </div>
                 {isInstalled ? (
                   <div className="flex items-center gap-2">
-                    <span className="rounded-full px-2 py-0.5 text-[10px] font-medium text-[var(--success)]"
+                    <span className="rounded-full px-2 py-0.5 text-xs font-medium text-[var(--success)]"
                       style={{ backgroundColor: 'color-mix(in srgb, var(--success) 12%, transparent)' }}
                     >
                       {installedPlugin.packageVersion ? `v${installedPlugin.packageVersion}` : '已安装'}
@@ -302,7 +302,7 @@ export default function BotPlatformRegistry() {
                   <button
                     onClick={() => handlePromotedInstall(pp)}
                     disabled={isInstalling || loading}
-                    className="flex items-center gap-1.5 rounded-full px-3 py-1 text-[11px] font-medium text-[var(--accent)] transition-colors hover:bg-[var(--accent-warm-subtle)] disabled:opacity-50"
+                    className="flex items-center gap-1.5 rounded-full px-3 py-1 text-xs font-medium text-[var(--accent)] transition-colors hover:bg-[var(--accent-warm-subtle)] disabled:opacity-50"
                     style={{ backgroundColor: 'color-mix(in srgb, var(--accent) 8%, transparent)' }}
                   >
                     {isInstalling && <Loader2 className="h-3 w-3 animate-spin" />}
@@ -381,7 +381,7 @@ export default function BotPlatformRegistry() {
             {GUIDE_STEPS_PATH1.map((step, i) => (
               <div key={i}>
                 <p className="mb-2 text-xs font-medium text-[var(--ink-subtle)]">
-                  <span className="mr-1.5 inline-flex h-[18px] w-[18px] items-center justify-center rounded-full bg-[var(--accent-warm)] text-[10px] font-bold text-white">
+                  <span className="mr-1.5 inline-flex h-[18px] w-[18px] items-center justify-center rounded-full bg-[var(--accent-warm)] text-xs font-bold text-white">
                     {i + 1}
                   </span>
                   {step.caption}
@@ -408,7 +408,7 @@ export default function BotPlatformRegistry() {
             {GUIDE_STEPS_PATH2.map((step, i) => (
               <div key={i}>
                 <p className="mb-2 text-xs font-medium text-[var(--ink-subtle)]">
-                  <span className="mr-1.5 inline-flex h-[18px] w-[18px] items-center justify-center rounded-full bg-[var(--accent-warm)] text-[10px] font-bold text-white">
+                  <span className="mr-1.5 inline-flex h-[18px] w-[18px] items-center justify-center rounded-full bg-[var(--accent-warm)] text-xs font-bold text-white">
                     {i + 1}
                   </span>
                   {step.caption}

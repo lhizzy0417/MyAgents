@@ -87,12 +87,12 @@ export default function OpenClawToolGroupsSelector({
                                 <div className="flex items-center gap-2">
                                     <p className="text-sm font-medium text-[var(--ink)]">{group.name}</p>
                                     {group.toolCount > 0 && (
-                                        <span className="rounded-full bg-[var(--paper-inset)] px-1.5 py-0.5 text-[10px] font-medium text-[var(--ink-subtle)]">
+                                        <span className="rounded-full bg-[var(--paper-inset)] px-1.5 py-0.5 text-xs font-medium text-[var(--ink-subtle)]">
                                             {group.toolCount} 个工具
                                         </span>
                                     )}
                                     {group.sensitive && (
-                                        <span className="rounded-full bg-[var(--warning-bg)] px-1.5 py-0.5 text-[10px] font-medium text-[var(--warning)]">
+                                        <span className="rounded-full bg-[var(--warning-bg)] px-1.5 py-0.5 text-xs font-medium text-[var(--warning)]">
                                             敏感
                                         </span>
                                     )}

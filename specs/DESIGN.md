@@ -1,7 +1,7 @@
 # MyAgents Design Guide
 
-> **Version**: 2.2.0
-> **Last Updated**: 2026-03-04
+> **Version**: 2.3.0
+> **Last Updated**: 2026-06-12
 > **Status**: Active
 > **Platform**: macOS / Windows Desktop Client
 
@@ -167,26 +167,51 @@ MyAgents 是一款 AI Agent 桌面客户端，采用**温暖纸张质感**的设
 ### 2.2 字号层级 (Type Scale)
 
 基于 **16px** 作为 AI 回复正文的基准字号设计，确保长文本阅读的舒适性。
+Token 定义在 `src/renderer/index.css` 的 `@theme` 块（单一真相源，同时驱动
+`text-xs` / `text-sm` 等 Tailwind utility 与配对行高）。
 
-| Token | 大小 | 行高 | 用途 |
-|-------|------|------|------|
-| `--text-2xs` | 10px | 1.4 | 极小辅助文字（谨慎使用） |
-| `--text-xs` | 11px | 1.4 | 时间戳、状态标签、badge |
-| `--text-sm` | 13px | 1.5 | **工具栏按钮**、标签、次要内容、工具名 |
-| `--text-base` | 14px (text-sm in Tailwind) | 1.5 | 导航按钮、主要按钮文字 |
-| `--text-md` | 16px | 1.6 | **正文主体** - AI 回答内容 |
-| `--text-lg` | 18px | 1.5 | H3 标题 |
-| `--text-xl` | 20px | 1.4 | H2 标题 |
-| `--text-2xl` | 22px | 1.3 | H1 标题 |
-| `--text-3xl` | 28px | 1.2 | 页面大标题 |
-| `--text-brand` | 56px | 1.1 | 品牌名（移动端 48px） |
+> ⚠️ **Tailwind 同名异值陷阱**：本项目覆盖了 Tailwind 默认字号——
+> `text-xs`=**11px**（官方 12）、`text-sm`=**13px**（官方 14）、`text-2xl`=**22px**（官方 24）。
+> 凭 Tailwind 肌肉记忆估字号必踩坑，以本表为准。
+> **禁止 `text-[Npx]` 任意字面量**（eslint 强制）——12px/14px 幽灵字阶曾长到 ~700 处，
+> 是"字号大小不一"用户投诉的根因（PRD 0.2.34 统一清理）。
+
+每档有唯一职责，新场景先归档位再写代码：
+
+| 档位 | Token / Utility | 大小 | 行高 | 唯一职责 |
+|------|----------------|------|------|---------|
+| micro | `--text-xs` / `text-xs` | 11px | 1.4 | 时间戳、badge、计数、快捷键、分类头(uppercase) |
+| caption | `--text-2sm` / `text-2sm` | 12px | 1.45 | 标题下描述行、hint、meta 信息、次级标签 |
+| ui | `--text-sm` / `text-sm` | 13px | 1.5 | 按钮、菜单项、树节点、tab、工具卡标题、工具/控制台输出 |
+| dense | `--text-md` / `text-md` | 14px | 1.55 | 嵌在 16px 正文里的密集内容（Markdown 表格等） |
+| prose | `--text-base` / `text-base` | 16px | 1.7 | **正文主体**——AI 回答、用户气泡、widget body、输入框* |
+| display | `--text-lg/xl/2xl` | 18/20/22px | 1.5/1.4/1.3 | Markdown H3/H2/H1、弹窗标题 |
+| stat | `--text-3xl` / `text-3xl` | 28px | 1.2 | 数据大数字（占用率百分比等）、页面大标题 |
+| brand | `--text-brand` | 56px | 1.1 | 品牌名（仅 Launcher 品牌区） |
+
+**已废除**：10px 档（`--text-2xs`，v2.3 删除——中文在 Windows 低分屏雅黑下发虚，
+全部并入 11px micro 档）；9 / 10.5 / 12.5 / 15 / 17px 等离阶孤值（唯一 px 字面量例外：
+Launcher 品牌 slogan 15/17px，见 §15.2，带 eslint-disable 立档）。
+
+**\*立档例外与禁令边界**：
+- 聊天输入框 textarea（SimpleChatInput）行高为 26px 整数常量（≈1.625）——自适应高度
+  计算依赖整数像素，不随 prose 档 1.7 配对行高，属字号同档、行高立档例外。
+- eslint 只封禁 **px 字面量**；rem/em 相对值（brand-title `2.5/3.5rem`、行内代码 `0.9em`）
+  与 `style={{fontSize}}` API 配置项（Monaco/xterm/语法高亮等）不在射程内——新增此类
+  用法需对照本表自证档位。
+- 悬浮球伴侣窗（`src/renderer/floating-ball/fb.css`，PRD 0.2.35 并行开发中）尚未对齐
+  本字阶，由该 feature 负责人跟进。
 
 **字号使用原则**：
-- AI 回复的 Markdown 正文使用 16px，确保阅读舒适
-- 工具栏按钮（ghost button）使用 13px，配合 h-3.5 w-3.5 图标
-- 主按钮/导航按钮使用 14px (text-sm)
-- 时间戳、状态等辅助信息使用 11px
+- AI 回复的 Markdown 正文使用 16px / 1.7，确保阅读舒适
+- AI 回复内的 Markdown 表格用 dense 档：td=14px，th=12px uppercase（表格是密集内容，
+  但 13px 会在同一条消息内造成肉眼可见跳变）
+- 工具栏按钮（ghost button）使用 13px，配合 h-3.5 w-3.5 图标；按钮文字下限 13px
+- 时间戳、状态等辅助信息使用 11px；描述行 / hint 使用 12px
 - Markdown 标题：H1=22px, H2=20px, H3=18px, H4-H6=16px
+- 菜单分组头统一形态：`text-xs font-semibold uppercase tracking-wider text-[var(--ink-muted)]/60`
+- Widget 沙箱与宿主同阶：body 16px；h1=20/h2=18/h3=16（嵌入式卡片，比文档标题低一档，
+  沙箱已预置重置，AI 不允许自设标题字号）；utility .text-xl=20/.text-2xl=22 与宿主一致
 
 ### 2.3 字重
 
@@ -533,15 +558,18 @@ Item 选中: 文字 var(--accent-warm)
 
 | 元素 | 字号 | 颜色 | 说明 |
 |------|------|------|------|
-| 表单标签 (`<label>`) | `text-sm` (14px) font-medium | `var(--ink)` | 深色 + 14px，保证可读性 |
-| 文本输入框 | `text-sm` (14px) | `var(--ink)` | 与标签同级 |
-| 开关/设置项标题 | `text-sm` (14px) font-medium | `var(--ink)` | 如"无头模式"、"搜索增强" |
-| 开关/设置项描述 | `text-xs` (12px) | `var(--ink-muted)` | 如"后台运行，不弹出浏览器窗口" |
-| 提示文字 (hint) | `text-xs` (12px) | `var(--ink-muted)` | 如"留空使用官方端点" |
-| Section 分隔标题 | `text-sm` (14px) font-medium | `var(--ink-muted)` | 如"高级设置"、"语音参数" |
-| 选择芯片 (pills) | `text-xs` (12px) | 选中/未选中色 | 如浏览器选择、设备选择 |
+| 表单标签 (`<label>`) | `text-sm` (13px) font-medium | `var(--ink)` | 深色 + 13px，保证可读性 |
+| 文本输入框 | `text-sm` (13px) | `var(--ink)` | 与标签同级 |
+| 开关/设置项标题 | `text-sm` (13px) font-medium | `var(--ink)` | 如"无头模式"、"搜索增强" |
+| 开关/设置项描述 | `text-xs` (11px) | `var(--ink-muted)` | 如"后台运行，不弹出浏览器窗口" |
+| 提示文字 (hint) | `text-xs` (11px) | `var(--ink-muted)` | 如"留空使用官方端点" |
+| Section 分隔标题 | `text-sm` (13px) font-medium | `var(--ink-muted)` | 如"高级设置"、"语音参数" |
+| 选择芯片 (pills) | `text-xs` (11px) | 选中/未选中色 | 如浏览器选择、设备选择 |
 | 弹窗标题 | `text-lg` (18px) font-semibold | `var(--ink)` | 如"Playwright 浏览器设置" |
-| Footer 按钮 | `text-sm` (14px) | — | "取消" / "保存" |
+| Footer 按钮 | `text-sm` (13px) | — | "取消" / "保存" |
+
+> 注：v2.3 之前本表的 px 标注（14px/12px）与实际 token 值不符——`text-sm`=13px、
+> `text-xs`=11px 才是真值（见 §2.2 Tailwind 同名异值陷阱）。
 
 ---
 
@@ -690,7 +718,7 @@ transition: opacity var(--duration-slow),
 背景: transparent (与页面融合)
 文字: var(--ink)
 字号: var(--text-base) / 16px
-行高: 1.6 (阅读优化)
+行高: 1.7 (阅读优化，@theme 配对行高)
 段落间距: var(--space-4)
 最大宽度: 768px (居中)
 ```
@@ -701,7 +729,7 @@ transition: opacity var(--duration-slow),
 文字: var(--ink)
 圆角: var(--radius-lg)
 内边距: var(--space-4)
-字号: var(--text-base)
+字号: var(--text-base)，行高 1.7（与 AI 消息一致，不另设 leading）
 对齐: 右侧（或左侧皆可，但需与 AI 区分）
 ```
 
@@ -802,7 +830,7 @@ AI 的思考过程，用户可选择查看。
 /* AI 回复正文 */
 .ai-message-content {
   font-size: var(--text-base);  /* 16px */
-  line-height: 1.6;              /* 25.6px - 适合长文本阅读 */
+  line-height: 1.7;              /* 27.2px - 适合长文本阅读 */
   letter-spacing: 0.01em;        /* 略微增加字间距 */
 }
 
@@ -831,6 +859,16 @@ AI 的思考过程，用户可选择查看。
 | `#### H4` | 16px, semibold, margin-top: 12px, margin-bottom: 8px |
 | `##### H5` | 16px, medium, margin-top: 12px, margin-bottom: 8px |
 | `###### H6` | 16px, medium, margin-top: 12px, margin-bottom: 8px |
+
+#### 表格 (Markdown Table)
+
+表格是嵌在 16px 正文里的密集内容，用 dense 档而非 ui 档——13px 会在同一条
+消息内造成肉眼可见的字号跳变（PRD 0.2.34 P0-1）：
+
+| 元素 | 样式 |
+|------|------|
+| 单元格 (td) | `text-md` (14px) |
+| 表头 (th) | `text-2sm` (12px), semibold, uppercase, tracking-wide, `var(--ink-muted)` |
 
 ### 10.8 内容块间距
 
@@ -1195,6 +1233,7 @@ Hover 状态:
 
 | 版本 | 日期 | 变更 |
 |------|------|------|
+| 2.3.0 | 2026-06-12 | **Typography Unification（PRD 0.2.34）**：字号 token 迁入 `@theme`（单一真相源，配对行高）；新增 caption 档 `--text-2sm`(12px) 与 dense 档 `--text-md`(14px)，每档唯一职责；废除 10px 档（`--text-2xs` 删除，155 处并入 11px）；全仓 ~700 处 `text-[Npx]` 字面量归一为 token utility（eslint 封禁新增 px 字面量，唯一豁免=品牌 slogan；rem/em 与悬浮球 fb.css 边界见 §2.2）；Markdown 表格 td 13→14px / th 11→12px（消同消息内字号跳变）；introduction-content 正文 14→16px 与聊天正文同基准（退层由色板承载）；用户气泡行高统一 1.7；Widget 沙箱注入 h1-h6 重置（20/18/16/14, 600）+ body 行高 1.6→1.7 + utility 对齐宿主（xl 22→20、2xl 28→22）——**存量 widget 重渲染后裸标题会从浏览器默认（h1=32px/700）收紧到契约尺寸，观感变化是预期行为**；菜单分组头统一 11px semibold uppercase tracking-wider /60；§2.2 字阶表重写为档位制并修正历史标注错误（旧表 `--text-base` 14px / `--text-md` 16px 均与代码不符）；删除死代码 `.tree-item*` |
 | 2.2.0 | 2026-03-04 | **Design Polish v2.2**：新增 `--hover-bg` Token（`rgba(194,109,58,0.07)` 暖棕 7%）统一列表行 hover；Hover 背景分层（列表行用 `--hover-bg`，小按钮用 `--paper-inset`）；27 处列表行 hover 迁移至 `--hover-bg`（Chat/Launcher/Settings/TaskCenter/SlashMenu/ProcessRow 等 10 个文件）；Settings 浮层面板背景统一 `--paper-elevated`（SkillDialogs×2/WorkspaceConfigPanel/UnifiedLogsPanel/CronTaskDebugPanel）；Settings 侧边栏字号 text-[15px]→text-base、active 底色 paper-inset→hover-bg；MCP 工具浮层字号对齐供应商面板（labels/inputs text-xs→text-sm，hints text-[10px]→text-xs）；紧凑卡片增加 hover:translate-y-[-1px] 微上浮（Skill/Command/Agent/ImBot）；SessionTagBadge 底色 paper-inset→paper-elevated；UsageStatsPanel 深背景降档；BugReportOverlay 配色修正；ImBot 停止按钮改 outline 样式；Skills/Agents 详情页互斥显示 |
 | 2.1.0 | 2026-03-04 | **Design Polish v2.1**：`--paper` 调浅（#f2ebe0 → #faf6ee）减少启动页/设置页压迫感；新增 heartbeat Token 系列替换 Tailwind red-500；工具栏弹窗背景统一 `--paper-elevated`；Plus 菜单/Slash 命令宽度归一化；工作区面板字号整体提升一档（10→11→13 阶梯）；Overlay 遮罩统一毛玻璃 `bg-black/30 backdrop-blur-sm`；Chat header 去除硬边框改渐变淡出；Launcher 横分割线改不封闭；Section 标题区分静态/Tab 式两种色阶 |
 | 2.0.0 | 2026-03-04 | **Design Polish v2.0**：Paper 色阶拉开（paper/elevated/inset 对比度增强）；Ink 层级拉开（ink-secondary 加深、ink-subtle 微亮）；主按钮从深棕改为暖棕 Accent #c26d3a；语义色暖化（success→#2d8a5e, info→#4a7ab5）；新增 accent-warm-subtle/muted/error-hover token；Tailwind v4 @theme 接管 shadow 体系；清理全部旧别名（paper-contrast/strong/reading, ink-strong, accent-strong/bg, shadow-soft/strong）；删除未使用 CSS 类（btn-*/card*/badge*/soft-panel）；SessionTagBadge 降饱和统一暖色调；Settings 侧边栏增加 accent 左竖条指示器；WorkspaceCard 标准卡片化 + hover 微上浮；硬编码颜色全部 token 化 |

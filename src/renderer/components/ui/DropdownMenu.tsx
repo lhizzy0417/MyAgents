@@ -162,7 +162,7 @@ function MenuItem({
       disabled={disabled}
       onClick={onClick}
       title={title}
-      className={`flex w-full items-center gap-2 px-3 py-1.5 text-left text-[12px] disabled:cursor-not-allowed disabled:opacity-50 ${colour}`}
+      className={`flex w-full items-center gap-2 px-3 py-1.5 text-left text-2sm disabled:cursor-not-allowed disabled:opacity-50 ${colour}`}
     >
       {icon}
       {label}

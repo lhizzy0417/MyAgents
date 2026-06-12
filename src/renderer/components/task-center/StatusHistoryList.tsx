@@ -45,7 +45,7 @@ export function StatusHistoryList({ task, defaultCollapsed = false }: Props) {
 
   if (history.length === 0) {
     return (
-      <div className="py-6 text-center text-[12px] text-[var(--ink-muted)]">
+      <div className="py-6 text-center text-2sm text-[var(--ink-muted)]">
         暂无状态变更记录
       </div>
     );
@@ -54,7 +54,7 @@ export function StatusHistoryList({ task, defaultCollapsed = false }: Props) {
   return (
     <div className="flex flex-col gap-2">
       <div className="flex items-center justify-between">
-        <div className="text-[14px] font-semibold text-[var(--ink)]">
+        <div className="text-md font-semibold text-[var(--ink)]">
           状态变更记录 ({history.length})
         </div>
         {/* Export button is only useful in the fully expanded view;
@@ -63,7 +63,7 @@ export function StatusHistoryList({ task, defaultCollapsed = false }: Props) {
           <button
             type="button"
             onClick={() => downloadAsJson(task)}
-            className="flex items-center gap-1 rounded-[var(--radius-md)] px-2 py-1 text-[11px] text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
+            className="flex items-center gap-1 rounded-[var(--radius-md)] px-2 py-1 text-xs text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
             title="下载完整 JSON"
           >
             <Download className="h-3 w-3" />
@@ -80,7 +80,7 @@ export function StatusHistoryList({ task, defaultCollapsed = false }: Props) {
         <button
           type="button"
           onClick={() => setExpanded(true)}
-          className="flex items-center gap-1 self-center rounded-[var(--radius-md)] px-3 py-1 text-[12px] text-[var(--accent-warm)] transition-colors hover:bg-[var(--accent-warm-subtle)]"
+          className="flex items-center gap-1 self-center rounded-[var(--radius-md)] px-3 py-1 text-2sm text-[var(--accent-warm)] transition-colors hover:bg-[var(--accent-warm-subtle)]"
         >
           <ChevronRight className="h-3 w-3" />
           查看全部 {ordered.length} 条
@@ -90,7 +90,7 @@ export function StatusHistoryList({ task, defaultCollapsed = false }: Props) {
         <button
           type="button"
           onClick={() => setVisibleCount((c) => c + PAGE_SIZE)}
-          className="self-center rounded-[var(--radius-md)] px-3 py-1 text-[12px] text-[var(--accent-warm)] transition-colors hover:bg-[var(--accent-warm-subtle)]"
+          className="self-center rounded-[var(--radius-md)] px-3 py-1 text-2sm text-[var(--accent-warm)] transition-colors hover:bg-[var(--accent-warm-subtle)]"
         >
           加载更多(剩余 {ordered.length - visibleCount})
         </button>
@@ -114,7 +114,7 @@ function TransitionRow({ t }: { t: StatusTransition }) {
         className="absolute left-1 top-2.5 inline-block h-2 w-2 rounded-full bg-[var(--accent-warm)]"
         aria-hidden
       />
-      <div className="flex-1 text-[12px]">
+      <div className="flex-1 text-2sm">
         <div className="flex items-center gap-1.5 text-[var(--ink)]">
           {selfLoop ? (
             <span className="font-medium">{to}</span>
@@ -125,18 +125,18 @@ function TransitionRow({ t }: { t: StatusTransition }) {
               <span className="font-medium">{to}</span>
             </>
           )}
-          <span className="text-[10px] text-[var(--ink-muted)]/70">
+          <span className="text-xs text-[var(--ink-muted)]/70">
             · {actorLabel(t.actor)}
             {t.source && ` · ${t.source}`}
           </span>
         </div>
         {t.message && (
-          <div className="mt-0.5 text-[11px] text-[var(--ink-muted)]">
+          <div className="mt-0.5 text-xs text-[var(--ink-muted)]">
             {t.message}
           </div>
         )}
       </div>
-      <span className="shrink-0 text-[10px] tabular-nums text-[var(--ink-muted)]/60">
+      <span className="shrink-0 text-xs tabular-nums text-[var(--ink-muted)]/60">
         {new Date(t.at).toLocaleString()}
       </span>
     </li>

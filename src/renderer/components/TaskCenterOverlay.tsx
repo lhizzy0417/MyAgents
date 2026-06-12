@@ -288,7 +288,7 @@ export default memo(function TaskCenterOverlay({
                     match the new domain of this overlay (Chat sessions only;
                     Tasks live in the Task Center singleton tab). */}
                 <div className="mb-4 flex items-center justify-between">
-                    <h2 className="text-[16px] font-semibold text-[var(--ink)]">历史对话</h2>
+                    <h2 className="text-base font-semibold text-[var(--ink)]">历史对话</h2>
                     <button
                         onClick={onClose}
                         className="rounded-md p-1.5 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
@@ -316,7 +316,7 @@ export default memo(function TaskCenterOverlay({
                                         value={searchQuery}
                                         onChange={(e) => setSearchQuery(e.target.value)}
                                         placeholder="搜索历史记录的内容或标题..."
-                                        className="h-full w-full rounded-md outline-none border border-[var(--line)] bg-transparent py-1 pl-8 pr-10 text-[12px] text-[var(--ink)] transition-colors placeholder:text-[var(--ink-muted)]/60 focus:border-[var(--accent)]"
+                                        className="h-full w-full rounded-md outline-none border border-[var(--line)] bg-transparent py-1 pl-8 pr-10 text-sm text-[var(--ink)] transition-colors placeholder:text-[var(--ink-muted)]/60 focus:border-[var(--accent)]"
                                         onKeyDown={(e) => {
                                             if (e.key === "Escape") {
                                                 setIsSearchMode(false);
@@ -353,7 +353,7 @@ export default memo(function TaskCenterOverlay({
                                             <button
                                                 key={opt.key}
                                                 onClick={() => setStatusFilter(opt.key)}
-                                                className={`rounded-full px-2.5 py-1 text-[11px] font-medium transition-colors ${
+                                                className={`rounded-full px-2.5 py-1 text-xs font-medium transition-colors ${
                                                     statusFilter === opt.key
                                                         ? 'bg-[var(--button-primary-bg)] text-[var(--button-primary-text)]'
                                                         : 'text-[var(--ink-muted)] hover:bg-[var(--hover-bg)]'
@@ -396,7 +396,7 @@ export default memo(function TaskCenterOverlay({
                                    bypassing full-text search and the filteredSessions guard. */
                                 directSessionMatch.kind === 'found' ? (
                                     <div className="space-y-2">
-                                        <div className="px-1 text-[11px] text-[var(--ink-muted)]/60">
+                                        <div className="px-1 text-xs text-[var(--ink-muted)]/60">
                                             匹配到会话 · 回车或点击打开
                                         </div>
                                         <div
@@ -404,14 +404,14 @@ export default memo(function TaskCenterOverlay({
                                             onClick={openDirectMatch}
                                             className="group flex w-full cursor-pointer items-center gap-2.5 rounded-lg border border-[var(--accent)]/30 px-3 py-2.5 text-left transition-all hover:bg-[var(--hover-bg)]"
                                         >
-                                            <div className="flex w-14 shrink-0 items-center gap-1 text-[11px] text-[var(--ink-muted)]/50">
+                                            <div className="flex w-14 shrink-0 items-center gap-1 text-xs text-[var(--ink-muted)]/50">
                                                 <Clock className="h-2.5 w-2.5" />
                                                 <span>{formatTime(directSessionMatch.session.lastActiveAt)}</span>
                                             </div>
-                                            <span className="min-w-0 flex-1 truncate text-[13px] text-[var(--ink-secondary)] transition-colors group-hover:text-[var(--ink)]">
+                                            <span className="min-w-0 flex-1 truncate text-sm text-[var(--ink-secondary)] transition-colors group-hover:text-[var(--ink)]">
                                                 {getSessionDisplayText(directSessionMatch.session)}
                                             </span>
-                                            <div className="flex shrink-0 items-center gap-1.5 text-[11px] text-[var(--ink-muted)]/45">
+                                            <div className="flex shrink-0 items-center gap-1.5 text-xs text-[var(--ink-muted)]/45">
                                                 <WorkspaceIcon icon={directSessionMatch.project.icon} size={14} />
                                                 <span className="max-w-[80px] truncate">
                                                     {getFolderName(directSessionMatch.project.path)}
@@ -420,19 +420,19 @@ export default memo(function TaskCenterOverlay({
                                         </div>
                                     </div>
                                 ) : (
-                                    <div className="py-8 text-center text-[13px] text-[var(--ink-muted)]/60">
+                                    <div className="py-8 text-center text-sm text-[var(--ink-muted)]/60">
                                         未找到该 SessionID 对应的会话
                                     </div>
                                 )
                             ) : filteredSessions.length === 0 ? (
-                                <div className="py-8 text-center text-[13px] text-[var(--ink-muted)]/60">
+                                <div className="py-8 text-center text-sm text-[var(--ink-muted)]/60">
                                     暂无匹配的历史对话
                                 </div>
                             ) : (
                                 <div className="space-y-0.5">
                                     {isSearchMode && searchQuery.trim() !== '' ? (
                                         searchResults.length === 0 && !isSearching ? (
-                                            <div className="py-8 text-center text-[13px] text-[var(--ink-muted)]/60">
+                                            <div className="py-8 text-center text-sm text-[var(--ink-muted)]/60">
                                                 未找到结果
                                             </div>
                                         ) : (
@@ -471,22 +471,22 @@ export default memo(function TaskCenterOverlay({
                                                     onClick={() => onOpenTask(session, project)}
                                                     className="group relative flex w-full cursor-pointer items-center gap-2.5 rounded-lg px-3 py-2 text-left transition-all hover:bg-[var(--hover-bg)]"
                                                 >
-                                                    <div className="flex w-14 shrink-0 items-center gap-1 text-[11px] text-[var(--ink-muted)]/50">
+                                                    <div className="flex w-14 shrink-0 items-center gap-1 text-xs text-[var(--ink-muted)]/50">
                                                         <Clock className="h-2.5 w-2.5" />
                                                         <span>{formatTime(session.lastActiveAt)}</span>
                                                     </div>
                                                     {tags.map((tag, i) => (
                                                         <SessionTagBadge key={i} tag={tag} />
                                                     ))}
-                                                    <span className="min-w-0 flex-1 truncate text-[13px] text-[var(--ink-secondary)] transition-colors group-hover:text-[var(--ink)]">
+                                                    <span className="min-w-0 flex-1 truncate text-sm text-[var(--ink-secondary)] transition-colors group-hover:text-[var(--ink)]">
                                                         {displayText}
                                                         {msgCount && (
-                                                            <span className="ml-1.5 text-[11px] text-[var(--ink-muted)]/40">
+                                                            <span className="ml-1.5 text-xs text-[var(--ink-muted)]/40">
                                                                 {msgCount}
                                                             </span>
                                                         )}
                                                     </span>
-                                                    <div className="flex shrink-0 items-center gap-1.5 text-[11px] text-[var(--ink-muted)]/45">
+                                                    <div className="flex shrink-0 items-center gap-1.5 text-xs text-[var(--ink-muted)]/45">
                                                         <WorkspaceIcon icon={project.icon} size={14} />
                                                         <span className="max-w-[80px] truncate">
                                                             {getFolderName(project.path)}

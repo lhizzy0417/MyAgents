@@ -72,7 +72,7 @@ export default function TaskCenter({ isActive, pendingIntent }: Props) {
   if (!taskCenterAvailable()) {
     return (
       <div className="flex h-full items-center justify-center bg-[var(--paper)] px-8 text-center">
-        <div className="max-w-md text-[13px] leading-relaxed text-[var(--ink-muted)]">
+        <div className="max-w-md text-sm leading-relaxed text-[var(--ink-muted)]">
           <p className="font-medium text-[var(--ink-secondary)]">任务中心</p>
           <p className="mt-2">
             此功能仅在桌面客户端内可用。
@@ -98,7 +98,7 @@ export default function TaskCenter({ isActive, pendingIntent }: Props) {
               replaces the hairline as the divider, continuing the
               "layout over rules" direction set in the review  */}
       <div className="flex shrink-0 items-center px-5 pt-5 pb-3">
-        <h1 className="text-[20px] font-semibold text-[var(--ink)]">
+        <h1 className="text-xl font-semibold text-[var(--ink)]">
           任务中心
         </h1>
       </div>

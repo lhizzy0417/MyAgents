@@ -45,7 +45,7 @@ export default memo(function FileSearchResults({
         return (
             <div className="flex h-full flex-col px-4 py-3 pb-8 overflow-y-auto overscroll-contain">
                 <div className="flex items-center gap-2 mb-4">
-                    <div className="text-[11px] font-medium text-[var(--ink-muted)]">搜索中...</div>
+                    <div className="text-xs font-medium text-[var(--ink-muted)]">搜索中...</div>
                 </div>
             </div>
         );
@@ -53,9 +53,9 @@ export default memo(function FileSearchResults({
 
     if (!query) {
         return (
-            <div className="flex h-full flex-col items-center justify-center p-6 text-center text-[13px] text-[var(--ink-muted)]/60">
+            <div className="flex h-full flex-col items-center justify-center p-6 text-center text-sm text-[var(--ink-muted)]/60">
                 <p>在当前工作区中搜索</p>
-                <p className="mt-1 text-[11px]">文件名和文件内容</p>
+                <p className="mt-1 text-xs">文件名和文件内容</p>
             </div>
         );
     }
@@ -64,7 +64,7 @@ export default memo(function FileSearchResults({
         return (
             <div className="flex h-full flex-col px-4 py-3 pb-8 overflow-y-auto overscroll-contain">
                 <div className="flex items-center gap-2 mb-4">
-                    <div className="text-[11px] font-medium text-[var(--ink-muted)]">
+                    <div className="text-xs font-medium text-[var(--ink-muted)]">
                         0 个结果{isRefreshing ? ' · 正在更新索引...' : ''}
                     </div>
                 </div>
@@ -77,7 +77,7 @@ export default memo(function FileSearchResults({
     return (
         <div className="flex h-full flex-col pb-8 overflow-y-auto overscroll-contain" style={{ scrollbarGutter: 'stable' }}>
             <div className="sticky top-0 z-10 bg-[var(--paper)]/90 px-4 py-2 backdrop-blur-sm border-b border-[var(--line-subtle)]">
-                <div className="text-[11px] font-medium text-[var(--ink-muted)]">
+                <div className="text-xs font-medium text-[var(--ink-muted)]">
                     {results.length} 个文件中找到 {totalMatches} 个结果{isRefreshing ? ' · 正在更新索引...' : ''}
                 </div>
             </div>
@@ -99,7 +99,7 @@ export default memo(function FileSearchResults({
                             <div
                                 role="group"
                                 title={hit.path}
-                                className={`group flex h-7 items-center pr-3 pl-2 text-[13px] select-none ${
+                                className={`group flex h-7 items-center pr-3 pl-2 text-sm select-none ${
                                     isActiveFile ? 'bg-[var(--accent-warm-subtle)]' : 'hover:bg-[var(--hover-bg)]'
                                 }`}
                                 onContextMenu={(e) => {
@@ -143,7 +143,7 @@ export default memo(function FileSearchResults({
                                     </span>
                                     {/* Dirname — takes remaining space, truncates with ellipsis */}
                                     {dirname && (
-                                        <span className="min-w-0 truncate text-[11px] text-[var(--ink-muted)]/70 ml-1">
+                                        <span className="min-w-0 truncate text-xs text-[var(--ink-muted)]/70 ml-1">
                                             {dirname}
                                         </span>
                                     )}
@@ -160,7 +160,7 @@ export default memo(function FileSearchResults({
                                 >
                                     <LocateFixed className="h-3.5 w-3.5" />
                                 </button>
-                                <div className="shrink-0 flex items-center justify-center w-5 h-5 rounded-full bg-[var(--paper-inset)] text-[10px] text-[var(--ink-muted)] font-medium">
+                                <div className="shrink-0 flex items-center justify-center w-5 h-5 rounded-full bg-[var(--paper-inset)] text-xs text-[var(--ink-muted)] font-medium">
                                     {hit.matchCount}
                                 </div>
                             </div>
@@ -174,7 +174,7 @@ export default memo(function FileSearchResults({
                                         <div
                                             key={`${hit.path}-${match.lineNumber}-${idx}`}
                                             role="button"
-                                            className={`group flex min-h-6 items-start py-0.5 pr-3 pl-[30px] text-[12px] hover:text-[var(--ink)] cursor-pointer text-[var(--ink-secondary)] transition-colors ${
+                                            className={`group flex min-h-6 items-start py-0.5 pr-3 pl-[30px] text-2sm hover:text-[var(--ink)] cursor-pointer text-[var(--ink-secondary)] transition-colors ${
                                                 isActiveMatch ? 'bg-[var(--accent-warm-subtle)]' : 'hover:bg-[var(--hover-bg)]'
                                             }`}
                                             onClick={() => onMatchClick(hit, match)}
@@ -185,7 +185,7 @@ export default memo(function FileSearchResults({
                                             }}
                                         >
                                             {/* Line number */}
-                                            <div className="w-8 shrink-0 text-right text-[10px] text-[var(--ink-muted)]/60 font-mono pt-[1px] select-none pr-3">
+                                            <div className="w-8 shrink-0 text-right text-xs text-[var(--ink-muted)]/60 font-mono pt-[1px] select-none pr-3">
                                                 {match.lineNumber}
                                             </div>
                                             {/* Line content */}
@@ -199,7 +199,7 @@ export default memo(function FileSearchResults({
                                         );
                                     })}
                                     {hit.matchCount > hit.matches.length && (
-                                        <div className="pl-[38px] py-1 text-[11px] text-[var(--ink-muted)]/50 italic mb-1">
+                                        <div className="pl-[38px] py-1 text-xs text-[var(--ink-muted)]/50 italic mb-1">
                                             ... 还有 {hit.matchCount - hit.matches.length} 个结果
                                         </div>
                                     )}

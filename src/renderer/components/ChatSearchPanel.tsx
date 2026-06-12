@@ -71,9 +71,9 @@ export default function ChatSearchPanel({ controller, onClose }: ChatSearchPanel
         onKeyDown={handleKeyDown}
         placeholder="在当前页面中查找"
         aria-label="在当前页面中查找"
-        className="min-w-0 flex-1 bg-transparent text-[13px] text-[var(--ink)] outline-none placeholder:text-[var(--ink-muted)]"
+        className="min-w-0 flex-1 bg-transparent text-sm text-[var(--ink)] outline-none placeholder:text-[var(--ink-muted)]"
       />
-      <span className="shrink-0 text-[11px] tabular-nums text-[var(--ink-muted)]">
+      <span className="shrink-0 text-xs tabular-nums text-[var(--ink-muted)]">
         {counterLabel}
       </span>
       <div className="mx-0.5 h-4 w-px bg-[var(--line)]" />

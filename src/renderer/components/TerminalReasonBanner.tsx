@@ -73,7 +73,7 @@ export default function TerminalReasonBanner({
   const showNewSession = reason === 'max_turns' && !!onNewSession;
 
   return (
-    <div className={`relative z-10 flex-shrink-0 border-b border-[var(--line)] ${style.bg} px-4 py-2 text-[11px] text-[var(--ink)]`}>
+    <div className={`relative z-10 flex-shrink-0 border-b border-[var(--line)] ${style.bg} px-4 py-2 text-xs text-[var(--ink)]`}>
       <div className="mx-auto flex max-w-3xl items-start gap-2">
         <Icon className={`mt-0.5 h-4 w-4 flex-shrink-0 ${style.iconColor}`} />
         <div className="flex-1">
@@ -94,7 +94,7 @@ export default function TerminalReasonBanner({
                 onNewSession!();
                 onDismiss();
               }}
-              className="rounded-md px-2 py-0.5 text-[10px] font-medium text-[var(--accent-warm)] transition-colors hover:bg-[var(--accent-warm-subtle)] disabled:cursor-wait disabled:opacity-60"
+              className="rounded-md px-2 py-0.5 text-xs font-medium text-[var(--accent-warm)] transition-colors hover:bg-[var(--accent-warm-subtle)] disabled:cursor-wait disabled:opacity-60"
             >
               新开会话
             </button>

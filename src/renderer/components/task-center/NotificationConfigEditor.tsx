@@ -51,7 +51,7 @@ export function NotificationConfigEditor({ value, onChange, workspacePath }: Pro
       <div className="flex items-center justify-between rounded-[var(--radius-lg)] border border-[var(--line)] bg-[var(--paper)] px-4 py-3">
         <div className="min-w-0 pr-3">
           <div className="text-sm text-[var(--ink)]">桌面通知</div>
-          <div className="mt-0.5 text-[12px] text-[var(--ink-muted)]">
+          <div className="mt-0.5 text-2sm text-[var(--ink-muted)]">
             任务状态变化时弹出系统通知
           </div>
         </div>
@@ -65,9 +65,9 @@ export function NotificationConfigEditor({ value, onChange, workspacePath }: Pro
       {/* IM channel — only render the picker when channels exist; otherwise
           a quiet hint so the user knows where to wire one up. */}
       <div>
-        <label className="mb-1.5 block text-[13px] font-medium text-[var(--ink-secondary)]">
+        <label className="mb-1.5 block text-sm font-medium text-[var(--ink-secondary)]">
           投递到 IM Bot
-          <span className="ml-1 text-[12px] font-normal text-[var(--ink-muted)]/80">
+          <span className="ml-1 text-2sm font-normal text-[var(--ink-muted)]/80">
             （可选）
           </span>
         </label>
@@ -80,7 +80,7 @@ export function NotificationConfigEditor({ value, onChange, workspacePath }: Pro
             size="md"
           />
         ) : (
-          <div className="rounded-[var(--radius-md)] border border-dashed border-[var(--line)] bg-[var(--paper)] px-3 py-2 text-[12px] text-[var(--ink-muted)]">
+          <div className="rounded-[var(--radius-md)] border border-dashed border-[var(--line)] bg-[var(--paper)] px-3 py-2 text-2sm text-[var(--ink-muted)]">
             该工作区还没有可用的 IM 频道。仅发送桌面通知。
           </div>
         )}

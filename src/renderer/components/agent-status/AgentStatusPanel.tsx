@@ -168,7 +168,7 @@ const AgentStatusBar = memo(function AgentStatusBar({ summary, expanded, onToggl
       onClick={onToggle}
       aria-expanded={expanded}
       aria-label={expanded ? '收起 Agent 状态面板' : '展开 Agent 状态面板'}
-      className={`flex items-center gap-4 px-3 py-2 text-[12px] text-[var(--ink)] transition-colors hover:bg-[var(--paper-inset)]/40 ${
+      className={`flex items-center gap-4 px-3 py-2 text-2sm text-[var(--ink)] transition-colors hover:bg-[var(--paper-inset)]/40 ${
         expanded ? 'border-t border-[var(--line-subtle)]' : ''
       }`}
     >

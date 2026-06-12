@@ -289,7 +289,7 @@ export default memo(function TemplateLibraryDialog({
                     <div className="flex w-[220px] flex-col border-r border-[var(--line)]">
                         <div className="flex-1 overflow-y-auto overscroll-contain p-3">
                             <div className="mb-2 px-1">
-                                <span className="text-[11px] font-semibold uppercase tracking-[0.12em] text-[var(--ink-muted)]">
+                                <span className="text-xs font-semibold uppercase tracking-[0.12em] text-[var(--ink-muted)]">
                                     模板库
                                 </span>
                             </div>
@@ -311,11 +311,11 @@ export default memo(function TemplateLibraryDialog({
                                         <WorkspaceIcon icon={tpl.icon} size={20} />
                                     </span>
                                     <div className="min-w-0 flex-1">
-                                        <p className="truncate text-[13px] font-medium leading-tight">{tpl.name}</p>
+                                        <p className="truncate text-sm font-medium leading-tight">{tpl.name}</p>
                                         {tpl.description ? (
-                                            <p className="mt-0.5 truncate text-[11px] leading-tight text-[var(--ink-muted)]">{tpl.description}</p>
+                                            <p className="mt-0.5 truncate text-xs leading-tight text-[var(--ink-muted)]">{tpl.description}</p>
                                         ) : tpl.isBuiltin ? (
-                                            <p className="mt-0.5 text-[11px] leading-tight text-[var(--ink-muted)]">内置</p>
+                                            <p className="mt-0.5 text-xs leading-tight text-[var(--ink-muted)]">内置</p>
                                         ) : null}
                                     </div>
                                     {/* Remove button for user templates */}
@@ -339,7 +339,7 @@ export default memo(function TemplateLibraryDialog({
                                 type="button"
                                 onClick={handleAddTemplate}
                                 disabled={addingTemplate}
-                                className="flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-[13px] font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--hover-bg)] hover:text-[var(--ink)] disabled:opacity-50"
+                                className="flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-sm font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--hover-bg)] hover:text-[var(--ink)] disabled:opacity-50"
                             >
                                 {addingTemplate ? (
                                     <Loader2 className="h-3.5 w-3.5 animate-spin" />
@@ -422,12 +422,12 @@ export default memo(function TemplateLibraryDialog({
                                                         if (e.key === 'Enter') { (e.target as HTMLInputElement).blur(); }
                                                         if (e.key === 'Escape') { setEditingName(false); }
                                                     }}
-                                                    className="w-full rounded border border-[var(--line)] bg-transparent px-1.5 py-0.5 text-[15px] font-semibold text-[var(--ink)] focus:border-[var(--ink-muted)] focus:outline-none"
+                                                    className="w-full rounded border border-[var(--line)] bg-transparent px-1.5 py-0.5 text-base font-semibold text-[var(--ink)] focus:border-[var(--ink-muted)] focus:outline-none"
                                                     autoFocus
                                                 />
                                             ) : (
                                                 <h3
-                                                    className={`text-[15px] font-semibold leading-tight text-[var(--ink)] ${
+                                                    className={`text-base font-semibold leading-tight text-[var(--ink)] ${
                                                         selectedTemplate.isBuiltin ? '' : 'cursor-pointer rounded px-1.5 py-0.5 -ml-1.5 transition-colors hover:bg-[var(--hover-bg)]'
                                                     }`}
                                                     onClick={() => {
@@ -443,7 +443,7 @@ export default memo(function TemplateLibraryDialog({
                                             )}
                                             {/* Description — inline editable for user templates */}
                                             {selectedTemplate.isBuiltin ? (
-                                                <p className="mt-1 min-h-[20px] text-[13px] leading-snug text-[var(--ink-muted)]">
+                                                <p className="mt-1 min-h-[20px] text-sm leading-snug text-[var(--ink-muted)]">
                                                     {selectedTemplate.description}
                                                 </p>
                                             ) : editingDesc ? (
@@ -461,13 +461,13 @@ export default memo(function TemplateLibraryDialog({
                                                         if (e.key === 'Enter') { (e.target as HTMLInputElement).blur(); }
                                                         if (e.key === 'Escape') { setEditingDesc(false); }
                                                     }}
-                                                    className="mt-1 w-full rounded border border-[var(--line)] bg-transparent px-1.5 py-0.5 text-[13px] text-[var(--ink-muted)] placeholder:text-[var(--ink-subtle)] focus:border-[var(--ink-muted)] focus:outline-none"
+                                                    className="mt-1 w-full rounded border border-[var(--line)] bg-transparent px-1.5 py-0.5 text-sm text-[var(--ink-muted)] placeholder:text-[var(--ink-subtle)] focus:border-[var(--ink-muted)] focus:outline-none"
                                                     placeholder="添加模板描述..."
                                                     autoFocus
                                                 />
                                             ) : (
                                                 <p
-                                                    className="mt-1 min-h-[20px] cursor-pointer rounded px-1.5 py-0.5 -ml-1.5 text-[13px] leading-snug text-[var(--ink-muted)] transition-colors hover:bg-[var(--hover-bg)]"
+                                                    className="mt-1 min-h-[20px] cursor-pointer rounded px-1.5 py-0.5 -ml-1.5 text-sm leading-snug text-[var(--ink-muted)] transition-colors hover:bg-[var(--hover-bg)]"
                                                     onClick={() => {
                                                         setDescDraft(selectedTemplate.description || '');
                                                         setEditingDesc(true);
@@ -513,7 +513,7 @@ export default memo(function TemplateLibraryDialog({
                                         <button
                                             type="button"
                                             onClick={handleChangeDir}
-                                            className="shrink-0 rounded-lg bg-[var(--button-secondary-bg)] px-3 py-2.5 text-[13px] font-medium text-[var(--button-secondary-text)] transition-colors hover:bg-[var(--button-secondary-bg-hover)]"
+                                            className="shrink-0 rounded-lg bg-[var(--button-secondary-bg)] px-3 py-2.5 text-sm font-medium text-[var(--button-secondary-text)] transition-colors hover:bg-[var(--button-secondary-bg-hover)]"
                                         >
                                             更换
                                         </button>
@@ -539,7 +539,7 @@ export default memo(function TemplateLibraryDialog({
                                         type="button"
                                         onClick={handleCreate}
                                         disabled={creating || !projectName.trim()}
-                                        className="flex items-center gap-1.5 rounded-full bg-[var(--button-primary-bg)] px-5 py-2.5 text-[13px] font-medium text-[var(--button-primary-text)] transition-all hover:bg-[var(--button-primary-bg-hover)] hover:shadow-sm disabled:opacity-50"
+                                        className="flex items-center gap-1.5 rounded-full bg-[var(--button-primary-bg)] px-5 py-2.5 text-sm font-medium text-[var(--button-primary-text)] transition-all hover:bg-[var(--button-primary-bg-hover)] hover:shadow-sm disabled:opacity-50"
                                     >
                                         {creating ? (
                                             <Loader2 className="h-3.5 w-3.5 animate-spin" />

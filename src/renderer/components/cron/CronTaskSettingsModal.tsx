@@ -45,7 +45,7 @@ function SectionHeader({ icon: Icon, children }: { icon: typeof Clock; children:
   return (
     <div className="flex items-center gap-2">
       <Icon className="h-4 w-4 text-[var(--ink-muted)]" />
-      <h3 className="text-[14px] font-semibold text-[var(--ink)]">{children}</h3>
+      <h3 className="text-md font-semibold text-[var(--ink)]">{children}</h3>
     </div>
   );
 }
@@ -223,7 +223,7 @@ function CronTaskSettingsForm({
         <div className="flex shrink-0 items-center justify-between px-6 py-4">
           <div className="flex items-center gap-2.5">
             <Clock className="h-4 w-4 text-[var(--accent)]" />
-            <h2 className="text-[15px] font-semibold text-[var(--ink)]">定时任务</h2>
+            <h2 className="text-base font-semibold text-[var(--ink)]">定时任务</h2>
           </div>
           <button onClick={onClose} className="rounded-lg p-1.5 text-[var(--ink-muted)] transition hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]">
             <X className="h-4 w-4" />
@@ -246,7 +246,7 @@ function CronTaskSettingsForm({
               </div>
               )}
               {!isLoopSchedule && (
-              <p className="mt-1.5 text-[13px] text-[var(--ink-muted)]">
+              <p className="mt-1.5 text-sm text-[var(--ink-muted)]">
                 {executionTarget === 'current_session'
                   ? '在当前对话中定时执行，保持上下文'
                   : '创建独立定时任务，不占用当前对话'}
@@ -274,11 +274,11 @@ function CronTaskSettingsForm({
               <div className="mt-3 space-y-3">
                 <div className="flex gap-1.5 rounded-[var(--radius-md)] bg-[var(--paper-inset)] p-1">
                   <button type="button" onClick={() => setEndMode('forever')}
-                    className={`flex flex-1 items-center justify-center rounded-[var(--radius-sm)] px-3 py-1.5 text-[13px] font-medium transition-colors ${
+                    className={`flex flex-1 items-center justify-center rounded-[var(--radius-sm)] px-3 py-1.5 text-sm font-medium transition-colors ${
                       endMode === 'forever' ? 'bg-[var(--paper-elevated)] text-[var(--ink)] shadow-xs' : 'text-[var(--ink-muted)] hover:text-[var(--ink)]'
                     }`}>永久运行</button>
                   <button type="button" onClick={() => setEndMode('conditional')}
-                    className={`flex flex-1 items-center justify-center rounded-[var(--radius-sm)] px-3 py-1.5 text-[13px] font-medium transition-colors ${
+                    className={`flex flex-1 items-center justify-center rounded-[var(--radius-sm)] px-3 py-1.5 text-sm font-medium transition-colors ${
                       endMode === 'conditional' ? 'bg-[var(--paper-elevated)] text-[var(--ink)] shadow-xs' : 'text-[var(--ink-muted)] hover:text-[var(--ink)]'
                     }`}>条件停止</button>
                 </div>
@@ -310,7 +310,7 @@ function CronTaskSettingsForm({
                         </div>
                       </div>
                     </div>
-                    <p className="text-[13px] text-[var(--ink-muted)]">可多选，满足任一条件时任务将自动停止</p>
+                    <p className="text-sm text-[var(--ink-muted)]">可多选，满足任一条件时任务将自动停止</p>
                   </>
                 )}
 

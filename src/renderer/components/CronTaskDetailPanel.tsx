@@ -48,13 +48,13 @@ function SectionHeader({ icon: Icon, children }: { icon?: typeof Clock; children
     return (
         <div className="flex items-center gap-2">
             {Icon && <Icon className="h-4 w-4 text-[var(--ink-muted)]" />}
-            <h4 className="text-[14px] font-semibold text-[var(--ink)]">{children}</h4>
+            <h4 className="text-md font-semibold text-[var(--ink)]">{children}</h4>
         </div>
     );
 }
 
 function DetailTag({ label }: { label: string }) {
-    return <span className="rounded-lg border border-[var(--line)] px-2.5 py-1 text-[12px] text-[var(--ink-muted)]">{label}</span>;
+    return <span className="rounded-lg border border-[var(--line)] px-2.5 py-1 text-2sm text-[var(--ink-muted)]">{label}</span>;
 }
 
 function ToggleSwitch({ enabled, onChange }: { enabled: boolean; onChange: (v: boolean) => void }) {
@@ -68,7 +68,7 @@ function ToggleSwitch({ enabled, onChange }: { enabled: boolean; onChange: (v: b
 
 function Checkbox({ checked, onChange, label }: { checked: boolean; onChange: (v: boolean) => void; label: string }) {
     return (
-        <button type="button" onClick={() => onChange(!checked)} className="flex items-center gap-2.5 text-[13px] text-[var(--ink)]">
+        <button type="button" onClick={() => onChange(!checked)} className="flex items-center gap-2.5 text-sm text-[var(--ink)]">
             <span className={`flex h-4 w-4 shrink-0 items-center justify-center rounded border transition-colors ${checked ? 'border-[var(--accent)] bg-[var(--accent)] text-white' : 'border-[var(--line-strong)] bg-transparent'}`}>
                 {checked && <Check className="h-2.5 w-2.5" />}
             </span>
@@ -232,10 +232,10 @@ export default function CronTaskDetailPanel({ task, botInfo, onClose, onDelete, 
                     <div className="flex shrink-0 items-center justify-between px-6 py-4">
                         <div className="flex min-w-0 items-center gap-2.5">
                             <Clock className="h-4 w-4 shrink-0 text-[var(--accent)]" />
-                            <h3 className="min-w-0 truncate text-[15px] font-semibold text-[var(--ink)]">
+                            <h3 className="min-w-0 truncate text-base font-semibold text-[var(--ink)]">
                                 {isEditing ? '编辑定时任务' : displayName}
                             </h3>
-                            {!isEditing && <span className={`shrink-0 text-[12px] font-medium ${getCronStatusColor(task.status)}`}>{getCronStatusText(task.status)}</span>}
+                            {!isEditing && <span className={`shrink-0 text-2sm font-medium ${getCronStatusColor(task.status)}`}>{getCronStatusText(task.status)}</span>}
                         </div>
                         <button onClick={() => isEditing ? setIsEditing(false) : onClose()} className="ml-2 shrink-0 rounded-lg p-1.5 text-[var(--ink-muted)] hover:bg-[var(--paper-inset)] hover:text-[var(--ink)] transition-colors">
                             <X className="h-4 w-4" />
@@ -251,11 +251,11 @@ export default function CronTaskDetailPanel({ task, botInfo, onClose, onDelete, 
                                     <SectionHeader icon={FileText}>基本信息</SectionHeader>
                                     <div className="mt-3 space-y-4">
                                         <div>
-                                            <label className="mb-1.5 block text-[13px] font-medium text-[var(--ink-secondary)]">任务名称<span className="ml-1 font-normal text-[var(--ink-muted)]">（可选）</span></label>
+                                            <label className="mb-1.5 block text-sm font-medium text-[var(--ink-secondary)]">任务名称<span className="ml-1 font-normal text-[var(--ink-muted)]">（可选）</span></label>
                                             <input type="text" value={editName} onChange={e => setEditName(e.target.value)} maxLength={50} placeholder="例如: 每日新闻摘要" className={INPUT_CLS} />
                                         </div>
                                         <div>
-                                            <label className="mb-1.5 block text-[13px] font-medium text-[var(--ink-secondary)]">AI 指令</label>
+                                            <label className="mb-1.5 block text-sm font-medium text-[var(--ink-secondary)]">AI 指令</label>
                                             <textarea value={editPrompt} onChange={e => setEditPrompt(e.target.value)} rows={5} placeholder="描述你希望 AI 定时执行的任务..." className={`${INPUT_CLS} resize-none`} />
                                         </div>
                                     </div>
@@ -275,8 +275,8 @@ export default function CronTaskDetailPanel({ task, botInfo, onClose, onDelete, 
                                         <SectionHeader icon={Flag}>结束条件</SectionHeader>
                                         <div className="mt-3 space-y-3">
                                             <div className="flex gap-1.5 rounded-[var(--radius-md)] bg-[var(--paper-inset)] p-1">
-                                                <button type="button" onClick={() => setEditEndMode('forever')} className={`flex flex-1 items-center justify-center rounded-[var(--radius-sm)] px-3 py-1.5 text-[13px] font-medium transition-colors ${editEndMode === 'forever' ? 'bg-[var(--paper-elevated)] text-[var(--ink)] shadow-xs' : 'text-[var(--ink-muted)] hover:text-[var(--ink)]'}`}>永久运行</button>
-                                                <button type="button" onClick={() => setEditEndMode('conditional')} className={`flex flex-1 items-center justify-center rounded-[var(--radius-sm)] px-3 py-1.5 text-[13px] font-medium transition-colors ${editEndMode === 'conditional' ? 'bg-[var(--paper-elevated)] text-[var(--ink)] shadow-xs' : 'text-[var(--ink-muted)] hover:text-[var(--ink)]'}`}>条件停止</button>
+                                                <button type="button" onClick={() => setEditEndMode('forever')} className={`flex flex-1 items-center justify-center rounded-[var(--radius-sm)] px-3 py-1.5 text-sm font-medium transition-colors ${editEndMode === 'forever' ? 'bg-[var(--paper-elevated)] text-[var(--ink)] shadow-xs' : 'text-[var(--ink-muted)] hover:text-[var(--ink)]'}`}>永久运行</button>
+                                                <button type="button" onClick={() => setEditEndMode('conditional')} className={`flex flex-1 items-center justify-center rounded-[var(--radius-sm)] px-3 py-1.5 text-sm font-medium transition-colors ${editEndMode === 'conditional' ? 'bg-[var(--paper-elevated)] text-[var(--ink)] shadow-xs' : 'text-[var(--ink-muted)] hover:text-[var(--ink)]'}`}>条件停止</button>
                                             </div>
                                             {editEndMode === 'conditional' && (
                                             <div className="rounded-lg border border-[var(--line)] bg-[var(--paper)]">
@@ -329,20 +329,20 @@ export default function CronTaskDetailPanel({ task, botInfo, onClose, onDelete, 
                                     <SectionHeader icon={FolderOpen}>基本信息</SectionHeader>
                                     <div className="mt-2 space-y-1.5">
                                         <div className="flex items-center justify-between py-1">
-                                            <span className="text-[13px] text-[var(--ink-muted)]">任务名称</span>
-                                            <span className="text-[13px] text-[var(--ink)]">{displayName}</span>
+                                            <span className="text-sm text-[var(--ink-muted)]">任务名称</span>
+                                            <span className="text-sm text-[var(--ink)]">{displayName}</span>
                                         </div>
                                         <div className="flex items-center justify-between py-1">
-                                            <span className="text-[13px] text-[var(--ink-muted)]">执行 Agent</span>
+                                            <span className="text-sm text-[var(--ink-muted)]">执行 Agent</span>
                                             <div className="flex items-center gap-1.5">
                                                 <WorkspaceIcon icon={project?.icon} size={14} />
-                                                <span className="text-[13px] text-[var(--ink)]">{getFolderName(task.workspacePath)}</span>
+                                                <span className="text-sm text-[var(--ink)]">{getFolderName(task.workspacePath)}</span>
                                             </div>
                                         </div>
                                         {botInfo && (
                                             <div className="flex items-center justify-between py-1">
-                                                <span className="text-[13px] text-[var(--ink-muted)]">来源</span>
-                                                <span className="text-[13px] text-[var(--ink)]">{botInfo.name} ({botInfo.platform})</span>
+                                                <span className="text-sm text-[var(--ink-muted)]">来源</span>
+                                                <span className="text-sm text-[var(--ink)]">{botInfo.name} ({botInfo.platform})</span>
                                             </div>
                                         )}
                                     </div>
@@ -355,7 +355,7 @@ export default function CronTaskDetailPanel({ task, botInfo, onClose, onDelete, 
                                     <>
                                         <div>
                                             <SectionHeader icon={FileText}>AI 指令</SectionHeader>
-                                            <div className="mt-2 rounded-lg border border-[var(--line)] px-3.5 py-3 text-[13px] leading-relaxed text-[var(--ink-secondary)] whitespace-pre-wrap break-words">{task.prompt}</div>
+                                            <div className="mt-2 rounded-lg border border-[var(--line)] px-3.5 py-3 text-sm leading-relaxed text-[var(--ink-secondary)] whitespace-pre-wrap break-words">{task.prompt}</div>
                                         </div>
                                         <div className="border-t border-[var(--line)]" />
                                     </>
@@ -374,7 +374,7 @@ export default function CronTaskDetailPanel({ task, botInfo, onClose, onDelete, 
                                     <SectionHeader icon={Clock}>执行计划</SectionHeader>
                                     <div className="mt-2 flex items-center justify-between rounded-lg border border-[var(--line)] px-3.5 py-3">
                                         <span className="text-sm font-medium text-[var(--ink)]">{scheduleDesc}</span>
-                                        <span className={`text-[12px] ${task.status === 'running' ? 'text-[var(--ink-secondary)]' : 'text-[var(--ink-muted)]/50'}`}>
+                                        <span className={`text-2sm ${task.status === 'running' ? 'text-[var(--ink-secondary)]' : 'text-[var(--ink-muted)]/50'}`}>
                                             {task.status === 'running' ? `下次: ${nextExec}` : '已停止'}
                                         </span>
                                     </div>
@@ -415,21 +415,21 @@ export default function CronTaskDetailPanel({ task, botInfo, onClose, onDelete, 
                                     <SectionHeader icon={BarChart2}>运行统计</SectionHeader>
                                     <div className="mt-2 grid grid-cols-3 gap-3">
                                         <div>
-                                            <span className="text-[12px] text-[var(--ink-muted)]">执行次数</span>
+                                            <span className="text-2sm text-[var(--ink-muted)]">执行次数</span>
                                             <p className="mt-0.5 text-sm font-medium text-[var(--ink)]">{task.endConditions.maxExecutions ? `${task.executionCount} / ${task.endConditions.maxExecutions}` : `${task.executionCount} 次`}</p>
                                         </div>
                                         <div>
-                                            <span className="text-[12px] text-[var(--ink-muted)]">上次执行</span>
+                                            <span className="text-2sm text-[var(--ink-muted)]">上次执行</span>
                                             <p className="mt-0.5 text-sm font-medium text-[var(--ink)]">{task.lastExecutedAt ? new Date(task.lastExecutedAt).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }) : '—'}</p>
                                         </div>
                                         {task.exitReason && (
                                             <div>
-                                                <span className="text-[12px] text-[var(--ink-muted)]">退出原因</span>
+                                                <span className="text-2sm text-[var(--ink-muted)]">退出原因</span>
                                                 <p className="mt-0.5 text-sm font-medium text-[var(--ink)]">{task.exitReason}</p>
                                             </div>
                                         )}
                                     </div>
-                                    {task.lastError && <p className="mt-2 text-[12px] text-[var(--error)]">{task.lastError}</p>}
+                                    {task.lastError && <p className="mt-2 text-2sm text-[var(--error)]">{task.lastError}</p>}
                                 </div>
 
                                 <div className="border-t border-[var(--line)]" />
@@ -458,7 +458,7 @@ export default function CronTaskDetailPanel({ task, botInfo, onClose, onDelete, 
                             </>
                         ) : (
                             <>
-                                <button onClick={() => setShowDeleteConfirm(true)} className="flex items-center gap-1.5 rounded-lg px-3 py-2 text-[13px] font-medium text-[var(--error)] hover:bg-[var(--error-bg)] transition-colors">
+                                <button onClick={() => setShowDeleteConfirm(true)} className="flex items-center gap-1.5 rounded-lg px-3 py-2 text-sm font-medium text-[var(--error)] hover:bg-[var(--error-bg)] transition-colors">
                                     <Trash2 className="h-3.5 w-3.5" />删除
                                 </button>
                                 <div className="flex items-center gap-2.5">
@@ -466,26 +466,26 @@ export default function CronTaskDetailPanel({ task, botInfo, onClose, onDelete, 
                                         <button
                                             onClick={() => setShowSyncConfirm(true)}
                                             title="将该会话的锁定配置（模型 / 权限 / MCP / 供应商）写回 Agent 默认值"
-                                            className="flex items-center gap-1.5 rounded-lg border border-[var(--line)] px-4 py-2 text-[13px] font-medium text-[var(--ink-muted)] hover:border-[var(--line-strong)] hover:text-[var(--ink)] transition-colors"
+                                            className="flex items-center gap-1.5 rounded-lg border border-[var(--line)] px-4 py-2 text-sm font-medium text-[var(--ink-muted)] hover:border-[var(--line-strong)] hover:text-[var(--ink)] transition-colors"
                                         >
                                             <ArrowUpToLine className="h-3.5 w-3.5" />同步到 Agent
                                         </button>
                                     )}
-                                    <button onClick={startEditing} className="flex items-center gap-1.5 rounded-lg border border-[var(--line)] px-4 py-2 text-[13px] font-medium text-[var(--ink-muted)] hover:border-[var(--line-strong)] hover:text-[var(--ink)] transition-colors">
+                                    <button onClick={startEditing} className="flex items-center gap-1.5 rounded-lg border border-[var(--line)] px-4 py-2 text-sm font-medium text-[var(--ink-muted)] hover:border-[var(--line-strong)] hover:text-[var(--ink)] transition-colors">
                                         <Pencil className="h-3.5 w-3.5" />编辑
                                     </button>
                                     {task.status === 'running' && onStop && (
                                         <button onClick={() => setShowStopConfirm(true)} disabled={isStopping}
-                                            className="flex items-center gap-1.5 rounded-lg border border-[var(--error)]/30 px-4 py-2 text-[13px] font-medium text-[var(--error)] hover:bg-[var(--error-bg)] disabled:opacity-50 transition-colors">
+                                            className="flex items-center gap-1.5 rounded-lg border border-[var(--error)]/30 px-4 py-2 text-sm font-medium text-[var(--error)] hover:bg-[var(--error-bg)] disabled:opacity-50 transition-colors">
                                             <Square className="h-3.5 w-3.5" />{isStopping ? '停止中...' : '停止'}
                                         </button>
                                     )}
                                     {task.status === 'stopped' && (resumeCheck.canResume ? (
                                         <button onClick={handleResume} disabled={isResuming}
-                                            className="flex items-center gap-1.5 rounded-lg bg-[var(--accent)] px-5 py-2 text-[13px] font-medium text-white hover:bg-[var(--accent-warm-hover)] disabled:opacity-50 transition-colors">
+                                            className="flex items-center gap-1.5 rounded-lg bg-[var(--accent)] px-5 py-2 text-sm font-medium text-white hover:bg-[var(--accent-warm-hover)] disabled:opacity-50 transition-colors">
                                             <Play className="h-3.5 w-3.5" />{isResuming ? '恢复中...' : '恢复'}
                                         </button>
-                                    ) : <span className="text-[12px] text-[var(--ink-muted)]/50">{resumeCheck.reason}</span>)}
+                                    ) : <span className="text-2sm text-[var(--ink-muted)]/50">{resumeCheck.reason}</span>)}
                                 </div>
                             </>
                         )}

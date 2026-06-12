@@ -192,7 +192,7 @@ export default function ToolAudioAttachment({ attachment }: Props) {
       />
 
       {/* time */}
-      <span className="shrink-0 font-mono text-[11px] tabular-nums text-[var(--ink-muted)]">
+      <span className="shrink-0 font-mono text-xs tabular-nums text-[var(--ink-muted)]">
         {isCurrent ? formatPlaybackTime(progress) : '0:00'} / {seekable ? formatPlaybackTime(duration) : '--:--'}
       </span>
 

@@ -1885,7 +1885,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                     setSelectedFileIndex(0);
                   }}
                 />
-                <span className="ml-auto pr-2 text-[10px] text-[var(--ink-muted)]/60">
+                <span className="ml-auto pr-2 text-xs text-[var(--ink-muted)]/60">
                   ⌘/Ctrl + ←/→ 切换
                 </span>
               </div>
@@ -1964,7 +1964,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                     </div>
                   ) : (
                     <>
-                      <div className="px-3 pt-2 pb-1 text-[10px] font-semibold uppercase tracking-wider text-[var(--ink-muted)]/60">
+                      <div className="px-3 pt-2 pb-1 text-xs font-semibold uppercase tracking-wider text-[var(--ink-muted)]/60">
                         {fileSearchQuery.length === 0
                           ? `最近 ${Math.min(thoughtResults.length, THOUGHT_RECENT_LIMIT)} 条想法`
                           : `匹配 "${fileSearchQuery}" 的想法 · ${thoughtResults.length} 条`}
@@ -1990,7 +1990,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                       ))}
                       {fileSearchQuery.length > 0
                         && thoughtResults.length >= THOUGHT_SOFT_CAP && (
-                          <div className="border-t border-[var(--line-subtle)] px-3 py-2 text-[11px] text-[var(--ink-muted)]/70">
+                          <div className="border-t border-[var(--line-subtle)] px-3 py-2 text-xs text-[var(--ink-muted)]/70">
                             已显示前 {THOUGHT_SOFT_CAP} 条匹配，请输入更精确的关键词
                           </div>
                         )}
@@ -2165,7 +2165,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                   setShowPlusMenu(false);
                   setShowToolMenu(false);
                 }}
-                className="flex items-center gap-1 rounded-lg px-2 py-1.5 text-[13px] font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]"
+                className="flex items-center gap-1 rounded-lg px-2 py-1.5 text-sm font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]"
                 title="切换执行模式"
               >
                 <span>{currentModeDisplay?.icon}</span>
@@ -2244,13 +2244,13 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                   setShowModelMenu(false);
                   setShowPlusMenu(false);
                 }}
-                className="flex items-center gap-1 rounded-lg px-2 py-1.5 text-[13px] font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]"
+                className="flex items-center gap-1 rounded-lg px-2 py-1.5 text-sm font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]"
                 title="使用工具"
               >
                 <Wrench className="h-3.5 w-3.5" />
                 <span className="toolbar-label">工具</span>
                 {effectiveMcpCount > 0 && (
-                  <span className="text-[11px] text-[var(--ink-muted)]">
+                  <span className="text-xs text-[var(--ink-muted)]">
                     {effectiveMcpCount}
                   </span>
                 )}
@@ -2374,7 +2374,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                               )}
                               {plugin.mcpServerNames && plugin.mcpServerNames.length > 0 && (
                                 <div
-                                  className="mt-0.5 text-[11px] text-[var(--ink-muted)] truncate"
+                                  className="mt-0.5 text-xs text-[var(--ink-muted)] truncate"
                                   title={`启用此插件会自动加载这些 MCP server：${plugin.mcpServerNames.join(', ')}`}
                                 >
                                   🔌 {plugin.mcpServerNames.length} 个 MCP：{plugin.mcpServerNames.join(', ')}
@@ -2441,7 +2441,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                     e.stopPropagation();
                     onCronButtonClick();
                   }}
-                  className={`flex items-center gap-1 rounded-lg px-2 py-1.5 text-[13px] font-medium transition-colors ${
+                  className={`flex items-center gap-1 rounded-lg px-2 py-1.5 text-sm font-medium transition-colors ${
                     cronModeEnabled
                       ? 'bg-[var(--heartbeat-bg)] text-[var(--heartbeat)] hover:bg-[var(--heartbeat)]/20'
                       : 'text-[var(--ink-muted)] hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]'
@@ -2483,7 +2483,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                     onRefreshProviders();
                   }
                 }}
-                className="flex items-center gap-1 rounded-lg px-2 py-1.5 text-[13px] font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]"
+                className="flex items-center gap-1 rounded-lg px-2 py-1.5 text-sm font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]"
                 title="切换模型"
               >
                 <span className="max-w-[140px] truncate">{currentModelName}</span>
@@ -2505,7 +2505,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                 <div className="max-h-[260px] overflow-y-auto py-1">
                 {isExternalRuntime && runtimeModels ? (
                   <>
-                    <div className="px-3 pb-0.5 pt-1.5 text-[10px] font-semibold uppercase tracking-wider text-[var(--ink-muted)]/60">
+                    <div className="px-3 pb-0.5 pt-1.5 text-xs font-semibold uppercase tracking-wider text-[var(--ink-muted)]/60">
                       {runtime === 'claude-code' ? 'CLAUDE CODE' : runtime === 'gemini' ? 'GEMINI CLI' : runtime?.toUpperCase()} 模型
                     </div>
                     {runtimeModels.map(model => {
@@ -2519,7 +2519,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                             onModelChange?.(model.value);
                             setShowModelMenu(false);
                           }}
-                          className={`w-full rounded-md px-3 py-1.5 text-left text-[13px] transition-colors ${
+                          className={`w-full rounded-md px-3 py-1.5 text-left text-sm transition-colors ${
                             isSelected
                               ? 'bg-[var(--accent)]/10 font-medium text-[var(--accent)]'
                               : 'text-[var(--ink)] hover:bg-[var(--hover-bg)]'
@@ -2543,7 +2543,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                             detail: { section: 'providers' }
                           }));
                         }}
-                        className="w-full px-3 py-2.5 text-left text-[13px] text-[var(--accent)] transition-colors hover:bg-[var(--hover-bg)]"
+                        className="w-full px-3 py-2.5 text-left text-sm text-[var(--accent)] transition-colors hover:bg-[var(--hover-bg)]"
                       >
                         请先设置模型服务 →
                       </button>
@@ -2552,7 +2552,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                   return availableProviders.map((p, idx) => (
                     <div key={p.id}>
                       {idx > 0 && <div className="mx-2 my-1 border-t border-[var(--line)]" />}
-                      <div className="group/provider relative flex items-center gap-1 px-3 pb-0.5 pt-1.5 text-[10px] font-semibold uppercase tracking-wider text-[var(--ink-muted)]/60">
+                      <div className="group/provider relative flex items-center gap-1 px-3 pb-0.5 pt-1.5 text-xs font-semibold uppercase tracking-wider text-[var(--ink-muted)]/60">
                         {p.name}{p.type === 'subscription' ? ' (订阅)' : ''}
                         {isProviderWarning(p, apiKeys, providerVerifyStatus) && (
                           <Tip label="验证未通过，部分模型可能不可用" position="bottom">
@@ -2575,7 +2575,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                               }
                               setShowModelMenu(false);
                             }}
-                            className={`flex w-full items-center rounded-md px-3 py-1.5 text-left text-[13px] transition-colors ${
+                            className={`flex w-full items-center rounded-md px-3 py-1.5 text-left text-sm transition-colors ${
                               isSelected
                                 ? 'bg-[var(--accent)]/10 font-medium text-[var(--accent)]'
                                 : 'text-[var(--ink)] hover:bg-[var(--hover-bg)]'
@@ -2611,13 +2611,13 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                           openEffortSubmenu();
                         }
                       }}
-                      className={`flex w-full items-center gap-1.5 rounded-md px-3 py-1.5 text-left text-[13px] text-[var(--ink)] transition-colors ${
+                      className={`flex w-full items-center gap-1.5 rounded-md px-3 py-1.5 text-left text-sm text-[var(--ink)] transition-colors ${
                         showEffortSubmenu ? 'bg-[var(--hover-bg)]' : 'hover:bg-[var(--hover-bg)]'
                       }`}
                     >
                       <Gauge className="h-3.5 w-3.5 shrink-0 text-[var(--ink-muted)]" />
                       <span className="flex-1">推理强度</span>
-                      <span className={`text-[12px] ${
+                      <span className={`text-2sm ${
                         reasoningEffort !== REASONING_EFFORT_DEFAULT
                           ? 'font-medium text-[var(--accent)]'
                           : 'text-[var(--ink-muted)]'
@@ -2648,20 +2648,20 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                                   setShowEffortSubmenu(false);
                                   setShowModelMenu(false);
                                 }}
-                                className={`flex w-full items-center justify-between rounded-md px-3 py-1.5 text-left text-[13px] transition-colors ${
+                                className={`flex w-full items-center justify-between rounded-md px-3 py-1.5 text-left text-sm transition-colors ${
                                   isSelected
                                     ? 'bg-[var(--accent)]/10 font-medium text-[var(--accent)]'
                                     : 'text-[var(--ink)] hover:bg-[var(--hover-bg)]'
                                 }`}
                               >
                                 <span>{level === REASONING_EFFORT_DEFAULT ? '默认' : level}</span>
-                                <span className={`text-[11px] font-normal ${isSelected ? 'text-[var(--accent)]/70' : 'text-[var(--ink-muted)]'}`}>
+                                <span className={`text-xs font-normal ${isSelected ? 'text-[var(--accent)]/70' : 'text-[var(--ink-muted)]'}`}>
                                   {REASONING_EFFORT_DESCRIPTIONS[level] ?? ''}
                                 </span>
                               </button>
                             );
                           })}
-                          <div className="mt-1 whitespace-nowrap border-t border-[var(--line)] px-3 pb-1 pt-1.5 text-[10px] text-[var(--ink-muted)]/60">
+                          <div className="mt-1 whitespace-nowrap border-t border-[var(--line)] px-3 pb-1 pt-1.5 text-xs text-[var(--ink-muted)]/60">
                             需服务商支持该参数，以实际生效为准
                           </div>
                         </div>
@@ -2778,7 +2778,7 @@ function MentionTabButton({
     <button
       type="button"
       onClick={onClick}
-      className={`rounded-full px-3 py-1 text-[12px] transition-colors ${
+      className={`rounded-full px-3 py-1 text-2sm transition-colors ${
         active
           ? 'bg-[var(--paper-elevated)] text-[var(--ink)] shadow-sm'
           : 'text-[var(--ink-muted)] hover:bg-[var(--hover-bg)]'
@@ -2820,14 +2820,14 @@ function ThoughtPickerRow({
           : 'hover:bg-[var(--hover-bg)]'
       }`}
     >
-      <div className="mb-1 flex items-center gap-2 text-[11px] text-[var(--ink-muted)]">
+      <div className="mb-1 flex items-center gap-2 text-xs text-[var(--ink-muted)]">
         <span>{formatThoughtTime(thought.updatedAt)}</span>
         {tags.length > 0 && (
           <div className="flex items-center gap-1">
             {tags.map((t) => (
               <span
                 key={t}
-                className="rounded-[var(--radius-sm)] bg-[var(--accent-warm-subtle)] px-1.5 py-px text-[10px] text-[var(--accent-warm)]"
+                className="rounded-[var(--radius-sm)] bg-[var(--accent-warm-subtle)] px-1.5 py-px text-xs text-[var(--accent-warm)]"
               >
                 #{t}
               </span>
@@ -2836,7 +2836,7 @@ function ThoughtPickerRow({
         )}
       </div>
       <div
-        className="text-[13px] leading-snug text-[var(--ink-secondary)]"
+        className="text-sm leading-snug text-[var(--ink-secondary)]"
         style={{
           display: '-webkit-box',
           WebkitLineClamp: 2,

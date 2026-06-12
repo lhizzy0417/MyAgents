@@ -70,10 +70,10 @@ export default function SessionStatsModal({
                             <BarChart2 className="h-4 w-4 text-[var(--accent)]" />
                         </div>
                         <div className="min-w-0">
-                            <div className="truncate text-[13px] font-semibold text-[var(--ink)]">
+                            <div className="truncate text-sm font-semibold text-[var(--ink)]">
                                 会话统计
                             </div>
-                            <div className="truncate text-[11px] text-[var(--ink-muted)]">
+                            <div className="truncate text-xs text-[var(--ink-muted)]">
                                 {sessionTitle}
                             </div>
                         </div>

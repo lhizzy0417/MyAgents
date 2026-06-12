@@ -131,7 +131,7 @@ export function useDeliveryChannels(currentWorkspacePath?: string) {
         channelOptions.push({
           value: ch.channelId,
           label: `${botName} (${platformTag})`,
-          suffix: <span className={`text-[10px] ${statusColor}`}>{statusText}</span>,
+          suffix: <span className={`text-xs ${statusColor}`}>{statusText}</span>,
         });
       }
 

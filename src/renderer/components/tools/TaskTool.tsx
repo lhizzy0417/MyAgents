@@ -338,7 +338,7 @@ function TaskBackgroundStats({
     <div className="flex w-full items-center justify-between text-xs rounded-lg bg-[var(--accent)]/5 px-3 py-2 cursor-default transition-colors">
       <div className="flex flex-wrap items-center gap-3 text-[var(--ink-muted)]">
         {/* "后台" 标签 */}
-        <span className="rounded-full bg-[var(--ink-muted)]/10 px-1.5 py-0.5 text-[10px] font-medium">
+        <span className="rounded-full bg-[var(--ink-muted)]/10 px-1.5 py-0.5 text-xs font-medium">
           后台
         </span>
 
@@ -410,7 +410,7 @@ const SubagentCallItem = memo(function SubagentCallItem({ call }: { call: Subage
           <span className="text-sm font-medium text-[var(--ink)]">{call.name}</span>
         </div>
         {isCallRunning && (
-          <div className="flex items-center gap-1.5 rounded-full bg-[var(--accent)]/10 px-2 py-0.5 text-[10px] font-medium text-[var(--accent)]">
+          <div className="flex items-center gap-1.5 rounded-full bg-[var(--accent)]/10 px-2 py-0.5 text-xs font-medium text-[var(--accent)]">
             <Loader2 className="size-3 animate-spin" />
             <span>执行中</span>
           </div>
@@ -421,7 +421,7 @@ const SubagentCallItem = memo(function SubagentCallItem({ call }: { call: Subage
 
       {inputText && (
         <div className="relative overflow-hidden rounded-md bg-[var(--paper-inset)] border border-[var(--line-subtle)]">
-          <pre className="max-h-32 overflow-y-auto p-2 font-mono text-[10px] text-[var(--ink-secondary)] whitespace-pre-wrap break-words">
+          <pre className="max-h-32 overflow-y-auto p-2 font-mono text-xs text-[var(--ink-secondary)] whitespace-pre-wrap break-words">
             {inputText}
           </pre>
         </div>
@@ -429,10 +429,10 @@ const SubagentCallItem = memo(function SubagentCallItem({ call }: { call: Subage
 
       {call.result && (
         <div className="mt-1">
-          <div className="mb-1 text-[10px] font-semibold uppercase tracking-wider text-[var(--ink-muted)]">结果</div>
+          <div className="mb-1 text-xs font-semibold uppercase tracking-wider text-[var(--ink-muted)]">结果</div>
           <ExpandableResult
             content={call.result}
-            className="rounded-md bg-[var(--paper-inset)]/50 p-2 text-[10px] text-[var(--ink-secondary)]"
+            className="rounded-md bg-[var(--paper-inset)]/50 p-2 text-xs text-[var(--ink-secondary)]"
           />
         </div>
       )}

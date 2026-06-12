@@ -42,7 +42,7 @@ export default function SessionTagBadge({ tag }: { tag: SessionTag }) {
     // pill against the 14px title's optical baseline rather than against a
     // taller default line-box that would visually float the pill upward.
     return (
-        <span className={`inline-flex shrink-0 items-center gap-1 rounded-full px-1.5 py-[3px] text-[10px] font-medium leading-none ${style.text} ${style.bg}`}>
+        <span className={`inline-flex shrink-0 items-center gap-1 rounded-full px-1.5 py-[3px] text-xs font-medium leading-none ${style.text} ${style.bg}`}>
             <span className={`inline-block h-1.5 w-1.5 rounded-full ${style.dot}`} />
             {label}
         </span>

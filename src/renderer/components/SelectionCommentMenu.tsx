@@ -166,7 +166,7 @@ const SelectionCommentMenu = memo(function SelectionCommentMenu({
       {showQuote && (
         <button
           type="button"
-          className="flex items-center gap-1 rounded-md px-2 py-1 text-[12px] font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]"
+          className="flex items-center gap-1 rounded-md px-2 py-1 text-2sm font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]"
           onClick={handleQuote}
         >
           <Quote className="h-3 w-3" />
@@ -177,7 +177,7 @@ const SelectionCommentMenu = memo(function SelectionCommentMenu({
       {showElaborate && (
         <button
           type="button"
-          className="flex items-center gap-1 rounded-md px-2 py-1 text-[12px] font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]"
+          className="flex items-center gap-1 rounded-md px-2 py-1 text-2sm font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]"
           onClick={handleElaborate}
         >
           <Sparkles className="h-3 w-3" />

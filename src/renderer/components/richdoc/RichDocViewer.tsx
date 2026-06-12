@@ -125,7 +125,7 @@ export default function RichDocViewer({ kind, path, workspacePath }: RichDocView
         <button
           type="button"
           onClick={openExternal}
-          className="inline-flex items-center gap-1.5 rounded-md border border-[var(--line-strong)] bg-[var(--button-secondary-bg)] px-3 py-1.5 text-[12px] font-semibold text-[var(--ink)] shadow-sm transition-all duration-150 hover:bg-[var(--button-secondary-bg-hover)] hover:shadow-md active:scale-[0.98]"
+          className="inline-flex items-center gap-1.5 rounded-md border border-[var(--line-strong)] bg-[var(--button-secondary-bg)] px-3 py-1.5 text-2sm font-semibold text-[var(--ink)] shadow-sm transition-all duration-150 hover:bg-[var(--button-secondary-bg-hover)] hover:shadow-md active:scale-[0.98]"
         >
           <ExternalLink className="h-3.5 w-3.5" />
           用默认程序打开

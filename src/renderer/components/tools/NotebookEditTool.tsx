@@ -26,13 +26,13 @@ export default function NotebookEditTool({ tool }: NotebookEditToolProps) {
       <div className="flex flex-wrap items-center gap-1.5 text-sm">
         <FilePath path={input.notebook_path} />
         {input.cell_id && (
-          <span className="text-[10px] text-[var(--ink-muted)]">cell: {input.cell_id}</span>
+          <span className="text-xs text-[var(--ink-muted)]">cell: {input.cell_id}</span>
         )}
-        <span className="rounded border border-[var(--accent-cool)]/30 bg-[var(--accent-cool)]/10 px-1.5 py-0.5 text-[10px] font-medium text-[var(--accent-cool)]">
+        <span className="rounded border border-[var(--accent-cool)]/30 bg-[var(--accent-cool)]/10 px-1.5 py-0.5 text-xs font-medium text-[var(--accent-cool)]">
           {cellType}
         </span>
         {editMode === 'delete' && (
-          <span className="rounded border border-[var(--error)]/30 bg-[var(--error-bg)] px-1.5 py-0.5 text-[10px] font-medium text-[var(--error)]">
+          <span className="rounded border border-[var(--error)]/30 bg-[var(--error-bg)] px-1.5 py-0.5 text-xs font-medium text-[var(--error)]">
             delete
           </span>
         )}

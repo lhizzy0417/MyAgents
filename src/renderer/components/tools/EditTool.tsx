@@ -50,7 +50,7 @@ export default function EditTool({ tool }: EditToolProps) {
         ))}
         {summary}
         {input?.replace_all && (
-          <span className="rounded border border-[var(--warning)]/30 bg-[var(--warning-bg)] px-1.5 py-0.5 text-[10px] font-medium text-[var(--warning)]">
+          <span className="rounded border border-[var(--warning)]/30 bg-[var(--warning-bg)] px-1.5 py-0.5 text-xs font-medium text-[var(--warning)]">
             replace all
           </span>
         )}

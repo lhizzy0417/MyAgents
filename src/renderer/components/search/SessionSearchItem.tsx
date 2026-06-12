@@ -42,7 +42,7 @@ export default memo(function SessionSearchItem({
             className="group relative flex w-full cursor-pointer items-start gap-2.5 rounded-lg px-3 py-2 text-left transition-all hover:bg-[var(--hover-bg)]"
         >
             {/* Left column: Time — fixed width so content column is consistently left-aligned */}
-            <div className="mt-1 flex w-16 shrink-0 items-center gap-1 whitespace-nowrap text-[11px] text-[var(--ink-muted)]/50">
+            <div className="mt-1 flex w-16 shrink-0 items-center gap-1 whitespace-nowrap text-xs text-[var(--ink-muted)]/50">
                 <Clock className="h-2.5 w-2.5" />
                 <span>{formatTime(hit.lastActiveAt)}</span>
             </div>
@@ -50,14 +50,14 @@ export default memo(function SessionSearchItem({
             {/* Middle column: Title + Snippet */}
             <div className="flex-1 min-w-0">
                 {/* First row: Title */}
-                <div className="flex items-center text-[13px] text-[var(--ink-secondary)] transition-colors group-hover:text-[var(--ink)]">
+                <div className="flex items-center text-sm text-[var(--ink-secondary)] transition-colors group-hover:text-[var(--ink)]">
                     <SearchHighlight
                         text={hit.title}
                         highlights={hit.titleHighlights}
                         className="truncate flex-1 min-w-0"
                     />
                     {msgCountStr && (
-                        <span className="ml-1.5 shrink-0 text-[11px] text-[var(--ink-muted)]/40">
+                        <span className="ml-1.5 shrink-0 text-xs text-[var(--ink-muted)]/40">
                             {msgCountStr}
                         </span>
                     )}
@@ -65,7 +65,7 @@ export default memo(function SessionSearchItem({
 
                 {/* Second row: Content Snippet (Only show if there's a snippet and it's a content match) */}
                 {hit.snippet && hit.matchType === 'content' && (
-                    <div className="mt-0.5 text-[11px] text-[var(--ink-muted)] leading-relaxed">
+                    <div className="mt-0.5 text-xs text-[var(--ink-muted)] leading-relaxed">
                         <SearchHighlight
                             text={hit.snippet}
                             highlights={hit.snippetHighlights}
@@ -78,7 +78,7 @@ export default memo(function SessionSearchItem({
             {/* Right column: Workspace Icon + Hover Actions */}
             <div className="relative flex shrink-0 items-start justify-end w-[100px] h-full mt-0.5">
                 {/* Default state: Workspace Info */}
-                <div className="flex items-center gap-1.5 text-[11px] text-[var(--ink-muted)]/45 transition-opacity group-hover:opacity-0">
+                <div className="flex items-center gap-1.5 text-xs text-[var(--ink-muted)]/45 transition-opacity group-hover:opacity-0">
                     {project && <WorkspaceIcon icon={project.icon} size={14} />}
                     <span className="truncate max-w-[80px]">
                         {projectName}

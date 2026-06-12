@@ -83,7 +83,7 @@ export default function AgentBasicsSection({ agent, status, onAgentChanged }: Ag
           <span>{selectedProvider?.name ?? '默认'} / {modelDisplay}</span>
           {!isSelectedProviderAvailable && selectedProvider && (
             <span
-              className="rounded px-1.5 py-0.5 text-[10px] font-medium text-[var(--warning)]"
+              className="rounded px-1.5 py-0.5 text-xs font-medium text-[var(--warning)]"
               title="该供应商未配置 API Key / 订阅登录"
             >
               ⚠ 暂不可用

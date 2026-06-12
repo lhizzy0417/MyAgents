@@ -308,7 +308,7 @@ export default function SessionMenuButton({
                 className="w-56 py-1"
             >
                 <div className="border-b border-[var(--line-subtle)] px-3 py-2">
-                    <div className="flex min-w-0 items-center gap-2 text-[11px]">
+                    <div className="flex min-w-0 items-center gap-2 text-xs">
                         <span className="shrink-0 text-[var(--ink-muted)]">SessionID:</span>
                         <span
                             className="min-w-0 flex-1 truncate font-mono text-[var(--ink)]"
@@ -319,7 +319,7 @@ export default function SessionMenuButton({
                         <button
                             type="button"
                             onClick={() => { void handleCopySessionId(); }}
-                            className="inline-flex shrink-0 items-center gap-1 rounded px-1.5 py-0.5 text-[11px] text-[var(--accent)] transition-colors hover:bg-[var(--accent-warm-subtle)]"
+                            className="inline-flex shrink-0 items-center gap-1 rounded px-1.5 py-0.5 text-xs text-[var(--accent)] transition-colors hover:bg-[var(--accent-warm-subtle)]"
                             aria-label="复制 SessionID"
                         >
                             {sessionIdCopied ? <Check className="h-3 w-3" /> : <Copy className="h-3 w-3" />}
@@ -414,7 +414,7 @@ export default function SessionMenuButton({
                              *  in the selected state. */}
                             <div
                                 aria-disabled
-                                className="flex w-full cursor-default items-center gap-2 px-3 py-2 text-left text-[12px]"
+                                className="flex w-full cursor-default items-center gap-2 px-3 py-2 text-left text-2sm"
                             >
                                 <span className="inline-block h-1.5 w-1.5 shrink-0 rounded-full bg-[var(--success)]" />
                                 <span className="shrink-0 font-medium text-[var(--ink)]">{boundChannel.platformLabel}</span>
@@ -425,14 +425,14 @@ export default function SessionMenuButton({
                                         ? ` · ${formatSourceLabel(boundChannel.sourceType)} ${boundChannel.sourceDisplayName}`
                                         : ''}
                                 </span>
-                                <span className="shrink-0 rounded-sm bg-[var(--paper-inset)] px-1.5 py-0.5 text-[10px] text-[var(--ink-muted)]">
+                                <span className="shrink-0 rounded-sm bg-[var(--paper-inset)] px-1.5 py-0.5 text-xs text-[var(--ink-muted)]">
                                     已绑定
                                 </span>
                             </div>
                             {otherChannels.length > 0 && (
                                 <>
                                     <div className="my-1 border-t border-[var(--line-subtle)]" />
-                                    <div className="px-3 py-1 text-[10px] uppercase tracking-wide text-[var(--ink-subtle)]">
+                                    <div className="px-3 py-1 text-xs uppercase tracking-wide text-[var(--ink-subtle)]">
                                         切换到其他
                                     </div>
                                     {otherChannels.map((c) => (
@@ -512,7 +512,7 @@ function ChannelMenuItem({ candidate, pending, disabled, onClick }: ChannelMenuI
             type="button"
             disabled={effectivelyDisabled}
             onClick={onClick}
-            className="flex w-full items-start gap-2 px-3 py-2 text-left text-[12px] transition-colors hover:bg-[var(--hover-bg)] disabled:cursor-not-allowed disabled:opacity-50"
+            className="flex w-full items-start gap-2 px-3 py-2 text-left text-2sm transition-colors hover:bg-[var(--hover-bg)] disabled:cursor-not-allowed disabled:opacity-50"
         >
             <span className="mt-1.5 inline-block h-1.5 w-1.5 shrink-0 rounded-full bg-[var(--success)]" />
             <span className="min-w-0 flex-1">
@@ -523,7 +523,7 @@ function ChannelMenuItem({ candidate, pending, disabled, onClick }: ChannelMenuI
                         {candidate.channelName}
                     </span>
                 </span>
-                <span className="mt-0.5 block truncate text-[11px] text-[var(--ink-subtle)]">
+                <span className="mt-0.5 block truncate text-xs text-[var(--ink-subtle)]">
                     {sourceLabel}
                 </span>
             </span>

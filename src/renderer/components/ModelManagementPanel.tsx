@@ -287,7 +287,7 @@ export default function ModelManagementPanel({
       >
         {/* Header */}
         <div className="flex flex-shrink-0 items-center justify-between border-b border-[var(--line)] px-5 py-3.5">
-          <h2 className="text-[15px] font-semibold text-[var(--ink)]">
+          <h2 className="text-base font-semibold text-[var(--ink)]">
             管理可用模型
             <span className="ml-2 text-sm font-normal text-[var(--ink-muted)]">{provider.name}</span>
           </h2>
@@ -371,7 +371,7 @@ export default function ModelManagementPanel({
                   type="button"
                   onClick={doFetch}
                   disabled={discoveryLoading}
-                  className="flex items-center gap-1 rounded-lg px-2 py-1 text-[11px] text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)] disabled:opacity-50"
+                  className="flex items-center gap-1 rounded-lg px-2 py-1 text-xs text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)] disabled:opacity-50"
                 >
                   <RefreshCw className={`h-3 w-3 ${discoveryLoading ? 'animate-spin' : ''}`} />
                   刷新
@@ -416,7 +416,7 @@ export default function ModelManagementPanel({
                 <button
                   type="button"
                   onClick={doFetch}
-                  className="mt-3 flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-[13px] font-medium text-[var(--accent)] transition-colors hover:bg-[var(--accent-warm-subtle)]"
+                  className="mt-3 flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-sm font-medium text-[var(--accent)] transition-colors hover:bg-[var(--accent-warm-subtle)]"
                 >
                   <RefreshCw className="h-3.5 w-3.5" />
                   重试
@@ -499,9 +499,9 @@ const ActiveModelRow = React.memo(function ActiveModelRow({
     <div className={`group flex items-center gap-3 rounded-lg px-2 py-2 transition-colors hover:bg-[var(--hover-bg)] ${isPrimary ? 'bg-[var(--accent-warm-subtle)]' : ''}`}>
       {/* Model info — unified: title always same style, subtitle always same style */}
       <div className="min-w-0 flex-1">
-        <span className="text-[13px] font-medium text-[var(--ink)]">{title}</span>
+        <span className="text-sm font-medium text-[var(--ink)]">{title}</span>
         {subtitle && (
-          <span className="ml-2 font-mono text-[11px] text-[var(--ink-subtle)]">{subtitle}</span>
+          <span className="ml-2 font-mono text-xs text-[var(--ink-subtle)]">{subtitle}</span>
         )}
       </div>
 
@@ -510,7 +510,7 @@ const ActiveModelRow = React.memo(function ActiveModelRow({
 
       {/* Context length */}
       {model.contextLength ? (
-        <span className="flex-shrink-0 text-[10px] text-[var(--ink-subtle)]">
+        <span className="flex-shrink-0 text-xs text-[var(--ink-subtle)]">
           {formatTokenCount(model.contextLength)}
         </span>
       ) : null}
@@ -535,14 +535,14 @@ const ActiveModelRow = React.memo(function ActiveModelRow({
 
       {/* Primary badge or hover action */}
       {isPrimary ? (
-        <span className="flex-shrink-0 rounded-full bg-[var(--accent-warm-muted)] px-2 py-0.5 text-[10px] font-medium text-[var(--accent)]">
+        <span className="flex-shrink-0 rounded-full bg-[var(--accent-warm-muted)] px-2 py-0.5 text-xs font-medium text-[var(--accent)]">
           首选
         </span>
       ) : (
         <button
           type="button"
           onClick={handleSetPrimary}
-          className="flex-shrink-0 rounded-full px-2 py-0.5 text-[10px] font-medium text-[var(--ink-subtle)] opacity-0 transition-all hover:bg-[var(--paper-inset)] hover:text-[var(--accent)] group-hover:opacity-100"
+          className="flex-shrink-0 rounded-full px-2 py-0.5 text-xs font-medium text-[var(--ink-subtle)] opacity-0 transition-all hover:bg-[var(--paper-inset)] hover:text-[var(--accent)] group-hover:opacity-100"
         >
           设为首选
         </button>
@@ -671,12 +671,12 @@ const ModelSettingsEditor = function ModelSettingsEditor({
       {/* 标题带模型 ID，防止改错对象 */}
       <div className="mb-3 flex items-baseline gap-2">
         <span className="flex-shrink-0 text-xs font-semibold text-[var(--ink)]">模型参数</span>
-        <code className="truncate font-mono text-[10px] text-[var(--ink-subtle)]">{model.model}</code>
+        <code className="truncate font-mono text-xs text-[var(--ink-subtle)]">{model.model}</code>
       </div>
 
       {/* 显示名称 */}
       <div className="mb-2.5">
-        <label className="mb-1 block text-[10px] font-medium tracking-wide text-[var(--ink-muted)]">显示名称</label>
+        <label className="mb-1 block text-xs font-medium tracking-wide text-[var(--ink-muted)]">显示名称</label>
         <input
           type="text"
           value={nameDraft}
@@ -688,7 +688,7 @@ const ModelSettingsEditor = function ModelSettingsEditor({
 
       {/* 上下文窗口 */}
       <div className="mb-2.5">
-        <label className="mb-1 block text-[10px] font-medium tracking-wide text-[var(--ink-muted)]">上下文窗口</label>
+        <label className="mb-1 block text-xs font-medium tracking-wide text-[var(--ink-muted)]">上下文窗口</label>
         <input
           type="text"
           value={contextDraft}
@@ -700,7 +700,7 @@ const ModelSettingsEditor = function ModelSettingsEditor({
 
       {/* 输入模态 */}
       <div>
-        <label className="mb-1 block text-[10px] font-medium tracking-wide text-[var(--ink-muted)]">输入模态</label>
+        <label className="mb-1 block text-xs font-medium tracking-wide text-[var(--ink-muted)]">输入模态</label>
         <div className="flex gap-1.5 pt-0.5">
           {EDITABLE_MODALITIES.map(kind => {
             const selected = modalities.includes(kind);
@@ -709,13 +709,13 @@ const ModelSettingsEditor = function ModelSettingsEditor({
                 key={kind}
                 type="button"
                 onClick={() => toggleModality(kind)}
-                className={`rounded-full border px-2.5 py-1 text-[11px] transition-colors ${
+                className={`rounded-full border px-2.5 py-1 text-xs transition-colors ${
                   selected
                     ? 'border-transparent bg-[var(--accent-warm-muted)] font-medium text-[var(--accent)]'
                     : 'border-[var(--line)] text-[var(--ink-muted)] hover:border-[var(--ink-subtle)]'
                 }`}
               >
-                {selected && <span className="mr-1 text-[9px]">✓</span>}
+                {selected && <span className="mr-1 text-xs">✓</span>}
                 {MODALITY_LABELS[kind]}
               </button>
             );
@@ -723,7 +723,7 @@ const ModelSettingsEditor = function ModelSettingsEditor({
         </div>
       </div>
 
-      <p className={`mt-2 text-[10px] leading-relaxed ${contextInvalid || modalitiesInvalid ? 'text-[var(--error)]' : 'text-[var(--ink-subtle)]'}`}>
+      <p className={`mt-2 text-xs leading-relaxed ${contextInvalid || modalitiesInvalid ? 'text-[var(--error)]' : 'text-[var(--ink-subtle)]'}`}>
         {hint}
       </p>
 
@@ -773,9 +773,9 @@ const DiscoveredModelRow = React.memo(function DiscoveredModelRow({
     <div className="group flex items-center gap-3 rounded-lg px-2 py-2 transition-colors hover:bg-[var(--hover-bg)]">
       {/* Model info — same style as ActiveModelRow */}
       <div className="min-w-0 flex-1">
-        <span className="text-[13px] font-medium text-[var(--ink)]">{title}</span>
+        <span className="text-sm font-medium text-[var(--ink)]">{title}</span>
         {subtitle && (
-          <span className="ml-2 font-mono text-[11px] text-[var(--ink-subtle)]">{subtitle}</span>
+          <span className="ml-2 font-mono text-xs text-[var(--ink-subtle)]">{subtitle}</span>
         )}
       </div>
 
@@ -784,7 +784,7 @@ const DiscoveredModelRow = React.memo(function DiscoveredModelRow({
 
       {/* Metadata */}
       {model.contextLength ? (
-        <span className="flex-shrink-0 text-[10px] text-[var(--ink-subtle)]">
+        <span className="flex-shrink-0 text-xs text-[var(--ink-subtle)]">
           {formatTokenCount(model.contextLength)}
         </span>
       ) : null}
@@ -793,7 +793,7 @@ const DiscoveredModelRow = React.memo(function DiscoveredModelRow({
       <button
         type="button"
         onClick={handleAdd}
-        className="flex-shrink-0 rounded-full px-2.5 py-0.5 text-[11px] font-medium text-[var(--accent)] opacity-0 transition-all hover:bg-[var(--accent-warm-subtle)] group-hover:opacity-100"
+        className="flex-shrink-0 rounded-full px-2.5 py-0.5 text-xs font-medium text-[var(--accent)] opacity-0 transition-all hover:bg-[var(--accent-warm-subtle)] group-hover:opacity-100"
       >
         添加
       </button>

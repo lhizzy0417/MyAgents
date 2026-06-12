@@ -301,7 +301,7 @@ export function AskUserQuestionPrompt({ request, onSubmit, onCancel }: AskUserQu
                                                                 setExpandedPreviewKey(isPreviewExpanded ? null : `${currentIndex}:${option.label}`);
                                                             }
                                                         }}
-                                                        className={`inline-flex items-center gap-1 px-1.5 py-0.5 text-[10px] rounded
+                                                        className={`inline-flex items-center gap-1 px-1.5 py-0.5 text-xs rounded
                                                             transition-colors cursor-pointer select-none
                                                             ${isPreviewExpanded
                                                                 ? 'text-[var(--accent)] bg-[var(--accent)]/10'
@@ -326,8 +326,8 @@ export function AskUserQuestionPrompt({ request, onSubmit, onCancel }: AskUserQu
                                     <div className="mt-1 ml-8 rounded-lg border border-[var(--line-subtle)] bg-[var(--paper-inset)] overflow-hidden">
                                         <div
                                             className="p-3 text-xs text-[var(--ink)] overflow-auto max-h-64
-                                                [&_pre]:bg-[var(--paper)] [&_pre]:rounded [&_pre]:p-2 [&_pre]:overflow-x-auto [&_pre]:text-[11px]
-                                                [&_code]:font-mono [&_code]:text-[11px]
+                                                [&_pre]:bg-[var(--paper)] [&_pre]:rounded [&_pre]:p-2 [&_pre]:overflow-x-auto [&_pre]:text-xs
+                                                [&_code]:font-mono [&_code]:text-xs
                                                 [&_p]:my-1 [&_ul]:ml-4 [&_ol]:ml-4 [&_li]:my-0.5"
                                             dangerouslySetInnerHTML={{
                                                 __html: request.previewFormat === 'html'
