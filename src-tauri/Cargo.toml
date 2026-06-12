@@ -87,6 +87,10 @@ nix = { version = "0.29", default-features = false, features = ["signal"] }
 tauri-nspanel = { git = "https://github.com/ahkohd/tauri-nspanel", rev = "a3122e894383aa068ec5365a42994e3ac94ba1b6" }
 # Frontmost app / window title probe (zero-permission context, PRD §5.1).
 active-win-pos-rs = "0.11"
+# CGDisplay 枚举（线程安全，不碰 NSScreen/MainThreadMarker）：📷 截"前台
+# 窗口所在的那块显示器"用——与 active-win-pos-rs 的 kCGWindowBounds 同
+# CG 坐标空间。版本对齐 lock 里既有传递依赖（0.22），零新增编译单元。
+core-graphics = "0.22"
 # Selected-text capture: AX API first, clipboard round-trip fallback. Only
 # ever invoked on explicit summon (PRD D3 red line), never on hover.
 get-selected-text = "0.1"

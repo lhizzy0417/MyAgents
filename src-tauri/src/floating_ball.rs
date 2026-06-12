@@ -719,37 +719,72 @@ mod imp {
         Ok(())
     }
 
-    /// Eager context capture (PRD §5.1). MUST run before the companion becomes
-    /// key — the probes read the *user's* frontmost app. Selection capture may
-    /// fall back to a clipboard round-trip inside get-selected-text, which is
-    /// acceptable here because this is only ever called on explicit summon.
-    /// Frontmost window identity (app name + title), self-filtered. Zero
-    /// permission. Shared by capture_context and the 📷 shutter label.
-    fn frontmost_window_info() -> (Option<String>, Option<String>) {
+    /// Frontmost window probe result（自滤本进程）。
+    struct FrontmostInfo {
+        app_name: Option<String>,
+        window_title: Option<String>,
+        /// 窗口中心点，CG 全局坐标（top-left origin）——kCGWindowBounds 与
+        /// CGDisplayBounds 同空间，多显示器下用它定位"用户正看的那块屏"。
+        window_center: Option<(f64, f64)>,
+    }
+
+    /// Frontmost window identity (app name + title + center), self-filtered.
+    /// Zero permission. Shared by capture_context and the 📷 shutter.
+    fn frontmost_window_info() -> FrontmostInfo {
         match active_win_pos_rs::get_active_window() {
             // Clicking the ball can make OUR panel the "active window" in the
             // CGWindow sense even though the app never activates — the user
             // saw "正在看 MyAgents — MyAgents Ball" in the title row. Filter
             // out our own process and fall back to NSWorkspace's frontmost
             // application (which nonactivating panels never become).
-            Ok(win) if win.process_id != std::process::id() as u64 => {
-                let app = (!win.app_name.is_empty()).then_some(win.app_name);
-                let title = (!win.title.is_empty()).then_some(win.title);
-                (app, title)
-            }
-            Ok(_) => (frontmost_app_name(), None),
+            Ok(win) if win.process_id != std::process::id() as u64 => FrontmostInfo {
+                app_name: (!win.app_name.is_empty()).then_some(win.app_name),
+                window_title: (!win.title.is_empty()).then_some(win.title),
+                window_center: Some((
+                    win.position.x + win.position.width / 2.0,
+                    win.position.y + win.position.height / 2.0,
+                )),
+            },
+            Ok(_) => FrontmostInfo {
+                app_name: frontmost_app_name(),
+                window_title: None,
+                window_center: None,
+            },
             Err(_) => {
                 ulog_warn!("[fb] get_active_window failed (no frontmost window?)");
-                (frontmost_app_name(), None)
+                FrontmostInfo {
+                    app_name: frontmost_app_name(),
+                    window_title: None,
+                    window_center: None,
+                }
             }
         }
     }
 
+    /// 包含给定 CG 坐标点的显示器边界（CG 空间）。纯 CoreGraphics、线程安全
+    /// ——screenshot 跑在 spawn_blocking，碰不得 NSScreen/MainThreadMarker。
+    fn display_bounds_containing(point: (f64, f64)) -> Option<(f64, f64, f64, f64)> {
+        use core_graphics::display::CGDisplay;
+        let ids = CGDisplay::active_displays().ok()?;
+        for id in ids {
+            let b = CGDisplay::new(id).bounds();
+            let (x, y, w, h) = (b.origin.x, b.origin.y, b.size.width, b.size.height);
+            if point.0 >= x && point.0 < x + w && point.1 >= y && point.1 < y + h {
+                return Some((x, y, w, h));
+            }
+        }
+        None
+    }
+
+    /// Eager context capture (PRD §5.1). MUST run before the companion becomes
+    /// key — the probes read the *user's* frontmost app. Selection capture may
+    /// fall back to a clipboard round-trip inside get-selected-text, which is
+    /// acceptable here because this is only ever called on explicit summon.
     pub fn capture_context() -> FbContext {
         let mut ctx = FbContext::default();
-        let (app_name, window_title) = frontmost_window_info();
-        ctx.app_name = app_name;
-        ctx.window_title = window_title;
+        let info = frontmost_window_info();
+        ctx.app_name = info.app_name;
+        ctx.window_title = info.window_title;
 
         // Don't even try selection capture without Accessibility permission —
         // get-selected-text would fall through to the Cmd+C clipboard hack and
@@ -808,12 +843,21 @@ mod imp {
     pub fn screenshot() -> Result<super::FbScreenshot, String> {
         use base64::Engine;
         // 快门时刻的前台窗口（nonactivating panel 不改变 frontmost，读到的
-        // 就是用户正看的窗口）——引用条拿它当标签。
-        let (app_name, window_title) = frontmost_window_info();
+        // 就是用户正看的窗口）——引用条拿它当标签，中心点定位它所在的屏。
+        let info = frontmost_window_info();
         let id = uuid::Uuid::new_v4();
         let tmp = std::env::temp_dir().join(format!("myagents-fb-shot-{id}.png"));
-        let status = crate::process_cmd::new("/usr/sbin/screencapture")
-            .arg("-x") // no shutter sound
+        let mut cmd = crate::process_cmd::new("/usr/sbin/screencapture");
+        cmd.arg("-x"); // no shutter sound
+        // 多显示器：截"前台窗口所在的那块屏"，与引用条标签同源同屏。
+        // screencapture 单输出文件默认只截主显示器——副屏聚焦 iTerm 时标签
+        // 写着 iTerm、图却是主屏浏览器（0613 用户实测 bug）。-R 用 CG 全局
+        // 坐标矩形圈定该屏；值与 flag 连写，防负坐标（主屏左侧的副屏 x<0）
+        // 被 getopt 当成另一个 flag。探不到前台窗口时不加 -R，回退主屏。
+        if let Some((x, y, w, h)) = info.window_center.and_then(display_bounds_containing) {
+            cmd.arg(format!("-R{x},{y},{w},{h}"));
+        }
+        let status = cmd
             .arg(&tmp)
             .status()
             .map_err(|e| format!("[fb] screencapture spawn: {e}"))?;
@@ -850,8 +894,8 @@ mod imp {
         let b64 = base64::engine::general_purpose::STANDARD.encode(bytes);
         Ok(super::FbScreenshot {
             data_url: format!("data:{mime};base64,{b64}"),
-            app_name,
-            window_title,
+            app_name: info.app_name,
+            window_title: info.window_title,
         })
     }
 

@@ -3640,6 +3640,7 @@ dependencies = [
  "base64 0.22.1",
  "chrono",
  "chrono-tz",
+ "core-graphics 0.22.3",
  "cron",
  "dirs 6.0.0",
  "futures",
