@@ -198,7 +198,7 @@ export default function ProviderEnableOrderDialog({
                     <div className="flex items-center justify-between">
                         <div>
                             <h3 className="text-lg font-semibold text-[var(--ink)]">启用和排序</h3>
-                            <p className="mt-1 text-sm text-[var(--ink-muted)]">
+                            <p className="mt-1 text-2sm text-[var(--ink-muted)]">
                                 控制可被对话、任务和聊天机器人使用的供应商，以及它们在模型选择器中的顺序。
                             </p>
                         </div>

@@ -956,7 +956,7 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
                             </div>
                         ) : visibleProjects.length === 0 ? (
                             <div className="flex flex-col items-center justify-center py-16 text-center">
-                                <h3 className="mb-1.5 text-md font-medium text-[var(--ink)]">
+                                <h3 className="mb-1.5 text-lg font-medium text-[var(--ink)]">
                                     还没有工作区
                                 </h3>
                                 <p className="mb-6 max-w-[220px] text-sm leading-relaxed text-[var(--ink-muted)]/60">

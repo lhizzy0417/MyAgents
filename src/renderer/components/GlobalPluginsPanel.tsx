@@ -265,7 +265,7 @@ export default function GlobalPluginsPanel({
       ) : plugins.length === 0 ? (
         <div className="rounded-xl bg-[var(--paper-elevated)] py-16 text-center">
           <Puzzle className="mx-auto h-10 w-10 text-[var(--ink-subtle)]" />
-          <p className="mt-3 text-md font-medium text-[var(--ink)]">还没有插件</p>
+          <p className="mt-3 text-base font-medium text-[var(--ink)]">还没有插件</p>
           <p className="mt-1 text-sm text-[var(--ink-muted)]">
             点右上角「安装插件」从 GitHub 或本地路径添加。
           </p>
@@ -337,7 +337,7 @@ function PluginCard({
     >
       <div className="flex items-center gap-2">
         {isBad && <AlertTriangle className="h-3.5 w-3.5 shrink-0 text-amber-500" />}
-        <h4 className="min-w-0 flex-1 truncate text-md font-semibold text-[var(--ink)]">
+        <h4 className="min-w-0 flex-1 truncate text-sm font-semibold text-[var(--ink)]">
           {item.name}
         </h4>
         <Puzzle className="h-3.5 w-3.5 shrink-0 text-[var(--accent-warm)]" />
@@ -429,11 +429,11 @@ function PluginDetailView({
         <div className="flex items-baseline gap-3">
           <h2 className="text-2xl font-semibold text-[var(--ink)]">{plugin.name}</h2>
           {plugin.version && (
-            <span className="text-md text-[var(--ink-muted)]">v{plugin.version}</span>
+            <span className="text-sm text-[var(--ink-muted)]">v{plugin.version}</span>
           )}
         </div>
         {plugin.description && (
-          <p className="mt-2 text-md leading-relaxed text-[var(--ink-secondary)]">
+          <p className="mt-2 text-sm leading-relaxed text-[var(--ink-secondary)]">
             {plugin.description}
           </p>
         )}
@@ -474,7 +474,7 @@ function PluginDetailView({
        *  for clickable list items; static content blocks like these need
        *  the border to visually contain themselves. */}
       <section>
-        <h3 className="mb-3 text-xs font-semibold uppercase tracking-[0.12em] text-[var(--ink-muted)]">
+        <h3 className="mb-3 text-sm font-semibold tracking-[0.04em] text-[var(--ink-muted)]">
           元数据
         </h3>
         <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] px-5 py-4">
@@ -492,7 +492,7 @@ function PluginDetailView({
 
       {components && (
         <section>
-          <h3 className="mb-3 text-xs font-semibold uppercase tracking-[0.12em] text-[var(--ink-muted)]">
+          <h3 className="mb-3 text-sm font-semibold tracking-[0.04em] text-[var(--ink-muted)]">
             组件清单
           </h3>
           <ComponentInventoryGrid inv={components} />
@@ -565,13 +565,13 @@ function ComponentInventoryGrid({ inv }: { inv: PluginComponentInventory }) {
       ))}
       <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] px-4 py-3">
         <div className="text-xs font-medium uppercase tracking-[0.04em] text-[var(--ink-muted)]">Hooks</div>
-        <div className="mt-1.5 text-md text-[var(--ink)]">
+        <div className="mt-1.5 text-sm text-[var(--ink)]">
           {inv.hooks > 0 ? `${inv.hooks} 个事件处理器` : <span className="text-[var(--ink-muted)]">— 无</span>}
         </div>
       </div>
       <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] px-4 py-3">
         <div className="text-xs font-medium uppercase tracking-[0.04em] text-[var(--ink-muted)]">Bin</div>
-        <div className="mt-1.5 text-md text-[var(--ink)]">
+        <div className="mt-1.5 text-sm text-[var(--ink)]">
           {inv.hasBin ? '✓ 有可执行文件' : <span className="text-[var(--ink-muted)]">— 无</span>}
         </div>
       </div>
@@ -591,7 +591,7 @@ function ComponentBlock({
   return (
     <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] px-4 py-3">
       <div className="text-xs font-medium uppercase tracking-[0.04em] text-[var(--ink-muted)]">{label}</div>
-      <div className="mt-1.5 text-md text-[var(--ink)]">
+      <div className="mt-1.5 text-sm text-[var(--ink)]">
         {count === 0 ? <span className="text-[var(--ink-muted)]">— 无</span> : `${count} 个`}
       </div>
       {count > 0 && (
@@ -930,7 +930,7 @@ function InputView({
   return (
     <>
       <div className="border-b border-[var(--line)] px-5 py-4">
-        <h2 className="text-base font-semibold text-[var(--ink)]">安装插件</h2>
+        <h2 className="text-lg font-semibold text-[var(--ink)]">安装插件</h2>
         <p className="mt-1 text-2sm text-[var(--ink-muted)]">
           支持：GitHub 仓库（<code className="text-xs">owner/repo</code>、<code className="text-xs">github.com/...</code> 或完整 URL）、直链 <code className="text-xs">.zip</code>、本地文件夹绝对路径（如 <code className="text-xs">/Users/me/dev/plugin</code> 或 <code className="text-xs">C:\dev\plugin</code>）
         </p>
@@ -977,7 +977,7 @@ function InputView({
           type="button"
           onClick={onClose}
           disabled={submitting}
-          className="rounded-full bg-[var(--button-secondary-bg)] px-4 py-1.5 text-2sm font-semibold text-[var(--button-secondary-text)] transition-colors hover:bg-[var(--button-secondary-bg-hover)] disabled:opacity-50"
+          className="rounded-full bg-[var(--button-secondary-bg)] px-4 py-1.5 text-sm font-semibold text-[var(--button-secondary-text)] transition-colors hover:bg-[var(--button-secondary-bg-hover)] disabled:opacity-50"
         >
           取消
         </button>
@@ -985,7 +985,7 @@ function InputView({
           type="button"
           onClick={onSubmit}
           disabled={submitting || !sourceUrl.trim()}
-          className="flex items-center gap-1.5 rounded-full bg-[var(--button-primary-bg)] px-4 py-1.5 text-2sm font-semibold text-white transition-colors hover:bg-[var(--button-primary-bg-hover)] disabled:opacity-50"
+          className="flex items-center gap-1.5 rounded-full bg-[var(--button-primary-bg)] px-4 py-1.5 text-sm font-semibold text-white transition-colors hover:bg-[var(--button-primary-bg-hover)] disabled:opacity-50"
         >
           {submitting && <Loader2 className="h-3 w-3 animate-spin" />}
           开始安装
@@ -1020,7 +1020,7 @@ function SelectingView({
   return (
     <>
       <div className="border-b border-[var(--line)] px-5 py-4">
-        <h2 className="text-base font-semibold text-[var(--ink)]">选择要安装的插件</h2>
+        <h2 className="text-lg font-semibold text-[var(--ink)]">选择要安装的插件</h2>
         <p className="mt-1 text-2sm text-[var(--ink-muted)]">
           来源：<span className="break-all">{sourceUrl}</span>
         </p>
@@ -1058,7 +1058,7 @@ function SelectingView({
                   />
                   <div className="min-w-0 flex-1">
                     <div className="flex items-baseline gap-2">
-                      <span className="truncate text-md font-medium text-[var(--ink)]">
+                      <span className="truncate text-sm font-medium text-[var(--ink)]">
                         {name}
                       </span>
                       {cand.manifest?.version && (
@@ -1096,14 +1096,14 @@ function SelectingView({
             type="button"
             onClick={onSelectAll}
             disabled={installable.length === 0}
-            className="rounded-full px-3 py-1 text-2sm text-[var(--ink-muted)] hover:bg-[var(--hover-bg)] hover:text-[var(--ink)] disabled:opacity-40"
+            className="rounded-full px-3 py-1 text-sm text-[var(--ink-muted)] hover:bg-[var(--hover-bg)] hover:text-[var(--ink)] disabled:opacity-40"
           >
             全选
           </button>
           <button
             type="button"
             onClick={onSelectNone}
-            className="rounded-full px-3 py-1 text-2sm text-[var(--ink-muted)] hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]"
+            className="rounded-full px-3 py-1 text-sm text-[var(--ink-muted)] hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]"
           >
             全不选
           </button>
@@ -1112,7 +1112,7 @@ function SelectingView({
           <button
             type="button"
             onClick={onBack}
-            className="rounded-full bg-[var(--button-secondary-bg)] px-4 py-1.5 text-2sm font-semibold text-[var(--button-secondary-text)] transition-colors hover:bg-[var(--button-secondary-bg-hover)]"
+            className="rounded-full bg-[var(--button-secondary-bg)] px-4 py-1.5 text-sm font-semibold text-[var(--button-secondary-text)] transition-colors hover:bg-[var(--button-secondary-bg-hover)]"
           >
             返回
           </button>
@@ -1120,7 +1120,7 @@ function SelectingView({
             type="button"
             onClick={onConfirm}
             disabled={selected.size === 0}
-            className="flex items-center gap-1.5 rounded-full bg-[var(--button-primary-bg)] px-4 py-1.5 text-2sm font-semibold text-white transition-colors hover:bg-[var(--button-primary-bg-hover)] disabled:opacity-50"
+            className="flex items-center gap-1.5 rounded-full bg-[var(--button-primary-bg)] px-4 py-1.5 text-sm font-semibold text-white transition-colors hover:bg-[var(--button-primary-bg-hover)] disabled:opacity-50"
           >
             安装 {selected.size} 个插件
           </button>
@@ -1154,7 +1154,7 @@ function InstallingView({
   return (
     <>
       <div className="border-b border-[var(--line)] px-5 py-4">
-        <h2 className="text-base font-semibold text-[var(--ink)]">
+        <h2 className="text-lg font-semibold text-[var(--ink)]">
           {done ? '安装完成' : '正在批量安装'}
         </h2>
         <p className="mt-1 text-2sm text-[var(--ink-muted)]">
@@ -1218,7 +1218,7 @@ function InstallingView({
           type="button"
           onClick={onClose}
           disabled={!done}
-          className="flex items-center gap-1.5 rounded-full bg-[var(--button-primary-bg)] px-4 py-1.5 text-2sm font-semibold text-white transition-colors hover:bg-[var(--button-primary-bg-hover)] disabled:opacity-50"
+          className="flex items-center gap-1.5 rounded-full bg-[var(--button-primary-bg)] px-4 py-1.5 text-sm font-semibold text-white transition-colors hover:bg-[var(--button-primary-bg-hover)] disabled:opacity-50"
         >
           {!done && <Loader2 className="h-3 w-3 animate-spin" />}
           {done ? '完成' : '安装中…'}

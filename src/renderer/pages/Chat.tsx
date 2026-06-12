@@ -3976,7 +3976,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
                   <button
                     type="button"
                     onClick={() => setSplitActiveView('file')}
-                    className={`group relative flex items-center gap-1 rounded-md px-2.5 py-1 text-2sm font-medium transition-colors ${
+                    className={`group relative flex items-center gap-1 rounded-md px-2.5 py-1 text-sm font-medium transition-colors ${
                       splitActiveView === 'file'
                         ? 'text-[var(--ink)]'
                         : 'text-[var(--ink-muted)] hover:text-[var(--ink)]'
@@ -4006,7 +4006,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
                   <button
                     type="button"
                     onClick={() => setSplitActiveView('terminal')}
-                    className={`group relative flex items-center gap-1 rounded-md px-2.5 py-1 text-2sm font-medium transition-colors ${
+                    className={`group relative flex items-center gap-1 rounded-md px-2.5 py-1 text-sm font-medium transition-colors ${
                       splitActiveView === 'terminal'
                         ? 'text-[var(--ink)]'
                         : 'text-[var(--ink-muted)] hover:text-[var(--ink)]'
@@ -4037,7 +4037,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
                   <button
                     type="button"
                     onClick={() => setSplitActiveView('browser')}
-                    className={`group relative flex items-center gap-1 rounded-md px-2.5 py-1 text-2sm font-medium transition-colors ${
+                    className={`group relative flex items-center gap-1 rounded-md px-2.5 py-1 text-sm font-medium transition-colors ${
                       splitActiveView === 'browser'
                         ? 'text-[var(--ink)]'
                         : 'text-[var(--ink-muted)] hover:text-[var(--ink)]'

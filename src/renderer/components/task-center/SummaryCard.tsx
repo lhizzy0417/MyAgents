@@ -137,7 +137,7 @@ export function SummaryCard({ task, stats }: Props) {
       <div className="flex items-start gap-2.5">
         <ScheduleIcon className="mt-0.5 h-4 w-4 shrink-0 text-[var(--accent-warm)]" />
         <div className="min-w-0 flex-1">
-          <div className="text-md font-medium leading-snug text-[var(--ink)]">
+          <div className="text-sm font-medium leading-snug text-[var(--ink)]">
             {schedule?.title ?? `${modeMeta.label} · 计算中…`}
           </div>
           {schedule?.next && (

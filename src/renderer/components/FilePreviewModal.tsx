@@ -312,7 +312,7 @@ function MdViewSegment({
 }) {
     const baseBtn = compact
         ? 'inline-flex items-center gap-1 rounded-[var(--radius-sm)] px-2 py-0.5 text-xs font-medium transition-all duration-150'
-        : 'inline-flex items-center gap-1.5 rounded-[var(--radius-sm)] px-3 py-1 text-2sm font-medium transition-all duration-150';
+        : 'inline-flex items-center gap-1.5 rounded-[var(--radius-sm)] px-3 py-1 text-sm font-medium transition-all duration-150';
     const activeBtn = 'bg-[var(--paper-elevated)] text-[var(--ink)] shadow-xs';
     const inactiveBtn = 'text-[var(--ink-muted)] hover:text-[var(--ink-secondary)]';
     const iconCls = compact ? 'h-3 w-3' : 'h-3 w-3';
@@ -1065,7 +1065,7 @@ export default function FilePreviewModal({
             }
             return (
                 <div ref={markdownScrollRef} className="h-full overflow-auto overscroll-contain p-6 bg-[var(--paper-elevated)]">
-                    <div className="prose prose-stone mx-auto max-w-3xl dark:prose-invert">
+                    <div className="ai-message-content mx-auto max-w-3xl">
                         <Markdown raw preserveNewlines basePath={path ? path.substring(0, path.lastIndexOf('/')) : undefined} workspacePath={workspacePath}>{previewSource}</Markdown>
                     </div>
                 </div>

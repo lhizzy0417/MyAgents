@@ -584,7 +584,7 @@ const AgentDetailPanel = forwardRef<AgentDetailPanelRef, AgentDetailPanelProps>(
                     {/* Body preview */}
                     <div className="flex-1 overflow-y-auto overscroll-contain px-6 py-4">
                         {body ? (
-                            <div className="prose prose-sm max-w-none text-[var(--ink)]" onClick={() => handleEdit('body')}>
+                            <div className="ai-message-content text-[var(--ink)]" onClick={() => handleEdit('body')}>
                                 <Markdown>{body}</Markdown>
                             </div>
                         ) : (

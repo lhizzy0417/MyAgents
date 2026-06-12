@@ -287,7 +287,7 @@ export default function ModelManagementPanel({
       >
         {/* Header */}
         <div className="flex flex-shrink-0 items-center justify-between border-b border-[var(--line)] px-5 py-3.5">
-          <h2 className="text-base font-semibold text-[var(--ink)]">
+          <h2 className="text-lg font-semibold text-[var(--ink)]">
             管理可用模型
             <span className="ml-2 text-sm font-normal text-[var(--ink-muted)]">{provider.name}</span>
           </h2>

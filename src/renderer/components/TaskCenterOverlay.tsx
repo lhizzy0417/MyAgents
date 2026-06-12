@@ -288,7 +288,7 @@ export default memo(function TaskCenterOverlay({
                     match the new domain of this overlay (Chat sessions only;
                     Tasks live in the Task Center singleton tab). */}
                 <div className="mb-4 flex items-center justify-between">
-                    <h2 className="text-base font-semibold text-[var(--ink)]">历史对话</h2>
+                    <h2 className="text-lg font-semibold text-[var(--ink)]">历史对话</h2>
                     <button
                         onClick={onClose}
                         className="rounded-md p-1.5 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"

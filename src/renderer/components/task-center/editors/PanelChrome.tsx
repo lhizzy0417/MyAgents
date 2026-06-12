@@ -114,7 +114,7 @@ export function FormSection({
     <section className={className}>
       <div className="mb-3 flex items-center gap-2">
         {Icon && <Icon className="h-4 w-4 shrink-0 text-[var(--ink-muted)]" />}
-        <h3 className="text-md font-semibold text-[var(--ink)]">{title}</h3>
+        <h3 className="text-sm font-semibold text-[var(--ink)]">{title}</h3>
         {hint && (
           <span className="text-2sm font-normal text-[var(--ink-muted)]/80">
             {hint}

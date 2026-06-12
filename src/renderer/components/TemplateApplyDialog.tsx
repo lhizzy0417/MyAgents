@@ -154,7 +154,7 @@ export default function TemplateApplyDialog({ agentDir, onClose, onApplied }: Te
                                 <ArrowLeft className="h-4 w-4" />
                             </button>
                         )}
-                        <h2 className="text-base font-semibold text-[var(--ink)]">
+                        <h2 className="text-lg font-semibold text-[var(--ink)]">
                             {step === 'pick' ? '选择模板应用到当前工作区' : '确认应用'}
                         </h2>
                     </div>

@@ -380,7 +380,7 @@ function AgentRow({
             onClick={onClick}
         >
             <div className="flex items-center gap-2">
-                <h4 className="min-w-0 flex-1 truncate text-md font-semibold text-[var(--ink)]">
+                <h4 className="min-w-0 flex-1 truncate text-sm font-semibold text-[var(--ink)]">
                     {agent.name}
                 </h4>
                 <Bot className="h-3.5 w-3.5 shrink-0 text-violet-500" />

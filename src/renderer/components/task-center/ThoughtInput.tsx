@@ -43,9 +43,10 @@ export interface ThoughtInputHandle {
 // Visual variants. Both variants share the outer card frame (radius,
 // shadow, border) so the Task Center input and the Launcher 想法 input
 // read as the same affordance. They diverge only on inner metrics —
-// `compact` (Task Center) keeps 14px text + tighter padding so it sits
-// quietly above the thought stream; `launcher` uses 16px text + roomier
-// padding to match SimpleChatInput's launcher-mode card byte-for-byte.
+// both use 16px prose text（想法正文 = prose 档，PRD 0.2.34 Part 2 升档）；
+// `compact` (Task Center) keeps tighter padding so it sits quietly above
+// the thought stream; `launcher` uses roomier padding to match
+// SimpleChatInput's launcher-mode card byte-for-byte.
 type ThoughtInputVariant = 'compact' | 'launcher';
 
 const VARIANTS: Record<ThoughtInputVariant, {
@@ -75,9 +76,9 @@ const VARIANTS: Record<ThoughtInputVariant, {
   toolbarButtonPaddingClass: string;
 }> = {
   compact: {
-    pxPerLine: 22,           // 14px × 1.6 line-height ≈ 22.4
+    pxPerLine: 26,           // text-base 16px × leading-relaxed 1.625 = 26（与 launcher variant 同源；改字号必同步此几何常量）
     verticalPaddingPx: 12,
-    textareaClass: 'text-md leading-relaxed',
+    textareaClass: 'text-base leading-relaxed',
     // Resting `shadow-xs` so the input reads as quietly elevated above
     // the thought stream below; lifts to `shadow-sm` on hover / focus to
     // signal the active write surface. Same idiom as SettingsHelperInbox.
@@ -605,7 +606,7 @@ export const ThoughtInput = forwardRef<ThoughtInputHandle, Props>(function Thoug
                 insertTag(tag);
               }}
               onMouseEnter={() => setTagIndex(i)}
-              className={`flex w-full items-center justify-between px-3 py-1.5 text-left text-2sm transition-colors ${
+              className={`flex w-full items-center justify-between px-3 py-1.5 text-left text-sm transition-colors ${
                 i === tagIndex
                   ? 'bg-[var(--accent-warm-subtle)] text-[var(--accent-warm)]'
                   : 'text-[var(--ink-secondary)] hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]'

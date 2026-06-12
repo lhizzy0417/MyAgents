@@ -74,7 +74,7 @@ export default function ConfirmDialog({
         <OverlayBackdrop onClose={loading ? undefined : onCancel} className="z-[300] px-4">
             <div className="glass-panel w-full max-w-sm">
                 <div className="border-b border-[var(--line)] px-5 py-4">
-                    <div className="text-md font-semibold text-[var(--ink)]">{title}</div>
+                    <div className="break-words text-lg font-semibold text-[var(--ink)]">{title}</div>
                 </div>
                 <div className="px-5 py-4">
                     {/* `whitespace-pre-line` lets callers pass multi-line messages via `\n`
@@ -87,7 +87,7 @@ export default function ConfirmDialog({
                         type="button"
                         onClick={onCancel}
                         disabled={loading}
-                        className="rounded-full bg-[var(--button-secondary-bg)] px-4 py-1.5 text-2sm font-semibold text-[var(--button-secondary-text)] transition-colors hover:bg-[var(--button-secondary-bg-hover)] disabled:opacity-50"
+                        className="rounded-full bg-[var(--button-secondary-bg)] px-4 py-1.5 text-sm font-semibold text-[var(--button-secondary-text)] transition-colors hover:bg-[var(--button-secondary-bg-hover)] disabled:opacity-50"
                     >
                         {finalCancelText}
                     </button>
@@ -95,7 +95,7 @@ export default function ConfirmDialog({
                         type="button"
                         onClick={onConfirm}
                         disabled={loading}
-                        className={`flex items-center gap-1.5 rounded-full px-4 py-1.5 text-2sm font-semibold text-white transition-colors disabled:opacity-50 ${isDanger
+                        className={`flex items-center gap-1.5 rounded-full px-4 py-1.5 text-sm font-semibold text-white transition-colors disabled:opacity-50 ${isDanger
                             ? 'bg-[var(--error)] hover:brightness-110'
                             : 'bg-[var(--button-primary-bg)] hover:bg-[var(--button-primary-bg-hover)]'
                             }`}

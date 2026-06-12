@@ -48,7 +48,7 @@ function SectionHeader({ icon: Icon, children }: { icon?: typeof Clock; children
     return (
         <div className="flex items-center gap-2">
             {Icon && <Icon className="h-4 w-4 text-[var(--ink-muted)]" />}
-            <h4 className="text-md font-semibold text-[var(--ink)]">{children}</h4>
+            <h4 className="text-sm font-semibold text-[var(--ink)]">{children}</h4>
         </div>
     );
 }
@@ -232,7 +232,7 @@ export default function CronTaskDetailPanel({ task, botInfo, onClose, onDelete, 
                     <div className="flex shrink-0 items-center justify-between px-6 py-4">
                         <div className="flex min-w-0 items-center gap-2.5">
                             <Clock className="h-4 w-4 shrink-0 text-[var(--accent)]" />
-                            <h3 className="min-w-0 truncate text-base font-semibold text-[var(--ink)]">
+                            <h3 className="min-w-0 truncate text-lg font-semibold text-[var(--ink)]">
                                 {isEditing ? '编辑定时任务' : displayName}
                             </h3>
                             {!isEditing && <span className={`shrink-0 text-2sm font-medium ${getCronStatusColor(task.status)}`}>{getCronStatusText(task.status)}</span>}

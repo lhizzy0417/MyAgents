@@ -64,7 +64,7 @@ export function ThoughtBulkBar({
           onClick={onMerge}
           disabled={!canMerge}
           title={count < 2 ? '至少选择 2 条想法' : '合并选中的想法为一条'}
-          className="flex items-center gap-1.5 rounded-full px-3 py-1 text-2sm text-[var(--ink-secondary)] transition-colors hover:bg-[var(--accent-warm-subtle)] hover:text-[var(--accent-warm)] disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-transparent disabled:hover:text-[var(--ink-secondary)]"
+          className="flex items-center gap-1.5 rounded-full px-3 py-1 text-sm text-[var(--ink-secondary)] transition-colors hover:bg-[var(--accent-warm-subtle)] hover:text-[var(--accent-warm)] disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-transparent disabled:hover:text-[var(--ink-secondary)]"
         >
           <Layers className="h-3.5 w-3.5" strokeWidth={1.75} />
           合并
@@ -74,7 +74,7 @@ export function ThoughtBulkBar({
           onClick={onArchive}
           disabled={!canArchive}
           title={viewMode === 'archived' ? '取消归档选中的想法' : '归档选中的想法'}
-          className="flex items-center gap-1.5 rounded-full px-3 py-1 text-2sm text-[var(--ink-secondary)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)] disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-transparent disabled:hover:text-[var(--ink-secondary)]"
+          className="flex items-center gap-1.5 rounded-full px-3 py-1 text-sm text-[var(--ink-secondary)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)] disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-transparent disabled:hover:text-[var(--ink-secondary)]"
         >
           <ArchiveIcon className="h-3.5 w-3.5" strokeWidth={1.75} />
           {archiveLabel}
@@ -84,7 +84,7 @@ export function ThoughtBulkBar({
           onClick={onDelete}
           disabled={!canDelete}
           title="删除选中的想法"
-          className="flex items-center gap-1.5 rounded-full px-3 py-1 text-2sm text-[var(--ink-secondary)] transition-colors hover:bg-[var(--error-bg)] hover:text-[var(--error)] disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-transparent disabled:hover:text-[var(--ink-secondary)]"
+          className="flex items-center gap-1.5 rounded-full px-3 py-1 text-sm text-[var(--ink-secondary)] transition-colors hover:bg-[var(--error-bg)] hover:text-[var(--error)] disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-transparent disabled:hover:text-[var(--ink-secondary)]"
         >
           <Trash2 className="h-3.5 w-3.5" strokeWidth={1.75} />
           删除
@@ -95,7 +95,7 @@ export function ThoughtBulkBar({
           onClick={onCancel}
           disabled={busy}
           title="退出多选模式"
-          className="flex items-center gap-1.5 rounded-full px-3 py-1 text-2sm text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)] disabled:opacity-50"
+          className="flex items-center gap-1.5 rounded-full px-3 py-1 text-sm text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)] disabled:opacity-50"
         >
           <X className="h-3.5 w-3.5" strokeWidth={1.75} />
           取消

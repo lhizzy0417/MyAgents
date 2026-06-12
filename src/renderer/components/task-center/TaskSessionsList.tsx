@@ -118,12 +118,12 @@ export function TaskSessionsList({ task, onBeforeOpen }: Props) {
 
   return (
     <div>
-      {/* Title matches the `text-md font-semibold text-[var(--ink)]`
+      {/* Title matches the `text-sm font-semibold text-[var(--ink)]`
           style used by TaskDocBlock / StatusHistoryList headers, so the
           overlay reads as a series of same-weight sections rather than
           an eyebrow label hidden between larger doc blocks. */}
       <div className="mb-2 flex items-baseline gap-2">
-        <h3 className="text-md font-semibold text-[var(--ink)]">任务执行</h3>
+        <h3 className="text-sm font-semibold text-[var(--ink)]">任务执行</h3>
         <span className="text-2sm tabular-nums text-[var(--ink-muted)]">
           {task.sessionIds.length}
         </span>

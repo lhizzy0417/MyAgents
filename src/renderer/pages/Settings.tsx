@@ -2860,7 +2860,7 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                     specs/playgrounds/toolbox_settings_tab.html 定稿版为准。 */}
                 {activeSection === 'mcp' && (
                     <div className="mx-auto max-w-4xl px-8 py-8">
-                        <h2 className="mb-7 text-xl font-semibold text-[var(--ink)]">工具箱</h2>
+                        <h2 className="mb-7 text-lg font-semibold text-[var(--ink)]">工具箱</h2>
 
                         {/* 分区 1：MCP */}
                         <div className="flex items-center gap-2.5">
@@ -2881,7 +2881,7 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                             </button>
                         </div>
 
-                        <p className="mb-4 mt-1 text-sm text-[var(--ink-muted)]">
+                        <p className="mb-4 mt-1 text-2sm text-[var(--ink-muted)]">
                             MCP (Model Context Protocol) 标准协议工具，适合接入现成的第三方服务
                         </p>
 
@@ -2973,7 +2973,7 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                         <div className="space-y-6">
                             <div>
                                 <h2 className="text-lg font-semibold text-[var(--ink)]">快捷键</h2>
-                                <p className="mt-1 text-sm text-[var(--ink-muted)]">
+                                <p className="mt-1 text-2sm text-[var(--ink-muted)]">
                                     管理消息发送与全局唤起快捷键
                                 </p>
                             </div>
@@ -3104,7 +3104,7 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                         <div className="space-y-6">
                             <div>
                                 <h2 className="text-lg font-semibold text-[var(--ink)]">通用设置</h2>
-                                <p className="mt-1 text-sm text-[var(--ink-muted)]">
+                                <p className="mt-1 text-2sm text-[var(--ink-muted)]">
                                     配置应用程序的通用行为
                                 </p>
                             </div>
@@ -3600,7 +3600,7 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                     <p>
                                         不同于每次对话都要重新自我介绍的 AI 工具，MyAgents 里的 Agent 与你的生活、工作深度同步，是一个越来越懂你的搭档。我们希望它成为每个人意图的超级放大器——
                                     </p>
-                                    <p className="text-center text-md font-medium italic tracking-wide text-[var(--ink)]">
+                                    <p className="text-center text-base font-medium italic tracking-wide text-[var(--ink)]">
                                         你有一个想法，And it&apos;s done.
                                     </p>
                                 </div>

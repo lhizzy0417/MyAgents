@@ -226,7 +226,7 @@ function renderWidgetSegments(text: string, isLoading: boolean): ReactNode {
     if (seg.type === 'text') {
       return (
         <div key={`t-${si}`} className="flex justify-start w-full px-1 py-1 select-none">
-          <div className="w-full max-w-none text-[var(--ink)] select-text">
+          <div className="ai-message-content w-full max-w-none text-[var(--ink)] select-text">
             <Markdown>{seg.content}</Markdown>
           </div>
         </div>
@@ -423,7 +423,7 @@ const Message = memo(function Message({ message, isLoading = false, onRewind, on
                 <button
                   type="button"
                   onClick={() => setUserExpanded(true)}
-                  className="flex w-full items-center justify-center gap-1 rounded-b-2xl bg-[var(--paper-elevated)] py-1.5 text-2sm font-medium text-[var(--ink-muted)] transition-colors hover:text-[var(--ink)]"
+                  className="flex w-full items-center justify-center gap-1 rounded-b-2xl bg-[var(--paper-elevated)] py-1.5 text-sm font-medium text-[var(--ink-muted)] transition-colors hover:text-[var(--ink)]"
                 >
                   <ChevronDown className="size-3.5" />
                   展开
@@ -476,7 +476,12 @@ const Message = memo(function Message({ message, isLoading = false, onRewind, on
               {renderWidgetSegments(message.content, isLoading)}
             </div>
           ) : (
-            <div className="text-[var(--ink)] select-text">
+            /* ai-message-content：聊天 AI 正文的 prose 上下文（16px/1.7/0.01em）。
+               v2.4 之前该 CSS 类是死代码（定义了却从未接线），聊天正文实际靠 UA 默认
+               16px + 段落 leading-relaxed——DESIGN.md 宣称的 1.7 从未上屏。三个
+               assistant 分支（string/blocks/widget-segment）+ 5 个预览面板现在共享
+               同一容器类（PRD 0.2.34 Part 2）。 */
+            <div className="ai-message-content text-[var(--ink)] select-text">
               {/* Tail-fade only while text is the actively-streaming edge — `streamingTextActive`
                   clears on the text block's content-block-stop, so it doesn't linger during a
                   slow gap before the next block (string-content path). */}
@@ -581,7 +586,7 @@ const Message = memo(function Message({ message, isLoading = false, onRewind, on
                       key={index}
                       className="flex justify-start w-full px-1 py-1 select-none"
                     >
-                      <div className="w-full max-w-none text-[var(--ink)] select-text">
+                      <div className="ai-message-content w-full max-w-none text-[var(--ink)] select-text">
                         <Markdown streaming={isLoading && index === groupedBlocks.length - 1 && !!message.streamingTextActive}>{item.text}</Markdown>
                       </div>
                     </div>

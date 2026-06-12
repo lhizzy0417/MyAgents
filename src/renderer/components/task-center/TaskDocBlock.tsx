@@ -149,9 +149,9 @@ export function TaskDocBlock({
 
   return (
     <section className="mt-4">
-      {/* Title — 14px semibold ink, matches the edit panel's section
+      {/* Title — text-sm(13px) semibold ink, matches the edit panel's section
           headers so the preview ↔ edit mental model is identical. */}
-      <h3 className="text-md font-semibold text-[var(--ink)]">{title}</h3>
+      <h3 className="text-sm font-semibold text-[var(--ink)]">{title}</h3>
       {/* Path + 打开文件夹 on a dedicated row below the title. */}
       <div className="mb-2 mt-1 flex items-center gap-2">
         <span
@@ -209,7 +209,7 @@ export function TaskDocBlock({
               <button
                 type="button"
                 onClick={() => setExpanded((v) => !v)}
-                className="inline-flex items-center gap-1 px-3 py-1.5 text-2sm font-medium text-[var(--ink-muted)] transition-colors hover:text-[var(--ink)]"
+                className="inline-flex items-center gap-1 px-3 py-1.5 text-sm font-medium text-[var(--ink-muted)] transition-colors hover:text-[var(--ink)]"
               >
                 {expanded ? (
                   <>

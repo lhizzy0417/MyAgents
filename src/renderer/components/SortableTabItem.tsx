@@ -78,7 +78,7 @@ export default memo(function SortableTabItem({
         >
             {/* Tab title — drag handle is bound here, not on the entire tab */}
             <span
-                className="flex-1 truncate text-2sm font-medium select-none cursor-grab active:cursor-grabbing"
+                className="flex-1 truncate text-sm font-medium select-none cursor-grab active:cursor-grabbing"
                 {...listeners}
             >
                 {displayTitle}

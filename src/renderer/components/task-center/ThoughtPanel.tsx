@@ -559,7 +559,7 @@ export function ThoughtPanel({
       <div className="flex min-h-[34px] items-center justify-between px-4 py-1.5">
         {activeTag ? (
           <div className="flex items-center gap-2">
-            <span className="text-xs font-semibold uppercase tracking-[0.12em] text-[var(--ink-muted)]">
+            <span className="text-sm font-semibold tracking-[0.04em] text-[var(--ink-muted)]">
               筛选
             </span>
             <button
@@ -573,7 +573,7 @@ export function ThoughtPanel({
             </button>
           </div>
         ) : (
-          <span className="text-xs font-semibold uppercase tracking-[0.12em] text-[var(--ink-muted)]">
+          <span className="text-sm font-semibold tracking-[0.04em] text-[var(--ink-muted)]">
             想法 <span className="text-[var(--ink-muted)]/60">({thoughts.length})</span>
           </span>
         )}

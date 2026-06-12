@@ -414,7 +414,7 @@ export default function SessionMenuButton({
                              *  in the selected state. */}
                             <div
                                 aria-disabled
-                                className="flex w-full cursor-default items-center gap-2 px-3 py-2 text-left text-2sm"
+                                className="flex w-full cursor-default items-center gap-2 px-3 py-2 text-left text-sm"
                             >
                                 <span className="inline-block h-1.5 w-1.5 shrink-0 rounded-full bg-[var(--success)]" />
                                 <span className="shrink-0 font-medium text-[var(--ink)]">{boundChannel.platformLabel}</span>
@@ -512,7 +512,7 @@ function ChannelMenuItem({ candidate, pending, disabled, onClick }: ChannelMenuI
             type="button"
             disabled={effectivelyDisabled}
             onClick={onClick}
-            className="flex w-full items-start gap-2 px-3 py-2 text-left text-2sm transition-colors hover:bg-[var(--hover-bg)] disabled:cursor-not-allowed disabled:opacity-50"
+            className="flex w-full items-start gap-2 px-3 py-2 text-left text-sm transition-colors hover:bg-[var(--hover-bg)] disabled:cursor-not-allowed disabled:opacity-50"
         >
             <span className="mt-1.5 inline-block h-1.5 w-1.5 shrink-0 rounded-full bg-[var(--success)]" />
             <span className="min-w-0 flex-1">

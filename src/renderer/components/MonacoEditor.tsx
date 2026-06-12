@@ -592,7 +592,7 @@ export default function MonacoEditor({
                 >
                     <button
                         type="button"
-                        className="flex items-center gap-1 rounded-md px-2 py-1 text-2sm font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]"
+                        className="flex items-center gap-1 rounded-md px-2 py-1 text-sm font-medium text-[var(--ink-muted)] transition-colors hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]"
                         onClick={handleQuoteClick}
                         onMouseDown={retainFocusOnMouseDown}
                     >

@@ -233,7 +233,9 @@ const TableRowComponent: Components['tr'] = ({ children }) => (
 
 // 表格用 dense 档（14px）而非 ui 档：表格是嵌在 16px 正文里的密集内容，
 // 13px 会在同一条消息内造成肉眼可见的字号跳变（PRD 0.2.34 P0-1）。
+// 这里是全仓 text-md 的唯一白名单点（lint 全域封禁，见 eslint.config.js）。
 const TableCellComponent: Components['td'] = ({ children }) => (
+  // eslint-disable-next-line no-restricted-syntax -- Markdown 表格 = dense 档唯一立档场景
   <td className="px-4 py-2.5 text-md">{children}</td>
 );
 
@@ -304,9 +306,12 @@ const LiComponent: Components['li'] = ({ children }) => (
   <li className="pl-1 [&>p]:my-0" style={{ display: 'list-item' }}>{children}</li>
 );
 
-// Paragraph component
+// Paragraph component — 1.7 对齐 prose 档配对行高（--text-base--line-height）。
+// 不用继承（~20 个 Markdown 调用点的容器行高不齐，继承会让无显式行高的容器
+// 退到 UA normal），也不用 leading-relaxed（1.625 与 prose 档 1.7 分叉，
+// PRD 0.2.34 Part 2 实测该分叉正是"宣称 1.7 从未上屏"的根源）。
 const ParagraphComponent: Components['p'] = ({ children }) => (
-  <p className="my-4 leading-relaxed">{children}</p>
+  <p className="my-4 leading-[1.7]">{children}</p>
 );
 
 // Horizontal rule

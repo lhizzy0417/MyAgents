@@ -1,6 +1,8 @@
 @import 'tailwindcss';
 
-@plugin '@tailwindcss/typography';
+/* @tailwindcss/typography 已于 v2.4 移除：其 prose 字阶（h1=2em/700 等）与产品
+   Type Scale 冲突，5 个 markdown 预览面板已统一改用 .ai-message-content + 自家
+   <Markdown> 组件（PRD 0.2.34 Part 2 F4）。 */
 
 /* Class-based dark mode: `.dark` class on <html> activates dark: utilities.
    ThemeProvider manages the class based on user preference (light/dark/system). */
@@ -842,19 +844,22 @@ pre code {
    ============================================ */
 
 /* AI message content - optimized for reading */
+/* 产品级 prose 上下文（语义已宽于其名）：凡渲染 markdown 长文的容器都用它——
+   聊天 AI 正文（Message.tsx 三个 assistant 分支）+ Skill/Command/Agent 详情、
+   系统提示词、文件预览等 5 个预览面板。不要因名生义为预览面板另起新类
+   （v2.4 之前本类是死代码、typography plugin 的 .prose 在各面板各自为政，
+   字阶分叉正是那段历史的产物）。 */
 .ai-message-content {
   font-size: var(--text-base);
   line-height: 1.7;
   letter-spacing: 0.01em;
 }
 
-.ai-message-content p + p {
-  margin-top: var(--space-4);
-}
-
-.ai-message-content li + li {
-  margin-top: var(--space-2);
-}
+/* 间距规则已删（v2.4 cross-review）：本类沉睡期间遗留的 `p + p` / `li + li`
+   descendant 规则与 Markdown 组件的间距 utility（my-4 / space-y-2.5）构成双
+   owner——unlayered 作者样式恒胜 @layer utilities，接线后会无声压缩列表间距
+   （10px→8px）。间距的唯一 owner = Markdown 组件；本类只管 font-size /
+   line-height / letter-spacing 三件套。 */
 
 /* User message bubble */
 .user-message {
@@ -940,9 +945,11 @@ code {
   user-select: text;
 }
 
-/* Markdown rendered content is selectable */
-.prose,
-.prose * {
+/* Markdown rendered content is selectable.
+   (.ai-message-content 取代了 typography plugin 的 .prose——v2.4 预览面板迁移后
+   .prose 不复存在，可选中规则随容器类同步，否则详情/预览面板文本无法复制) */
+.ai-message-content,
+.ai-message-content * {
   user-select: text;
 }
 

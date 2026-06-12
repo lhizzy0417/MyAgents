@@ -655,7 +655,7 @@ function NotificationSummary({ task }: { task: Task }) {
 
   return (
     <div>
-      <div className="mb-1.5 flex items-center gap-1.5 text-md font-semibold text-[var(--ink)]">
+      <div className="mb-1.5 flex items-center gap-1.5 text-sm font-semibold text-[var(--ink)]">
         <Bell className="h-3.5 w-3.5" />
         通知
       </div>

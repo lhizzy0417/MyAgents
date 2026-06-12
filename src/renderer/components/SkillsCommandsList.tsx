@@ -500,7 +500,7 @@ export function SkillCard({ skill, onClick, onToggleEnabled }: {
                 the name, so the eye doesn't have to travel to the footer
                 to read "is this on?". */}
             <div className="flex items-center gap-2">
-                <h4 className="min-w-0 flex-1 truncate text-md font-semibold text-[var(--ink)]">
+                <h4 className="min-w-0 flex-1 truncate text-sm font-semibold text-[var(--ink)]">
                     {skill.name}
                 </h4>
                 <Sparkles className="h-3.5 w-3.5 shrink-0 text-amber-500" />
@@ -549,7 +549,7 @@ export function CommandCard({ command, onClick }: { command: CommandItem; onClic
             onClick={onClick}
         >
             <div className="flex items-center gap-2">
-                <h4 className="min-w-0 flex-1 truncate text-md font-semibold text-[var(--ink)]">
+                <h4 className="min-w-0 flex-1 truncate text-sm font-semibold text-[var(--ink)]">
                     {command.name}
                 </h4>
                 <Terminal className="h-3.5 w-3.5 shrink-0 text-sky-500" />

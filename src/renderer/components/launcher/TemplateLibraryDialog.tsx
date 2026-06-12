@@ -289,7 +289,7 @@ export default memo(function TemplateLibraryDialog({
                     <div className="flex w-[220px] flex-col border-r border-[var(--line)]">
                         <div className="flex-1 overflow-y-auto overscroll-contain p-3">
                             <div className="mb-2 px-1">
-                                <span className="text-xs font-semibold uppercase tracking-[0.12em] text-[var(--ink-muted)]">
+                                <span className="text-sm font-semibold tracking-[0.04em] text-[var(--ink-muted)]">
                                     模板库
                                 </span>
                             </div>

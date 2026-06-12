@@ -68,7 +68,7 @@ interface Props {
 }
 
 const VIEW_CLAMP_LINES = 5;
-const EDIT_MAX_HEIGHT_PX = 224; // ~9–10 lines at 13px/1.55
+const EDIT_MAX_HEIGHT_PX = 224; // ~8.75 行 @ text-base 16px × leading-[1.6] = 25.6px/行
 
 export function ThoughtCard({
   thought,
@@ -298,7 +298,7 @@ export function ThoughtCard({
                     ref={discussAnchorRef}
                     type="button"
                     onClick={() => setShowWorkspacePicker((v) => !v)}
-                    className="flex items-center gap-1 rounded-[var(--radius-md)] px-2 py-0.5 text-2sm text-[var(--ink-muted)] hover:bg-[var(--paper-inset)] hover:text-[var(--accent-cool)]"
+                    className="flex items-center gap-1 rounded-[var(--radius-md)] px-2 py-0.5 text-sm text-[var(--ink-muted)] hover:bg-[var(--paper-inset)] hover:text-[var(--accent-cool)]"
                   >
                     <MessageSquare className="h-3.5 w-3.5" strokeWidth={1.5} />
                     AI 讨论
@@ -315,7 +315,7 @@ export function ThoughtCard({
                   <button
                     type="button"
                     onClick={() => onDispatch(thought)}
-                    className="flex items-center gap-1 rounded-[var(--radius-md)] px-2 py-0.5 text-2sm text-[var(--ink-muted)] hover:bg-[var(--paper-inset)] hover:text-[var(--accent-warm)]"
+                    className="flex items-center gap-1 rounded-[var(--radius-md)] px-2 py-0.5 text-sm text-[var(--ink-muted)] hover:bg-[var(--paper-inset)] hover:text-[var(--accent-warm)]"
                   >
                     <Zap className="h-3.5 w-3.5" strokeWidth={1.5} />
                     派发
@@ -401,7 +401,7 @@ export function ThoughtCard({
                   setShowMenu(false);
                   enterEdit();
                 }}
-                className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-2sm text-[var(--ink-secondary)] hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]"
+                className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-sm text-[var(--ink-secondary)] hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]"
               >
                 <Pencil className="h-3.5 w-3.5" strokeWidth={1.5} />
                 编辑
@@ -413,7 +413,7 @@ export function ThoughtCard({
                     setShowMenu(false);
                     onEnterSelectMode();
                   }}
-                  className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-2sm text-[var(--ink-secondary)] hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]"
+                  className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-sm text-[var(--ink-secondary)] hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]"
                 >
                   <CheckSquare className="h-3.5 w-3.5" strokeWidth={1.5} />
                   多选
@@ -423,7 +423,7 @@ export function ThoughtCard({
                 type="button"
                 onClick={() => void handleToggleArchive()}
                 disabled={busy}
-                className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-2sm text-[var(--ink-secondary)] hover:bg-[var(--hover-bg)] hover:text-[var(--ink)] disabled:opacity-50"
+                className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-sm text-[var(--ink-secondary)] hover:bg-[var(--hover-bg)] hover:text-[var(--ink)] disabled:opacity-50"
               >
                 {isArchived ? (
                   <>
@@ -440,7 +440,7 @@ export function ThoughtCard({
               <button
                 type="button"
                 onClick={() => void handleDelete()}
-                className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-2sm text-[var(--error)] hover:bg-[var(--error-bg)]"
+                className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-sm text-[var(--error)] hover:bg-[var(--error-bg)]"
               >
                 <Trash2 className="h-3.5 w-3.5" strokeWidth={1.5} />
                 删除
@@ -464,12 +464,12 @@ export function ThoughtCard({
             maxHeight: `${EDIT_MAX_HEIGHT_PX}px`,
             overflowY: 'auto',
           }}
-          className="w-full resize-none rounded-[var(--radius-sm)] bg-transparent text-md leading-[1.6] text-[var(--ink)] focus:outline-none"
+          className="w-full resize-none rounded-[var(--radius-sm)] bg-transparent text-base leading-[1.6] text-[var(--ink)] focus:outline-none"
         />
       ) : (
         <div
           ref={viewRef}
-          className="cursor-text whitespace-pre-wrap break-words text-md leading-[1.6] text-[var(--ink-secondary)]"
+          className="cursor-text whitespace-pre-wrap break-words text-base leading-[1.6] text-[var(--ink-secondary)]"
           style={
             expanded
               ? undefined
@@ -535,7 +535,7 @@ export function ThoughtCard({
               setEditing(false);
             }}
             disabled={busy}
-            className="rounded-[var(--radius-md)] px-2 py-1 text-2sm text-[var(--ink-muted)] hover:bg-[var(--paper-inset)]"
+            className="rounded-[var(--radius-md)] px-2 py-1 text-sm text-[var(--ink-muted)] hover:bg-[var(--paper-inset)]"
           >
             取消
           </button>
@@ -543,7 +543,7 @@ export function ThoughtCard({
             type="button"
             onClick={() => void handleSave()}
             disabled={busy}
-            className="rounded-[var(--radius-md)] bg-[var(--accent-warm)] px-2.5 py-1 text-2sm font-medium text-white hover:bg-[var(--accent-warm-hover)]"
+            className="rounded-[var(--radius-md)] bg-[var(--accent-warm)] px-2.5 py-1 text-sm font-medium text-white hover:bg-[var(--accent-warm-hover)]"
           >
             保存
           </button>

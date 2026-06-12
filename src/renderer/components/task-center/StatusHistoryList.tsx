@@ -54,7 +54,7 @@ export function StatusHistoryList({ task, defaultCollapsed = false }: Props) {
   return (
     <div className="flex flex-col gap-2">
       <div className="flex items-center justify-between">
-        <div className="text-md font-semibold text-[var(--ink)]">
+        <div className="text-sm font-semibold text-[var(--ink)]">
           状态变更记录 ({history.length})
         </div>
         {/* Export button is only useful in the fully expanded view;

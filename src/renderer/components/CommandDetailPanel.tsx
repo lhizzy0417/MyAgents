@@ -296,7 +296,7 @@ const CommandDetailPanel = forwardRef<CommandDetailPanelRef, CommandDetailPanelP
                 {/* Header */}
                 <div className="flex flex-shrink-0 items-center justify-between border-b border-[var(--line)] bg-[var(--paper-inset)]/50 px-6 py-2">
                     <div className="min-w-0 flex-1">
-                        <h3 className="text-base font-semibold text-[var(--ink)]">{commandName || name}</h3>
+                        <h3 className="truncate text-lg font-semibold text-[var(--ink)]">{commandName || name}</h3>
                         <div className="mt-0.5 flex items-center gap-2">
                             <span
                                 className={`max-w-[300px] truncate font-mono text-xs ${pathChanged ? 'text-[var(--accent)]' : 'text-[var(--ink-muted)]'}`}
@@ -453,7 +453,7 @@ const CommandDetailPanel = forwardRef<CommandDetailPanelRef, CommandDetailPanelP
                                 ) : (
                                     <div className="h-full overflow-auto p-4">
                                         {body ? (
-                                            <div className="prose prose-stone max-w-none dark:prose-invert">
+                                            <div className="ai-message-content">
                                                 <Markdown raw>{body}</Markdown>
                                             </div>
                                         ) : (

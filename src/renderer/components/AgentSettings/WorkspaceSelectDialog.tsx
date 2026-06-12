@@ -26,7 +26,7 @@ export default function WorkspaceSelectDialog({ projects, onSelect, onClose }: W
     <OverlayBackdrop onClose={onClose} className="z-50">
       <div className="w-full max-w-md rounded-2xl border border-[var(--line)] bg-[var(--paper-elevated)] p-6 shadow-xl">
         <div className="mb-4 flex items-center justify-between">
-          <h2 className="text-base font-semibold text-[var(--ink)]">
+          <h2 className="text-lg font-semibold text-[var(--ink)]">
             选择工作区
           </h2>
           <button onClick={onClose} className="rounded p-1 text-[var(--ink-subtle)] hover:text-[var(--ink-muted)] transition-colors">

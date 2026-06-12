@@ -291,13 +291,28 @@ export default defineConfig(
         // Tailwind JIT never generates CSS for it, so it self-neutralizes.
         // Banning ALL `text-[...]` would false-positive on the color form
         // `text-[var(--ink)]` — px-only is the deliberate scope.
+        //
+        // PRD 0.2.34 Part 2: `text-md` (14px dense) has exactly ONE
+        // legitimate role — dense content embedded in 16px prose (today:
+        // Markdown tables). The Part-2 audit found 76% (22/29) of its
+        // uses had drifted onto card titles / section headers / dialog
+        // titles. Ban the class everywhere; legitimate dense sites carry
+        // inline disables (same narrow-exemption pattern as BrandSection).
+        {
+          selector: 'Literal[value=/\\btext-md\\b/]',
+          message: '`text-md`(14px dense 档) 仅限"嵌在 16px 正文里的密集内容"（如 Markdown 表格，白名单点带行内 disable 立档）。Part 2 审计显示 76% 的 text-md 被误用在卡片标题/小节标题/弹窗标题上——按 DESIGN.md §2.2 职责表：卡片/小节标题用 text-sm(13)、弹窗标题用 text-lg(18)、正文用 text-base(16)。确属 dense 场景再对单行 eslint-disable 并注明理由。',
+        },
+        {
+          selector: 'TemplateElement[value.raw=/\\btext-md\\b/]',
+          message: '`text-md`(14px dense 档) 仅限"嵌在 16px 正文里的密集内容"（如 Markdown 表格，白名单点带行内 disable 立档）。Part 2 审计显示 76% 的 text-md 被误用在卡片标题/小节标题/弹窗标题上——按 DESIGN.md §2.2 职责表：卡片/小节标题用 text-sm(13)、弹窗标题用 text-lg(18)、正文用 text-base(16)。确属 dense 场景再对单行 eslint-disable 并注明理由。',
+        },
         {
           selector: 'Literal[value=/\\btext-\\[[0-9]+(?:\\.[0-9]+)?px\\]/]',
-          message: '任意 px 字号 `text-[Npx]` 被禁止（PRD 0.2.34）：绕过 Type Scale 会重新长出 12px/14px 这类幽灵字阶，正是"字号大小不一"投诉的根因。改用字阶 utility：text-xs(11 micro)/text-2sm(12 caption)/text-sm(13 ui)/text-md(14 dense)/text-base(16 prose)/text-lg(18)/text-xl(20)/text-2xl(22)/text-3xl(28)。注意本项目 text-sm=13px、text-xs=11px，与 Tailwind 官方值不同（index.css @theme 覆盖）。确需离阶值的展示型场景（如品牌字）先在 DESIGN.md 立档，再对单行 eslint-disable 并注明出处。',
+          message: '任意 px 字号 `text-[Npx]` 被禁止（PRD 0.2.34）：绕过 Type Scale 会重新长出 12px/14px 这类幽灵字阶，正是"字号大小不一"投诉的根因。改用字阶 utility：text-xs(11 micro)/text-2sm(12 caption)/text-sm(13 ui)/text-md(14 dense，已全域封禁、仅 Markdown 表格等白名单可用)/text-base(16 prose)/text-lg(18)/text-xl(20)/text-2xl(22)/text-3xl(28)。注意本项目 text-sm=13px、text-xs=11px，与 Tailwind 官方值不同（index.css @theme 覆盖）。确需离阶值的展示型场景（如品牌字）先在 DESIGN.md 立档，再对单行 eslint-disable 并注明出处。',
         },
         {
           selector: 'TemplateElement[value.raw=/\\btext-\\[[0-9]+(?:\\.[0-9]+)?px\\]/]',
-          message: '任意 px 字号 `text-[Npx]` 被禁止（PRD 0.2.34）：绕过 Type Scale 会重新长出 12px/14px 这类幽灵字阶，正是"字号大小不一"投诉的根因。改用字阶 utility：text-xs(11 micro)/text-2sm(12 caption)/text-sm(13 ui)/text-md(14 dense)/text-base(16 prose)/text-lg(18)/text-xl(20)/text-2xl(22)/text-3xl(28)。注意本项目 text-sm=13px、text-xs=11px，与 Tailwind 官方值不同（index.css @theme 覆盖）。确需离阶值的展示型场景（如品牌字）先在 DESIGN.md 立档，再对单行 eslint-disable 并注明出处。',
+          message: '任意 px 字号 `text-[Npx]` 被禁止（PRD 0.2.34）：绕过 Type Scale 会重新长出 12px/14px 这类幽灵字阶，正是"字号大小不一"投诉的根因。改用字阶 utility：text-xs(11 micro)/text-2sm(12 caption)/text-sm(13 ui)/text-md(14 dense，已全域封禁、仅 Markdown 表格等白名单可用)/text-base(16 prose)/text-lg(18)/text-xl(20)/text-2xl(22)/text-3xl(28)。注意本项目 text-sm=13px、text-xs=11px，与 Tailwind 官方值不同（index.css @theme 覆盖）。确需离阶值的展示型场景（如品牌字）先在 DESIGN.md 立档，再对单行 eslint-disable 并注明出处。',
         },
         ...[
           '/api/files/import-base64',

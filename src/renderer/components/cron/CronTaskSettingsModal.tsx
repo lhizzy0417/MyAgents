@@ -45,7 +45,7 @@ function SectionHeader({ icon: Icon, children }: { icon: typeof Clock; children:
   return (
     <div className="flex items-center gap-2">
       <Icon className="h-4 w-4 text-[var(--ink-muted)]" />
-      <h3 className="text-md font-semibold text-[var(--ink)]">{children}</h3>
+      <h3 className="text-sm font-semibold text-[var(--ink)]">{children}</h3>
     </div>
   );
 }
@@ -223,7 +223,7 @@ function CronTaskSettingsForm({
         <div className="flex shrink-0 items-center justify-between px-6 py-4">
           <div className="flex items-center gap-2.5">
             <Clock className="h-4 w-4 text-[var(--accent)]" />
-            <h2 className="text-base font-semibold text-[var(--ink)]">定时任务</h2>
+            <h2 className="text-lg font-semibold text-[var(--ink)]">定时任务</h2>
           </div>
           <button onClick={onClose} className="rounded-lg p-1.5 text-[var(--ink-muted)] transition hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]">
             <X className="h-4 w-4" />

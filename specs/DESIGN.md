@@ -1,6 +1,6 @@
 # MyAgents Design Guide
 
-> **Version**: 2.3.0
+> **Version**: 2.4.0
 > **Last Updated**: 2026-06-12
 > **Status**: Active
 > **Platform**: macOS / Windows Desktop Client
@@ -475,23 +475,23 @@ Item 选中: 文字 var(--accent-warm)
 用于 Launcher、Settings 等页面的区块标题，统一样式确保页面一致性。
 
 ```
-字号: 11px (--text-xs)
+字号: 13px (text-sm)   ← v2.4 由 11px 上调：用户裁决"标题取大"，以 Launcher 事实标准为规范
 字重: 600 (font-semibold)
-样式: uppercase (大写)
-字间距: 0.12em
+字间距: 中文标签 tracking-[0.04em]；拉丁/大写标签 uppercase + tracking-[0.12em]
+       （CJK 无大小写，0.12em 在 13px 中文上过散，按文种取距）
 颜色: var(--ink-muted)（静态标题）或 var(--ink-muted) / 60%（Tab 式切换中的非选中态）
 下边距: 12px (mb-3)
 ```
 
 **Tailwind 类名**：
 ```jsx
-{/* 静态 Section 标题 — 始终全色 */}
-<h3 className="mb-3 text-[11px] font-semibold uppercase tracking-[0.12em] text-[var(--ink-muted)]">
+{/* 静态 Section 标题（中文标签） — 始终全色 */}
+<h3 className="mb-3 text-sm font-semibold tracking-[0.04em] text-[var(--ink-muted)]">
   工作区
 </h3>
 
 {/* Tab 式 Section 标题 — 选中态全色，非选中态 /40，hover /60 */}
-<button className={`text-[11px] font-semibold uppercase tracking-[0.12em] ${
+<button className={`text-sm font-semibold tracking-[0.04em] ${
   isActive ? 'text-[var(--ink-muted)]' : 'text-[var(--ink-muted)]/40 hover:text-[var(--ink-muted)]/60'
 }`}>
   最近任务
@@ -499,8 +499,17 @@ Item 选中: 文字 var(--accent-warm)
 ```
 
 **使用场景**：
-- Launcher 页面：「工作区」（静态）、「最近任务」/「快捷功能」（Tab 式）
-- Settings 页面：各设置区块标题（静态）
+- Launcher 页面：「Agent 工作区」（静态）、「最近任务」/「我的任务」（Tab 式）
+- TaskCenter / 插件面板等常驻面板的区块标题（静态）
+
+**边界（13px 形态只用于"常驻页面/面板"的区块标题）**：
+- 弹出层内分组头（菜单、popover、dropdown）维持 11px 菜单形态：
+  `text-xs font-semibold uppercase tracking-wider text-[var(--ink-muted)]/60`（见 §2.2）
+- 内容内小节标签（如工具卡的"输入/输出"）维持 `text-xs uppercase`——它们是 micro
+  档的字段标签，不是区块标题
+- 列表分桶分隔头（如 TaskListPanel BucketHeader：label + hairline 横线，自述
+  "section divider 而非 heading"，视觉权重让位于下方卡片）维持 11px uppercase
+  形态——它是内容流里的安静分隔符，升 13px 会与卡片标题抢权重
 
 ### 6.9 心跳组件 (Heartbeat)
 
@@ -1233,6 +1242,7 @@ Hover 状态:
 
 | 版本 | 日期 | 变更 |
 |------|------|------|
+| 2.4.0 | 2026-06-12 | **Typography Part 2——全产品面档位归位（PRD 0.2.34 §7-11）**：§6.8 Section 标题 11px→**13px**（用户裁决"标题取大"，Launcher 事实标准升格为规范；弹出层分组头与列表分桶分隔头维持 11px，边界写入 §6.8）；`text-md` 27 处误用清零（卡片标题/面板小标题→text-sm、弹窗标题→text-lg，此后 text-md 仅限 Markdown 表格，eslint 白名单强制）；全部菜单系统统一 13px（MenuItem/DropdownMenu/ContextMenu 等 12→13，结束右键菜单与斜杠菜单双密度）；弹窗主标题统一 text-lg 18px（ConfirmDialog 14→18、WorkspaceConfigPanel 等 16→18、Settings 工具箱 20→18）；按钮文字下限 13px 落实（ConfirmDialog 等 12→13）；描述行两态规则（宿主标题 13px→描述 11px；宿主 ≥16px→描述 12px）；5 个 markdown 预览面板弃 `prose` 类改用 `.ai-message-content` + 自家 `<Markdown>` 组件（typography plugin 整个移除）；**修复 `.ai-message-content` 死 CSS**——该类定义了 16px/1.7 却从未接线到聊天，§10 宣称的 1.7 行高此前从未上屏，现已接线三个 assistant 分支并把 Markdown 段落行高 1.625→1.7 对齐 prose 档 |
 | 2.3.0 | 2026-06-12 | **Typography Unification（PRD 0.2.34）**：字号 token 迁入 `@theme`（单一真相源，配对行高）；新增 caption 档 `--text-2sm`(12px) 与 dense 档 `--text-md`(14px)，每档唯一职责；废除 10px 档（`--text-2xs` 删除，155 处并入 11px）；全仓 ~700 处 `text-[Npx]` 字面量归一为 token utility（eslint 封禁新增 px 字面量，唯一豁免=品牌 slogan；rem/em 与悬浮球 fb.css 边界见 §2.2）；Markdown 表格 td 13→14px / th 11→12px（消同消息内字号跳变）；introduction-content 正文 14→16px 与聊天正文同基准（退层由色板承载）；用户气泡行高统一 1.7；Widget 沙箱注入 h1-h6 重置（20/18/16/14, 600）+ body 行高 1.6→1.7 + utility 对齐宿主（xl 22→20、2xl 28→22）——**存量 widget 重渲染后裸标题会从浏览器默认（h1=32px/700）收紧到契约尺寸，观感变化是预期行为**；菜单分组头统一 11px semibold uppercase tracking-wider /60；§2.2 字阶表重写为档位制并修正历史标注错误（旧表 `--text-base` 14px / `--text-md` 16px 均与代码不符）；删除死代码 `.tree-item*` |
 | 2.2.0 | 2026-03-04 | **Design Polish v2.2**：新增 `--hover-bg` Token（`rgba(194,109,58,0.07)` 暖棕 7%）统一列表行 hover；Hover 背景分层（列表行用 `--hover-bg`，小按钮用 `--paper-inset`）；27 处列表行 hover 迁移至 `--hover-bg`（Chat/Launcher/Settings/TaskCenter/SlashMenu/ProcessRow 等 10 个文件）；Settings 浮层面板背景统一 `--paper-elevated`（SkillDialogs×2/WorkspaceConfigPanel/UnifiedLogsPanel/CronTaskDebugPanel）；Settings 侧边栏字号 text-[15px]→text-base、active 底色 paper-inset→hover-bg；MCP 工具浮层字号对齐供应商面板（labels/inputs text-xs→text-sm，hints text-[10px]→text-xs）；紧凑卡片增加 hover:translate-y-[-1px] 微上浮（Skill/Command/Agent/ImBot）；SessionTagBadge 底色 paper-inset→paper-elevated；UsageStatsPanel 深背景降档；BugReportOverlay 配色修正；ImBot 停止按钮改 outline 样式；Skills/Agents 详情页互斥显示 |
 | 2.1.0 | 2026-03-04 | **Design Polish v2.1**：`--paper` 调浅（#f2ebe0 → #faf6ee）减少启动页/设置页压迫感；新增 heartbeat Token 系列替换 Tailwind red-500；工具栏弹窗背景统一 `--paper-elevated`；Plus 菜单/Slash 命令宽度归一化；工作区面板字号整体提升一档（10→11→13 阶梯）；Overlay 遮罩统一毛玻璃 `bg-black/30 backdrop-blur-sm`；Chat header 去除硬边框改渐变淡出；Launcher 横分割线改不封闭；Section 标题区分静态/Tab 式两种色阶 |
