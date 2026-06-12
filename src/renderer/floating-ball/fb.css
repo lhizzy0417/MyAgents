@@ -164,16 +164,18 @@ html.fb-transparent #root {
   background: rgba(253, 250, 244, 0.15);
   border: 1px solid rgba(255, 255, 255, 0.5);
   overflow: hidden;
-  transition: background 280ms ease, transform 260ms cubic-bezier(0.22, 1, 0.36, 1);
+  transition: background 280ms ease, transform 260ms cubic-bezier(0.22, 1, 0.36, 1),
+    opacity 200ms ease;
   -webkit-user-select: none;
   user-select: none;
 }
 .fbw-win.pin { background: rgba(253, 250, 244, 0.96); }
-/* 出入场二段式：『显形』交给 NSWindow.alphaValue（Rust NSAnimationContext
-   ——毛玻璃 NSVisualEffectView 垫在 webview 下面，CSS opacity 管不到它，
-   只有窗口层 alpha 能把模糊背板连同内容一起淡入）；DOM 这层只负责『升起』
-   微动效——hidden 下沉轻缩，入场回正，与窗口渐显并行。 */
-.fbw-win.hidden { transform: translateY(8px) scale(0.98); }
+/* 出入场二段式、严格成对：『显形/散去』主层是 NSWindow.alphaValue（Rust
+   NSAnimationContext——毛玻璃 NSVisualEffectView 垫在 webview 下面，CSS
+   opacity 管不到它，只有窗口层 alpha 能把模糊背板连同内容一起淡）；DOM
+   这层是对称的『升起/下沉 + 渐显/渐隐』——hidden 下沉轻缩且 opacity 0。
+   DOM opacity 同时是出场动画的双保险：内容先隐、玻璃后散，层次更细腻。 */
+.fbw-win.hidden { transform: translateY(8px) scale(0.98); opacity: 0; }
 .fbw-win.peek { cursor: pointer; }
 .fbw-win.peek .fbw-inputarea { opacity: 0.5; pointer-events: none; }
 .fbw-win.peek .fbw-convo { pointer-events: none; }

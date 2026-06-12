@@ -488,7 +488,10 @@ mod imp {
     // 都让计数器前进，过期的延迟 orderOut 自动作废。
     const FADE_IN_PEEK_S: f64 = 0.18;
     const FADE_IN_PIN_S: f64 = 0.12;
-    const FADE_OUT_S: f64 = 0.13;
+    // 出场与 peek 入场同长（成对）。0612 三轮反馈：最初 0.13s 在 peek 高透
+    // 玻璃（着色仅 0.15）上读不出"渐隐"，体感是瞬灭——出入场必须是同一
+    // 对动画语汇（窗口 alpha + DOM 下沉/渐隐，见 fb.css .fbw-win.hidden）。
+    const FADE_OUT_S: f64 = 0.18;
 
     static COMPANION_VIS_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
@@ -566,6 +569,7 @@ mod imp {
         }
         let generation =
             COMPANION_VIS_GEN.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+        crate::ulog_debug!("[fb] companion fade-out start (gen {generation})");
         animate_companion_alpha(app, 0.0, FADE_OUT_S);
         // 淡出完成后才真正 orderOut。hide()/orderOut is sufficient — AppKit
         // reassigns key to the frontmost app on its own. (Do NOT call
