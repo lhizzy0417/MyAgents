@@ -60,10 +60,10 @@ export default function AttachmentPreviewList({
     : `flex flex-wrap gap-3 ${className}`;
   const cardRadiusClass = compact ? 'rounded-lg' : 'rounded-2xl';
   const imageFrameClass = compact
-    ? `relative flex max-w-full items-center justify-center overflow-hidden ${cardRadiusClass} ${resolvedImageDimensions} cursor-pointer`
+    ? `relative flex items-center justify-center overflow-hidden ${cardRadiusClass} ${resolvedImageDimensions} cursor-pointer`
     : `relative overflow-hidden ${cardRadiusClass} ${resolvedImageDimensions} cursor-pointer`;
   const imageClass = compact
-    ? 'block h-full w-auto max-w-full object-contain'
+    ? 'block h-full w-auto max-w-none object-contain'
     : 'h-full w-full object-cover';
 
   return (
@@ -77,7 +77,7 @@ export default function AttachmentPreviewList({
         return (
           <div
             key={attachment.id}
-            className={`relative ${compact ? 'w-fit max-w-full shrink-0' : ''} ${cardRadiusClass} border border-[var(--line)] bg-[var(--paper-elevated)] shadow-lg ${cardClassName}`}
+            className={`relative ${compact ? 'w-fit shrink-0' : ''} ${cardRadiusClass} border border-[var(--line)] bg-[var(--paper-elevated)] shadow-lg ${cardClassName}`}
           >
             {showImagePreview ? (
               <div

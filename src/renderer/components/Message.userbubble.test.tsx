@@ -34,7 +34,7 @@ describe('Message — user bubble spacing', () => {
     expect(content?.querySelector('p')).toHaveTextContent('你可以帮我写个 v3');
   });
 
-  it('renders sent image attachments as fixed-height ratio-preserving previews', () => {
+  it('renders sent image attachments as a fixed-height ratio-preserving strip', () => {
     const { container } = render(
       <Message
         message={userMsg('能看到我的屏幕嘛', {
@@ -47,17 +47,46 @@ describe('Message — user bubble spacing', () => {
               previewUrl: 'data:image/png;base64,abc',
               isImage: true,
             },
+            {
+              id: 'att-2',
+              name: 'portrait.png',
+              size: 21_000,
+              mimeType: 'image/png',
+              previewUrl: 'data:image/png;base64,def',
+              isImage: true,
+            },
+            {
+              id: 'att-3',
+              name: 'notes.txt',
+              size: 128,
+              mimeType: 'text/plain',
+              relativePath: 'notes.txt',
+              isImage: false,
+            },
           ],
         })}
       />
     );
 
-    const image = container.querySelector('img[alt="wide-terminal.png"]');
-    expect(image).toHaveClass('h-full', 'w-auto', 'object-contain');
-    expect(image).not.toHaveClass('object-cover');
+    const images = Array.from(container.querySelectorAll('img'));
+    expect(images).toHaveLength(2);
+    for (const image of images) {
+      expect(image).toHaveClass('h-full', 'w-auto', 'max-w-none', 'object-contain');
+      expect(image).not.toHaveClass('object-cover');
 
-    const attachmentStrip = image?.closest('.flex-nowrap');
+      const imageFrame = image.parentElement;
+      expect(imageFrame).toHaveClass('h-24');
+      expect(imageFrame).not.toHaveClass('max-w-full');
+
+      const imageCard = imageFrame?.parentElement;
+      expect(imageCard).toHaveClass('w-fit', 'shrink-0');
+      expect(imageCard).not.toHaveClass('max-w-full');
+    }
+
+    const attachmentStrip = images[0]?.closest('.flex-nowrap');
     expect(attachmentStrip).toBeInTheDocument();
+    expect(attachmentStrip).toHaveClass('overflow-x-auto');
     expect(attachmentStrip).not.toHaveClass('grid-cols-5');
+    expect(attachmentStrip).toHaveTextContent('notes.txt');
   });
 });
