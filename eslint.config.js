@@ -303,7 +303,7 @@ export default defineConfig(
         // (`text-[2.5rem]` brand title, `text-[0.9em]` inline code) are
         // legitimate relative/display forms; `style={{fontSize}}` API
         // configs (Monaco/xterm/syntax-highlighter) are out of Tailwind's
-        // reach anyway; `.css` files aren't linted (fb.css tracked under
+        // reach anyway; `.css` files aren't linted (fb.css 已对齐 v2.5 字阶, see
         // PRD 0.2.35); dynamic `text-[${n}px]` escapes the lint but
         // Tailwind JIT never generates CSS for it, so it self-neutralizes.
         // Banning ALL `text-[...]` would false-positive on the color form

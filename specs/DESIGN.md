@@ -201,8 +201,10 @@ meta（v2.5——11px 中文在 Windows 低分屏雅黑下偏虚，且 11/12/13 
 - eslint 只封禁 **px 字面量**；rem/em 相对值（brand-title `2.5/3.5rem`、行内代码 `0.9em`）
   与 `style={{fontSize}}` API 配置项（Monaco/xterm/语法高亮等）不在射程内——新增此类
   用法需对照本表自证档位。
-- 悬浮球伴侣窗（`src/renderer/floating-ball/fb.css`，PRD 0.2.35 并行开发中）尚未对齐
-  本字阶，由该 feature 负责人跟进。
+- 悬浮球伴侣窗（`src/renderer/floating-ball/fb.css`）已于 v2.5 对齐本字阶（全部
+  font-size 走 `var(--text-*, fallback)`，AI 消息挂 `.ai-message-content`，详见
+  PRD 0.2.35 §12.5）。fb.css 不在 eslint 射程内——新增 fb 文字 MUST 用 token，
+  禁止裸 px。
 
 **字号使用原则**：
 - AI 回复的 Markdown 正文使用 16px / 1.7，确保阅读舒适

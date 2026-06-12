@@ -561,7 +561,7 @@ export default function CompanionWindow() {
                     ) : m.role === 'act' ? (
                         <ActivityRow key={m.id} label={m.label ?? ''} detail={m.detail} running={false} />
                     ) : (
-                        <div className="fbw-msg ai" key={m.id}>
+                        <div className="fbw-msg ai ai-message-content" key={m.id}>
                             <Markdown>{m.text}</Markdown>
                         </div>
                     ),
@@ -576,7 +576,7 @@ export default function CompanionWindow() {
                     />
                 ))}
                 {session.streamText !== null && (
-                    <div className="fbw-msg ai" key="streaming">
+                    <div className="fbw-msg ai ai-message-content" key="streaming">
                         <Markdown>{session.streamText}</Markdown>
                         <span className="fbw-caret" />
                     </div>
