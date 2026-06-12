@@ -169,10 +169,19 @@ export default function CompanionWindow() {
             ac.signal,
         );
         void listenWithCleanup('fb:ball-leave', () => scheduleHideIfPeek(), ac.signal);
-        void listenWithCleanup<{ ctx?: FbCtx }>(
+        // summon 拆两段（性能：窗口显示不等 AX capture）：fb:summon = 快相位
+        // （立即 pin + 聚焦），fb:summon-ctx = 处境到位后补引用条/标题行。
+        void listenWithCleanup(
             'fb:summon',
+            () => {
+                void summonPinned(null);
+            },
+            ac.signal,
+        );
+        void listenWithCleanup<{ ctx?: FbCtx }>(
+            'fb:summon-ctx',
             (e) => {
-                void summonPinned(e.payload?.ctx ?? null);
+                void applySummonCtx(e.payload?.ctx ?? null);
             },
             ac.signal,
         );
@@ -210,7 +219,7 @@ export default function CompanionWindow() {
             () => undefined,
         );
         return () => ac.abort();
-    }, [applyMode, scheduleHideIfPeek, summonPinned, hideSelf, suspend, resume]);
+    }, [applyMode, applySummonCtx, scheduleHideIfPeek, summonPinned, hideSelf, suspend, resume]);
 
     // ── 窗口失焦（pin 态用户点了别处）→ 收起；Esc → 收起 ──
     useEffect(() => {
@@ -228,24 +237,22 @@ export default function CompanionWindow() {
         };
     }, [hideSelf]);
 
-    // ── peek 态点击任意处 → 升格 pin（点击瞬间补抓处境） ──
+    // ── peek 态点击任意处 → 升格 pin（即时；处境并行抓、到了再补） ──
     const onWinClick = useCallback(() => {
         if (modeRef.current !== 'peek') return;
+        void invoke('cmd_fb_pin_companion').catch((err) => {
+            console.error('[fb] pin failed:', err);
+        });
+        void summonPinned(null);
         void (async () => {
-            let ctx: FbCtx | null = null;
             try {
-                ctx = await invoke<FbCtx>('cmd_fb_capture_context');
+                const ctx = await invoke<FbCtx>('cmd_fb_capture_context');
+                await applySummonCtx(ctx);
             } catch {
-                ctx = null;
+                // capture 失败不阻断 pin
             }
-            try {
-                await invoke('cmd_fb_pin_companion');
-            } catch (err) {
-                console.error('[fb] pin failed:', err);
-            }
-            await summonPinned(ctx);
         })();
-    }, [summonPinned]);
+    }, [summonPinned, applySummonCtx]);
 
     // ── 自动滚底 ──
     useEffect(() => {

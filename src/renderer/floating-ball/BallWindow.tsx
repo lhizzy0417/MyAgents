@@ -31,10 +31,17 @@ export default function BallWindow() {
     const companionModeRef = useRef<'hidden' | 'peek' | 'pin'>('hidden');
     // Boot-race guard (review W1): Tauri events have no replay — a summon
     // fired before the companion registered its listeners would vanish. Track
-    // readiness via the fb:companion-ready handshake and stash one pending
-    // summon to re-deliver.
+    // readiness via the fb:companion-ready handshake and queue pending events
+    // to re-deliver in order.
     const companionReadyRef = useRef(false);
-    const pendingSummonRef = useRef<unknown | null>(null);
+    const pendingEventsRef = useRef<Array<{ event: string; payload: unknown }>>([]);
+    const relayToCompanion = useCallback((event: string, payload: unknown) => {
+        if (companionReadyRef.current) {
+            void invoke('cmd_fb_relay', { target: 'companion', event, payload });
+        } else {
+            pendingEventsRef.current.push({ event, payload });
+        }
+    }, []);
     // Previous ball state for done-transition pop (kept OUT of the setState
     // updater — updaters must stay pure under concurrent rendering).
     const prevStateRef = useRef<FbBallState>('idle');
@@ -77,10 +84,10 @@ export default function BallWindow() {
             'fb:companion-ready',
             () => {
                 companionReadyRef.current = true;
-                const pending = pendingSummonRef.current;
-                if (pending !== null) {
-                    pendingSummonRef.current = null;
-                    void invoke('cmd_fb_relay', { target: 'companion', event: 'fb:summon', payload: pending });
+                const pending = pendingEventsRef.current;
+                pendingEventsRef.current = [];
+                for (const { event, payload } of pending) {
+                    void invoke('cmd_fb_relay', { target: 'companion', event, payload });
                 }
             },
             ac.signal,
@@ -99,10 +106,11 @@ export default function BallWindow() {
         if (dragRef.current.active) return;
         if (companionModeRef.current === 'pin') return; // already open for real
         // Small intent delay so a fly-by cursor doesn't flash the panel.
+        // 60ms：加上轮询间隔 60ms，hover→出窗最坏 ~120ms + IPC，体感即时。
         hoverTimerRef.current = setTimeout(() => {
             void invoke('cmd_fb_show_companion', { mode: 'peek' });
             void invoke('cmd_fb_relay', { target: 'companion', event: 'fb:ball-enter', payload: {} });
-        }, 120);
+        }, 60);
     }, []);
     const handleMouseLeave = useCallback(() => {
         if (!hoverInsideRef.current) return;
@@ -130,33 +138,31 @@ export default function BallWindow() {
         return () => ac.abort();
     }, [handleMouseEnter, handleMouseLeave]);
 
-    // ── click → summon（先抓处境，再给键盘焦点 — 顺序是红线） ──
+    // ── click → summon ──
+    // 性能关键（用户反馈"点击卡卡的"）：窗口显示**不等** capture——AX 读选区
+    // 可达 100-300ms，串行会把 pin 的视觉反馈压在后面。并行是安全的：
+    // nonactivating panel 永不改变 frontmost app，capture 读的始终是用户
+    // 的 app（探针按 frontmost 定位，与我们窗口的 key 状态无关）。D3 红线
+    // 不变：capture 仍只在显式点击时发起，hover 永不碰。
     const summon = useCallback(async () => {
         if (companionModeRef.current === 'pin') {
             // Toggle: ball click while pinned closes the companion.
             void invoke('cmd_fb_relay', { target: 'companion', event: 'fb:close-request', payload: {} });
             return;
         }
-        let ctx: unknown = null;
+        // 1) 立即出窗 + 进入 pin（伴侣窗瞬时聚焦输入框）
+        void invoke('cmd_fb_show_companion', { mode: 'pin' }).catch((err) => {
+            console.error('[fb-ball] show pin failed:', err);
+        });
+        relayToCompanion('fb:summon', {});
+        // 2) context 并行抓，到了再补进去（引用条/标题行晚到一拍，可接受）
         try {
-            // Eager capture runs while the USER'S app is still frontmost.
-            ctx = await invoke('cmd_fb_capture_context');
+            const ctx = await invoke('cmd_fb_capture_context');
+            relayToCompanion('fb:summon-ctx', { ctx });
         } catch (err) {
             console.warn('[fb-ball] capture_context failed:', err);
         }
-        try {
-            await invoke('cmd_fb_show_companion', { mode: 'pin' });
-            const payload = { ctx };
-            if (companionReadyRef.current) {
-                await invoke('cmd_fb_relay', { target: 'companion', event: 'fb:summon', payload });
-            } else {
-                // Companion webview still booting — deliver on fb:companion-ready.
-                pendingSummonRef.current = payload;
-            }
-        } catch (err) {
-            console.error('[fb-ball] summon failed:', err);
-        }
-    }, []);
+    }, [relayToCompanion]);
 
     // ── drag / snap ──
     const flushDrag = useCallback(() => {

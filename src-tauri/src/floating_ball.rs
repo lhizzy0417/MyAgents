@@ -191,7 +191,10 @@ mod imp {
                 if !HOVER_POLLER_RUNNING.load(Ordering::SeqCst) {
                     break;
                 }
-                tokio::time::sleep(std::time::Duration::from_millis(120)).await;
+                // 60ms ≈ 16Hz：hover 响应的第一段延迟就是这个间隔，120ms 在
+                // 体感上"卡"（用户验收反馈）；16Hz 的 mouseLocation 查询 CPU
+                // 仍不可测量。
+                tokio::time::sleep(std::time::Duration::from_millis(60)).await;
                 let app2 = app.clone();
                 let (tx, rx) = std::sync::mpsc::channel::<(Option<bool>, Option<bool>)>();
                 let dispatched = app
@@ -344,6 +347,12 @@ mod imp {
                 .build()
                 .map_err(|e| format!("[fb] create companion window: {e}"))?;
 
+            // Park it next to the ball IMMEDIATELY. Without an initial
+            // position Tauri centers the window — the first show would
+            // flash a center-screen frame before our reposition lands
+            // (user-verified symptom).
+            position_companion_near_ball(app, &win);
+
             // True frosted glass: NSVisualEffectView under the (transparent)
             // webview, rounded to match the DOM panel radius.
             //
@@ -434,26 +443,14 @@ mod imp {
         }
     }
 
-    /// Position the companion next to the ball (dock-aware) and show it.
-    /// mode = "peek" (no keyboard focus) | "pin" (becomes key window).
-    pub fn show_companion(app: &AppHandle, mode: &str) -> Result<(), String> {
-        ensure_windows(app)?;
-        let ball = app
-            .get_webview_window(BALL_LABEL)
-            .ok_or("[fb] ball window missing")?;
-        let companion = app
-            .get_webview_window(COMPANION_LABEL)
-            .ok_or("[fb] companion window missing")?;
-
+    /// Compute + apply the companion's dock-aware position next to the ball.
+    fn position_companion_near_ball(app: &AppHandle, companion: &tauri::WebviewWindow) {
+        let Some(ball) = app.get_webview_window(BALL_LABEL) else { return };
         let scale = ball.scale_factor().unwrap_or(2.0);
-        let bpos = ball
-            .outer_position()
-            .map_err(|e| format!("[fb] ball position: {e}"))?
-            .to_logical::<f64>(scale);
-        let csize = companion
-            .outer_size()
-            .map_err(|e| format!("[fb] companion size: {e}"))?
-            .to_logical::<f64>(scale);
+        let Ok(bpos) = ball.outer_position() else { return };
+        let bpos = bpos.to_logical::<f64>(scale);
+        let Ok(csize) = companion.outer_size() else { return };
+        let csize = csize.to_logical::<f64>(scale);
         let (ax, ay, aw, ah) = work_area(app).unwrap_or((0.0, 28.0, 1440.0, 872.0));
 
         // Ball on the right half → companion opens to its left, and vice versa.
@@ -467,6 +464,16 @@ mod imp {
         let mut y = bpos.y + BALL_WIN / 2.0 - csize.height * 0.25;
         y = y.clamp(ay + 8.0, (ay + ah - csize.height - 8.0).max(ay + 8.0));
         let _ = companion.set_position(LogicalPosition::new(x, y));
+    }
+
+    /// Position the companion next to the ball (dock-aware) and show it.
+    /// mode = "peek" (no keyboard focus) | "pin" (becomes key window).
+    pub fn show_companion(app: &AppHandle, mode: &str) -> Result<(), String> {
+        ensure_windows(app)?;
+        let companion = app
+            .get_webview_window(COMPANION_LABEL)
+            .ok_or("[fb] companion window missing")?;
+        position_companion_near_ball(app, &companion);
 
         let panel = app
             .get_webview_panel(COMPANION_LABEL)
