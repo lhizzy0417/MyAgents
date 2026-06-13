@@ -69,6 +69,7 @@ import { apiGetJson } from '@/api/apiFetch';
 import { updateSession } from '@/api/sessionClient';
 import { dismissTopmost } from '@/utils/closeLayer';
 import { dispatchAppShortcut } from '@/utils/appShortcuts';
+import { handleSelectAllKeydown } from '@/utils/selectAllRouter';
 import { forceFlushLogs, setLogServerUrl, clearLogServerUrl } from '@/utils/frontendLogger';
 import { normalizeRuntime, resolveEffectiveRuntime, planSessionOpen } from '@/utils/sessionOpenPlan';
 import { applyTerminalSessionToTabs } from '@/utils/sessionTermination';
@@ -1146,7 +1147,7 @@ export default function App() {
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       const isMac = navigator.platform.toLowerCase().includes('mac');
-      dispatchAppShortcut(e, isMac, {
+      if (dispatchAppShortcut(e, isMac, {
         tabs: tabsRef.current,
         activeTabId: activeTabIdRef.current,
         setActiveTabId,
@@ -1156,7 +1157,14 @@ export default function App() {
         hasBlockingBackdrop: () => !!document.querySelector('.fixed.inset-0[class*="backdrop-blur"]'),
         openTaskCenter: () => window.dispatchEvent(new CustomEvent(CUSTOM_EVENTS.OPEN_TASK_CENTER)),
         openSettings: () => window.dispatchEvent(new CustomEvent(CUSTOM_EVENTS.OPEN_SETTINGS)),
-      });
+      })) return;
+      // ⌘/Ctrl+A for plain <input>/<textarea> (chat input, rename fields). The native
+      // macOS "Select All" menu item was removed so ⌘A reaches the WebView (see
+      // src-tauri/src/lib.rs); Monaco and the workspace tree own it via their own
+      // keydown handlers, but a plain text control has no JS owner — handle it here
+      // deterministically rather than depend on an undocumented WKWebView default.
+      // Returns false (no-op) for Monaco/tree/everything else, so those still own ⌘A.
+      handleSelectAllKeydown(e, isMac);
     };
 
     // Capture phase: application-level shortcuts (Cmd+W/T/Tab, etc.) MUST fire before

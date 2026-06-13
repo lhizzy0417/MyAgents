@@ -2986,10 +2986,12 @@ const DirectoryPanel = memo(
             onClick: () => void pasteFromClipboard(),
           },
           {
-            // ⌘A is consumed by the native Edit menu on macOS (selectAll:
-            // selector — same pre-emption as ⌘C/⌘Z), and native select-all
-            // does nothing useful on select-none rows. The menu is the
-            // reachable entry point there (cross-review 0.2.33, cc W1).
+            // ⌘A now reaches the tree's keydown handler on macOS too — the
+            // native Edit menu's Select All item (which used to pre-empt it as
+            // the selectAll: selector) was removed; see src-tauri/src/lib.rs.
+            // This menu item stays as a discoverable / mouse-reachable entry
+            // (⌘C/⌘Z are still consumed by their native menu items, so the
+            // copy/undo entries below remain their only reachable path).
             label: "全选",
             icon: <ListChecks className="h-4 w-4" />,
             disabled: visibleRows.length === 0,

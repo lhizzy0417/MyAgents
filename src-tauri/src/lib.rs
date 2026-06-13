@@ -880,6 +880,27 @@ pub fn run() {
                     .quit()
                     .build()?;
 
+                // NOTE: deliberately NO `.select_all()` here. The predefined
+                // Select All item registers ⌘A as a menu key-equivalent, which
+                // macOS dispatches as the native `selectAll:` selector in
+                // `performKeyEquivalent:` — BEFORE the WebView ever delivers a
+                // JS `keydown`. Unlike `copy:`/`cut:`/`paste:`/`undo:` (which
+                // WebKit translates into DOM clipboard / `beforeinput` events
+                // that Monaco listens to), `selectAll:` has no DOM-event
+                // equivalent, so Monaco's own ⌘A keybinding never fires and the
+                // workspace tree's keyboard ⌘A is pre-empted too. Net effect:
+                // ⌘A silently does nothing in every custom WebView editor while
+                // "working" by accident only in plain <textarea>/<input> (where
+                // WKWebView routes `selectAll:` to the native field).
+                //
+                // The fix is to leave ⌘A OUT of the native menu so the keydown
+                // reaches the WebView — the correct owner — exactly like ⌘T/⌘Y
+                // /⌘U/⌘1-9 already do. There Monaco's built-in selectAll, the
+                // tree's resolveTreeKeyAction, and WebKit's textarea default all
+                // pick it up. Keep cut/copy/paste/undo/redo: those map to DOM
+                // events Monaco honours, so removing them would gain nothing and
+                // risk the clipboard paths. (Long-standing since the custom menu
+                // landed in 11a35a25 / Tauri's default menu before that.)
                 let edit_menu = SubmenuBuilder::new(app_handle, "Edit")
                     .undo()
                     .redo()
@@ -887,7 +908,6 @@ pub fn run() {
                     .cut()
                     .copy()
                     .paste()
-                    .select_all()
                     .build()?;
 
                 // Use `WINDOW_SUBMENU_ID` (the magic Tauri 2 constant) so
