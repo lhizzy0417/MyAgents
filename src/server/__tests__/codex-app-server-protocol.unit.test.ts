@@ -6,6 +6,7 @@ import {
   buildCodexTurnStartParams,
   initializeCodexRpc,
   KNOWN_CODEX_SERVER_REQUEST_METHODS,
+  mapCodexTurnCompletedNotification,
   serializeCodexPermissionResponse,
   type PendingCodexRequest,
 } from '../runtimes/codex';
@@ -79,6 +80,29 @@ describe('Codex app-server protocol helpers', () => {
     expect(buildCodexTurnStartParams({ ...base, reasoningEffort: 'xhigh' }).effort).toBe('xhigh');
     expect('effort' in buildCodexTurnStartParams({ ...base, reasoningEffort: null })).toBe(false);
     expect('effort' in buildCodexTurnStartParams(base)).toBe(false);
+  });
+
+  it('preserves Codex turn/completed status instead of treating interrupts as success', () => {
+    expect(mapCodexTurnCompletedNotification({ status: 'completed' })).toEqual({
+      kind: 'turn_complete',
+      status: 'completed',
+    });
+
+    expect(mapCodexTurnCompletedNotification({ status: 'interrupted' })).toEqual({
+      kind: 'turn_complete',
+      status: 'interrupted',
+      result: 'Turn ended with status interrupted',
+    });
+
+    expect(mapCodexTurnCompletedNotification({
+      status: 'failed',
+      error: { message: 'websocket failed' },
+    })).toEqual({
+      kind: 'turn_complete',
+      status: 'failed',
+      error: 'websocket failed',
+      result: 'websocket failed',
+    });
   });
 
   it('serializes command/file approvals with session scope when always allowed', () => {

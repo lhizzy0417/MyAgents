@@ -1167,6 +1167,22 @@ function classifyAndForwardCodexStderr(text: string, onEvent: UnifiedEventCallba
   }
 }
 
+export function mapCodexTurnCompletedNotification(
+  turnValue: unknown,
+): Extract<UnifiedEvent, { kind: 'turn_complete' }> {
+  const turn = objectValue(turnValue);
+  const status = stringValue(turn.status) ?? 'completed';
+  const error = objectValue(turn.error);
+  const errorMessage = stringValue(error.message);
+
+  return {
+    kind: 'turn_complete',
+    status,
+    ...(errorMessage ? { error: errorMessage, result: errorMessage } : {}),
+    ...(status !== 'completed' && !errorMessage ? { result: `Turn ended with status ${status}` } : {}),
+  };
+}
+
 // ─── Diagnostic helpers (issue #194) ───
 
 /**
@@ -2243,7 +2259,7 @@ export class CodexRuntime implements AgentRuntime {
         return { kind: 'status_change', state: 'running' };
 
       case 'turn/completed': {
-        const turn = p.turn as { status: string; error?: { message: string } } | undefined;
+        const turn = p.turn;
         // PRD 0.2.27 — sub-agent threads live within a turn; clear correlation
         // maps at turn end so a stale child threadId can't re-parent next turn's
         // tools and the maps don't grow unbounded across a long session.
@@ -2251,14 +2267,7 @@ export class CodexRuntime implements AgentRuntime {
         codexProc.subThreadToParent.clear();
         codexProc.subThreadMeta.clear();
         codexProc.collabControlToolParents.clear();
-        if (turn?.status === 'failed') {
-          return {
-            kind: 'session_complete',
-            result: turn.error?.message || 'Turn failed',
-            subtype: 'error',
-          };
-        }
-        return { kind: 'turn_complete' };
+        return mapCodexTurnCompletedNotification(turn);
       }
 
       // ── Text streaming ──

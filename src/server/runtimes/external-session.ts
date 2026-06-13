@@ -1148,6 +1148,16 @@ export function restoreExternalSessionState(
 
 // ─── Config change handlers ───
 
+export function isExternalModelFallbackRestartNeeded(
+  nextModel: string,
+  prevConfiguredModel: string,
+  liveReportedModel: string,
+): boolean {
+  if (nextModel === prevConfiguredModel) return false;
+  if (liveReportedModel && nextModel === liveReportedModel) return false;
+  return true;
+}
+
 /**
  * Set model for external runtime. Stops any running process so the next
  * sendExternalMessage resumes with the new model.
@@ -1199,8 +1209,18 @@ export async function setExternalModel(model: string): Promise<void> {
   // dedupe is best-effort, so a redundant push here would otherwise cause
   // a needless kill+respawn (paying ~10s cold restart for nothing). Safe at
   // this point because there's no in-flight runtime RPC to race against.
-  // Compares against the pre-call value (see prevModel note at top).
-  if (model === prevModel) return;
+  // Compares against the pre-call value (see prevModel note at top). Also
+  // treats the runtime-reported live model as authoritative: Chat can adopt a
+  // backend-owned IM/Cron sidecar after session_init has reported its model
+  // but before lastModel was populated by a renderer config push. Restarting
+  // that active process for the same live model interrupts the in-flight turn.
+  if (!isExternalModelFallbackRestartNeeded(model, prevModel, lastRuntimeReportedModel)) {
+    if (model !== prevModel) {
+      lastModel = model;
+      console.log(`[external-session] Model set to "${model}" (matches live runtime; no restart)`);
+    }
+    return;
+  }
   lastModel = model;
   console.log(`[external-session] Model set to "${model}" (will restart on next send)`);
   if (isRunning || activeProcess) {
@@ -1518,6 +1538,36 @@ export async function waitForExternalSessionIdle(timeoutMs: number, pollMs = 500
  */
 export function didLastTurnSucceed(): boolean {
   return lastTurnSucceeded;
+}
+
+export function isSuccessfulExternalTurnCompletion(
+  event: Pick<Extract<UnifiedEvent, { kind: 'turn_complete' }>, 'status'>,
+): boolean {
+  return !event.status
+    || event.status === 'completed'
+    || event.status === 'success'
+    || event.status === 'succeeded';
+}
+
+type ExternalTurnFailureCleanup = 'defer-to-stop' | 'stopped' | 'error';
+
+function isInterruptedExternalTurnStatus(status: string | undefined): boolean {
+  return status === 'interrupted' || status === 'cancelled' || status === 'canceled';
+}
+
+export function classifyExternalTurnFailureCleanup(
+  event: Pick<Extract<UnifiedEvent, { kind: 'turn_complete' }>, 'status'>,
+  intentionalStopInProgress: boolean,
+): ExternalTurnFailureCleanup {
+  if (intentionalStopInProgress) return 'defer-to-stop';
+  if (isInterruptedExternalTurnStatus(event.status)) return 'stopped';
+  return 'error';
+}
+
+function externalTurnFailureMessage(event: Extract<UnifiedEvent, { kind: 'turn_complete' }>): string {
+  return event.error
+    || event.result
+    || (event.status ? `External runtime turn ended with status ${event.status}` : 'External runtime turn failed');
 }
 
 /**
@@ -3531,8 +3581,59 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
     case 'turn_complete': {
       // Mark turn complete — session_complete will follow for CC -p mode
       turnCompleted = true;
-      lastTurnSucceeded = true;
       clearWatchdog();
+      const turnSucceeded = isSuccessfulExternalTurnCompletion(event);
+      lastTurnSucceeded = turnSucceeded;
+
+      if (!turnSucceeded) {
+        const message = externalTurnFailureMessage(event);
+        const cleanup = classifyExternalTurnFailureCleanup(event, userRequestedExternalStop);
+        console.warn(
+          `[external-session] turn_complete: non-success status=${event.status ?? 'unknown'}, elapsed=${currentTurnStartTime ? Date.now() - currentTurnStartTime : 0}ms, message=${message}`,
+        );
+        if (cleanup === 'defer-to-stop') {
+          console.log('[external-session] turn_complete arrived during intentional stop; deferring idle/drain cleanup to stopExternalSession');
+          broadcast('chat:message-stopped', null);
+          resetTurnAccumulators();
+          pendingPermissionSuggestions.clear();
+          drainPendingInteractiveRequestsAsExpired('stop');
+          pendingExternalAskUserQuestions.clear();
+          pendingExternalInteractiveRequests.clear();
+          break;
+        }
+
+        emitExternalTurnTrace('final', {
+          status: 'error',
+          detail: {
+            source: 'turn_complete',
+            turnStatus: event.status ?? 'unknown',
+            error: message,
+          },
+        });
+        if (cleanup === 'stopped') {
+          broadcast('chat:message-stopped', null);
+        } else {
+          broadcast('chat:agent-error', { message });
+          broadcast('chat:message-error', message);
+        }
+        fireImCallback('error', message);
+        if (activeRequestId) {
+          imRequestRegistry.setStatus(activeRequestId, 'failed');
+          imRequestRegistry.unregister(activeRequestId);
+        }
+        activeRequestId = null;
+        clearInboxMetaOnRejection('turn_failed', message);
+        resetTurnAccumulators();
+        pendingPermissionSuggestions.clear();
+        drainPendingInteractiveRequestsAsExpired('error');
+        pendingExternalAskUserQuestions.clear();
+        pendingExternalInteractiveRequests.clear();
+        setExternalSessionState('idle');
+        setTimeout(() => drainExternalQueueAfterTurn(), 0);
+        clearExternalTurnTrace();
+        break;
+      }
+
       emitExternalTurnTrace('final', {
         status: 'ok',
         detail: {
@@ -3560,12 +3661,12 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
       // subsequent flushPendingChunks at message-complete bails its updater,
       // dropping every chunk that hadn't yet RAF-flushed. v0.2.14 cross-bugfix.
       //
-      // Initialize from `turnCompleted`: turn_complete handler already fires
-      // persistTurnResult fire-and-forget (Codex/Gemini path), so it's in-flight
-      // regardless of whether this session_complete carries success or error
-      // subtype. Set this BEFORE the if/else so the error branch also honours
-      // the in-flight contract.
-      let persistInFlight = turnCompleted;
+      // Use the actual finalization gate rather than `turnCompleted`: a
+      // non-success turn (Codex interrupted/cancelled) also reaches
+      // turn_complete, but intentionally does not persist an assistant message.
+      // Set this BEFORE the if/else so the error branch also honours the
+      // in-flight contract.
+      let persistInFlight = turnFinalization.inFlight;
       // Pre-warm exit: process died after spawn but before any user turn
       // started. `currentTurnStartTime === 0` distinguishes this from a
       // mid-turn exit (which sets the timestamp at turn kickoff). Applies to
@@ -3604,9 +3705,9 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
           persistInFlight = true;
         }
         // else: turn_complete already fired persistTurnResult — persistInFlight
-        // was already set true above by the `let persistInFlight = turnCompleted`
-        // initializer. The async broadcast it emits after chat:message-complete
-        // is the authoritative idle.
+        // was already initialized from the turnFinalization gate. The async
+        // broadcast it emits after chat:message-complete is the authoritative
+        // idle.
       } else {
         const errorMessage = event.result || 'Session ended with error';
         // Suppress user-visible error when the external runtime's persistent process

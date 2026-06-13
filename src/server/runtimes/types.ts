@@ -159,7 +159,7 @@ export type UnifiedEvent =
   // === Session lifecycle ===
   | { kind: 'session_init'; sessionId: string; model: string; tools: string[] }
   | { kind: 'status_change'; state: 'idle' | 'running' | 'waiting_permission' | 'error' }
-  | { kind: 'turn_complete'; result?: string }
+  | { kind: 'turn_complete'; result?: string; status?: string; error?: string }
   | {
     kind: 'session_complete';
     result: string;
