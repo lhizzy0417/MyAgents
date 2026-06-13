@@ -30,13 +30,14 @@
 //!   * IM user → sees a one-line notification explaining the switch +
 //!     the new session's 8-char prefix (matching `/new` IM affordance).
 
-use std::time::Duration;
-use std::time::Instant;
+use std::collections::HashMap;
+use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 use uuid::Uuid;
 
 use super::adapter::ImAdapter;
+use super::types::ImSourceType;
 use super::AgentInstance;
 use crate::sidecar::{release_session_sidecar, ManagedSidecarManager, SidecarOwner};
 use crate::utils::file_lock::{with_file_lock, FileLockOptions};
@@ -258,9 +259,36 @@ fn short_id(s: &str) -> String {
     s.chars().take(8).collect()
 }
 
+#[derive(Debug)]
+struct RuntimeChangeNotification {
+    chat_id: String,
+    text: String,
+    source_type: ImSourceType,
+    last_active: Instant,
+    session_key: String,
+    new_session_id: String,
+}
+
+fn source_type_priority(source_type: &ImSourceType) -> u8 {
+    match source_type {
+        ImSourceType::Private => 1,
+        ImSourceType::Group => 0,
+    }
+}
+
+fn should_replace_notification_candidate(
+    existing: &RuntimeChangeNotification,
+    candidate: &RuntimeChangeNotification,
+) -> bool {
+    let existing_priority = source_type_priority(&existing.source_type);
+    let candidate_priority = source_type_priority(&candidate.source_type);
+    candidate_priority > existing_priority
+        || (candidate_priority == existing_priority && candidate.last_active > existing.last_active)
+}
+
 /// Per-channel iteration: for each peer_session, freeze (HTTP if sidecar is
 /// alive, file-lock fallback otherwise), rotate session_id to a fresh UUID,
-/// release the old Agent owner, and push a notification to the IM chat.
+/// release the old Agent owner, and push one notification per IM delivery target.
 ///
 /// Caller (`cmd_update_agent_config` runtime branch) is responsible for:
 ///
@@ -312,137 +340,209 @@ pub async fn freeze_and_rotate_for_runtime_change(
     let mut frozen_via_fallback = 0usize;
     let mut rotated = 0usize;
     let mut notified = 0usize;
+    let mut notification_targets = 0usize;
+    let mut deduped_notifications = 0usize;
 
     for (channel_id, ch_inst) in &agent.channels {
-        let mut router = ch_inst.bot_instance.router.lock().await;
-        let keys: Vec<String> = router.peer_session_keys();
-        if keys.is_empty() {
-            continue;
-        }
         let adapter = ch_inst.bot_instance.adapter.clone();
+        let health = ch_inst.bot_instance.health.clone();
+        let mut pending_notifications: HashMap<String, RuntimeChangeNotification> = HashMap::new();
+        let mut channel_rotated = 0usize;
 
-        for key in keys {
-            total_bindings += 1;
+        let active_sessions_after_rotation = {
+            let mut router = ch_inst.bot_instance.router.lock().await;
+            let keys: Vec<String> = router.peer_session_keys();
+            if keys.is_empty() {
+                continue;
+            }
 
-            // Snapshot prior session for chat_id + sidecar port, then rotate.
-            let prior = match router.peer_session_snapshot(&key) {
-                Some(p) => p,
-                None => continue, // race: removed under us — skip safely
-            };
-            let old_session_id = prior.session_id.clone();
-            let port = prior.sidecar_port;
-            let chat_id = prior.source_id.clone();
+            for key in keys {
+                total_bindings += 1;
 
-            // ----- 1. Freeze old session (HTTP if alive AND client built;
-            //         file-lock fallback otherwise). The two paths must be
-            //         symmetric — both stamp configSnapshotAt=now and merge
-            //         only present snapshot fields (review-by-codex F2).
-            let try_http = port != 0 && http.is_some();
-            if try_http {
-                let client = http.as_ref().unwrap();
-                match freeze_via_sidecar(client, port, &old_session_id, &snapshot_json).await {
-                    Ok(()) => {
-                        frozen_via_sidecar += 1;
-                        ulog_info!(
-                            "[runtime-change] froze session {} via sidecar port {}",
-                            short_id(&old_session_id),
-                            port
-                        );
-                    }
-                    Err(e) => {
-                        ulog_warn!(
-                            "[runtime-change] sidecar freeze failed (channel={} session={}): {} — falling back to file lock",
-                            channel_id,
-                            short_id(&old_session_id),
-                            e
-                        );
-                        match freeze_via_file_lock(&old_session_id, &snapshot).await {
-                            Ok(()) => {
-                                frozen_via_fallback += 1;
-                                ulog_info!(
-                                    "[runtime-change] froze session {} via file lock (sidecar fallback)",
-                                    short_id(&old_session_id)
-                                );
-                            }
-                            Err(e2) => ulog_warn!(
-                                "[runtime-change] file-lock freeze ALSO failed for session {}: {}",
+                // Snapshot prior session for chat_id + sidecar port, then rotate.
+                let prior = match router.peer_session_snapshot(&key) {
+                    Some(p) => p,
+                    None => continue, // race: removed under us — skip safely
+                };
+                let old_session_id = prior.session_id.clone();
+                let port = prior.sidecar_port;
+                let chat_id = prior.source_id.clone();
+
+                // ----- 1. Freeze old session (HTTP if alive AND client built;
+                //         file-lock fallback otherwise). The two paths must be
+                //         symmetric — both stamp configSnapshotAt=now and merge
+                //         only present snapshot fields (review-by-codex F2).
+                let try_http = port != 0 && http.is_some();
+                if try_http {
+                    let client = http.as_ref().unwrap();
+                    match freeze_via_sidecar(client, port, &old_session_id, &snapshot_json).await {
+                        Ok(()) => {
+                            frozen_via_sidecar += 1;
+                            ulog_info!(
+                                "[runtime-change] froze session {} via sidecar port {}",
                                 short_id(&old_session_id),
-                                e2
-                            ),
+                                port
+                            );
+                        }
+                        Err(e) => {
+                            ulog_warn!(
+                                "[runtime-change] sidecar freeze failed (channel={} session={}): {} — falling back to file lock",
+                                channel_id,
+                                short_id(&old_session_id),
+                                e
+                            );
+                            match freeze_via_file_lock(&old_session_id, &snapshot).await {
+                                Ok(()) => {
+                                    frozen_via_fallback += 1;
+                                    ulog_info!(
+                                        "[runtime-change] froze session {} via file lock (sidecar fallback)",
+                                        short_id(&old_session_id)
+                                    );
+                                }
+                                Err(e2) => ulog_warn!(
+                                    "[runtime-change] file-lock freeze ALSO failed for session {}: {}",
+                                    short_id(&old_session_id),
+                                    e2
+                                ),
+                            }
                         }
                     }
+                } else {
+                    // Sidecar dead (port==0 from previous preserve_bindings) OR
+                    // HTTP client failed to build. Go straight to file-lock.
+                    match freeze_via_file_lock(&old_session_id, &snapshot).await {
+                        Ok(()) => {
+                            frozen_via_fallback += 1;
+                            ulog_info!(
+                                "[runtime-change] froze session {} via file lock (no HTTP path available)",
+                                short_id(&old_session_id)
+                            );
+                        }
+                        Err(e) => ulog_warn!(
+                            "[runtime-change] file-lock freeze failed for session {}: {}",
+                            short_id(&old_session_id),
+                            e
+                        ),
+                    }
                 }
-            } else {
-                // Sidecar dead (port==0 from previous preserve_bindings) OR
-                // HTTP client failed to build. Go straight to file-lock.
-                match freeze_via_file_lock(&old_session_id, &snapshot).await {
-                    Ok(()) => {
-                        frozen_via_fallback += 1;
+
+                // ----- 2. Mint fresh session_id and rotate the binding.
+                //         `last_active = Instant::now()` matches every other
+                //         peer_session creation site (`add_peer_session` /
+                //         `handover.rs::cmd_handover_session_to_channel` step 5);
+                //         keeping the prior's stale timestamp would make the
+                //         fresh binding look "old" to most_recent_peer_session_key
+                //         and similar last-write-wins selectors.
+                //         (review-by-codex F4.)
+                let new_session_id = Uuid::new_v4().to_string();
+                let mut new_peer = prior.clone();
+                new_peer.session_id = new_session_id.clone();
+                new_peer.sidecar_port = 0; // next IM message spawns a fresh sidecar with NEW runtime
+                new_peer.message_count = 0;
+                new_peer.last_active = Instant::now();
+                router.upsert_peer_session(new_peer);
+                rotated += 1;
+                channel_rotated += 1;
+                ulog_info!(
+                    "[runtime-change] rotated peer_session {} → {} (channel={})",
+                    short_id(&old_session_id),
+                    short_id(&new_session_id),
+                    channel_id,
+                );
+
+                // ----- 3. Release the OLD session's Agent owner. The sidecar
+                // dies if no other owner remains (typical case for IM-only
+                // bindings); a desktop tab on the same session keeps its
+                // sidecar alive (Tab owner persists), and that's correct —
+                // the user gets to keep using the old session as a regular
+                // historical session backed by the snapshot we just wrote.
+                let owner = SidecarOwner::Agent(key.clone());
+                let _ = release_session_sidecar(sidecar_manager, &old_session_id, &owner);
+
+                // ----- 4. Queue one notification per actual adapter delivery
+                // target. A channel can temporarily contain stale duplicate
+                // peer bindings that collapse to the same Feishu/OpenClaw
+                // chatId; rotating them all is correct, but user-facing
+                // management messages must be per delivered conversation.
+                let candidate = RuntimeChangeNotification {
+                    chat_id: chat_id.clone(),
+                    text: format!(
+                        "Agent 工作区 Runtime 从「{}」更新为「{}」，开始新会话（{}）",
+                        old_runtime,
+                        new_runtime,
+                        short_id(&new_session_id),
+                    ),
+                    source_type: prior.source_type.clone(),
+                    last_active: prior.last_active,
+                    session_key: key,
+                    new_session_id,
+                };
+                if let Some(existing) = pending_notifications.get_mut(&chat_id) {
+                    deduped_notifications += 1;
+                    if should_replace_notification_candidate(existing, &candidate) {
                         ulog_info!(
-                            "[runtime-change] froze session {} via file lock (no HTTP path available)",
-                            short_id(&old_session_id)
+                            "[runtime-change] coalesced duplicate notification target channel={} chat={} replacing session_key={} new_session={} with session_key={} new_session={}",
+                            channel_id,
+                            chat_id,
+                            existing.session_key,
+                            short_id(&existing.new_session_id),
+                            candidate.session_key,
+                            short_id(&candidate.new_session_id),
+                        );
+                        *existing = candidate;
+                    } else {
+                        ulog_info!(
+                            "[runtime-change] coalesced duplicate notification target channel={} chat={} keeping session_key={} new_session={}, skipped session_key={} new_session={}",
+                            channel_id,
+                            chat_id,
+                            existing.session_key,
+                            short_id(&existing.new_session_id),
+                            candidate.session_key,
+                            short_id(&candidate.new_session_id),
                         );
                     }
-                    Err(e) => ulog_warn!(
-                        "[runtime-change] file-lock freeze failed for session {}: {}",
-                        short_id(&old_session_id),
-                        e
-                    ),
+                } else {
+                    pending_notifications.insert(chat_id, candidate);
                 }
             }
 
-            // ----- 2. Mint fresh session_id and rotate the binding.
-            //         `last_active = Instant::now()` matches every other
-            //         peer_session creation site (`add_peer_session` /
-            //         `handover.rs::cmd_handover_session_to_channel` step 5);
-            //         keeping the prior's stale timestamp would make the
-            //         fresh binding look "old" to most_recent_peer_session_key
-            //         and similar last-write-wins selectors.
-            //         (review-by-codex F4.)
-            let new_session_id = Uuid::new_v4().to_string();
-            let mut new_peer = prior.clone();
-            new_peer.session_id = new_session_id.clone();
-            new_peer.sidecar_port = 0; // next IM message spawns a fresh sidecar with NEW runtime
-            new_peer.message_count = 0;
-            new_peer.last_active = Instant::now();
-            router.upsert_peer_session(new_peer);
-            rotated += 1;
-            ulog_info!(
-                "[runtime-change] rotated peer_session {} → {} (channel={})",
-                short_id(&old_session_id),
-                short_id(&new_session_id),
-                channel_id,
-            );
+            router.active_sessions()
+        };
 
-            // ----- 3. Release the OLD session's Agent owner. The sidecar
-            // dies if no other owner remains (typical case for IM-only
-            // bindings); a desktop tab on the same session keeps its
-            // sidecar alive (Tab owner persists), and that's correct —
-            // the user gets to keep using the old session as a regular
-            // historical session backed by the snapshot we just wrote.
-            let owner = SidecarOwner::Agent(key.clone());
-            let _ = release_session_sidecar(sidecar_manager, &old_session_id, &owner);
+        if channel_rotated > 0 {
+            health
+                .set_active_sessions(active_sessions_after_rotation)
+                .await;
+            if let Err(e) = health.persist().await {
+                ulog_warn!(
+                    "[runtime-change] failed to persist rotated active sessions (channel={}): {}",
+                    channel_id,
+                    e
+                );
+            }
+        }
 
-            // ----- 4. Notify the IM chat.
-            let notification = format!(
-                "Agent 工作区 Runtime 从「{}」更新为「{}」，开始新会话（{}）",
-                old_runtime,
-                new_runtime,
-                short_id(&new_session_id),
-            );
-            match adapter.send_message(&chat_id, &notification).await {
+        notification_targets += pending_notifications.len();
+        for notification in pending_notifications.into_values() {
+            match adapter
+                .send_message(&notification.chat_id, &notification.text)
+                .await
+            {
                 Ok(_) => {
                     notified += 1;
                     ulog_info!(
-                        "[runtime-change] notified channel={} chat={}",
+                        "[runtime-change] notified channel={} chat={} session_key={} new_session={}",
                         channel_id,
-                        chat_id
+                        notification.chat_id,
+                        notification.session_key,
+                        short_id(&notification.new_session_id),
                     );
                 }
                 Err(e) => ulog_warn!(
-                    "[runtime-change] notification send failed (channel={} chat={}): {}",
+                    "[runtime-change] notification send failed (channel={} chat={} session_key={}): {}",
                     channel_id,
-                    chat_id,
+                    notification.chat_id,
+                    notification.session_key,
                     e
                 ),
             }
@@ -451,7 +551,7 @@ pub async fn freeze_and_rotate_for_runtime_change(
 
     if total_bindings > 0 {
         ulog_info!(
-            "[runtime-change] agent={} {} → {}: bindings={} frozen(sidecar={}, fallback={}) rotated={} notified={}",
+            "[runtime-change] agent={} {} → {}: bindings={} frozen(sidecar={}, fallback={}) rotated={} notification_targets={} notified={} deduped_notifications={}",
             agent.agent_id,
             old_runtime,
             new_runtime,
@@ -459,7 +559,74 @@ pub async fn freeze_and_rotate_for_runtime_change(
             frozen_via_sidecar,
             frozen_via_fallback,
             rotated,
+            notification_targets,
             notified,
+            deduped_notifications,
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn candidate(
+        chat_id: &str,
+        source_type: ImSourceType,
+        last_active: Instant,
+        session_key: &str,
+        new_session_id: &str,
+    ) -> RuntimeChangeNotification {
+        RuntimeChangeNotification {
+            chat_id: chat_id.to_string(),
+            text: String::new(),
+            source_type,
+            last_active,
+            session_key: session_key.to_string(),
+            new_session_id: new_session_id.to_string(),
+        }
+    }
+
+    #[test]
+    fn notification_candidate_prefers_private_over_group_for_same_delivery_target() {
+        let now = Instant::now();
+        let existing = candidate(
+            "ou_123",
+            ImSourceType::Group,
+            now + Duration::from_secs(10),
+            "agent:a:openclaw:feishu:group:ou_123",
+            "group-new",
+        );
+        let private = candidate(
+            "ou_123",
+            ImSourceType::Private,
+            now,
+            "agent:a:openclaw:feishu:private:ou_123",
+            "private-new",
+        );
+
+        assert!(should_replace_notification_candidate(&existing, &private));
+    }
+
+    #[test]
+    fn notification_candidate_prefers_more_recent_same_source_type() {
+        let now = Instant::now();
+        let existing = candidate(
+            "oc_123",
+            ImSourceType::Group,
+            now,
+            "agent:a:openclaw:feishu:group:oc_123",
+            "older-new",
+        );
+        let newer = candidate(
+            "oc_123",
+            ImSourceType::Group,
+            now + Duration::from_secs(10),
+            "agent:a:openclaw:feishu:group:oc_123",
+            "newer-new",
+        );
+
+        assert!(should_replace_notification_candidate(&existing, &newer));
+        assert!(!should_replace_notification_candidate(&newer, &existing));
     }
 }
