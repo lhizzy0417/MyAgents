@@ -8,7 +8,7 @@
  *   hidden → peek（hover：半透明，纯视觉，焦点纹丝不动）
  *          → pin （点击/球点击：变实 + 拿键盘焦点；窗口失焦/Esc/×/再点球 → hidden）
  */
-import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { AlertCircle, Brain, Image as ImageIcon, Loader2, StopCircle, XCircle } from 'lucide-react';
 
@@ -16,17 +16,28 @@ import { listenWithCleanup } from '@/utils/tauriListen';
 import Markdown from '@/components/Markdown';
 import OverlayBackdrop from '@/components/OverlayBackdrop';
 import CustomSelect from '@/components/CustomSelect';
+import AttachmentPreviewList from '@/components/AttachmentPreviewList';
 import { PermissionPrompt } from '@/components/PermissionPrompt';
 import { AskUserQuestionPrompt } from '@/components/AskUserQuestionPrompt';
 import { ExitPlanModePrompt } from '@/components/ExitPlanModePrompt';
+import { FileActionProvider } from '@/context/FileActionContext';
+import { useImagePreview } from '@/context/ImagePreviewContext';
+import { useToast } from '@/components/Toast';
+import { useWorkspaceFileService } from '@/hooks/useWorkspaceFileService';
+import { useTauriFileDrop } from '@/hooks/useTauriFileDrop';
 import { track } from '@/analytics';
+import { loadAppConfig, mergePresetCustomModels } from '@/config/services/appConfigService';
+import { getAllProviders, modelSupportsModality } from '@/config/services/providerService';
+import { applyProviderEnablementAndOrder, type Provider } from '@/config/types';
+import { ALLOWED_IMAGE_MIME_TYPES, isImageFile, isImageMimeType } from '../../shared/fileTypes';
 import { isImeComposingEvent, resolveEnterKeyAction } from '@/utils/chatSendKey';
+import { renameIfBareClipboardImage } from '@/utils/clipboardImage';
 import { formatDuration, getToolBadgeConfig, getToolLabel, getToolMainLabel, getToolSummaryNode, isSubagentContainerTool } from '@/components/tools/toolBadgeConfig';
 import { groupContentBlocksForDisplay } from '@/utils/contentBlockDisplay';
 import type { ContentBlock } from '@/types/chat';
 import { computeDragOrigin } from './fbDrag';
 import { isNearBottom } from './convoAutoFollow';
-import { useFloatingSession, type FbMsg } from './useFloatingSession';
+import { useFloatingSession, type FbAttachment, type FbMsg } from './useFloatingSession';
 
 import './fb.css';
 
@@ -45,9 +56,20 @@ interface FbShot {
     windowTitle?: string | null;
 }
 
+interface FbImageDraft {
+    id: string;
+    name: string;
+    mimeType: string;
+    size: number;
+    data: string;
+    previewUrl: string;
+}
+
 const WIN_W = 440;
 const WIN_H_KEY = 'fb-win-h';
 const HIDE_GRACE_MS = 280;
+const MAX_IMAGES = 5;
+const MAX_IMAGE_SIZE = 5 * 1024 * 1024;
 
 function loadWinH(): number {
     const saved = parseInt(localStorage.getItem(WIN_H_KEY) ?? '', 10);
@@ -167,6 +189,53 @@ function AssistantMessage({ message, isStreaming, tick }: { message: Extract<FbM
     );
 }
 
+function makeId(prefix: string): string {
+    return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function splitDataUrl(dataUrl: string): { mimeType: string; data: string } {
+    const match = /^data:([^;,]+);base64,(.*)$/i.exec(dataUrl);
+    return {
+        mimeType: match?.[1] ?? 'image/png',
+        data: match?.[2] ?? dataUrl.split(',')[1] ?? '',
+    };
+}
+
+function readFileAsDataUrl(file: File): Promise<string> {
+    return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(String(reader.result ?? ''));
+        reader.onerror = reject;
+        reader.readAsDataURL(file);
+    });
+}
+
+async function fileToImageDraft(file: File): Promise<FbImageDraft> {
+    const previewUrl = await readFileAsDataUrl(file);
+    const { mimeType, data } = splitDataUrl(previewUrl);
+    return {
+        id: makeId('img'),
+        name: file.name || 'image.png',
+        mimeType: file.type || mimeType,
+        size: file.size,
+        data,
+        previewUrl,
+    };
+}
+
+function shotToImageDraft(shot: FbShot): FbImageDraft {
+    const { mimeType, data } = splitDataUrl(shot.dataUrl);
+    const ext = mimeType === 'image/jpeg' || mimeType === 'image/jpg' ? 'jpg' : 'png';
+    return {
+        id: makeId('shot'),
+        name: `screenshot-${new Date().toISOString().replace(/[:.]/g, '-')}.${ext}`,
+        mimeType,
+        size: Math.floor(data.length * 0.75),
+        data,
+        previewUrl: shot.dataUrl,
+    };
+}
+
 export default function CompanionWindow() {
     // `mode` drives rendering; `modeRef` mirrors it for event handlers and the
     // session hook. The ref is written ONLY inside applyMode (every mode
@@ -175,18 +244,22 @@ export default function CompanionWindow() {
     const modeRef = useRef<FbMode>('hidden');
 
     const session = useFloatingSession(modeRef);
+    const fileService = useWorkspaceFileService(session.workspacePath);
+    const toast = useToast();
+    const { openPreview } = useImagePreview();
     // ⚠️ 稳定性纪律（review critical）：`session` 是每渲染新对象——监听 effect
     // 的依赖链只能挂这些 useCallback 稳定函数，否则流式期间每个 chunk 都会
     // 重订阅 Tauri listener，abort↔listen 的异步空窗会静默吞掉跨窗口事件。
     const { markRead, rotateIfStale, send, suspend, resume } = session;
 
     const [quote, setQuote] = useState<string | null>(null);
-    const [shot, setShot] = useState<FbShot | null>(null);
-    const [shotPreview, setShotPreview] = useState(false); // 缩略图点开的大图
+    const [imageDrafts, setImageDrafts] = useState<FbImageDraft[]>([]);
     const [who, setWho] = useState<string>('Mino');
     const [input, setInput] = useState('');
     const [axNeeded, setAxNeeded] = useState(false);
     const [showSettings, setShowSettings] = useState(false); // 设置面板（齿轮，D17）
+    const [providerForCapability, setProviderForCapability] = useState<Provider | null>(null);
+    const [isDraggingFiles, setIsDraggingFiles] = useState(false);
 
     const convoRef = useRef<HTMLDivElement | null>(null);
     const inputRef = useRef<HTMLTextAreaElement | null>(null);
@@ -202,6 +275,46 @@ export default function CompanionWindow() {
     }, [hasRunningActivity]);
     // Eager-captured situation（最前台 app/标题）— 发送时随 user 消息走（D4）。
     const lastCtxRef = useRef<FbCtx | null>(null);
+
+    useEffect(() => {
+        let cancelled = false;
+        void (async () => {
+            try {
+                const [config, rawProviders] = await Promise.all([loadAppConfig(), getAllProviders()]);
+                const merged = mergePresetCustomModels(
+                    rawProviders,
+                    config.presetCustomModels,
+                    config.presetRemovedModels,
+                );
+                const withPrimaryOverrides = merged.map((provider) => {
+                    const primaryModel = config.providerPrimaryModels?.[provider.id];
+                    if (!primaryModel || !provider.models?.some((m) => m.model === primaryModel)) return provider;
+                    return { ...provider, primaryModel };
+                });
+                const providers = applyProviderEnablementAndOrder(withPrimaryOverrides, {
+                    providerOrder: config.providerOrder,
+                    disabledProviderIds: config.disabledProviderIds,
+                });
+                if (!cancelled) {
+                    setProviderForCapability(providers.find((p) => p.id === session.providerId) ?? null);
+                }
+            } catch (err) {
+                if (!cancelled) {
+                    console.warn('[fb] failed to resolve provider capabilities:', err);
+                    setProviderForCapability(null);
+                }
+            }
+        })();
+        return () => {
+            cancelled = true;
+        };
+    }, [session.providerId]);
+
+    const canAttachImages = useMemo(() => {
+        if (session.runtime !== 'builtin') return true;
+        const modelId = session.model ?? providerForCapability?.primaryModel ?? null;
+        return modelSupportsModality(providerForCapability, modelId, 'image');
+    }, [providerForCapability, session.model, session.runtime]);
 
     // ── mode → 通知球（球用它决定点击语义）＋ pin 时清未读 ──
     const applyMode = useCallback(
@@ -223,7 +336,6 @@ export default function CompanionWindow() {
             clearTimeout(hideTimerRef.current);
             hideTimerRef.current = null;
         }
-        setShotPreview(false); // 大图预览不跨一次显隐
         setShowSettings(false); // 设置面板不跨一次显隐
         applyMode('hidden');
         void invoke('cmd_fb_hide_companion');
@@ -356,10 +468,6 @@ export default function CompanionWindow() {
                 setShowSettings(false);
                 return;
             }
-            if (shotPreview) {
-                setShotPreview(false);
-                return;
-            }
             hideSelf();
         };
         window.addEventListener('blur', onBlur);
@@ -368,7 +476,7 @@ export default function CompanionWindow() {
             window.removeEventListener('blur', onBlur);
             window.removeEventListener('keydown', onKey);
         };
-    }, [hideSelf, shotPreview, showSettings]);
+    }, [hideSelf, showSettings]);
 
     // ── peek → pin 升格（窗内有效行为 = 激活 + 执行该行为，0612 用户裁决） ──
     // 点击带处境抓取（点击 = "我要说话"）；滚轮只升格不抓处境（滚轮 = "我要
@@ -465,6 +573,231 @@ export default function CompanionWindow() {
         [promoteToPin],
     );
 
+    const insertReferencePaths = useCallback((paths: string[]) => {
+        if (paths.length === 0) return;
+        const insertedText = `${paths.map((path) => `@${path}`).join(' ')} `;
+        setInput((prev) => {
+            const start = inputRef.current?.selectionStart ?? prev.length;
+            const end = inputRef.current?.selectionEnd ?? start;
+            return `${prev.slice(0, start)}${insertedText}${prev.slice(end)}`;
+        });
+        requestAnimationFrame(() => {
+            const el = inputRef.current;
+            if (!el) return;
+            el.focus();
+            el.style.height = 'auto';
+            el.style.height = `${Math.min(el.scrollHeight, 110)}px`;
+        });
+    }, []);
+
+    const addImageDrafts = useCallback((drafts: FbImageDraft[]) => {
+        if (drafts.length === 0) return;
+        const slots = Math.max(0, MAX_IMAGES - imageDrafts.length);
+        if (slots === 0) {
+            toast.warning(`最多只能上传 ${MAX_IMAGES} 张图片`);
+            return;
+        }
+        if (drafts.length > slots) {
+            toast.warning(`最多只能上传 ${MAX_IMAGES} 张图片`);
+        }
+        setImageDrafts((prev) => [...prev, ...drafts.slice(0, Math.max(0, MAX_IMAGES - prev.length))]);
+    }, [imageDrafts.length, toast]);
+
+    const importFilesAsReferences = useCallback(async (files: File[]) => {
+        if (files.length === 0) return;
+        if (!fileService.isAvailable) {
+            toast.error(session.workspacePath ? '无法上传文件：当前为浏览器开发模式，请使用桌面应用' : '无法上传文件：请先选择工作区');
+            return;
+        }
+        try {
+            const base64Files = await Promise.all(
+                files.map(async (file) => ({
+                    name: file.name || 'attachment',
+                    content: splitDataUrl(await readFileAsDataUrl(file)).data,
+                })),
+            );
+            const result = await fileService.importBase64Files({
+                files: base64Files,
+                targetDir: 'myagents_files',
+            });
+            if (!result.success || !result.files || result.files.length === 0) {
+                throw new Error('上传失败');
+            }
+            await fileService.addGitignore({ pattern: 'myagents_files/' }).catch(() => undefined);
+            insertReferencePaths(result.files);
+            toast.success(`已添加 ${result.files.length} 个文件到工作区`);
+        } catch (err) {
+            console.error('[fb] import files failed:', err);
+            toast.error('文件上传失败');
+        }
+    }, [fileService, insertReferencePaths, session.workspacePath, toast]);
+
+    const copyPathsAsReferences = useCallback(async (paths: string[]) => {
+        if (paths.length === 0) return;
+        if (!fileService.isAvailable) {
+            toast.error(session.workspacePath ? '无法处理文件：当前为浏览器开发模式，请使用桌面应用' : '无法处理文件：请先选择工作区');
+            return;
+        }
+        try {
+            const result = await fileService.copyPaths({
+                sourcePaths: paths,
+                targetDir: 'myagents_files',
+                autoRename: true,
+            });
+            if (!result.success || !result.copiedFiles || result.copiedFiles.length === 0) {
+                throw new Error('复制失败');
+            }
+            await fileService.addGitignore({ pattern: 'myagents_files/' }).catch(() => undefined);
+            insertReferencePaths(result.copiedFiles.map((file) => file.targetPath));
+            toast.success(`已添加 ${result.copiedFiles.length} 个文件到工作区`);
+            if (result.errors?.length) {
+                toast.warning(`${result.errors.length} 个文件未能添加`);
+            }
+        } catch (err) {
+            console.error('[fb] copy paths failed:', err);
+            toast.error('文件处理失败');
+        }
+    }, [fileService, insertReferencePaths, session.workspacePath, toast]);
+
+    const processDroppedFiles = useCallback(async (files: File[]) => {
+        if (files.length === 0) return;
+        const imageFiles: File[] = [];
+        const otherFiles: File[] = [];
+        for (const file of files) {
+            if (isImageFile(file.name) || isImageMimeType(file.type)) imageFiles.push(file);
+            else otherFiles.push(file);
+        }
+
+        if (imageFiles.length > 0 && !canAttachImages) {
+            toast.info('当前模型不支持图片输入，已转为文件存入工作区供模型读取');
+            for (const image of imageFiles) otherFiles.push(renameIfBareClipboardImage(image));
+            imageFiles.length = 0;
+        }
+
+        if (imageFiles.length > 0) {
+            const drafts: FbImageDraft[] = [];
+            for (const file of imageFiles) {
+                if (!ALLOWED_IMAGE_MIME_TYPES.includes(file.type)) {
+                    toast.warning(`不支持的图片格式：${file.name}`);
+                    continue;
+                }
+                if (file.size > MAX_IMAGE_SIZE) {
+                    toast.warning(`${file.name} 超过 5MB，已跳过`);
+                    continue;
+                }
+                try {
+                    drafts.push(await fileToImageDraft(file));
+                } catch (err) {
+                    console.warn('[fb] failed to read image file:', err);
+                }
+            }
+            addImageDrafts(drafts);
+        }
+
+        await importFilesAsReferences(otherFiles);
+    }, [addImageDrafts, canAttachImages, importFilesAsReferences, toast]);
+
+    const processDroppedFilePaths = useCallback(async (paths: string[]) => {
+        if (paths.length === 0) return;
+        if (!fileService.isAvailable) {
+            toast.error(session.workspacePath ? '无法处理文件：当前为浏览器开发模式，请使用桌面应用' : '无法处理文件：请先选择工作区');
+            return;
+        }
+
+        const imagePaths: string[] = [];
+        const otherPaths: string[] = [];
+        for (const path of paths) {
+            const filename = path.split(/[\\/]/).pop() || path;
+            if (isImageFile(filename)) imagePaths.push(path);
+            else otherPaths.push(path);
+        }
+
+        if (imagePaths.length > 0 && !canAttachImages) {
+            toast.info('当前模型不支持图片输入，已转为文件存入工作区供模型读取');
+            otherPaths.push(...imagePaths);
+            imagePaths.length = 0;
+        }
+
+        if (imagePaths.length > 0) {
+            try {
+                const readResult = await fileService.readPathsAsBase64({ paths: imagePaths });
+                if (!readResult.success) throw new Error('读取图片失败');
+                const drafts: FbImageDraft[] = [];
+                const fallbackPaths: string[] = [];
+                for (const file of readResult.files ?? []) {
+                    if (!file.data || file.error) {
+                        fallbackPaths.push(file.path);
+                        continue;
+                    }
+                    if (!ALLOWED_IMAGE_MIME_TYPES.includes(file.mimeType)) {
+                        toast.warning(`不支持的图片格式：${file.name}`);
+                        continue;
+                    }
+                    drafts.push({
+                        id: makeId('img'),
+                        name: file.name,
+                        mimeType: file.mimeType,
+                        size: Math.floor(file.data.length * 0.75),
+                        data: file.data,
+                        previewUrl: `data:${file.mimeType};base64,${file.data}`,
+                    });
+                }
+                addImageDrafts(drafts);
+                otherPaths.push(...fallbackPaths);
+            } catch (err) {
+                console.warn('[fb] failed to read dropped images, treating as files:', err);
+                otherPaths.push(...imagePaths);
+            }
+        }
+
+        await copyPathsAsReferences(otherPaths);
+    }, [addImageDrafts, canAttachImages, copyPathsAsReferences, fileService, session.workspacePath, toast]);
+
+    useTauriFileDrop({
+        enabled: mode !== 'hidden',
+        onDragEnter: () => setIsDraggingFiles(true),
+        onDragLeave: () => setIsDraggingFiles(false),
+        onDrop: (paths) => {
+            setIsDraggingFiles(false);
+            void processDroppedFilePaths(paths);
+        },
+    });
+
+    const onInputPaste = useCallback((e: React.ClipboardEvent<HTMLTextAreaElement>) => {
+        const files = Array.from(e.clipboardData.files ?? []);
+        if (files.length === 0) return;
+        e.preventDefault();
+        void processDroppedFiles(files);
+    }, [processDroppedFiles]);
+
+    const onWinDragOver = useCallback((e: React.DragEvent<HTMLDivElement>) => {
+        if (!Array.from(e.dataTransfer.types).includes('Files')) return;
+        e.preventDefault();
+        setIsDraggingFiles(true);
+    }, []);
+
+    const onWinDrop = useCallback((e: React.DragEvent<HTMLDivElement>) => {
+        const files = Array.from(e.dataTransfer.files ?? []);
+        if (files.length === 0) return;
+        e.preventDefault();
+        e.stopPropagation();
+        setIsDraggingFiles(false);
+        void processDroppedFiles(files);
+    }, [processDroppedFiles]);
+
+    const onWinDragLeave = useCallback((e: React.DragEvent<HTMLDivElement>) => {
+        if (e.currentTarget.contains(e.relatedTarget as Node | null)) return;
+        setIsDraggingFiles(false);
+    }, []);
+
+    const removeImageDraft = useCallback((id: string) => {
+        setImageDrafts((prev) => prev.filter((draft) => draft.id !== id));
+    }, []);
+
+    const previewDraft = useCallback((url: string, name: string) => {
+        openPreview(url, name);
+    }, [openPreview]);
+
     // ── 自动滚底（贴底跟随，唯贴底才跟随） ──
     const onConvoScroll = useCallback(() => {
         const el = convoRef.current;
@@ -483,22 +816,34 @@ export default function CompanionWindow() {
     // ── 发送 ──（埋点在 hook 的 send 内、入队成功后才打）
     const doSend = useCallback(async () => {
         const text = input.trim();
-        if (!text || session.busy || !session.ready) return;
+        const drafts = imageDrafts;
+        if ((!text && drafts.length === 0) || session.busy || !session.ready) return;
         stickToBottomRef.current = true; // 发送 = 跟住回复
         setInput('');
+        setImageDrafts([]);
         const q = quote;
-        const s = shot;
         setQuote(null);
-        setShot(null);
-        setShotPreview(false);
         const ctx = lastCtxRef.current;
+        const attachments: FbAttachment[] = drafts.map((draft) => ({
+            id: draft.id,
+            name: draft.name,
+            size: draft.size,
+            mimeType: draft.mimeType,
+            previewUrl: draft.previewUrl,
+            isImage: true,
+        }));
         await send(text, {
             quote: q,
-            screenshotDataUrl: s?.dataUrl ?? null,
+            images: drafts.map((draft) => ({
+                name: draft.name,
+                mimeType: draft.mimeType,
+                data: draft.data,
+            })),
+            attachments,
             appName: ctx?.appName ?? null,
             windowTitle: ctx?.windowTitle ?? null,
         });
-    }, [input, quote, shot, session.busy, session.ready, send]);
+    }, [imageDrafts, input, quote, session.busy, session.ready, send]);
 
     // 输入交互与主对话框同源（用户验收裁决：复用，不自创）：
     // chatSendKey 纯函数承担 Enter/换行语义（含 chatSendShortcut 偏好），
@@ -538,12 +883,27 @@ export default function CompanionWindow() {
     const onShot = useCallback(async () => {
         try {
             const res = await invoke<FbShot>('cmd_fb_screenshot');
-            setShot(res);
+            if (canAttachImages) {
+                addImageDrafts([shotToImageDraft(res)]);
+            } else {
+                toast.info('当前模型不支持图片输入，已转为文件存入工作区供模型读取');
+                const { mimeType, data } = splitDataUrl(res.dataUrl);
+                const ext = mimeType === 'image/jpeg' || mimeType === 'image/jpg' ? 'jpg' : 'png';
+                const fileName = `screenshot-${new Date().toISOString().replace(/[:.]/g, '-')}.${ext}`;
+                const result = await fileService.importBase64Files({
+                    files: [{ name: fileName, content: data }],
+                    targetDir: 'myagents_files',
+                });
+                if (!result.success || !result.files?.length) throw new Error('截图保存失败');
+                await fileService.addGitignore({ pattern: 'myagents_files/' }).catch(() => undefined);
+                insertReferencePaths(result.files);
+            }
             track('floating_ball_summon', { kind: 'screenshot' });
         } catch (err) {
             console.warn('[fb] screenshot failed:', err);
+            toast.error('截图失败');
         }
-    }, []);
+    }, [addImageDrafts, canAttachImages, fileService, insertReferencePaths, toast]);
 
     // ── 展开进主程序（唤起主窗 → 新 Tab 接上这条会话） ──
     const onExpand = useCallback(() => {
@@ -552,9 +912,23 @@ export default function CompanionWindow() {
         void invoke('cmd_fb_open_main_with_session', {
             sessionId: session.sessionId,
             workspacePath: session.workspacePath,
+            previewPath: null,
+            previewLine: null,
         });
         hideSelf();
     }, [session.sessionId, session.workspacePath, hideSelf]);
+
+    const onOpenMyAgentsPreview = useCallback((path: string, options?: { displayPath?: string; initialLineNumber?: number }) => {
+        if (!session.sessionId || !session.workspacePath) return;
+        track('floating_ball_expand', { kind: 'file_preview' });
+        void invoke('cmd_fb_open_main_with_session', {
+            sessionId: session.sessionId,
+            workspacePath: session.workspacePath,
+            previewPath: path,
+            previewLine: options?.initialLineNumber ?? null,
+        });
+        hideSelf();
+    }, [hideSelf, session.sessionId, session.workspacePath]);
 
     // ── AX 授权引导 ──
     const onGrantAx = useCallback(async () => {
@@ -637,14 +1011,17 @@ export default function CompanionWindow() {
         target.addEventListener('pointerup', onUp);
     }, []);
 
-    const sendReady = input.trim().length > 0 && !session.busy && session.ready;
+    const sendReady = (input.trim().length > 0 || imageDrafts.length > 0) && !session.busy && session.ready;
 
     return (
         <div
-            className={`fbw-win ${mode === 'pin' ? 'pin' : 'peek'}${mode === 'hidden' ? ' hidden' : ''}`}
+            className={`fbw-win ${mode === 'pin' ? 'pin' : 'peek'}${mode === 'hidden' ? ' hidden' : ''}${isDraggingFiles ? ' dragging-files' : ''}`}
             onMouseDown={onWinMouseDown}
             onClick={onWinClick}
             onWheel={onWinWheel}
+            onDragOver={onWinDragOver}
+            onDragLeave={onWinDragLeave}
+            onDrop={onWinDrop}
             onMouseEnter={() => {
                 mouseInsideRef.current = true;
                 if (hideTimerRef.current) clearTimeout(hideTimerRef.current);
@@ -669,6 +1046,12 @@ export default function CompanionWindow() {
             </div>
 
             {/* 会话流 */}
+            <FileActionProvider
+                workspacePath={session.workspacePath}
+                onInsertReference={insertReferencePaths}
+                menuProfile="floatingBall"
+                onOpenMyAgentsPreview={onOpenMyAgentsPreview}
+            >
             <div className="fbw-convo" ref={convoRef} onScroll={onConvoScroll}>
                 {!session.ready && !session.error && (
                     <div className="fbw-divider">正在连接 {session.workspaceName}…</div>
@@ -681,7 +1064,15 @@ export default function CompanionWindow() {
                         <div className="fbw-msg user" key={m.id}>
                             <div className="pill">
                                 {m.quote && <div className="q">{m.quote}</div>}
-                                {m.hasShot && <div className="q">📷 屏幕截图</div>}
+                                {m.attachments && m.attachments.length > 0 && (
+                                    <AttachmentPreviewList
+                                        attachments={m.attachments}
+                                        compact
+                                        imageDimensions="h-20"
+                                        className={m.text ? 'mb-2' : ''}
+                                        onPreview={previewDraft}
+                                    />
+                                )}
                                 {m.text}
                             </div>
                         </div>
@@ -720,6 +1111,7 @@ export default function CompanionWindow() {
                     </div>
                 )}
             </div>
+            </FileActionProvider>
 
             {/* 兜底状态行：仅在还没有任何可见反馈（无活动行/无流式文本）时出现 */}
             {session.busy && session.activities.length === 0 && !session.liveMessage && (
@@ -752,28 +1144,22 @@ export default function CompanionWindow() {
                         </button>
                     </div>
                 )}
-                {shot && (
-                    <div className="fbw-quote shot">
-                        <span className="rule" />
-                        <button className="q-thumb" onClick={() => setShotPreview(true)} title="查看大图">
-                            <img src={shot.dataUrl} alt="截图缩略图" draggable={false} />
-                        </button>
-                        <span className="q-text">
-                            {shot.appName
-                                ? `${shot.appName}${shot.windowTitle ? ` — ${shot.windowTitle}` : ''}`
-                                : '屏幕截图 · 刚刚'}
-                        </span>
-                        <button
-                            className="q-x"
-                            onClick={() => {
-                                setShot(null);
-                                setShotPreview(false);
-                            }}
-                            title="去掉截图"
-                        >
-                            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><path d="M18 6L6 18M6 6l12 12" /></svg>
-                        </button>
-                    </div>
+                {imageDrafts.length > 0 && (
+                    <AttachmentPreviewList
+                        attachments={imageDrafts.map((draft) => ({
+                            id: draft.id,
+                            name: draft.name,
+                            size: draft.size,
+                            mimeType: draft.mimeType,
+                            previewUrl: draft.previewUrl,
+                            isImage: true,
+                        }))}
+                        compact
+                        className="fbw-input-attachments"
+                        imageDimensions="h-20"
+                        onRemove={removeImageDraft}
+                        onPreview={previewDraft}
+                    />
                 )}
                 <div className="fbw-inputrow">
                     <textarea
@@ -787,10 +1173,11 @@ export default function CompanionWindow() {
                             if (!isComposingRef.current) resizeInput(e.target);
                         }}
                         onKeyDown={onInputKeyDown}
+                        onPaste={onInputPaste}
                         onCompositionStart={onCompositionStart}
                         onCompositionEnd={onCompositionEnd}
                     />
-                    <button className="cam" onClick={() => void onShot()} title="附上一张截屏（我授意的快门）">
+                    <button className="cam" onClick={() => void onShot()} title="添加屏幕截图">
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z" /><circle cx="12" cy="13" r="4" /></svg>
                     </button>
                     {/* 与主对话框同语义：运行中 = 停止（方块），否则 = 发送（箭头） */}
@@ -810,25 +1197,6 @@ export default function CompanionWindow() {
             <div className="fbw-rz top" onPointerDown={bindResize('top')} title="拖动调节高度" />
             <div className="fbw-rz bottom" onPointerDown={bindResize('bottom')} title="拖动调节高度" />
             <div className="fbw-mv" onPointerDown={onMoveDown} title="拖动移动窗口" />
-
-            {/* 截图大图预览（缩略图点开；Esc/点任意处关闭）。伴侣窗是独立
-                webview、无 Tab 体系，不接 useCloseLayer；遮罩按红线用
-                OverlayBackdrop。圆角跟玻璃容器，遮罩不溢出窗口弧度。 */}
-            {shotPreview && shot && (
-                <OverlayBackdrop
-                    variant="dark"
-                    onClose={() => setShotPreview(false)}
-                    className="z-20 rounded-[24px] cursor-zoom-out"
-                >
-                    <img
-                        src={shot.dataUrl}
-                        alt="屏幕截图"
-                        draggable={false}
-                        className="fbw-shot-full"
-                        onClick={() => setShotPreview(false)}
-                    />
-                </OverlayBackdrop>
-            )}
 
             {/* 设置面板（齿轮，D17）：当前唯一有效内容 = 工作区绑定 + 新对话。
                 遮罩同 lightbox 走 OverlayBackdrop（伴侣窗无 Tab 体系不接

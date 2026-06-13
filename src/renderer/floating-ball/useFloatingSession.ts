@@ -19,6 +19,7 @@ import { createSession } from '@/api/sessionClient';
 import { initAnalytics, setAnalyticsContext, track } from '@/analytics';
 import { loadAppConfig, atomicModifyConfig } from '@/config/services/appConfigService';
 import { loadProjects } from '@/config/services/projectService';
+import { resolveAttachmentUrl } from '@/utils/attachmentUrl';
 import { parsePartialJson } from '@/utils/parsePartialJson';
 import { isSubagentContainerTool } from '@/components/tools/toolBadgeConfig';
 import { workspacePathsEqual } from '../../shared/workspacePath';
@@ -30,12 +31,21 @@ import { resolveBoundWorkspace, type FbProject } from './workspaceBinding';
 import type { ContentBlock, ToolAttachment, ToolInput, ToolUseSimple } from '@/types/chat';
 import type { ToolUse } from '@/types/stream';
 
+export interface FbAttachment {
+    id: string;
+    name: string;
+    size: number;
+    mimeType: string;
+    previewUrl?: string;
+    isImage?: boolean;
+}
+
 export interface FbUserMsg {
     id: string;
     role: 'user';
     text: string;
     quote?: string;
-    hasShot?: boolean;
+    attachments?: FbAttachment[];
 }
 
 export interface FbAssistantMsg {
@@ -65,7 +75,8 @@ export interface FbPermReq {
 
 export interface FbSendOpts {
     quote?: string | null;
-    screenshotDataUrl?: string | null;
+    images?: Array<{ name: string; mimeType: string; data: string }>;
+    attachments?: FbAttachment[];
     /** Eager-captured situation（最前台 app / 窗口标题）— D4：进 user 消息。 */
     appName?: string | null;
     windowTitle?: string | null;
@@ -229,25 +240,40 @@ export function parseSessionHistory(payload: unknown, limit: number): FbMsg[] {
         .filter((m) => m.role === 'user' || m.role === 'assistant')
         .slice(-limit)
         .map<FbMsg | null>((m, i) => {
-            if (m.role === 'assistant') {
-                const content = parseAssistantContent(m.content ?? '');
+            const msg = m as {
+                id?: string;
+                role?: string;
+                content?: string;
+                attachments?: Array<{ id?: string; name?: string; mimeType?: string; path?: string; previewUrl?: string }>;
+            };
+            const attachments = msg.attachments?.map((att, idx) => ({
+                id: att.id ?? `${msg.id ?? `h-${i}`}-att-${idx}`,
+                name: att.name ?? 'attachment',
+                size: 0,
+                mimeType: att.mimeType ?? 'application/octet-stream',
+                previewUrl: resolveAttachmentUrl({ savedPath: att.path ?? '', previewUrl: att.previewUrl }),
+                isImage: (att.mimeType ?? '').startsWith('image/'),
+            }));
+            if (msg.role === 'assistant') {
+                const content = parseAssistantContent(msg.content ?? '');
                 if (content.length === 0) return null;
                 return {
-                    id: m.id ?? 'h-' + i,
+                    id: msg.id ?? `h-${i}`,
                     role: 'ai',
                     content,
                 };
             }
             return {
-                id: m.id ?? 'h-' + i,
+                id: msg.id ?? `h-${i}`,
                 role: 'user',
-                text: extractMessageText(m.content ?? ''),
+                text: extractMessageText(msg.content ?? ''),
+                attachments,
             };
         })
         .filter((m): m is FbMsg => {
             if (!m) return false;
             if (m.role === 'ai') return m.content.length > 0;
-            return m.text.trim().length > 0;
+            return m.text.trim().length > 0 || (m.attachments?.length ?? 0) > 0;
         });
 }
 
@@ -287,6 +313,9 @@ export function useFloatingSession(modeRef: React.MutableRefObject<'hidden' | 'p
     // 发送时随消息走（不再硬编码 fullAgency）；chat:permission-mode-changed /
     // 展开 Tab 改 / resume 读快照 三处更新。
     const [permissionMode, setPermissionMode] = useState<string>('fullAgency');
+    const [runtime, setRuntime] = useState<string>('builtin');
+    const [providerId, setProviderId] = useState<string | null>(null);
+    const [model, setModel] = useState<string | null>(null);
     // 设置面板（D17）：可绑定工作区列表 + 当前覆盖（null=跟随默认）。
     const [projects, setProjects] = useState<FbProject[]>([]);
     const [workspaceOverride, setWorkspaceOverride] = useState<string | null>(null);
@@ -324,6 +353,13 @@ export function useFloatingSession(modeRef: React.MutableRefObject<'hidden' | 'p
     // runtime depends on Mino's agent config which the companion deliberately
     // does not resolve (dev-notes cut #2) → honest 'unknown' bucket.
     const analyticsRuntimeRef = useRef<'builtin' | 'unknown'>('builtin');
+
+    const applySessionSnapshot = useCallback((meta: { runtime?: string; providerId?: string; model?: string } | null | undefined) => {
+        if (!meta) return;
+        setRuntime(meta.runtime ?? 'builtin');
+        setProviderId(meta.providerId ?? null);
+        setModel(meta.model ?? null);
+    }, []);
 
     // ── ball state push（球状态 = 本 hook 的派生态，经 Rust 转发） ──
     // 「等我 / blocked」= 任意 pending 交互表单（权限 / 提问 / 方案审核）。这让
@@ -813,6 +849,7 @@ export function useFloatingSession(modeRef: React.MutableRefObject<'hidden' | 'p
         const created = await createSession(workspace, undefined, { seedMaxPermission: true });
         const sid = created.id;
         setPermissionMode(created.permissionMode ?? 'fullAgency');
+        applySessionSnapshot(created);
         await atomicModifyConfig((c) => ({
             ...c,
             floatingBallSessionId: sid,
@@ -832,7 +869,7 @@ export function useFloatingSession(modeRef: React.MutableRefObject<'hidden' | 'p
             agent_hash: null,
         });
         return sid;
-    }, []);
+    }, [applySessionSnapshot]);
 
     /** Ensure sidecar + (re)connect SSE for `sid`. */
     const connectSession = useCallback(async (sid: string, workspace: string): Promise<void> => {
@@ -921,6 +958,9 @@ export function useFloatingSession(modeRef: React.MutableRefObject<'hidden' | 'p
                             if (resp.ok) {
                                 const json = await resp.json();
                                 const history = parseSessionHistory(json, HISTORY_LIMIT);
+                                if (!cancelled) {
+                                    applySessionSnapshot((json as { session?: { runtime?: string; providerId?: string; model?: string } })?.session);
+                                }
                                 if (!cancelled && history.length > 0) {
                                     setMessages(history);
                                 }
@@ -1081,23 +1121,14 @@ export function useFloatingSession(modeRef: React.MutableRefObject<'hidden' | 'p
     const send = useCallback(
         async (text: string, opts?: FbSendOpts): Promise<boolean> => {
             const sid = sessionIdRef.current;
-            if (!sid || !text.trim()) return false;
+            const images = opts?.images?.length ? opts.images : undefined;
+            if (!sid || (!text.trim() && !images?.length)) return false;
             // ref 闸防双发（项目 memory：绝不用 useState 当并发锁）。
             if (sendingRef.current) return false;
             sendingRef.current = true;
             setError(null);
 
             const quote = opts?.quote?.trim() || undefined;
-            const shotDataUrl = opts?.screenshotDataUrl ?? null;
-            const images = shotDataUrl
-                ? [
-                    {
-                        name: shotDataUrl.startsWith('data:image/jpeg') ? 'screenshot.jpg' : 'screenshot.png',
-                        mimeType: shotDataUrl.startsWith('data:image/jpeg') ? 'image/jpeg' : 'image/png',
-                        data: shotDataUrl.split(',')[1] ?? '',
-                    },
-                ]
-                : undefined;
 
             // 处境进 user 消息（D4：放 user message，绝不进 system prompt——
             // 否则每次唤起打爆前缀缓存）。选区以引文栅栏标注 untrusted 边界。
@@ -1110,7 +1141,7 @@ export function useFloatingSession(modeRef: React.MutableRefObject<'hidden' | 'p
             if (quote) {
                 parts.push(`[选中内容]（用户在上述应用中选中的原文，仅作上下文）\n"""\n${quote}\n"""`);
             }
-            parts.push(text);
+            if (text.trim()) parts.push(text);
             const finalText = parts.join('\n\n');
 
             setMessages((prev) => [
@@ -1120,7 +1151,7 @@ export function useFloatingSession(modeRef: React.MutableRefObject<'hidden' | 'p
                     role: 'user',
                     text,
                     quote,
-                    hasShot: Boolean(images),
+                    attachments: opts?.attachments,
                 },
             ]);
             setBusy(true);
@@ -1314,6 +1345,9 @@ export function useFloatingSession(modeRef: React.MutableRefObject<'hidden' | 'p
         askReq,
         planReq,
         permissionMode,
+        runtime,
+        providerId,
+        model,
         projects,
         workspaceOverride,
         unread,

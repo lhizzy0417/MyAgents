@@ -8,6 +8,7 @@ const mocks = vi.hoisted(() => ({
   openInFinder: vi.fn(),
   readPreview: vi.fn(),
   onInsertReference: vi.fn(),
+  onOpenMyAgentsPreview: vi.fn(),
   writeText: vi.fn(),
 }));
 
@@ -37,6 +38,19 @@ const ABS = `${WORKSPACE}/${REL}`;
 function renderMarkdown(markdown: string) {
   render(
     <FileActionProvider workspacePath={WORKSPACE} onInsertReference={mocks.onInsertReference}>
+      <Markdown>{markdown}</Markdown>
+    </FileActionProvider>,
+  );
+}
+
+function renderFloatingMarkdown(markdown: string) {
+  render(
+    <FileActionProvider
+      workspacePath={WORKSPACE}
+      onInsertReference={mocks.onInsertReference}
+      menuProfile="floatingBall"
+      onOpenMyAgentsPreview={mocks.onOpenMyAgentsPreview}
+    >
       <Markdown>{markdown}</Markdown>
     </FileActionProvider>,
   );
@@ -121,5 +135,23 @@ describe('Markdown inline-code file paths', () => {
     fireEvent.click(screen.getByText('复制'));
     // Copies exactly the shown text (relative here, as the model wrote it).
     expect(mocks.writeText).toHaveBeenCalledWith(REL);
+  });
+
+  it('uses the floating-ball four-action menu profile', async () => {
+    mocks.checkPaths.mockResolvedValue({ results: { [REL]: { exists: true, type: 'file' } } });
+    renderFloatingMarkdown(`v4 已存到 \`${REL}\` 。`);
+
+    const chip = await waitFor(() => {
+      const el = screen.getByText(REL);
+      expect(el).toHaveClass('cursor-pointer');
+      return el;
+    });
+    fireEvent.click(chip);
+
+    const labels = screen.getAllByRole('button').map((b) => b.textContent);
+    expect(labels).toEqual(['复制', '引用', '打开所在文件夹', '打开 MyAgents 预览']);
+
+    fireEvent.click(screen.getByText('打开 MyAgents 预览'));
+    expect(mocks.onOpenMyAgentsPreview).toHaveBeenCalledWith(REL, { displayPath: REL });
   });
 });

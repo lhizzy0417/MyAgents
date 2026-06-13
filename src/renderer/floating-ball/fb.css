@@ -486,6 +486,13 @@ html.fb-transparent #root {
   flex: none;
   transition: opacity 280ms ease;
 }
+.fbw-win.dragging-files .fbw-inputarea {
+  background: var(--paper-elevated);
+}
+.fbw-input-attachments {
+  margin-bottom: 10px;
+  padding-bottom: 1px;
+}
 .fbw-quote {
   display: flex;
   align-items: flex-start;

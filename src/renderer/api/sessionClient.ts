@@ -79,6 +79,13 @@ export interface SessionMessage {
     role: 'user' | 'assistant';
     content: string;
     timestamp: string;
+    attachments?: Array<{
+        id: string;
+        name: string;
+        mimeType: string;
+        path: string;
+        previewUrl?: string;
+    }>;
     usage?: MessageUsage;
     toolCount?: number;
     durationMs?: number;

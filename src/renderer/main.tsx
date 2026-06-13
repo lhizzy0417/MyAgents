@@ -62,9 +62,13 @@ if (tauriWindowLabel === 'fb-ball') {
   document.documentElement.classList.add('fb-transparent');
   root.render(
     <AppErrorBoundary>
-      <React.Suspense fallback={null}>
-        <CompanionWindow />
-      </React.Suspense>
+      <ToastProvider>
+        <ImagePreviewProvider>
+          <React.Suspense fallback={null}>
+            <CompanionWindow />
+          </React.Suspense>
+        </ImagePreviewProvider>
+      </ToastProvider>
     </AppErrorBoundary>
   );
 } else {

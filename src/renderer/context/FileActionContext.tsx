@@ -6,7 +6,7 @@
  *
  * Only provided inside Chat; Settings / other pages get null from useFileAction().
  */
-import { AtSign, Copy, ExternalLink, Eye, FolderOpen, LocateFixed } from 'lucide-react';
+import { AtSign, Copy, ExternalLink, Eye, FolderOpen, LocateFixed, PanelRightOpen } from 'lucide-react';
 import {
   createContext,
   lazy,
@@ -90,6 +90,15 @@ interface FileActionProviderProps {
    *  ancestors + select + scroll into view). Reuses the same mechanism as the
    *  search panel's「在文件目录中展示」. When omitted, the menu item is hidden. */
   onRevealInTree?: (path: string) => void;
+  /** Menu surface. Default keeps the full Chat menu; floatingBall uses the
+   *  companion-specific four-action menu requested for the mini window. */
+  menuProfile?: 'default' | 'floatingBall';
+  /** Floating-ball only: raise MyAgents, focus the session tab, and open the
+   *  given workspace-relative file in the main preview surface. */
+  onOpenMyAgentsPreview?: (
+    path: string,
+    options?: { displayPath?: string; initialLineNumber?: number },
+  ) => void;
 }
 
 // ---------- Context ----------
@@ -109,7 +118,7 @@ export function useFileLinkAction(): FileLinkActionContextValue | null {
 
 const BATCH_DELAY_MS = 50;
 
-export function FileActionProvider({ children, workspacePath, onInsertReference, refreshTrigger, onFilePreviewExternal, onQuoteFile, onQuoteSelection, onRevealInTree }: FileActionProviderProps) {
+export function FileActionProvider({ children, workspacePath, onInsertReference, refreshTrigger, onFilePreviewExternal, onQuoteFile, onQuoteSelection, onRevealInTree, menuProfile = 'default', onOpenMyAgentsPreview }: FileActionProviderProps) {
   const fileService = useWorkspaceFileService(workspacePath);
   const { openPreview: openImagePreview } = useImagePreview();
 
@@ -129,6 +138,9 @@ export function FileActionProvider({ children, workspacePath, onInsertReference,
 
   const onRevealInTreeRef = useRef(onRevealInTree);
   onRevealInTreeRef.current = onRevealInTree;
+
+  const onOpenMyAgentsPreviewRef = useRef(onOpenMyAgentsPreview);
+  onOpenMyAgentsPreviewRef.current = onOpenMyAgentsPreview;
 
   // Stabilise fileService so async closures see the latest service without
   // re-binding callbacks. Mirrors the React-stability rules pattern used
@@ -365,6 +377,16 @@ export function FileActionProvider({ children, workspacePath, onInsertReference,
     if (!fileServiceRef.current.isAvailable) return false;
     const target = resolveWorkspaceFileLinkTarget(href, workspacePath);
     if (!target) return false;
+    if (menuProfile === 'floatingBall' && onOpenMyAgentsPreviewRef.current) {
+      const fileName = target.path.split(/[/\\]/).pop() ?? target.path;
+      if (isPreviewable(fileName) || !!getRichDocKind(fileName)) {
+        onOpenMyAgentsPreviewRef.current(target.path, {
+          displayPath: href,
+          initialLineNumber: target.initialLineNumber,
+        });
+        return true;
+      }
+    }
     if (handlePreview(target.path, { initialLineNumber: target.initialLineNumber })) {
       return true;
     }
@@ -372,7 +394,7 @@ export function FileActionProvider({ children, workspacePath, onInsertReference,
       console.error('[FileAction] Failed to open file link with default app:', err);
     });
     return true;
-  }, [handlePreview, workspacePath]);
+  }, [handlePreview, menuProfile, workspacePath]);
 
   const handleReference = useCallback((path: string) => {
     onInsertReferenceRef.current?.([path]);
@@ -400,12 +422,47 @@ export function FileActionProvider({ children, workspacePath, onInsertReference,
     onRevealInTreeRef.current?.(path);
   }, []);
 
+  const handleOpenMyAgentsPreview = useCallback((path: string, displayPath?: string): void => {
+    onOpenMyAgentsPreviewRef.current?.(path, { displayPath });
+  }, []);
+
   // Build menu items
   const menuItems = useMemo((): ContextMenuItem[] => {
     if (!menuState) return [];
     const { path, pathType, displayPath } = menuState;
     const fileName = path.split('/').pop() ?? path;
     const items: ContextMenuItem[] = [];
+
+    if (menuProfile === 'floatingBall') {
+      const canOpenMyAgentsPreview =
+        pathType === 'file' &&
+        !!onOpenMyAgentsPreviewRef.current &&
+        (isPreviewable(fileName) || !!getRichDocKind(fileName));
+
+      return [
+        {
+          label: '复制',
+          icon: <Copy className="h-4 w-4" />,
+          onClick: () => handleCopyPath(displayPath),
+        },
+        {
+          label: '引用',
+          icon: <AtSign className="h-4 w-4" />,
+          onClick: () => handleReference(path),
+        },
+        {
+          label: '打开所在文件夹',
+          icon: <FolderOpen className="h-4 w-4" />,
+          onClick: () => handleOpenInFinder(path),
+        },
+        {
+          label: '打开 MyAgents 预览',
+          icon: <PanelRightOpen className="h-4 w-4" />,
+          disabled: !canOpenMyAgentsPreview,
+          onClick: () => handleOpenMyAgentsPreview(path, displayPath),
+        },
+      ];
+    }
 
     if (pathType === 'file') {
       const canPreview = isPreviewable(fileName) || isImageFile(fileName) || !!getRichDocKind(fileName);
@@ -452,7 +509,7 @@ export function FileActionProvider({ children, workspacePath, onInsertReference,
     }
 
     return items;
-  }, [menuState, handlePreview, handleCopyPath, handleReference, handleOpenWithDefault, handleOpenInFinder, handleRevealInTree]);
+  }, [menuState, menuProfile, handlePreview, handleCopyPath, handleReference, handleOpenWithDefault, handleOpenInFinder, handleRevealInTree, handleOpenMyAgentsPreview]);
 
   // ---------- Context value ----------
   const contextValue = useMemo<FileActionContextValue>(() => ({

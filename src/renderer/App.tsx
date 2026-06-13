@@ -53,7 +53,7 @@ import {
   isProjectVisibleToUser,
   type Project,
 } from '@/config/types';
-import { type Tab, type InitialMessage, type SidecarConfigDisposition, createNewTab, getFolderName, buildChatFlipPatch, MAX_TABS } from '@/types/tab';
+import { type Tab, type InitialMessage, type SidecarConfigDisposition, type FilePreviewIntent, createNewTab, getFolderName, buildChatFlipPatch, MAX_TABS } from '@/types/tab';
 import { buildRestoredTabs, saveOpenTabs, hydratePersistedState, pickDurableOverride, shouldOfferRestore, planRestoreTabs } from '@/utils/tabPersistence';
 import { persistOpenTabsDurable, loadAndClearOpenTabsDurable, clearOpenTabsDurable } from '@/utils/tabPersistenceDurable';
 import { consumeCleanExitMarker } from '@/utils/lastExitMarker';
@@ -157,6 +157,7 @@ interface TabContentProps {
   onUpdateSessionId: (tabId: string, newSessionId: string) => Promise<void>;
   onClearInitialMessage: (tabId: string) => void;
   onSidecarConfigAdopted: (tabId: string) => void;
+  onFilePreviewIntentConsumed?: (tabId: string, intentId: string) => void;
   // Settings callbacks
   onSettingsSectionChange: () => void;
   updateReady: boolean;
@@ -179,7 +180,7 @@ export const MemoizedTabContent = memo(function TabContent({
   tab, isActive, isLoading, error, isDeferredMount,
   onLaunchProject, onBack, onSwitchSession, onOpenSessionInNewTab, onNewSession,
   onUpdateGenerating, onUpdateTitle, onUpdateUnread, onRenameSession, onForkSession, onUpdateSessionId, onClearInitialMessage,
-  onSidecarConfigAdopted,
+  onSidecarConfigAdopted, onFilePreviewIntentConsumed,
   settingsInitialSection, settingsInitialMcpId, settingsInitialSelect, onSettingsSectionChange,
   updateReady, updateVersion, updateChecking, updateDownloading, updateInstalling, updatePreparing,
   onCheckForUpdate, onRestartAndUpdate,
@@ -254,6 +255,8 @@ export const MemoizedTabContent = memo(function TabContent({
               onInitialMessageConsumed={() => onClearInitialMessage(tab.id)}
               sidecarConfigDisposition={tab.sidecarConfigDisposition}
               onSidecarConfigAdopted={() => onSidecarConfigAdopted(tab.id)}
+              pendingFilePreview={tab.pendingFilePreview}
+              onFilePreviewIntentConsumed={(intentId) => onFilePreviewIntentConsumed?.(tab.id, intentId)}
               sessionTitle={tab.title}
               onRenameSession={(newTitle: string) => onRenameSession(tab.id, newTitle)}
               onForkSession={(newSessionId: string, agentDir: string, title: string, initialMessage?: string) => onForkSession(tab.id, newSessionId, agentDir, title, initialMessage)}
@@ -763,15 +766,19 @@ export default function App() {
       // emits this; re-dispatch onto the existing OPEN_SESSION_IN_NEW_TAB
       // DOM-event path so the companion's session opens via the same
       // cron-aware plan→spawn flow as the task center.
-      void listenWithCleanup<{ sessionId: string; workspacePath: string }>(
+      void listenWithCleanup<{
+        sessionId: string;
+        workspacePath: string;
+        preview?: { path?: string; initialLineNumber?: number };
+      }>(
         'fb:open-session',
         (event) => {
           if (!mountedRef.current) return;
-          const { sessionId, workspacePath } = event.payload ?? {};
+          const { sessionId, workspacePath, preview } = event.payload ?? {};
           if (!sessionId || !workspacePath) return;
           window.dispatchEvent(
             new CustomEvent(CUSTOM_EVENTS.OPEN_SESSION_IN_NEW_TAB, {
-              detail: { sessionId, workspacePath },
+              detail: { sessionId, workspacePath, preview },
             }),
           );
         },
@@ -1627,6 +1634,14 @@ export default function App() {
     ));
   }, []);
 
+  const handleFilePreviewIntentConsumed = useCallback((tabId: string, intentId: string) => {
+    setTabs(prev => prev.map(t =>
+      t.id === tabId && t.pendingFilePreview?.id === intentId
+        ? { ...t, pendingFilePreview: undefined }
+        : t
+    ));
+  }, []);
+
   // Rename session: update tab title + persist to backend + notify listeners
   const handleRenameSession = useCallback((tabId: string, newTitle: string) => {
     updateTabTitle(tabId, newTitle);
@@ -1696,7 +1711,7 @@ export default function App() {
     sessionId: string,
     sessionAgentDir: string,
     title: string,
-    opts?: { preserveCronActivation?: boolean },
+    opts?: { preserveCronActivation?: boolean; pendingFilePreview?: FilePreviewIntent },
   ): Promise<boolean> => {
     if (tabsRef.current.length >= MAX_TABS) {
       toastRef.current.error('标签页已达上限，请关闭一个后重试');
@@ -1708,6 +1723,7 @@ export default function App() {
       sessionId,
       view: 'chat',
       title,
+      ...(opts?.pendingFilePreview ? { pendingFilePreview: opts.pendingFilePreview } : {}),
       // Existing session pre-mounted before ensure → 'pending'; the post-ensure
       // step below resolves push|adopt from result.isNew (no stomp on a join).
       sidecarConfigDisposition: 'pending',
@@ -2801,9 +2817,17 @@ export default function App() {
       const event = raw as CustomEvent<{
         sessionId: string;
         workspacePath: string;
+        preview?: { path?: string; initialLineNumber?: number };
       }>;
-      const { sessionId, workspacePath } = event.detail ?? {};
+      const { sessionId, workspacePath, preview } = event.detail ?? {};
       if (!sessionId || !workspacePath) return;
+      const pendingFilePreview: FilePreviewIntent | undefined = preview?.path
+        ? {
+          id: `fp-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+          path: preview.path,
+          ...(preview.initialLineNumber ? { initialLineNumber: preview.initialLineNumber } : {}),
+        }
+        : undefined;
 
       const workspace = configProjectsRef.current.find(
         (p) => workspacePathsEqual(p.path, workspacePath),
@@ -2831,6 +2855,11 @@ export default function App() {
       });
       if (plan.type === 'jump-to-tab') {
         // Already open → switch to it (don't duplicate, don't block on MAX_TABS).
+        if (pendingFilePreview) {
+          setTabs((prev) => prev.map((t) =>
+            t.id === plan.tabId ? { ...t, pendingFilePreview } : t,
+          ));
+        }
         setActiveTabId(plan.tabId);
         return;
       }
@@ -2838,7 +2867,10 @@ export default function App() {
         sessionId,
         workspace.path,
         workspace.displayName || getFolderName(workspace.path),
-        { preserveCronActivation: plan.type === 'attach-existing-sidecar' },
+        {
+          preserveCronActivation: plan.type === 'attach-existing-sidecar',
+          pendingFilePreview,
+        },
       );
     };
     window.addEventListener(CUSTOM_EVENTS.OPEN_SESSION_IN_NEW_TAB, handler);
@@ -3132,6 +3164,7 @@ export default function App() {
             onUpdateSessionId={updateTabSessionId}
             onClearInitialMessage={clearInitialMessage}
             onSidecarConfigAdopted={markSidecarConfigAdopted}
+            onFilePreviewIntentConsumed={handleFilePreviewIntentConsumed}
             settingsInitialSection={tab.view === 'settings' ? settingsInitialSection : undefined}
             settingsInitialMcpId={tab.view === 'settings' ? settingsInitialMcpId : undefined}
             settingsInitialSelect={tab.view === 'settings' ? settingsInitialSelect : undefined}

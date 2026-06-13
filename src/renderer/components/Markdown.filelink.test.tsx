@@ -7,6 +7,7 @@ const mocks = vi.hoisted(() => ({
   readPreview: vi.fn(),
   readFileAsBlobUrl: vi.fn(),
   openWithDefault: vi.fn(),
+  onOpenMyAgentsPreview: vi.fn(),
 }));
 
 vi.mock('@/utils/openExternal', async () => {
@@ -48,6 +49,18 @@ function renderMarkdown(markdown: string, onFilePreviewExternal = vi.fn()) {
     </FileActionProvider>,
   );
   return { onFilePreviewExternal };
+}
+
+function renderFloatingMarkdown(markdown: string) {
+  render(
+    <FileActionProvider
+      workspacePath={WORKSPACE}
+      menuProfile="floatingBall"
+      onOpenMyAgentsPreview={mocks.onOpenMyAgentsPreview}
+    >
+      <Markdown>{markdown}</Markdown>
+    </FileActionProvider>,
+  );
 }
 
 describe('Markdown local file links', () => {
@@ -111,5 +124,23 @@ describe('Markdown local file links', () => {
       expect(mocks.openWithDefault).toHaveBeenCalledWith({ path: 'dist/archive.zip' });
     });
     expect(mocks.openExternal).not.toHaveBeenCalled();
+  });
+
+  it('opens previewable workspace links through the floating-ball MyAgents preview bridge', () => {
+    renderFloatingMarkdown(
+      `[Message.tsx](${WORKSPACE}/src/renderer/components/Message.tsx:42)`,
+    );
+
+    fireEvent.click(screen.getByRole('link', { name: 'Message.tsx' }));
+
+    expect(mocks.onOpenMyAgentsPreview).toHaveBeenCalledWith(
+      'src/renderer/components/Message.tsx',
+      {
+        displayPath: `${WORKSPACE}/src/renderer/components/Message.tsx:42`,
+        initialLineNumber: 42,
+      },
+    );
+    expect(mocks.readPreview).not.toHaveBeenCalled();
+    expect(mocks.openWithDefault).not.toHaveBeenCalled();
   });
 });

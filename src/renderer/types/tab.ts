@@ -97,6 +97,13 @@ export interface InitialMessage {
  */
 export type SidecarConfigDisposition = 'pending' | 'push' | 'adopt';
 
+/** Runtime-only request for Chat to open a workspace file once after mount/activation. */
+export interface FilePreviewIntent {
+    id: string;
+    path: string;
+    initialLineNumber?: number;
+}
+
 export interface Tab {
     id: string;
     agentDir: string | null;  // null = showing Launcher
@@ -117,6 +124,9 @@ export interface Tab {
      *  initial active-tab activation) opens it. Cleared by
      *  App.activateRestoredTab once its sidecar is ensured. See PRD 0.2.25. */
     restoreState?: 'cold';
+    /** Runtime-only (never persisted). Set by floating-ball path actions to
+     *  ask the target Chat tab to open a workspace file in its preview surface. */
+    pendingFilePreview?: FilePreviewIntent;
 }
 
 export interface TabState {

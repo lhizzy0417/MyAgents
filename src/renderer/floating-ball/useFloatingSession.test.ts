@@ -105,6 +105,42 @@ describe('parseSessionHistory', () => {
         expect(out.map((m) => (m.role === 'user' ? m.text : m.content[0]?.text))).toEqual(['2', '3']);
     });
 
+    it('keeps image-only user messages when they have persisted attachments', () => {
+        const payload = wrap([
+            {
+                id: 'u-img',
+                role: 'user',
+                content: '',
+                attachments: [
+                    {
+                        id: 'att-1',
+                        name: 'screenshot.png',
+                        mimeType: 'image/png',
+                        path: 'session-a/screenshot.png',
+                    },
+                ],
+            },
+        ]);
+
+        const out = parseSessionHistory(payload, 50);
+        expect(out).toHaveLength(1);
+        expect(out[0]).toMatchObject({
+            id: 'u-img',
+            role: 'user',
+            text: '',
+            attachments: [
+                {
+                    id: 'att-1',
+                    name: 'screenshot.png',
+                    mimeType: 'image/png',
+                    isImage: true,
+                },
+            ],
+        });
+        if (out[0].role !== 'user') throw new Error('expected user message');
+        expect(out[0].attachments?.[0]?.previewUrl).toContain('/attachment/session-a/screenshot.png');
+    });
+
     it('tolerates null / malformed payloads', () => {
         expect(parseSessionHistory(null, 10)).toEqual([]);
         expect(parseSessionHistory({ session: {} }, 10)).toEqual([]);

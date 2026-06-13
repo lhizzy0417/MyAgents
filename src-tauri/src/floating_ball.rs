@@ -92,8 +92,7 @@ pub fn load_fb_config() -> FbConfig {
     let Ok(content) = std::fs::read_to_string(dir.join("config.json")) else {
         return FbConfig::default();
     };
-    let Ok(cfg) =
-        serde_json::from_str::<serde_json::Value>(crate::utils::bom::strip_bom(&content))
+    let Ok(cfg) = serde_json::from_str::<serde_json::Value>(crate::utils::bom::strip_bom(&content))
     else {
         return FbConfig::default();
     };
@@ -119,11 +118,11 @@ mod imp {
     use serde::Serialize;
     use std::path::PathBuf;
     use tauri::{
-        AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, WebviewUrl,
-        WebviewWindowBuilder,
+        AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, WebviewUrl, WebviewWindowBuilder,
     };
-    use tauri_nspanel::{tauri_panel, CollectionBehavior, ManagerExt, PanelLevel, StyleMask,
-        WebviewWindowExt};
+    use tauri_nspanel::{
+        tauri_panel, CollectionBehavior, ManagerExt, PanelLevel, StyleMask, WebviewWindowExt,
+    };
 
     pub const BALL_LABEL: &str = "fb-ball";
     pub const COMPANION_LABEL: &str = "fb-companion";
@@ -171,9 +170,15 @@ mod imp {
         std::sync::atomic::AtomicBool::new(false);
 
     fn mouse_in_window(win: &tauri::WebviewWindow, mouse_top_left: (f64, f64)) -> bool {
-        let Ok(scale) = win.scale_factor() else { return false };
-        let Ok(pos) = win.outer_position() else { return false };
-        let Ok(size) = win.outer_size() else { return false };
+        let Ok(scale) = win.scale_factor() else {
+            return false;
+        };
+        let Ok(pos) = win.outer_position() else {
+            return false;
+        };
+        let Ok(size) = win.outer_size() else {
+            return false;
+        };
         let pos = pos.to_logical::<f64>(scale);
         let size = size.to_logical::<f64>(scale);
         let (mx, my) = mouse_top_left;
@@ -236,7 +241,9 @@ mod imp {
                 if !dispatched {
                     break;
                 }
-                let Ok((ball_in, comp_in)) = rx.recv() else { break };
+                let Ok((ball_in, comp_in)) = rx.recv() else {
+                    break;
+                };
                 if let Some(inside) = ball_in {
                     if inside != ball_inside {
                         ball_inside = inside;
@@ -309,10 +316,8 @@ mod imp {
             let ms = m.scale_factor();
             let mp = m.position().to_logical::<f64>(ms);
             let msz = m.size().to_logical::<f64>(ms);
-            let inside = cx >= mp.x
-                && cx < mp.x + msz.width
-                && cy >= mp.y
-                && cy < mp.y + msz.height;
+            let inside =
+                cx >= mp.x && cx < mp.x + msz.width && cy >= mp.y && cy < mp.y + msz.height;
             if inside {
                 return Some(m);
             }
@@ -339,8 +344,8 @@ mod imp {
     /// Work area of the monitor the ball lives on (logical coordinates),
     /// falling back to the primary monitor.
     fn work_area(app: &AppHandle) -> Option<(f64, f64, f64, f64)> {
-        let monitor = monitor_for_ball_center(app)
-            .or_else(|| app.primary_monitor().ok().flatten())?;
+        let monitor =
+            monitor_for_ball_center(app).or_else(|| app.primary_monitor().ok().flatten())?;
         Some(monitor_work_area(&monitor))
     }
 
@@ -486,7 +491,11 @@ mod imp {
         // Re-enable after a disable: tell the companion to re-acquire its
         // sidecar owner + SSE. On the very first enable the companion webview
         // may not have listeners yet — harmless, its boot path covers that.
-        let _ = app.emit_to(COMPANION_LABEL, "fb:lifecycle", serde_json::json!({ "active": true }));
+        let _ = app.emit_to(
+            COMPANION_LABEL,
+            "fb:lifecycle",
+            serde_json::json!({ "active": true }),
+        );
         start_hover_poller(app);
         ulog_info!("[fb] floating ball enabled");
         Ok(())
@@ -528,11 +537,17 @@ mod imp {
 
     /// Compute + apply the companion's dock-aware position next to the ball.
     fn position_companion_near_ball(app: &AppHandle, companion: &tauri::WebviewWindow) {
-        let Some(ball) = app.get_webview_window(BALL_LABEL) else { return };
+        let Some(ball) = app.get_webview_window(BALL_LABEL) else {
+            return;
+        };
         let scale = ball.scale_factor().unwrap_or(2.0);
-        let Ok(bpos) = ball.outer_position() else { return };
+        let Ok(bpos) = ball.outer_position() else {
+            return;
+        };
         let bpos = bpos.to_logical::<f64>(scale);
-        let Ok(csize) = companion.outer_size() else { return };
+        let Ok(csize) = companion.outer_size() else {
+            return;
+        };
         let csize = csize.to_logical::<f64>(scale);
         let (ax, ay, aw, ah) = work_area(app).unwrap_or((0.0, 28.0, 1440.0, 872.0));
 
@@ -678,7 +693,11 @@ mod imp {
         // Peek: visible but never key — D1. 半透明由 DOM 着色层表达
         // （毛玻璃常开，见 ensure_windows 的 vibrancy 注释）。
         // 已可见时（含淡出半程被重新唤起）从 tracked alpha 续渐到 1，无跳变。
-        let dur = if mode == "pin" { FADE_IN_PIN_MS } else { FADE_IN_PEEK_MS };
+        let dur = if mode == "pin" {
+            FADE_IN_PIN_MS
+        } else {
+            FADE_IN_PEEK_MS
+        };
         fade_companion_to(app, generation, 1.0, dur, false);
         Ok(())
     }
@@ -699,7 +718,9 @@ mod imp {
     }
 
     pub fn hide_companion(app: &AppHandle) {
-        let Some(win) = app.get_webview_window(COMPANION_LABEL) else { return };
+        let Some(win) = app.get_webview_window(COMPANION_LABEL) else {
+            return;
+        };
         if !win.is_visible().unwrap_or(false) {
             return;
         }
@@ -736,7 +757,14 @@ mod imp {
 
     /// 吸附决策（纯函数，可单测）：球落点 + 显示器 work area → 停靠边 + 高度比。
     /// `cx` = 球心 x；`ball_y` = 球原点 y；`ax/ay/aw/ah` = work area 左/顶/宽/高。
-    fn snap_decision(cx: f64, ball_y: f64, ax: f64, ay: f64, aw: f64, ah: f64) -> (&'static str, f64) {
+    fn snap_decision(
+        cx: f64,
+        ball_y: f64,
+        ax: f64,
+        ay: f64,
+        aw: f64,
+        ah: f64,
+    ) -> (&'static str, f64) {
         let dock = if cx < ax + aw / 2.0 { "left" } else { "right" };
         let y_ratio = ((ball_y - ay) / ah).clamp(0.02, 0.92);
         (dock, y_ratio)
@@ -922,11 +950,11 @@ mod imp {
         let tmp = std::env::temp_dir().join(format!("myagents-fb-shot-{id}.png"));
         let mut cmd = crate::process_cmd::new("/usr/sbin/screencapture");
         cmd.arg("-x"); // no shutter sound
-        // 多显示器：截"前台窗口所在的那块屏"，与引用条标签同源同屏。
-        // screencapture 单输出文件默认只截主显示器——副屏聚焦 iTerm 时标签
-        // 写着 iTerm、图却是主屏浏览器（0613 用户实测 bug）。-R 用 CG 全局
-        // 坐标矩形圈定该屏；值与 flag 连写，防负坐标（主屏左侧的副屏 x<0）
-        // 被 getopt 当成另一个 flag。探不到前台窗口时不加 -R，回退主屏。
+                       // 多显示器：截"前台窗口所在的那块屏"，与引用条标签同源同屏。
+                       // screencapture 单输出文件默认只截主显示器——副屏聚焦 iTerm 时标签
+                       // 写着 iTerm、图却是主屏浏览器（0613 用户实测 bug）。-R 用 CG 全局
+                       // 坐标矩形圈定该屏；值与 flag 连写，防负坐标（主屏左侧的副屏 x<0）
+                       // 被 getopt 当成另一个 flag。探不到前台窗口时不加 -R，回退主屏。
         if let Some((x, y, w, h)) = info.window_center.and_then(display_bounds_containing) {
             cmd.arg(format!("-R{x},{y},{w},{h}"));
         }
@@ -943,7 +971,16 @@ mod imp {
         // back to the original PNG rather than losing the shot.
         let jpg = std::env::temp_dir().join(format!("myagents-fb-shot-{id}.jpg"));
         let sips_ok = crate::process_cmd::new("/usr/bin/sips")
-            .args(["-Z", "1600", "-s", "format", "jpeg", "-s", "formatOptions", "72"])
+            .args([
+                "-Z",
+                "1600",
+                "-s",
+                "format",
+                "jpeg",
+                "-s",
+                "formatOptions",
+                "72",
+            ])
             .arg(&tmp)
             .arg("--out")
             .arg(&jpg)
@@ -1007,7 +1044,10 @@ mod imp {
         fn y_ratio_clamped_into_visible_band() {
             // 顶到边外/底到边外都夹进 [0.02, 0.92]，球不会被吸到 Dock 下/菜单栏上。
             assert_eq!(snap_decision(100.0, AY - 500.0, AX, AY, AW, AH).1, 0.02);
-            assert_eq!(snap_decision(100.0, AY + AH + 500.0, AX, AY, AW, AH).1, 0.92);
+            assert_eq!(
+                snap_decision(100.0, AY + AH + 500.0, AX, AY, AW, AH).1,
+                0.92
+            );
             // 居中：(ay + 0.4*ah - ay)/ah = 0.4。
             let y = AY + 0.4 * AH;
             assert!((snap_decision(100.0, y, AX, AY, AW, AH).1 - 0.4).abs() < 1e-9);
@@ -1101,7 +1141,11 @@ mod commands {
     /// channel-join 主线程（work_area/available_monitors 读 NSScreen 须主线程）。
     /// 落点 (x, y) = 松手时光标推算的权威全局点，snap 不回读 frame。
     #[tauri::command]
-    pub async fn cmd_fb_snap_ball(app: AppHandle, x: f64, y: f64) -> Result<imp::SnapResult, String> {
+    pub async fn cmd_fb_snap_ball(
+        app: AppHandle,
+        x: f64,
+        y: f64,
+    ) -> Result<imp::SnapResult, String> {
         let (tx, rx) = std::sync::mpsc::channel();
         app.clone()
             .run_on_main_thread(move || {
@@ -1165,13 +1209,25 @@ mod commands {
         app: AppHandle,
         session_id: String,
         workspace_path: String,
+        preview_path: Option<String>,
+        preview_line: Option<u32>,
     ) -> Result<(), String> {
         use tauri::Emitter;
         crate::tray::show_main_window(&app);
+        let preview = preview_path.map(|path| {
+            serde_json::json!({
+                "path": path,
+                "initialLineNumber": preview_line,
+            })
+        });
         app.emit_to(
             "main",
             "fb:open-session",
-            serde_json::json!({ "sessionId": session_id, "workspacePath": workspace_path }),
+            serde_json::json!({
+                "sessionId": session_id,
+                "workspacePath": workspace_path,
+                "preview": preview,
+            }),
         )
         .map_err(|e| format!("[fb] emit open-session: {e}"))
     }
@@ -1276,6 +1332,8 @@ mod commands {
         _app: AppHandle,
         _session_id: String,
         _workspace_path: String,
+        _preview_path: Option<String>,
+        _preview_line: Option<u32>,
     ) -> Result<(), String> {
         Err(UNSUPPORTED.to_string())
     }

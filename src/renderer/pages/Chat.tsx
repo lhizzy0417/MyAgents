@@ -64,13 +64,13 @@ import { reasoningEffortChoices } from '../../shared/reasoningEffort';
 import type { CapabilityInitialSelect } from '../../shared/skillsTypes';
 import { CC_MODELS, CC_PERMISSION_MODES, CODEX_PERMISSION_MODES, GEMINI_PERMISSION_MODES, getDefaultRuntimePermissionMode, getRuntimePermissionModes, buildRuntimeChangePatch } from '../../shared/types/runtime';
 import type { RuntimeType, RuntimeDetections, RuntimeConfig } from '../../shared/types/runtime';
-import type { InitialMessage, SidecarConfigDisposition } from '@/types/tab';
+import type { FilePreviewIntent, InitialMessage, SidecarConfigDisposition } from '@/types/tab';
 import type { FilePreviewFocusTarget } from '@/types/filePreview';
 import { shouldAutoSendInitialMessage } from '@/utils/initialMessageAutoSend';
 import { resolveBuiltinPermissionMode, isPinnedProviderUnavailable, shouldResetModelOnProviderChange, shouldSkipSnapshotWrite } from '@/utils/optionResolve';
 // CronTaskConfig type is used via useCronTask hook
 
-import type { RichDocKind } from '../../shared/fileTypes';
+import { getRichDocKind, isPreviewable, type RichDocKind } from '../../shared/fileTypes';
 
 type SplitPreviewFile = {
   name: string;
@@ -198,6 +198,9 @@ interface ChatProps {
   onRenameSession?: (newTitle: string) => void;
   /** Called when user forks session at a specific assistant message — App creates new tab */
   onForkSession?: (newSessionId: string, agentDir: string, title: string, initialMessage?: string) => void;
+  /** Runtime-only request from App/floating-ball to open a file preview once. */
+  pendingFilePreview?: FilePreviewIntent;
+  onFilePreviewIntentConsumed?: (intentId: string) => void;
 }
 
 /** Preset for the `/loop` slash command: opens the cron modal in infinite-loop
@@ -213,7 +216,7 @@ const LOOP_SLASH_PRESET: CronInitialConfig = {
   executionTarget: 'current_session',
 };
 
-export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSessionInNewTab, initialMessage, onInitialMessageConsumed, sidecarConfigDisposition, onSidecarConfigAdopted, sessionTitle, onRenameSession, onForkSession }: ChatProps) {
+export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSessionInNewTab, initialMessage, onInitialMessageConsumed, sidecarConfigDisposition, onSidecarConfigAdopted, sessionTitle, onRenameSession, onForkSession, pendingFilePreview, onFilePreviewIntentConsumed }: ChatProps) {
   // Get state from TabContext (required - Chat must be inside TabProvider)
   const {
     tabId,
@@ -491,6 +494,77 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
     }
     // Keep workspace open — user can dismiss it manually
   }, [isSplitViewEnabled, agentDir, startBrowserSplitTransitionIfNeeded]);
+
+  useEffect(() => {
+    if (!pendingFilePreview) return;
+    let cancelled = false;
+    const intent = pendingFilePreview;
+
+    const consume = () => {
+      onFilePreviewIntentConsumed?.(intent.id);
+    };
+
+    const openIntentPreview = async () => {
+      try {
+        if (!fileService.isAvailable) {
+          toastRef.current.error('无法打开预览：工作区文件服务不可用');
+          return;
+        }
+        const fileName = intent.path.split(/[/\\]/).pop() ?? intent.path;
+        const richDocKind = getRichDocKind(fileName);
+        let file: SplitPreviewFile | null = null;
+
+        if (richDocKind) {
+          file = {
+            name: fileName,
+            content: '',
+            size: 0,
+            path: intent.path,
+            richDocKind,
+            initialLineNumber: intent.initialLineNumber,
+          };
+        } else if (isPreviewable(fileName)) {
+          const resp = await fileService.readPreview({ path: intent.path });
+          file = {
+            name: resp.name,
+            content: resp.content,
+            size: resp.size,
+            path: intent.path,
+            initialLineNumber: intent.initialLineNumber,
+          };
+        } else {
+          toastRef.current.info('这个文件类型暂不支持 MyAgents 预览');
+          return;
+        }
+
+        if (cancelled || !file) return;
+        if (isSplitViewEnabled && !isNarrowLayout) {
+          handleSplitFilePreview(file);
+        } else {
+          setFullscreenPreviewFile(file);
+        }
+      } catch (err) {
+        if (!cancelled) {
+          console.error('[Chat] Failed to open pending file preview:', err);
+          toastRef.current.error('打开文件预览失败');
+        }
+      } finally {
+        if (!cancelled) consume();
+      }
+    };
+
+    void openIntentPreview();
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    pendingFilePreview,
+    fileService,
+    handleSplitFilePreview,
+    isSplitViewEnabled,
+    isNarrowLayout,
+    onFilePreviewIntentConsumed,
+  ]);
 
   // Open terminal in split panel (called from DirectoryPanel header button)
   const handleOpenTerminal = useCallback(() => {
