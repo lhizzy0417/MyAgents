@@ -23,6 +23,7 @@ import { workspacePathsEqual } from '../../shared/workspacePath';
 import { localDate } from '../../shared/logTime';
 import type { AskUserQuestionRequest } from '../../shared/types/askUserQuestion';
 import type { ExitPlanModeRequest } from '../../shared/types/planMode';
+import type { FbPendingKind } from './petStateMapper';
 import { resolveBoundWorkspace, type FbProject } from './workspaceBinding';
 
 export interface FbMsg {
@@ -202,12 +203,13 @@ export function useFloatingSession(modeRef: React.MutableRefObject<'hidden' | 'p
     useEffect(() => {
         const blocked = permReq || askReq || planReq;
         const state = blocked ? 'blocked' : busy ? 'running' : unread > 0 ? 'done' : 'idle';
+        const pendingKind: FbPendingKind | undefined = planReq ? 'plan' : permReq ? 'permission' : askReq ? 'ask' : undefined;
         void invoke('cmd_fb_relay', {
             target: 'ball',
             event: 'fb:state',
-            payload: { state, count: unread },
+            payload: { state, count: unread, pendingKind, hasError: Boolean(error) },
         }).catch(() => undefined);
-    }, [permReq, askReq, planReq, busy, unread]);
+    }, [permReq, askReq, planReq, busy, unread, error]);
 
     const finalizeStream = useCallback(() => {
         const text = streamRef.current;

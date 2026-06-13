@@ -553,6 +553,8 @@ export interface AppConfig {
   floatingBallDevGate?: boolean;
   /** 悬浮球本体显隐开关（总门控开启后才有意义）。 */
   floatingBallEnabled?: boolean;
+  /** 悬浮球本体外观。缺省视同 'pet'（PRD 0.2.34 floating_ball_pet_mode Phase 1）。 */
+  floatingBallAppearance?: 'pet' | 'orb';
   /** 桌面渠道持久 session id（伴侣窗自铸 UUID v4；轮换见下两个字段，PRD §6.2）。 */
   floatingBallSessionId?: string;
   /** 上述 session 的铸造日期（本地 YYYY-MM-DD）。与今天不同时轮换新 session。 */

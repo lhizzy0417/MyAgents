@@ -150,6 +150,99 @@ html.fb-transparent #root {
 }
 .fbw-ball.state-done .badge { opacity: 1; transform: scale(1); }
 
+/* 宠物化球体（PRD 0.2.34 floating_ball_pet_mode Phase 1）：保持 92×92
+   OS panel 不变，只替换 DOM 视觉层。状态仍由 idle/running/blocked/done 四态
+   聚合；Codex 9 行只是 sprite atlas 动画名。 */
+.fbw-ball.pet-mode {
+  width: 76px;
+  height: 82px;
+  border-radius: 24px;
+  background: transparent;
+  border: none;
+  box-shadow: none;
+  overflow: visible;
+  --pet-status: color-mix(in srgb, var(--ink-subtle) 42%, transparent);
+  --glow: color-mix(in srgb, var(--ink-secondary) 10%, transparent);
+}
+.fbw-ball.pet-mode:hover { transform: translateY(-2px) scale(1.04); }
+.fbw-ball.pet-mode.dragging { cursor: grabbing; transform: scale(1.05) rotate(-2deg); }
+.fbw-ball.pet-mode::after {
+  inset: 10px 12px 10px;
+  border-radius: 24px;
+  box-shadow:
+    0 5px 10px color-mix(in srgb, var(--ink) 18%, transparent),
+    0 0 10px 1px var(--glow);
+}
+.fbw-pet-pad {
+  position: absolute;
+  left: 9px;
+  right: 9px;
+  bottom: 5px;
+  height: 15px;
+  border-radius: 50%;
+  background: radial-gradient(ellipse at center, var(--pet-status), transparent 68%);
+  opacity: 0.9;
+  pointer-events: none;
+}
+.fbw-pet-sprite {
+  position: relative;
+  z-index: 1;
+  width: 76px;
+  height: 82px;
+  background-repeat: no-repeat;
+  background-size: 608px 738px;
+  image-rendering: auto;
+  pointer-events: none;
+  filter: drop-shadow(0 2px 2px color-mix(in srgb, var(--ink) 20%, transparent));
+}
+.fbw-ball.pet-mode .ring {
+  inset: 4px 1px 0;
+  border-radius: 24px;
+  background: conic-gradient(from 0deg, transparent 0 64%, var(--accent) 86%, transparent 100%);
+  -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 3px), #000 calc(100% - 2.5px));
+          mask: radial-gradient(farthest-side, transparent calc(100% - 3px), #000 calc(100% - 2.5px));
+}
+.fbw-ball.pet-mode .ripple {
+  inset: 9px 6px 5px;
+  border-radius: 24px;
+}
+.fbw-ball.pet-mode.state-running {
+  --pet-status: color-mix(in srgb, var(--accent) 34%, transparent);
+  --glow: color-mix(in srgb, var(--accent) 32%, transparent);
+}
+.fbw-ball.pet-mode.state-blocked {
+  --pet-status: color-mix(in srgb, var(--warning) 42%, transparent);
+  --glow: color-mix(in srgb, var(--warning) 40%, transparent);
+}
+.fbw-ball.pet-mode.state-done {
+  --pet-status: color-mix(in srgb, var(--success) 34%, transparent);
+  --glow: color-mix(in srgb, var(--success) 30%, transparent);
+}
+.fbw-ball.pet-mode.state-running .ring { opacity: 1; animation: fb-spin 1.7s linear infinite; }
+.fbw-ball.pet-mode.state-blocked .ripple.r1 { animation: fb-pet-ripple 2.2s ease-out infinite; }
+.fbw-ball.pet-mode.state-blocked .ripple.r2 { animation: fb-pet-ripple 2.2s ease-out infinite 1.1s; }
+.fbw-ball.pet-mode.state-done .badge {
+  top: 8px;
+  right: 1px;
+}
+@keyframes fb-pet-ripple {
+  0% { transform: scale(0.92); opacity: 0.58; }
+  100% { transform: scale(1.24); opacity: 0; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .fbw-ball.pet-mode,
+  .fbw-ball.pet-mode:hover,
+  .fbw-ball.pet-mode.dragging {
+    transform: none;
+  }
+  .fbw-ball.pet-mode .ring,
+  .fbw-ball.pet-mode .ripple,
+  .fbw-ball.pet-mode.pop {
+    animation: none;
+  }
+}
+
 /* ════════ Companion（透明窗，DOM = 一块玻璃） ════════ */
 .fbw-win {
   position: fixed;
