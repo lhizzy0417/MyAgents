@@ -10,7 +10,16 @@ import { killWithEscalation } from './utils/kill-with-escalation';
 import { InactivityWatchdog } from '../utils/inactivity-watchdog';
 import { buildSystemPromptAppend } from '../system-prompt';
 import type { InteractionScenario } from '../system-prompt';
-import type { AgentRuntime, RuntimeProcess, UnifiedEvent, ImagePayload } from './types';
+import type {
+  AgentRuntime,
+  ExternalRuntimeConfigPatch,
+  ExternalRuntimeConfigSnapshot,
+  RuntimeConfigApplyMode,
+  RuntimeConfigCapabilities,
+  RuntimeProcess,
+  UnifiedEvent,
+  ImagePayload,
+} from './types';
 import type { ToolAttachment } from '../../shared/types/tool-attachment';
 import { StaleRuntimeSessionError } from './types';
 import { awaitInFlightSaves, rebuildAttachmentRegistryFromBlocks, trackInFlightSave } from './tool-attachments';
@@ -245,22 +254,56 @@ let earlyBroadcastedUserMsg: SessionMessage | null = null;
 // existing direct sendExternalMessage await semantics (they're already
 // serialized at the caller level by single-flight cron/heartbeat loops).
 let externalDesktopSendTail: Promise<unknown> = Promise.resolve();
-// ─── External mid-turn message queue (turn-level injection model; mirrors the builtin SDK) ───
-// Codex/CC/Gemini are turn-level: each send starts a NEW turn (no mid-tool-call injection like
-// the builtin SDK's queued_command). A desktop message typed WHILE a turn is running is HELD
-// here (a pill via queue:added) instead of sent; at turn end it's surfaced (queue:started) +
-// sent. Force-send interrupts the current turn so the same turn-end drain runs it now. See
-// external-queue-policy.ts for the (pure) defer/drain decisions.
-interface ExternalQueueItem {
+export type ExternalConfigSource =
+  | 'runtime-config'
+  | 'message-snapshot'
+  | 'legacy-model-set'
+  | 'legacy-permission-mode-set'
+  | 'legacy-reasoning-effort-set'
+  | 'desktop'
+  | 'im-sync'
+  | 'cron-sync'
+  | 'adopt-sync';
+
+export interface ExternalConfigUpdateResult {
+  success: boolean;
+  runtime: RuntimeType;
+  status: 'applied' | 'queued' | 'noop';
+  warnings: string[];
+  error?: string;
+}
+
+interface ExternalConfigApplyResult {
+  warnings: string[];
+  error?: string;
+}
+
+interface ExternalQueuedMessageOperation {
+  kind: 'message';
   queueId: string;
   text: string;
   images?: ImagePayload[];
-  permissionMode?: string;
-  model?: string;
   context: ExternalSendContext;
+  runtimeConfig: ExternalRuntimeConfigSnapshot;
 }
-const externalMessageQueue: ExternalQueueItem[] = [];
+
+interface ExternalQueuedConfigOperation {
+  kind: 'config';
+  opId: string;
+  patch: ExternalRuntimeConfigPatch;
+  source: ExternalConfigSource;
+}
+
+type ExternalTurnOperation = ExternalQueuedMessageOperation | ExternalQueuedConfigOperation;
+
+// ─── External turn-boundary operation queue (messages + config) ───
+// Codex/CC/Gemini are turn-level: each send starts a NEW turn. Desktop sends
+// become message ops (visible queue pills). Config changes become invisible
+// config ops in the SAME FIFO so message/config/message ordering is preserved.
+const externalOperationQueue: ExternalTurnOperation[] = [];
 let externalQueueSeq = 0;
+let externalConfigSeq = 0;
+let externalOperationDrainInFlight = false;
 // Parity with the builtin queue cap (agent-session.ts). Guards against an unbounded queue.
 const EXTERNAL_MAX_QUEUE_SIZE = 50;
 // Monotonic suffix for surfaced user-message ids so two messages minted in the same
@@ -275,11 +318,45 @@ let externalUserMsgSeq = 0;
  * Mirrors the builtin drainQueueWithCancellation (agent-session.ts).
  */
 function clearExternalQueueWithCancellation(): void {
-  if (externalMessageQueue.length === 0) return;
-  for (const item of externalMessageQueue) {
-    broadcast('queue:cancelled', { queueId: item.queueId });
+  if (externalOperationQueue.length === 0) return;
+  for (const item of externalOperationQueue) {
+    if (item.kind === 'message') {
+      broadcast('queue:cancelled', { queueId: item.queueId });
+    }
   }
-  externalMessageQueue.length = 0;
+  externalOperationQueue.length = 0;
+}
+
+function queuedExternalMessageCount(): number {
+  return externalOperationQueue.reduce((count, item) => count + (item.kind === 'message' ? 1 : 0), 0);
+}
+
+function hasQueuedExternalConfigOperation(): boolean {
+  return externalOperationQueue.some((item) => item.kind === 'config');
+}
+
+function captureExternalRuntimeConfigSnapshot(
+  model: string | undefined,
+  permissionMode: string | undefined,
+  context: ExternalSendContext,
+): ExternalRuntimeConfigSnapshot {
+  return {
+    model: model ?? context.model ?? lastModel,
+    permissionMode: permissionMode ?? context.permissionMode ?? lastPermissionMode,
+    reasoningEffort: resolveTurnReasoningEffort(context) ?? '',
+  };
+}
+
+function applySnapshotToExternalSendContext(
+  context: ExternalSendContext,
+  snapshot: ExternalRuntimeConfigSnapshot,
+): ExternalSendContext {
+  return {
+    ...context,
+    model: snapshot.model,
+    permissionMode: snapshot.permissionMode,
+    reasoningEffort: snapshot.reasoningEffort === '' ? 'default' : snapshot.reasoningEffort,
+  };
 }
 interface PendingExternalSessionBirth {
   sessionId: string;
@@ -1317,152 +1394,258 @@ export function isExternalModelFallbackRestartNeeded(
   return true;
 }
 
-/**
- * Set model for external runtime. Stops any running process so the next
- * sendExternalMessage resumes with the new model.
- * Called from index.ts /api/model/set when runtime is external.
- */
-export async function setExternalModel(model: string): Promise<void> {
-  // NOTE(#324 cross-review): `prevModel` exists because the fallback dedupe
-  // below must compare against the PRE-call value. The in-place branch writes
-  // `lastModel = model` before its RPC; on RPC failure the old comparison
-  // (`model === lastModel`) was always true → the documented stop-and-resume
-  // fallback was dead code and the failed in-place switch was silently lost.
-  const prevModel = lastModel;
-  // Wait for any in-flight startExternalSession (notably pre-warm) to finish
-  // before dispatching. Without this, a user-initiated model change during
-  // the 10–14s handshake window sees `activeProcess=null` → skips the in-place
-  // path → falls through to `stopExternalSession()` which itself early-returns
-  // on `!activeProcess` → the change is silently lost: the live runtime keeps
-  // its original model and `runtime.sendMessage` in Case 3 routes future turns
-  // through the stale session. Serializing here lets the correct branch run.
-  if (startingPromise) {
-    await startingPromise;
-  }
-
-  // In-place setModel path (currently Gemini via ACP `session/set_model`):
-  // ALWAYS call through, even on duplicate-value pushes. Reasons:
-  //   1. Runtime-layer setModel is idempotent at the protocol layer — calling
-  //      with an unchanged model is a no-op for the runtime.
-  //   2. Short-circuiting here would lose self-healing: if a previous concurrent
-  //      pair of setModel calls landed out of order (later request wrote
-  //      `lastModel` first, earlier request's RPC completed last → runtime model
-  //      drifts from `lastModel`), the user's only recovery is to re-select
-  //      their intended model. A `lastModel === model` short-circuit would
-  //      silently swallow that recovery click.
-  //   3. The cost of a redundant in-place RPC is one cheap protocol roundtrip.
-  if (isExternalSessionActive() && activeProcess && activeRuntime?.setModel) {
-    lastModel = model;
-    console.log(`[external-session] Model set to "${model}" (in-place)`);
-    try {
-      await activeRuntime.setModel(activeProcess, model);
-      return;
-    } catch (err) {
-      console.warn(`[external-session] In-place setModel failed — falling back to process restart:`, err);
-      // Fall through to the stop-and-resume path below.
-    }
-  }
-
-  // Fallback restart path: stop running process so next message resumes with
-  // the new model. Idempotent short-circuit on duplicate value — frontend
-  // dedupe is best-effort, so a redundant push here would otherwise cause
-  // a needless kill+respawn (paying ~10s cold restart for nothing). Safe at
-  // this point because there's no in-flight runtime RPC to race against.
-  // Compares against the pre-call value (see prevModel note at top). Also
-  // treats the runtime-reported live model as authoritative: Chat can adopt a
-  // backend-owned IM/Cron sidecar after session_init has reported its model
-  // but before lastModel was populated by a renderer config push. Restarting
-  // that active process for the same live model interrupts the in-flight turn.
-  if (!isExternalModelFallbackRestartNeeded(model, prevModel, lastRuntimeReportedModel)) {
-    if (model !== prevModel) {
-      lastModel = model;
-      console.log(`[external-session] Model set to "${model}" (matches live runtime; no restart)`);
-    }
-    return;
-  }
-  lastModel = model;
-  console.log(`[external-session] Model set to "${model}" (will restart on next send)`);
-  if (isRunning || activeProcess) {
-    console.log('[external-session] Stopping process for model change');
-    await stopExternalSession();
+export function getDefaultExternalConfigCapabilities(runtimeType: RuntimeType): RuntimeConfigCapabilities {
+  switch (runtimeType) {
+    case 'codex':
+      return { model: 'next_turn_state', permissionMode: 'next_turn_state', reasoningEffort: 'next_turn_state' };
+    case 'gemini':
+      return { model: 'live_session_rpc', permissionMode: 'live_session_rpc', reasoningEffort: 'unsupported' };
+    case 'claude-code':
+      return { model: 'next_turn_state', permissionMode: 'next_turn_state', reasoningEffort: 'next_turn_state' };
+    default:
+      return { model: 'restart_when_idle', permissionMode: 'restart_when_idle', reasoningEffort: 'restart_when_idle' };
   }
 }
 
-/**
- * Set permission mode for external runtime. Stops any running process so the next
- * sendExternalMessage resumes with the new permission mode.
- * Called from index.ts /api/session/permission-mode when runtime is external.
- */
-export async function setExternalPermissionMode(mode: string): Promise<void> {
-  // Wait for any in-flight startExternalSession (notably pre-warm) to finish
-  // before dispatching — same reasoning as setExternalModel: during handshake
-  // `activeProcess=null` makes `stopExternalSession()` early-return, and the
-  // change is lost against the stale live session.
-  if (startingPromise) {
-    await startingPromise;
-  }
-  // Idempotent short-circuit on duplicate value — symmetric with setExternalModel's
-  // fallback-path guard. Safe to short-circuit unconditionally here because all
-  // runtimes implement permission-mode change via stop+restart (no in-place RPC),
-  // so there's no concurrent ordering race that would require self-healing.
-  if (mode === lastPermissionMode) return;
-  lastPermissionMode = mode;
-  console.log(`[external-session] Permission mode set to "${mode}"`);
-  if (isRunning || activeProcess) {
-    console.log('[external-session] Stopping process for permission mode change');
-    await stopExternalSession();
-  }
+export function mergeExternalRuntimeConfigPatches(
+  base: ExternalRuntimeConfigPatch,
+  next: ExternalRuntimeConfigPatch,
+): ExternalRuntimeConfigPatch {
+  return {
+    ...base,
+    ...(next.model !== undefined ? { model: next.model } : {}),
+    ...(next.permissionMode !== undefined ? { permissionMode: next.permissionMode } : {}),
+    ...(next.reasoningEffort !== undefined ? { reasoningEffort: next.reasoningEffort } : {}),
+  };
 }
 
-/**
- * #324 — set reasoning effort for external runtimes. `setting` is the UI
- * value ('default' | level); module state stores the normalized level
- * ('' = default).
- *
- * In-place path: Codex implements `setReasoningEffort` (its `turn/start.effort`
- * overrides "this turn and subsequent turns", so the adapter just records the
- * value on process state — next turn carries it). Always call through on
- * duplicates for the same self-healing reason as setExternalModel.
- *
- * Fallback: stop the process so the next sendExternalMessage start/resume
- * passes `reasoningEffort` in SessionStartOptions (Claude Code: per-turn
- * spawn → `--effort`, so between turns this is effectively free).
- */
-export async function setExternalReasoningEffort(setting: string): Promise<void> {
+function externalConfigPatchKeys(patch: ExternalRuntimeConfigPatch): Array<keyof ExternalRuntimeConfigPatch> {
+  return (['model', 'permissionMode', 'reasoningEffort'] as const).filter((key) => patch[key] !== undefined);
+}
+
+function normalizeExternalRuntimeConfigPatch(patch: ExternalRuntimeConfigPatch): ExternalRuntimeConfigPatch {
+  const normalized: ExternalRuntimeConfigPatch = {};
+  if (patch.model !== undefined) normalized.model = patch.model ?? '';
+  if (patch.permissionMode !== undefined) normalized.permissionMode = patch.permissionMode ?? '';
+  if (patch.reasoningEffort !== undefined) {
+    normalized.reasoningEffort = normalizeReasoningEffort(patch.reasoningEffort) ?? '';
+  }
+  return normalized;
+}
+
+export function isExternalModelConfigNoop(
+  nextModel: string,
+  desiredModel: string,
+  liveReportedModel: string,
+  options: { allowLiveReportedModel: boolean },
+): boolean {
+  if (nextModel === desiredModel) return true;
+  return Boolean(options.allowLiveReportedModel && liveReportedModel && nextModel === liveReportedModel);
+}
+
+function isExternalRuntimeConfigNoopAgainstDesired(
+  patch: ExternalRuntimeConfigPatch,
+  options: { allowLiveReportedModel: boolean },
+): boolean {
+  const keys = externalConfigPatchKeys(patch);
+  if (keys.length === 0) return true;
+  return keys.every((key) => {
+    switch (key) {
+      case 'model': {
+        const nextModel = patch.model ?? '';
+        return isExternalModelConfigNoop(nextModel, lastModel, lastRuntimeReportedModel, options);
+      }
+      case 'permissionMode':
+        return (patch.permissionMode ?? '') === lastPermissionMode;
+      case 'reasoningEffort':
+        return (patch.reasoningEffort ?? '') === lastReasoningEffort;
+    }
+  });
+}
+
+function applyDesiredExternalRuntimeConfigPatch(patch: ExternalRuntimeConfigPatch): void {
+  if (patch.model !== undefined) lastModel = patch.model;
+  if (patch.permissionMode !== undefined) lastPermissionMode = patch.permissionMode;
+  if (patch.reasoningEffort !== undefined) lastReasoningEffort = patch.reasoningEffort;
+}
+
+export function shouldDeferExternalConfigOperation(
+  state: ExternalSessionState,
+  queueLength: number,
+  drainInFlight: boolean,
+  finalizationInFlight: boolean,
+): boolean {
+  return state === 'running' || queueLength > 0 || drainInFlight || finalizationInFlight;
+}
+
+function isCurrentExternalSessionSnapshotted(): boolean {
+  const sid = lastSessionId || getCurrentBoundSessionId();
+  if (!sid) return false;
+  const meta = getSessionMetadata(sid);
+  return Boolean(meta?.configSnapshotAt);
+}
+
+function enqueueExternalConfigOperation(
+  patch: ExternalRuntimeConfigPatch,
+  source: ExternalConfigSource,
+): number {
+  const tail = externalOperationQueue[externalOperationQueue.length - 1];
+  if (tail?.kind === 'config') {
+    tail.patch = mergeExternalRuntimeConfigPatches(tail.patch, patch);
+    tail.source = source;
+    return externalOperationQueue.length;
+  }
+  externalOperationQueue.push({
+    kind: 'config',
+    opId: `xcfg-${Date.now()}-${externalConfigSeq++}`,
+    patch,
+    source,
+  });
+  return externalOperationQueue.length;
+}
+
+function getActiveRuntimeConfigCapabilities(): RuntimeConfigCapabilities {
+  return activeRuntime?.getConfigCapabilities?.()
+    ?? getDefaultExternalConfigCapabilities(activeRuntime?.type ?? getCurrentRuntimeType());
+}
+
+async function applyRuntimeConfigFieldAtBoundary(
+  key: keyof ExternalRuntimeConfigPatch,
+  value: string | undefined,
+  mode: RuntimeConfigApplyMode,
+  warnings: string[],
+): Promise<string | undefined> {
+  if (!activeProcess || activeProcess.exited || !activeRuntime) return undefined;
+
+  const run = async (setter: ((process: RuntimeProcess, value: string | undefined) => Promise<void>) | undefined) => {
+    if (!setter) return;
+    await setter.call(activeRuntime, activeProcess!, value || undefined);
+  };
+
+  try {
+    switch (mode) {
+      case 'next_turn_state':
+        if (key === 'model') await run(activeRuntime.setModel);
+        if (key === 'permissionMode') await run(activeRuntime.setPermissionMode);
+        if (key === 'reasoningEffort') await run(activeRuntime.setReasoningEffort);
+        return undefined;
+      case 'live_session_rpc':
+        if (key === 'model') await run(activeRuntime.setModel);
+        if (key === 'permissionMode') await run(activeRuntime.setPermissionMode);
+        if (key === 'reasoningEffort') await run(activeRuntime.setReasoningEffort);
+        return undefined;
+      case 'restart_when_idle':
+        warnings.push(`${key} requires an idle restart for ${activeRuntime.type}; restart is deferred until the runtime process exits`);
+        console.warn(`[external-session] external-config restart_when_idle: field=${key} runtime=${activeRuntime.type} sessionId=${lastSessionId || '(none)'}`);
+        return undefined;
+      case 'unsupported':
+        warnings.push(`${key} is not supported by ${activeRuntime.type}`);
+        console.warn(`[external-session] external-config unsupported: field=${key} runtime=${activeRuntime.type} sessionId=${lastSessionId || '(none)'}`);
+        return undefined;
+    }
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.warn(`[external-session] external-config ${mode} failed: field=${key} runtime=${activeRuntime?.type ?? getCurrentRuntimeType()} sessionId=${lastSessionId || '(none)'} error=${message}`);
+    if (mode === 'live_session_rpc' && (key === 'model' || key === 'permissionMode')) {
+      return `${key} ${mode} failed: ${message}`;
+    }
+    warnings.push(`${key} ${mode} failed: ${message}`);
+  }
+  return undefined;
+}
+
+async function applyExternalRuntimeConfigToActiveProcess(
+  patch: ExternalRuntimeConfigPatch,
+  source: ExternalConfigSource,
+): Promise<ExternalConfigApplyResult> {
+  const warnings: string[] = [];
+  const capabilities = getActiveRuntimeConfigCapabilities();
+  const keys = externalConfigPatchKeys(patch);
+
+  for (const key of keys) {
+    const error = await applyRuntimeConfigFieldAtBoundary(key, patch[key], capabilities[key], warnings);
+    if (error) return { warnings, error };
+  }
+
+  console.log(
+    `[external-session] external-config applied: sessionId=${lastSessionId || '(none)'} runtime=${getCurrentRuntimeType()} source=${source} keys=${keys.join(',') || '(none)'} modes=${keys.map((key) => `${key}:${capabilities[key]}`).join(',') || '(none)'}`,
+  );
+  return { warnings };
+}
+
+async function applyExternalRuntimeConfigAtBoundary(
+  patch: ExternalRuntimeConfigPatch,
+  source: ExternalConfigSource,
+): Promise<ExternalConfigApplyResult> {
+  applyDesiredExternalRuntimeConfigPatch(patch);
+  return applyExternalRuntimeConfigToActiveProcess(patch, source);
+}
+
+export async function updateExternalRuntimeConfig(
+  patch: ExternalRuntimeConfigPatch,
+  opts: { source?: ExternalConfigSource } = {},
+): Promise<ExternalConfigUpdateResult> {
   if (startingPromise) {
     await startingPromise;
   }
-  const effort = normalizeReasoningEffort(setting) ?? '';
-  // Capture BEFORE any write: the fallback dedupe below must compare against
-  // the pre-call value, not the value the in-place branch just wrote —
-  // otherwise a failed in-place attempt short-circuits its own fallback
-  // (cross-review: setExternalModel inherited exactly this dead path).
-  const prev = lastReasoningEffort;
 
-  if (isExternalSessionActive() && activeProcess && activeRuntime?.setReasoningEffort) {
-    lastReasoningEffort = effort;
-    console.log(`[external-session] Reasoning effort set to "${effort || '(default)'}" (in-place)`);
-    try {
-      await activeRuntime.setReasoningEffort(activeProcess, effort || undefined);
-      return;
-    } catch (err) {
-      console.warn('[external-session] In-place setReasoningEffort failed — falling back to process restart:', err);
-      // Fall through to the stop-and-resume path below.
+  const source = opts.source ?? 'runtime-config';
+  const runtime = getCurrentRuntimeType();
+  const normalized = normalizeExternalRuntimeConfigPatch(patch);
+  const keys = externalConfigPatchKeys(normalized);
+  if (keys.length === 0) {
+    console.log(`[external-session] external-config noop: sessionId=${lastSessionId || '(none)'} runtime=${runtime} source=${source} keys=(none)`);
+    return { success: true, runtime, status: 'noop', warnings: [] };
+  }
+
+  const shouldDefer = shouldDeferExternalConfigOperation(
+    externalSessionState,
+    externalOperationQueue.length,
+    externalOperationDrainInFlight,
+    turnFinalization.inFlight,
+  );
+  const noop = isExternalRuntimeConfigNoopAgainstDesired(normalized, {
+    allowLiveReportedModel: !shouldDefer,
+  });
+  applyDesiredExternalRuntimeConfigPatch(normalized);
+  if (noop) {
+    console.log(`[external-session] external-config noop: sessionId=${lastSessionId || '(none)'} runtime=${runtime} source=${source} keys=${keys.join(',')}`);
+    return { success: true, runtime, status: 'noop', warnings: [] };
+  }
+
+  if (shouldDefer) {
+    const position = enqueueExternalConfigOperation(normalized, source);
+    console.log(`[external-session] external-config queued: sessionId=${lastSessionId || '(none)'} runtime=${runtime} source=${source} keys=${keys.join(',')} queuePosition=${position}`);
+    if (externalSessionState !== 'running' && turnFinalization.inFlight) {
+      void turnFinalization.settled(60_000).then(() => drainExternalQueueAfterTurn());
     }
+    return { success: true, runtime, status: 'queued', warnings: [] };
   }
 
-  if (effort === prev) return;
-  lastReasoningEffort = effort;
-  console.log(`[external-session] Reasoning effort set to "${effort || '(default)'}" (applies on next send)`);
-  // Claude Code is per-turn spawn (`--effort` flag read fresh from
-  // lastReasoningEffort each turn via Case 2's start options) — stopping the
-  // process here would only kill an in-flight response for zero benefit.
-  // Other runtimes without an in-place setter need the stop so the next
-  // sendExternalMessage resumes with the new value.
-  if ((isRunning || activeProcess) && getCurrentRuntimeType() !== 'claude-code') {
-    console.log('[external-session] Stopping process for reasoning effort change');
-    await stopExternalSession();
+  const result = await applyExternalRuntimeConfigAtBoundary(normalized, source);
+  if (result.error) {
+    return { success: false, runtime, status: 'applied', warnings: result.warnings, error: result.error };
   }
+  return { success: true, runtime, status: 'applied', warnings: result.warnings };
+}
+
+export async function setExternalModel(model: string): Promise<ExternalConfigUpdateResult> {
+  return updateExternalRuntimeConfig({ model }, { source: 'legacy-model-set' });
+}
+
+export async function setExternalPermissionMode(mode: string): Promise<ExternalConfigUpdateResult> {
+  if (isCurrentExternalSessionSnapshotted()) {
+    console.warn(`[external-session] config sync permissionMode '${mode}' ignored — session ${lastSessionId || getCurrentBoundSessionId() || '(none)'} is snapshotted (snapshot wins; legacy endpoint is Rust-IM-router-only by contract)`);
+    return { success: true, runtime: getCurrentRuntimeType(), status: 'noop', warnings: [] };
+  }
+  return updateExternalRuntimeConfig({ permissionMode: mode }, { source: 'legacy-permission-mode-set' });
+}
+
+export async function setExternalReasoningEffort(setting: string): Promise<ExternalConfigUpdateResult> {
+  return updateExternalRuntimeConfig(
+    { reasoningEffort: normalizeReasoningEffort(setting) ?? '' },
+    { source: 'legacy-reasoning-effort-set' },
+  );
 }
 
 /** #324 — current normalized reasoning effort level, undefined = default. */
@@ -1483,8 +1666,8 @@ export function shouldUseExternalRuntime(): boolean {
  * Wait for any in-flight startExternalSession (notably pre-warm) to finish.
  * Used by callers that touch module state which the spawn path will write to —
  * /sessions/switch's external branch races against pre-warm post-spawn writes
- * if it doesn't serialize. setExternalModel / setExternalPermissionMode use
- * the same pattern internally; this exported helper is for HTTP-route callers
+ * if it doesn't serialize. updateExternalRuntimeConfig uses the same pattern
+ * internally; this exported helper is for HTTP-route callers
  * that don't have direct access to `startingPromise`.
  */
 export async function awaitExternalSessionStarting(): Promise<void> {
@@ -1786,6 +1969,8 @@ export async function startExternalSession(options: {
   resumeSessionId?: string;
   /** Issue #194 — per-agent env policy (proxy: myagents/terminal/direct). */
   envPolicy?: import('../../shared/types/runtime').RuntimeEnvPolicy;
+  /** Internal: false when a per-message snapshot should not overwrite desired last* state. */
+  recordConfigState?: boolean;
 }): Promise<void> {
   // Concurrency guard — wait for any in-flight start to finish
   if (startingPromise) {
@@ -1826,6 +2011,7 @@ async function _doStartExternalSession(options: {
   scenario: InteractionScenario;
   resumeSessionId?: string;
   envPolicy?: import('../../shared/types/runtime').RuntimeEnvPolicy;
+  recordConfigState?: boolean;
 }): Promise<void> {
 
   const runtimeType = getCurrentRuntimeType();
@@ -1913,10 +2099,14 @@ async function _doStartExternalSession(options: {
   // watchdog is armed when the first turn begins (Case 3 in sendExternalMessage,
   // or the initialMessage block below).
   currentTurnStartTime = 0;
-  // Track latest config for resume
-  if (options.model !== undefined) lastModel = options.model;
-  if (options.permissionMode !== undefined) lastPermissionMode = options.permissionMode;
-  if (options.reasoningEffort !== undefined) lastReasoningEffort = options.reasoningEffort;
+  // Track latest desired config for resume. Per-message snapshots (queued
+  // message A followed by config B) deliberately opt out so the older message's
+  // start options do not overwrite the newer desired state.
+  if (options.recordConfigState !== false) {
+    if (options.model !== undefined) lastModel = options.model;
+    if (options.permissionMode !== undefined) lastPermissionMode = options.permissionMode;
+    if (options.reasoningEffort !== undefined) lastReasoningEffort = options.reasoningEffort;
+  }
   // Only clear message history for new sessions, not resumes
   if (!options.resumeSessionId) {
     allSessionMessages = [];
@@ -1988,6 +2178,7 @@ async function _doStartExternalSession(options: {
         systemPromptAppend,
         model: options.model,
         permissionMode: options.permissionMode,
+        reasoningEffort: options.reasoningEffort,
         scenario: options.scenario,
         resumeSessionId: resumeId,
         envPolicy: resolvedEnvPolicy,
@@ -2255,10 +2446,11 @@ export async function sendExternalMessage(
         workspacePath: context.workspacePath,
         initialMessage: text,
         initialImages: hasImages ? images : undefined,
-        model: context.model,
-        permissionMode: context.permissionMode,
+        model: context.model ?? lastModel,
+        permissionMode: context.permissionMode ?? lastPermissionMode,
         reasoningEffort: resolveTurnReasoningEffort(context),
         scenario: context.scenario,
+        recordConfigState: !hasQueuedExternalConfigOperation(),
       });
       return { queued: true };
     } catch (err) {
@@ -2276,8 +2468,8 @@ export async function sendExternalMessage(
     const runtimeType = getCurrentRuntimeType();
     const resumeId = runtimeType === 'claude-code' ? lastSessionId : lastRuntimeSessionId;
     const nextScenario = context?.scenario ?? lastScenario;
-    const nextModel = context ? context.model : lastModel;
-    const nextPermissionMode = context ? context.permissionMode : lastPermissionMode;
+    const nextModel = context?.model ?? lastModel;
+    const nextPermissionMode = context?.permissionMode ?? lastPermissionMode;
     console.log(`[external-session] Previous process exited, resuming ${runtimeType} session ${resumeId}`);
     try {
       await startExternalSession({
@@ -2290,6 +2482,7 @@ export async function sendExternalMessage(
         reasoningEffort: resolveTurnReasoningEffort(context), // #324
         scenario: nextScenario,
         resumeSessionId: resumeId, // CC: --resume <myagents-session-id>; Codex: --resume <threadId>
+        recordConfigState: !hasQueuedExternalConfigOperation(),
       });
       return { queued: true };
     } catch (err) {
@@ -2351,6 +2544,28 @@ export async function sendExternalMessage(
       failureContext: '[external-session] Failed to persist active-process user message',
     });
 
+    const applyResult = await applyExternalRuntimeConfigToActiveProcess(
+      normalizeExternalRuntimeConfigPatch({
+        model: _model ?? context?.model ?? lastModel,
+        permissionMode: _permissionMode ?? context?.permissionMode ?? lastPermissionMode,
+        reasoningEffort: resolveTurnReasoningEffort(context),
+      }),
+      'message-snapshot',
+    );
+    if (applyResult.error) {
+      clearWatchdog();
+      currentTurnStartTime = 0;
+      turnCompleted = true;
+      clearInboxMetaOnRejection('config_apply_failed', applyResult.error);
+      setExternalSessionState('idle');
+      emitExternalTurnTrace('final', {
+        status: 'error',
+        detail: { source: 'config_apply_failed', error: applyResult.error },
+      });
+      clearExternalTurnTrace();
+      return { queued: false, error: applyResult.error };
+    }
+
     setExternalSessionState('running');
     await activeRuntime.sendMessage(activeProcess, text, hasImages ? images : undefined);
     return { queued: true };
@@ -2396,12 +2611,20 @@ export function enqueueExternalSendForDesktop(
   // Return the queueId SYNCHRONOUSLY so /chat/send can hand it back to the renderer, which
   // reconciles its optimistic `opt-` pill with this real queueId (exactly like the builtin
   // path) — without it the optimistic pill would orphan + a stray bubble would appear.
-  if (shouldQueueExternalSend(externalSessionState, externalMessageQueue.length)) {
-    if (externalMessageQueue.length >= EXTERNAL_MAX_QUEUE_SIZE) {
+  if (shouldQueueExternalSend(externalSessionState, externalOperationQueue.length) || externalOperationDrainInFlight) {
+    if (queuedExternalMessageCount() >= EXTERNAL_MAX_QUEUE_SIZE) {
       return { queued: false, dispatch: Promise.resolve({ queued: false, error: '排队消息已达上限，请稍后再发' }) };
     }
     const queueId = `xq-${Date.now()}-${externalQueueSeq++}`;
-    externalMessageQueue.push({ queueId, text, images, permissionMode, model, context });
+    const runtimeConfig = captureExternalRuntimeConfigSnapshot(model, permissionMode, context);
+    externalOperationQueue.push({
+      kind: 'message',
+      queueId,
+      text,
+      images,
+      context: applySnapshotToExternalSendContext(context, runtimeConfig),
+      runtimeConfig,
+    });
     broadcast('queue:added', { queueId, messageText: text.slice(0, 100), isInFlight: false });
     return { queued: true, queueId, dispatch: Promise.resolve({ queued: true }) };
   }
@@ -2416,8 +2639,10 @@ export function enqueueExternalSendForDesktop(
   };
   broadcast('chat:message-replay', { message: userMsg });
 
+  const runtimeConfig = captureExternalRuntimeConfigSnapshot(model, permissionMode, context);
+  const sendContext = applySnapshotToExternalSendContext(context, runtimeConfig);
   const dispatch = externalDesktopSendTail.then(() =>
-    sendExternalMessage(text, images, permissionMode, model, context, userMsg)
+    sendExternalMessage(text, images, runtimeConfig.permissionMode, runtimeConfig.model, sendContext, userMsg)
   );
   externalDesktopSendTail = dispatch.catch(() => undefined);
   return { queued: true, dispatch };
@@ -2430,39 +2655,82 @@ export function enqueueExternalSendForDesktop(
  * chat:message-complete on the SSE wire (see persistTurnResult idle-ordering notes).
  */
 function drainExternalQueueAfterTurn(): void {
-  if (!canDrainExternalQueue(externalSessionState, externalMessageQueue.length)) return;
-  const item = externalMessageQueue.shift();
-  if (!item) return;
-  // Reserve the turn synchronously: the drained item is GUARANTEED to start a turn, but the
-  // chained sendExternalMessage only flips state to 'running' after awaiting metadata/save.
-  // Without this, a send arriving in that window sees state='idle' + queueLength=0 and would
-  // surface an out-of-order bubble (the exact UX this fixes). Flip now so it re-queues instead.
-  setExternalSessionState('running');
-  const userMsg: SessionMessage = {
-    id: `user-${Date.now()}-${externalUserMsgSeq++}`,
-    role: 'user',
-    content: item.text,
-    timestamp: new Date().toISOString(),
-  };
-  // Surface the bubble now (turn end) — mirrors the builtin queue:started fallback.
-  broadcast('queue:started', {
-    queueId: item.queueId,
-    userMessage: { id: userMsg.id, role: 'user', content: item.text, timestamp: userMsg.timestamp },
-  });
-  // Send (serialized), adopting the surfaced bubble so sendExternalMessage doesn't re-broadcast.
-  const task = externalDesktopSendTail.then(() =>
-    sendExternalMessage(item.text, item.images, item.permissionMode, item.model, item.context, userMsg)
-  );
-  externalDesktopSendTail = task.catch(() => undefined);
-  // Surface a drained-send failure the same way /chat/send does for the initial dispatch —
-  // otherwise the pill has already become a bubble but the error is silently swallowed.
-  void task
-    .then((result) => {
-      if (result && !result.queued && result.error) {
-        broadcast('chat:agent-error', { message: result.error });
+  if (!canDrainExternalQueue(externalSessionState, externalOperationQueue.length) || externalOperationDrainInFlight) return;
+  void drainExternalOperationsAfterTurn();
+}
+
+function consumeLeadingExternalConfigOps(): { patch: ExternalRuntimeConfigPatch; source: ExternalConfigSource } | null {
+  let patch: ExternalRuntimeConfigPatch | null = null;
+  let source: ExternalConfigSource = 'runtime-config';
+  while (externalOperationQueue[0]?.kind === 'config') {
+    const op = externalOperationQueue.shift() as ExternalQueuedConfigOperation;
+    patch = mergeExternalRuntimeConfigPatches(patch ?? {}, op.patch);
+    source = op.source;
+  }
+  return patch ? { patch, source } : null;
+}
+
+async function drainExternalOperationsAfterTurn(): Promise<void> {
+  if (!canDrainExternalQueue(externalSessionState, externalOperationQueue.length) || externalOperationDrainInFlight) return;
+  externalOperationDrainInFlight = true;
+  try {
+    const leadingConfig = consumeLeadingExternalConfigOps();
+    if (leadingConfig) {
+      const applyResult = await applyExternalRuntimeConfigAtBoundary(leadingConfig.patch, leadingConfig.source);
+      if (applyResult.error) {
+        const message = `External runtime config apply failed: ${applyResult.error}`;
+        console.error(`[external-session] ${message}`);
+        broadcast('chat:agent-error', { message });
+        clearExternalQueueWithCancellation();
+        setExternalSessionState('idle');
+        return;
       }
-    })
-    .catch((err) => broadcast('chat:agent-error', { message: err instanceof Error ? err.message : String(err) }));
+    }
+
+    const item = externalOperationQueue.shift();
+    if (!item) return;
+    if (item.kind === 'config') {
+      externalOperationQueue.unshift(item);
+      setTimeout(drainExternalQueueAfterTurn, 0);
+      return;
+    }
+
+    // Reserve the turn synchronously: the drained item is GUARANTEED to start a turn, but the
+    // chained sendExternalMessage only flips state to 'running' after awaiting metadata/save.
+    // Without this, a send arriving in that window sees state='idle' + queueLength=0 and would
+    // surface an out-of-order bubble (the exact UX this fixes). Flip now so it re-queues instead.
+    setExternalSessionState('running');
+    externalOperationDrainInFlight = false;
+    const userMsg: SessionMessage = {
+      id: `user-${Date.now()}-${externalUserMsgSeq++}`,
+      role: 'user',
+      content: item.text,
+      timestamp: new Date().toISOString(),
+    };
+    // Surface the bubble now (turn end) — mirrors the builtin queue:started fallback.
+    broadcast('queue:started', {
+      queueId: item.queueId,
+      userMessage: { id: userMsg.id, role: 'user', content: item.text, timestamp: userMsg.timestamp },
+    });
+    // Send (serialized), adopting the surfaced bubble so sendExternalMessage doesn't re-broadcast.
+    const task = externalDesktopSendTail.then(() =>
+      sendExternalMessage(item.text, item.images, item.runtimeConfig.permissionMode, item.runtimeConfig.model, item.context, userMsg)
+    );
+    externalDesktopSendTail = task.catch(() => undefined);
+    // Surface a drained-send failure the same way /chat/send does for the initial dispatch —
+    // otherwise the pill has already become a bubble but the error is silently swallowed.
+    void task
+      .then((result) => {
+        if (result && !result.queued && result.error) {
+          broadcast('chat:agent-error', { message: result.error });
+        }
+      })
+      .catch((err) => broadcast('chat:agent-error', { message: err instanceof Error ? err.message : String(err) }));
+  } finally {
+    if (externalOperationDrainInFlight) {
+      externalOperationDrainInFlight = false;
+    }
+  }
 }
 
 /**
@@ -2480,11 +2748,11 @@ function drainExternalQueueAfterTurn(): void {
  * Mirrors the builtin forceExecuteQueueItem (move-to-front + interrupt; turn-end drain surfaces).
  */
 export async function forceExecuteExternalQueueItem(queueId: string): Promise<boolean> {
-  const idx = externalMessageQueue.findIndex(q => q.queueId === queueId);
+  const idx = externalOperationQueue.findIndex(q => q.kind === 'message' && q.queueId === queueId);
   if (idx < 0) return false;
   if (idx > 0) {
-    const [item] = externalMessageQueue.splice(idx, 1);
-    externalMessageQueue.unshift(item);
+    const [item] = externalOperationQueue.splice(idx, 1);
+    externalOperationQueue.unshift(item);
   }
   if (externalSessionState === 'running' && activeProcess && activeRuntime?.interruptTurn) {
     await activeRuntime.interruptTurn(activeProcess);
@@ -2498,16 +2766,18 @@ export async function forceExecuteExternalQueueItem(queueId: string): Promise<bo
 
 /** Cancel a queued external item (the pill ✕). Returns the removed text, or null if not found. */
 export function cancelExternalQueueItem(queueId: string): string | null {
-  const idx = externalMessageQueue.findIndex(q => q.queueId === queueId);
+  const idx = externalOperationQueue.findIndex(q => q.kind === 'message' && q.queueId === queueId);
   if (idx < 0) return null;
-  const [item] = externalMessageQueue.splice(idx, 1);
+  const [item] = externalOperationQueue.splice(idx, 1) as ExternalQueuedMessageOperation[];
   broadcast('queue:cancelled', { queueId });
   return item.text;
 }
 
 /** Current external queue (for /chat/queue/status). Mirrors builtin getQueueStatus shape. */
 export function getExternalQueueStatus(): Array<{ id: string; messagePreview: string }> {
-  return externalMessageQueue.map(q => ({ id: q.queueId, messagePreview: q.text.slice(0, 100) }));
+  return externalOperationQueue
+    .filter((q): q is ExternalQueuedMessageOperation => q.kind === 'message')
+    .map(q => ({ id: q.queueId, messagePreview: q.text.slice(0, 100) }));
 }
 
 /**
@@ -2716,9 +2986,8 @@ export async function stopExternalSession(): Promise<boolean> {
     // Any pre-warm that raced with a stop is no longer relevant. Keeping the
     // flag around would leak 'prewarm' into a subsequent session's session_init
     // broadcast. _doStartExternalSession resets this per-call too, but some
-    // paths (setExternalPermissionMode fallback) call stopExternalSession
-    // without a follow-up start — explicit reset here keeps the state machine
-    // consistent regardless of what runs next.
+    // paths can call stopExternalSession without a follow-up start — explicit
+    // reset here keeps the state machine consistent regardless of what runs next.
     isPrewarmingSession = false;
     pendingPermissionSuggestions.clear();  // Prevent stale suggestions leaking across sessions
     drainPendingInteractiveRequestsAsExpired('stop');  // PRD #131 — clear stale modals before wiping map

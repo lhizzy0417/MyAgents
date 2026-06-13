@@ -16,7 +16,7 @@ import type {
   RuntimeProxyPolicy, RuntimeDiagnosticIssue,
 } from '../../shared/types/runtime';
 import { CODEX_PERMISSION_MODES } from '../../shared/types/runtime';
-import type { AgentRuntime, RuntimeProcess, SessionStartOptions, UnifiedEvent, UnifiedEventCallback, ImagePayload, SubAgentScope } from './types';
+import type { AgentRuntime, RuntimeConfigCapabilities, RuntimeProcess, SessionStartOptions, UnifiedEvent, UnifiedEventCallback, ImagePayload, SubAgentScope } from './types';
 import { StaleRuntimeSessionError } from './types';
 import { mapCodexTokenUsage, type CodexThreadTokenUsage } from './codex-token-usage';
 import { augmentedProcessEnv, resolveCommand, stripAnsi } from './env-utils';
@@ -1045,6 +1045,7 @@ class CodexProcess implements RuntimeProcess {
   approvalPolicy: CodexApprovalPolicy = 'on-request';
   sandbox: CodexSandboxMode = 'workspace-write';
   permissionMode = '';
+  defaultPermissionMode = 'full-auto';
   /** #324 — NORMALIZED effort level ('' = Codex default). Carried on every
    *  turn/start (its `effort` overrides "this turn and subsequent turns"),
    *  which is also what makes setReasoningEffort an in-place update. */
@@ -1663,6 +1664,14 @@ export class CodexRuntime implements AgentRuntime {
     return CODEX_PERMISSION_MODES;
   }
 
+  getConfigCapabilities(): RuntimeConfigCapabilities {
+    return {
+      model: 'next_turn_state',
+      permissionMode: 'next_turn_state',
+      reasoningEffort: 'next_turn_state',
+    };
+  }
+
   /**
    * Standalone diagnostic run (issue #194 — used by `myagents diagnose runtime
    * codex`). Spawns a short-lived `codex app-server`, runs initialize, fans
@@ -1928,8 +1937,10 @@ export class CodexRuntime implements AgentRuntime {
 
       // 2. Determine permission mode
       const isImOrCron = options.scenario.type === 'im' || options.scenario.type === 'agent-channel' || options.scenario.type === 'cron';
-      const permMode = options.permissionMode || (isImOrCron ? 'no-restrictions' : 'full-auto');
+      const defaultPermissionMode = isImOrCron ? 'no-restrictions' : 'full-auto';
+      const permMode = options.permissionMode || defaultPermissionMode;
       const { approval, sandbox } = mapPermissionMode(permMode);
+      codexProc.defaultPermissionMode = defaultPermissionMode;
       codexProc.permissionMode = permMode;
       codexProc.approvalPolicy = approval;
       codexProc.sandbox = sandbox;
@@ -2065,6 +2076,32 @@ export class CodexRuntime implements AgentRuntime {
       reasoningEffort: codexProc.reasoningEffort || null,
     }), 15_000) as { turn: { id: string } };
     codexProc.currentTurnId = turnResult.turn.id;
+  }
+
+  /**
+   * Codex carries model on every turn/start. Updating process state at the
+   * session layer's turn boundary is enough; the active turn has already
+   * received its turn/start payload and is not affected.
+   */
+  async setModel(process: RuntimeProcess, model: string | undefined): Promise<void> {
+    const codexProc = process as CodexProcess;
+    if (codexProc.exited) throw new Error('Codex process has exited');
+    codexProc.model = model ?? '';
+  }
+
+  /**
+   * Codex permission mode is also a turn/start payload. Keep the original
+   * human-readable mode for diagnostics and update the derived approval/sandbox
+   * pair used by the next sendMessage().
+   */
+  async setPermissionMode(process: RuntimeProcess, mode: string | undefined): Promise<void> {
+    const codexProc = process as CodexProcess;
+    if (codexProc.exited) throw new Error('Codex process has exited');
+    const nextMode = mode || codexProc.defaultPermissionMode;
+    const { approval, sandbox } = mapPermissionMode(nextMode);
+    codexProc.permissionMode = nextMode;
+    codexProc.approvalPolicy = approval;
+    codexProc.sandbox = sandbox;
   }
 
   /**

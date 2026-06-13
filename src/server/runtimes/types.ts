@@ -59,6 +59,31 @@ export interface RuntimeProcess {
   waitForExit(): Promise<number>;
 }
 
+export type RuntimeConfigApplyMode =
+  | 'next_turn_state'
+  | 'live_session_rpc'
+  | 'restart_when_idle'
+  | 'unsupported';
+
+export interface RuntimeConfigCapabilities {
+  model: RuntimeConfigApplyMode;
+  permissionMode: RuntimeConfigApplyMode;
+  reasoningEffort: RuntimeConfigApplyMode;
+}
+
+export interface ExternalRuntimeConfigPatch {
+  model?: string | undefined;
+  permissionMode?: string | undefined;
+  /** NORMALIZED level for the session layer: undefined = untouched, '' = runtime default. */
+  reasoningEffort?: string | undefined;
+}
+
+export interface ExternalRuntimeConfigSnapshot {
+  model?: string;
+  permissionMode?: string;
+  reasoningEffort?: string;
+}
+
 /**
  * Sub-agent scope for a tool event. Set ONLY by runtimes whose protocol exposes
  * multi-agent / multi-thread tool activity within a single session (currently
@@ -215,6 +240,9 @@ export type UnifiedEventCallback = (event: UnifiedEvent) => void;
 export interface AgentRuntime {
   readonly type: RuntimeType;
 
+  /** How this runtime applies turn-scoped config changes at a safe boundary. */
+  getConfigCapabilities?(): RuntimeConfigCapabilities;
+
   /** Check if the CLI is installed and get version info */
   detect(): Promise<RuntimeDetection>;
 
@@ -271,23 +299,21 @@ export interface AgentRuntime {
   interruptTurn?(process: RuntimeProcess): Promise<void>;
 
   /**
-   * Switch the session's active model in-place without restarting the process.
-   * Optional — only runtimes whose protocol exposes mid-session model switching
-   * implement this (currently Gemini via ACP `session/set_model`). When absent
-   * or the call fails, the session layer falls back to stopExternalSession()
-   * so the next message resumes with the new model.
+   * Apply a model update at the session layer's chosen turn boundary. The
+   * actual meaning is declared by getConfigCapabilities(): Codex records
+   * next-turn state, Gemini performs ACP session/set_model, and per-turn
+   * runtimes may omit this because the next spawn reads SessionStartOptions.
    */
-  setModel?(process: RuntimeProcess, model: string): Promise<void>;
+  setModel?(process: RuntimeProcess, model: string | undefined): Promise<void>;
+
+  /** Switch the session permission mode according to this runtime's capabilities. */
+  setPermissionMode?(process: RuntimeProcess, mode: string | undefined): Promise<void>;
 
   /**
-   * #324 — switch the session's reasoning effort in-place without restarting
-   * the process. `effort` is a NORMALIZED level (never 'default'); undefined
-   * = revert to the runtime's default. Optional — currently Codex (its
-   * `turn/start.effort` param overrides "this turn and subsequent turns", so
-   * the adapter just records the value on its process state). When absent,
-   * the session layer falls back to stopExternalSession() so the next message
-   * resumes with the new effort (Claude Code: per-turn spawn rereads it via
-   * SessionStartOptions.reasoningEffort → `--effort`).
+   * #324 — apply reasoning effort at the session layer's chosen turn boundary.
+   * `effort` is a NORMALIZED level (never 'default'); undefined = runtime
+   * default. Codex records next-turn process state; Claude Code omits this and
+   * rereads SessionStartOptions.reasoningEffort on the next per-turn spawn.
    */
   setReasoningEffort?(process: RuntimeProcess, effort: string | undefined): Promise<void>;
 }

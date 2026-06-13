@@ -4,6 +4,7 @@ import {
   buildCodexInitializeParams,
   buildCodexSandboxPolicy,
   buildCodexTurnStartParams,
+  CodexRuntime,
   initializeCodexRpc,
   KNOWN_CODEX_SERVER_REQUEST_METHODS,
   mapCodexTurnCompletedNotification,
@@ -80,6 +81,49 @@ describe('Codex app-server protocol helpers', () => {
     expect(buildCodexTurnStartParams({ ...base, reasoningEffort: 'xhigh' }).effort).toBe('xhigh');
     expect('effort' in buildCodexTurnStartParams({ ...base, reasoningEffort: null })).toBe(false);
     expect('effort' in buildCodexTurnStartParams(base)).toBe(false);
+  });
+
+  it('records Codex config changes as next-turn process state', async () => {
+    const runtime = new CodexRuntime();
+    const proc = {
+      exited: false,
+      model: 'gpt-5.1-codex',
+      permissionMode: 'full-auto',
+      approvalPolicy: 'never',
+      sandbox: 'workspace-write',
+      reasoningEffort: '',
+      defaultPermissionMode: 'full-auto',
+    } as unknown as import('../runtimes/types').RuntimeProcess;
+
+    await runtime.setModel(proc, 'gpt-5.2-codex');
+    await runtime.setPermissionMode(proc, 'no-restrictions');
+    await runtime.setReasoningEffort(proc, 'xhigh');
+
+    const state = proc as unknown as {
+      model: string;
+      permissionMode: string;
+      approvalPolicy: 'never';
+      sandbox: 'danger-full-access';
+      reasoningEffort: string;
+    };
+    expect(state.model).toBe('gpt-5.2-codex');
+    expect(state.permissionMode).toBe('no-restrictions');
+    expect(state.approvalPolicy).toBe('never');
+    expect(state.sandbox).toBe('danger-full-access');
+    expect(buildCodexTurnStartParams({
+      threadId: 'thread-1',
+      input: [],
+      cwd: '/tmp/ws',
+      approvalPolicy: state.approvalPolicy,
+      sandbox: state.sandbox,
+      model: state.model,
+      reasoningEffort: state.reasoningEffort,
+    })).toMatchObject({
+      model: 'gpt-5.2-codex',
+      approvalPolicy: 'never',
+      sandboxPolicy: { type: 'dangerFullAccess' },
+      effort: 'xhigh',
+    });
   });
 
   it('preserves Codex turn/completed status instead of treating interrupts as success', () => {

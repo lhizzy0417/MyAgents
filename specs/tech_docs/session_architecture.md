@@ -457,6 +457,18 @@ Tab 翻成 chat 时，Chat 要决定**如何与该 session 的 sidecar 对齐配
 
 配套 Rust 根因：`SessionRouter::ensure_sidecar` 曾在 create 路径无条件返回 `is_new=true`——复用既有健康 sidecar（只加 owner）也被当"新建"推配置。现透传 manager 锁内权威的 `EnsureSidecarResult.is_new`，复用即跳过 `sync_ai_config`（复用的 sidecar 已有配置；per-message enqueue 每轮重解析 channel 配置，不受影响）。
 
+**External runtime 补充（0.2.34）**：外部 runtime 的 model / permission /
+reasoning effort setter 不再是“直接 stop 进程”的 process-global 操作。`/api/runtime/config`
+和旧 `/api/model/set` / `/api/session/permission-mode` / `/api/reasoning-effort/set`
+的 external 分支都会进入 `external-session.ts::updateExternalRuntimeConfig()`:
+
+- active turn 中的配置变更入 `externalOperationQueue`,当前 turn 继续运行。
+- desktop queued message 捕获入队时的 runtime config snapshot,后续 config op 不会倒灌。
+- turn boundary drain 先应用前导 config ops,再启动下一条 message。
+- Codex / Claude Code 使用 next-turn state；Gemini 的 `session/set_model` /
+  `session/set_mode` 也只在 boundary 调用,保持“当前轮不受影响”的产品语义。
+- IM / Cron 仍通过每轮 `ExternalSendContext` live resolve 配置,不是桌面 queue pill。
+
 **红线**：
 - provider/permission 两端点"仅 Rust-IM-router 可调"是**注释级契约**——渲染器/桌面侧**禁止**新增对这两个端点的调用；在快照会话上它们会被静默吞掉（守卫处 `console.warn` 可见）。桌面要改 provider/permission：provider 走 chat-send payload（enqueue 每轮 inline 解析），permission 走既有 `/api/permission-mode` 桌面路径。
 - 纯 IM / cron 会话（无快照）不受守卫影响，保持 live-follow——新增守卫时不得破坏这条（回归测试 `session-config-snapshot-guard.test.ts` 锁定三 setter × 三场景）。

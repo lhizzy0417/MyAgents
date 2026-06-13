@@ -27,6 +27,7 @@ import type {
 import { GEMINI_PERMISSION_MODES } from '../../shared/types/runtime';
 import type {
   AgentRuntime,
+  RuntimeConfigCapabilities,
   RuntimeProcess,
   SessionStartOptions,
   UnifiedEvent,
@@ -443,6 +444,7 @@ class GeminiProcess implements RuntimeProcess {
   exited = false;
   rpc: JsonRpcClient;
   sessionId = '';
+  defaultMode = 'autoEdit';
 
   /** Callback registered by startSession() — sendMessage() routes async events through this. */
   wrappedOnEvent: UnifiedEventCallback | null = null;
@@ -758,6 +760,14 @@ export class GeminiRuntime implements AgentRuntime {
     return GEMINI_PERMISSION_MODES;
   }
 
+  getConfigCapabilities(): RuntimeConfigCapabilities {
+    return {
+      model: 'live_session_rpc',
+      permissionMode: 'live_session_rpc',
+      reasoningEffort: 'unsupported',
+    };
+  }
+
   async startSession(
     options: SessionStartOptions,
     onEvent: UnifiedEventCallback,
@@ -906,6 +916,7 @@ export class GeminiRuntime implements AgentRuntime {
       const desiredMode = options.permissionMode
         ? mapPermissionMode(options.permissionMode)
         : pickDefaultMode(options.scenario.type);
+      geminiProc.defaultMode = pickDefaultMode(options.scenario.type);
 
       if (options.resumeSessionId) {
         // Turn on replay-drop BEFORE session/load. Gemini emits the loaded session's
@@ -1230,7 +1241,7 @@ export class GeminiRuntime implements AgentRuntime {
    * Throws on failure so the caller can fall back to process restart.
    * Empty `model` is a no-op — the runtime keeps its currently selected model.
    */
-  async setModel(process: RuntimeProcess, model: string): Promise<void> {
+  async setModel(process: RuntimeProcess, model: string | undefined): Promise<void> {
     const geminiProc = process as GeminiProcess;
     if (geminiProc.exited) throw new Error('Gemini process has exited');
     if (!geminiProc.sessionId) throw new Error('Gemini session has no sessionId');
@@ -1242,6 +1253,19 @@ export class GeminiRuntime implements AgentRuntime {
       5_000,
     );
     console.log(`[gemini] set_model (mid-session) → ${model}`);
+  }
+
+  async setPermissionMode(process: RuntimeProcess, mode: string | undefined): Promise<void> {
+    const geminiProc = process as GeminiProcess;
+    if (geminiProc.exited) throw new Error('Gemini process has exited');
+    if (!geminiProc.sessionId) throw new Error('Gemini session has no sessionId');
+    const modeId = mode ? mapPermissionMode(mode) : geminiProc.defaultMode;
+    await geminiProc.rpc.call(
+      'session/set_mode',
+      { sessionId: geminiProc.sessionId, modeId },
+      5_000,
+    );
+    console.log(`[gemini] set_mode (mid-session) → ${modeId}`);
   }
 
   // ─── Logging ───

@@ -395,15 +395,26 @@ interface PersistContentBlock {
 
 ### 配置变更
 
-**Permission Mode**:`setExternalPermissionMode()` 停止当前进程 → 下次 `sendExternalMessage` 以新模式 resume。
+External runtime 的 model / permission / reasoning effort 统一走
+`updateExternalRuntimeConfig()`。该入口只更新 desired state；如果当前 turn
+正在运行、已有 queued message/config operation、或 turn finalization 仍在落盘,则把
+config patch 放入桌面发送队列扩展出来的 `externalOperationQueue`。turn boundary
+drain 时先应用前导 config ops,再启动下一条 desktop queued message,因此不会打断当前轮,
+也不会让后来的配置倒灌到更早入队的 message。IM / Cron 不走桌面 queue pill,仍在每轮
+`ExternalSendContext` 中 self-resolve live config。
 
-**Model**:`setExternalModel()` 优先尝试 in-place 切换(`activeRuntime.setModel()`),失败或不支持再 fallback 到停进程 resume 路径:
+| Runtime | model | permissionMode | reasoningEffort |
+|---------|-------|----------------|-----------------|
+| Codex | `next_turn_state`：更新 process.model,下一次 `turn/start.model` 生效 | `next_turn_state`：更新 approval/sandbox,下一次 `turn/start` 生效 | `next_turn_state`：下一次 `turn/start.effort` 生效 |
+| Gemini | `live_session_rpc`：边界处调用 ACP `session/set_model` | `live_session_rpc`：边界处调用 ACP `session/set_mode` | `unsupported` |
+| Claude Code | `next_turn_state`：更新 `lastModel`,下一轮 `-p` spawn 带入 | `next_turn_state`：更新 `lastPermissionMode`,下一轮 spawn 带入 | `next_turn_state`：更新 `lastReasoningEffort`,下一轮 `--effort` 带入 |
 
-| Runtime | 切换方式 |
-|---------|---------|
-| Gemini | ACP `session/set_model` RPC,保留活进程 + session 状态,无需 re-handshake |
-| Codex | 无等价 RPC → fallback 到停进程 resume |
-| Claude Code | `-p` 模式每轮都重启,无意义 → fallback 到停进程 resume |
+旧的 `setExternalModel()` / `setExternalPermissionMode()` /
+`setExternalReasoningEffort()` 仍保留为 thin wrappers,供 `/api/model/set` 等旧端点
+兼容调用。新增配置入口不得在 active turn 中调用 `stopExternalSession()` 作为生效手段；
+需要 process restart 的 runtime 必须在 idle/turn boundary 处理。
+Gemini 的 model / permission boundary RPC 失败时 fail-closed：不继续用旧配置启动
+queued message,并向前端广播错误。
 
 ### 预热 Pre-warm
 

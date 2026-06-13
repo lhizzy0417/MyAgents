@@ -601,6 +601,7 @@ import {
   cancelExternalImRequest,
   waitForExternalSessionIdle,
   getLastExternalAssistantText,
+  updateExternalRuntimeConfig,
   setExternalModel,
   setExternalPermissionMode,
   setExternalReasoningEffort,
@@ -2295,6 +2296,7 @@ async function main() {
             scenario: { type: 'desktop' as const },
             permissionMode,
             model: model ?? undefined,
+            reasoningEffort,
           };
           // Synchronous decide: a mid-turn send is QUEUED (returns a queueId now); an idle send
           // dispatches fire-and-forget (no queueId → becomes a bubble). Hand the queueId back so
@@ -2410,6 +2412,7 @@ async function main() {
           runtimeConfig?: {
             model?: string | null;
             permissionMode?: string | null;
+            reasoningEffort?: string | null;
           } | null;
         };
         const activeRuntime = getActiveRuntimeType();
@@ -2421,14 +2424,13 @@ async function main() {
         }
 
         const runtimeConfig = body.runtimeConfig ?? {};
-        if ('model' in runtimeConfig) {
-          await setExternalModel(runtimeConfig.model ?? '');
-        }
-        if ('permissionMode' in runtimeConfig) {
-          await setExternalPermissionMode(runtimeConfig.permissionMode ?? '');
-        }
+        const result = await updateExternalRuntimeConfig({
+          ...('model' in runtimeConfig ? { model: runtimeConfig.model ?? '' } : {}),
+          ...('permissionMode' in runtimeConfig ? { permissionMode: runtimeConfig.permissionMode ?? '' } : {}),
+          ...('reasoningEffort' in runtimeConfig ? { reasoningEffort: runtimeConfig.reasoningEffort ?? '' } : {}),
+        }, { source: 'runtime-config' });
 
-        return jsonResponse({ success: true, runtime: activeRuntime });
+        return jsonResponse(result, result.success ? 200 : 500);
       }
 
       // Pre-warm the external runtime process (v0.1.68)
@@ -8044,8 +8046,8 @@ async function main() {
             return jsonResponse({ success: false, error: 'model is required' }, 400);
           }
           if (shouldUseExternalRuntime()) {
-            await setExternalModel(payload.model);
-            return jsonResponse({ success: true });
+            const result = await setExternalModel(payload.model);
+            return jsonResponse(result, result.success ? 200 : 500);
           }
           setSessionModel(payload.model, { imConfigSync: payload.imConfigSync === true });
           return jsonResponse({ success: true });
@@ -8068,8 +8070,8 @@ async function main() {
             return jsonResponse({ success: false, error: 'effort is required' }, 400);
           }
           if (shouldUseExternalRuntime()) {
-            await setExternalReasoningEffort(payload.effort);
-            return jsonResponse({ success: true });
+            const result = await setExternalReasoningEffort(payload.effort);
+            return jsonResponse(result, result.success ? 200 : 500);
           }
           setSessionReasoningEffort(payload.effort);
           return jsonResponse({ success: true });
@@ -8101,8 +8103,8 @@ async function main() {
             return jsonResponse({ success: false, error: 'permissionMode is required' }, 400);
           }
           if (shouldUseExternalRuntime()) {
-            await setExternalPermissionMode(payload.permissionMode);
-            return jsonResponse({ success: true });
+            const result = await setExternalPermissionMode(payload.permissionMode);
+            return jsonResponse(result, result.success ? 200 : 500);
           }
           const { setSessionPermissionMode } = await import('./agent-session');
           setSessionPermissionMode(payload.permissionMode as import('./agent-session').PermissionMode);

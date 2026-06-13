@@ -12,7 +12,7 @@ import { join } from 'path';
 import type { RuntimeDetection, RuntimeModelInfo, RuntimePermissionMode, RuntimeType } from '../../shared/types/runtime';
 import { CC_PERMISSION_MODES } from '../../shared/types/runtime';
 import { isSdkEffortLevel } from '../../shared/reasoningEffort';
-import type { AgentRuntime, RuntimeProcess, SessionStartOptions, UnifiedEvent, UnifiedEventCallback, ImagePayload } from './types';
+import type { AgentRuntime, RuntimeConfigCapabilities, RuntimeProcess, SessionStartOptions, UnifiedEvent, UnifiedEventCallback, ImagePayload } from './types';
 import { augmentedProcessEnv, resolveCommand, stripAnsi } from './env-utils';
 import { ensureDirSync } from '../utils/fs-utils';
 import { killWithEscalation } from './utils/kill-with-escalation';
@@ -292,6 +292,14 @@ export class ClaudeCodeRuntime implements AgentRuntime {
 
   getPermissionModes(): RuntimePermissionMode[] {
     return CC_PERMISSION_MODES;
+  }
+
+  getConfigCapabilities(): RuntimeConfigCapabilities {
+    return {
+      model: 'next_turn_state',
+      permissionMode: 'next_turn_state',
+      reasoningEffort: 'next_turn_state',
+    };
   }
 
   async startSession(
