@@ -521,6 +521,14 @@ export interface AppConfig {
   // UI preferences
   theme: 'light' | 'dark' | 'system';
   minimizeToTray: boolean;
+  /** 全局「始终阻止电脑睡眠」开关（PRD 0.2.35）。
+   *  默认 `false` ⇒ 沿用「智能模式」：AI 跑中由 sidecar.rs / cron_task.rs 各自持锁。
+   *  `true` ⇒ 进程启动起就持一把常开 wake-lock，直到关闭开关 / 进程结束。
+   *  写盘 + acquire/drop OS 锁 + emit + 托盘 set_checked 由 Rust 的
+   *  `cmd_set_force_wake_lock` 原子完成；ConfigProvider.updateConfig 识别到该
+   *  字段时**特化分支**，不走默认 atomicModifyConfig（避免 disk/锁中间态打架，
+   *  PRD §3.3 / D2）。 */
+  forceWakeLock?: boolean;
   /** 对话输入框发送键偏好。缺省视同 'enter'（Enter 发送，Shift+Enter 换行）。
    *  'modEnter' 则 ⌘/Ctrl+Enter 发送、Enter 换行。统一作用于全部"和 AI 对话"的
    *  输入：主对话框 / AI 小助理 / 问题反馈（见 utils/chatSendKey.ts）。 */
@@ -1369,6 +1377,7 @@ export const DEFAULT_CONFIG: AppConfig = {
   backgroundAgentPermissionMode: 'inherit', // background agents inherit granted perms; nothing wider (#264)
   theme: 'system',
   minimizeToTray: true,   // 默认开启最小化到托盘
+  forceWakeLock: false,   // 默认关闭常开阻睡（智能模式仍在跑，覆盖 AI 工作期间）
   showDevTools: false,
   liteLLMModelDataRefresh: true, // 默认开启 LiteLLM 模型数据兜底刷新（开发者可关）
   claudeTranscriptCleanupPeriodDays: DEFAULT_CLAUDE_TRANSCRIPT_CLEANUP_PERIOD_DAYS,

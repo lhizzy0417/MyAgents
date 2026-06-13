@@ -366,6 +366,12 @@ export function ConfigProvider({ children }: { children: React.ReactNode }) {
 
         void listenWithCleanup<{ botId: string }>('im:bot-config-changed', refreshOnEvent, ac.signal);
         void listenWithCleanup('agent:config-changed', refreshOnEvent, ac.signal);
+        // PRD 0.2.35 — the Rust `cmd_set_force_wake_lock` command (called from
+        // Settings.tsx OR triggered by the tray CheckMenuItem click) writes
+        // disk and emits this event. We re-read disk so the React state
+        // matches the durable truth. Without this, a tray-side toggle would
+        // leave Settings.tsx stuck on its last-rendered value.
+        void listenWithCleanup<boolean>('force-wake-lock-changed', refreshOnEvent, ac.signal);
 
         return () => ac.abort();
     }, []);
@@ -389,6 +395,31 @@ export function ConfigProvider({ children }: { children: React.ReactNode }) {
     // ============= Actions =============
 
     const updateConfig = useCallback(async (updates: Partial<AppConfig>) => {
+        // PRD 0.2.35 D2 — `forceWakeLock` has OS-level side effects (acquire /
+        // drop an IOPMAssertion-class lock, sync the tray CheckMenuItem, emit
+        // to all renderers). Going through atomicModifyConfig writes disk
+        // *before* Rust toggles the OS lock, opening a window where the
+        // disk truth and the live OS state disagree. The Rust command is the
+        // single chokepoint that does all four mirrors atomically — route
+        // through it for this field; let any other co-updated keys flow
+        // through the default path so we don't lose them.
+        if ('forceWakeLock' in updates) {
+            const value = !!updates.forceWakeLock;
+            try {
+                const { invoke } = await import('@tauri-apps/api/core');
+                await invoke('cmd_set_force_wake_lock', { value });
+                // Optimistic local mirror: snappy UI; the
+                // `force-wake-lock-changed` listener will re-read disk and
+                // arrive at the same value (no-op).
+                setConfig(prev => ({ ...prev, forceWakeLock: value }));
+            } catch (err) {
+                console.error('[ConfigProvider] cmd_set_force_wake_lock failed:', err);
+                throw err;
+            }
+            const { forceWakeLock: _, ...rest } = updates;
+            if (Object.keys(rest).length === 0) return;
+            updates = rest;
+        }
         const newConfig = await atomicModifyConfig(c => ({ ...c, ...updates }));
         setConfig(newConfig);
         // No more CONFIG_CHANGED event — all consumers share this Context

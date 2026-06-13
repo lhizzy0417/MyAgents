@@ -5,8 +5,8 @@ use serde::Deserialize;
 use std::fs;
 use tauri::{
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    menu::{MenuBuilder, MenuItemBuilder},
-    Emitter, Manager, Runtime,
+    menu::{CheckMenuItem, CheckMenuItemBuilder, MenuBuilder, MenuItemBuilder},
+    Emitter, Manager, Runtime, Wry,
 };
 #[cfg(target_os = "macos")]
 use tauri::image::Image;
@@ -20,21 +20,54 @@ use crate::ulog_warn;
 /// Menu item IDs for tray right-click menu
 const MENU_OPEN: &str = "open";
 const MENU_SETTINGS: &str = "settings";
+const MENU_FORCE_WAKE_LOCK: &str = "force_wake_lock";
 const MENU_EXIT: &str = "exit";
 
-/// Initialize the system tray with icon and menu
-pub fn setup_tray<R: Runtime>(app: &tauri::App<R>) -> Result<(), Box<dyn std::error::Error>> {
+/// Tray-menu items whose check state we need to mutate at runtime
+/// (PRD 0.2.35 D4: handle MUST live in app state so `apply_force_wake_lock`
+/// can call `set_checked()` from any thread — `CheckMenuItem::set_checked`
+/// internally marshals onto the main thread via `run_item_main_thread!`,
+/// so any-thread access is safe).
+///
+/// Non-generic over Runtime: production uses `Wry` everywhere; pinning the
+/// type here avoids dragging an `R: Runtime` parameter through every consumer.
+pub struct TrayMenuHandles {
+    pub force_wake_lock: CheckMenuItem<Wry>,
+}
+
+/// Initialize the system tray with icon and menu.
+///
+/// Pinned to `Wry` because production runs on Wry and `TrayMenuHandles` stores
+/// `CheckMenuItem<Wry>` non-generically. All callers pass `&mut App<Wry>`.
+pub fn setup_tray(app: &tauri::App<Wry>) -> Result<(), Box<dyn std::error::Error>> {
     // Build the tray menu
     let open_item = MenuItemBuilder::with_id(MENU_OPEN, "打开 MyAgents").build(app)?;
     let settings_item = MenuItemBuilder::with_id(MENU_SETTINGS, "设置").build(app)?;
+    // PRD 0.2.35 — global force wake-lock toggle. Initial check state mirrors
+    // disk truth (`config.json::forceWakeLock`). The CheckMenuItem handle is
+    // managed (below) so `apply_force_wake_lock` can call `set_checked()` when
+    // the value changes from the Settings page.
+    let initial_force_wl = crate::wake_lock::should_force_wake_lock();
+    let force_wake_lock_item: CheckMenuItem<Wry> =
+        CheckMenuItemBuilder::with_id(MENU_FORCE_WAKE_LOCK, "阻止电脑睡眠")
+            .checked(initial_force_wl)
+            .build(app)?;
     let exit_item = MenuItemBuilder::with_id(MENU_EXIT, "退出").build(app)?;
 
     let menu = MenuBuilder::new(app)
         .item(&open_item)
         .item(&settings_item)
         .separator()
+        .item(&force_wake_lock_item)
+        .separator()
         .item(&exit_item)
         .build()?;
+
+    // Store the CheckMenuItem in app state so `wake_lock::apply_force_wake_lock`
+    // can mutate its check state from any thread.
+    app.manage(TrayMenuHandles {
+        force_wake_lock: force_wake_lock_item,
+    });
 
     // Load tray icon - use template icon on macOS for proper menu bar appearance
     #[cfg(target_os = "macos")]
@@ -75,6 +108,47 @@ pub fn setup_tray<R: Runtime>(app: &tauri::App<R>) -> Result<(), Box<dyn std::er
                     if let Err(e) = app.emit("tray:open-settings", ()) {
                         ulog_error!("[Tray] Failed to emit settings event: {}", e);
                     }
+                }
+                MENU_FORCE_WAKE_LOCK => {
+                    // PRD 0.2.35 D2: the same `apply_force_wake_lock` chokepoint
+                    // serves both the Settings page (via `cmd_set_force_wake_lock`)
+                    // and the tray click.
+                    //
+                    // ⚠️ Subtle (codex review BLOCKING #1, 2026-06-13): muda's
+                    // platform impls for `CheckMenuItem` *auto-toggle* the
+                    // visible check state BEFORE sending `MenuEvent::send`. We
+                    // verified this in:
+                    //   - macOS  ~/.cargo/registry/.../muda-0.17.2/src/platform_impl/macos/mod.rs:1124
+                    //              `item.set_checked(!item.is_checked());`
+                    //   - Windows ~/.cargo/.../muda-0.17.2/src/platform_impl/windows/mod.rs
+                    //              `let checked = !item.checked; item.set_checked(checked);`
+                    //   - GTK    GTK's own `gtk::CheckMenuItem` flips `is_active`
+                    //              before firing `activate` (which is what muda
+                    //              forwards as `MenuEvent`).
+                    //
+                    // So by the time we reach this handler, `is_checked()` already
+                    // reflects the user's intended NEW value — applying `!cur`
+                    // would silently reverse the click. Read it straight.
+                    //
+                    // The fallback for "handle missing" (shouldn't happen
+                    // post-setup) reads disk for the OLD value and inverts; the
+                    // tray hasn't auto-toggled anything we can read in that
+                    // fallback because the handle isn't there to ask.
+                    let new_value = match app
+                        .try_state::<TrayMenuHandles>()
+                        .and_then(|h| h.force_wake_lock.is_checked().ok())
+                    {
+                        Some(post_toggle) => post_toggle,
+                        None => !crate::wake_lock::should_force_wake_lock(),
+                    };
+                    ulog_info!("[Tray] Force wake-lock toggled to {}", new_value);
+                    // `apply_force_wake_lock` does fs IO via `with_config_lock`
+                    // (sync, blocking). The Tauri menu event runs on the main
+                    // thread; offload to keep the menu loop responsive.
+                    let app_for_apply = app.clone();
+                    tauri::async_runtime::spawn_blocking(move || {
+                        crate::wake_lock::apply_force_wake_lock(&app_for_apply, new_value);
+                    });
                 }
                 MENU_EXIT => {
                     ulog_info!("[Tray] Exit menu clicked");

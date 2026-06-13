@@ -294,6 +294,10 @@ pub fn run() {
         .manage(browser_state)
         .manage(thought_state)
         .manage(task_state)
+        // PRD 0.2.35 — global force-wake-lock holder. `setup_tray` later registers
+        // `TrayMenuHandles` for the matching CheckMenuItem; the boot hydrate
+        // runs after both so they start coherent.
+        .manage(wake_lock::ForceWakeLockState::default())
         // PRD 0.2.7 Phase D: per-process registry of active workspace
         // filesystem watchers (one debouncer per workspace, ref-counted).
         .manage(std::sync::Arc::new(workspace_files::watcher::WorkspaceWatchers::default()))
@@ -546,6 +550,8 @@ pub fn run() {
             task::cmd_task_open_docs_dir,
             task::cmd_task_get_run_stats,
             legacy_upgrade::cmd_task_upgrade_legacy_cron,
+            // PRD 0.2.35 — global "always-on" wake-lock toggle
+            wake_lock::cmd_set_force_wake_lock,
         ])
         .setup(|app| {
             // Initialize logging before acquire_lock() and cleanup_stale_sidecars()
@@ -805,10 +811,19 @@ pub fn run() {
                 ulog_info!("[boot] v={} build={} os={}-{} provider={} mcp={} agents={} channels={} cron={} proxy={} dir={}", version, build_mode, os, arch, provider, mcp, agents, channels, cron, proxy, dir_str);
             }
 
-            // Setup system tray
+            // Setup system tray. setup_tray() ALSO registers `TrayMenuHandles` as
+            // app state — `wake_lock::init_from_disk` below depends on it being
+            // present so the initial tray check matches the OS lock.
             if let Err(e) = tray::setup_tray(app) {
                 ulog_error!("[App] Failed to setup system tray: {}", e);
             }
+
+            // PRD 0.2.35 — boot-time hydrate the user's force wake-lock intent
+            // from disk. If `forceWakeLock: true`, acquire the OS assertion now.
+            // Disk → OS lock; the tray's initial `checked` was set inside
+            // setup_tray() reading the same field. Crash / kill releases the
+            // assertion automatically (process-bound API).
+            wake_lock::init_from_disk(app.handle());
 
             // Register global summon shortcut from config (PRD 0.2.16).
             // Failures are non-fatal — they surface in the Settings panel.

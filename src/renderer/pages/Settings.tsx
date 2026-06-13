@@ -3174,6 +3174,39 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                     </button>
                                 </div>
 
+                                {/* 始终阻止电脑睡眠 (PRD 0.2.35).
+                                    副标题文案锁定 (D5):必须诚实告诉用户合盖照睡 + 更耗电,
+                                    用户原话「在外面 AI 始终响应」直觉对应"合盖塞包"但 mac
+                                    合盖即睡是固件强制,不说=误导。
+                                    ConfigProvider.updateConfig 特化分支会路由到
+                                    cmd_set_force_wake_lock,本组件保持和 minimizeToTray 同构。 */}
+                                <div className="mt-4 flex items-center justify-between">
+                                    <div className="flex-1 pr-4">
+                                        <p className="text-sm font-medium text-[var(--ink)]">始终阻止电脑睡眠</p>
+                                        <p className="text-xs text-[var(--ink-muted)]">
+                                            开启后即使 AI 没有在运行,电脑也不会自动睡眠。注意:合上盖子仍会睡眠,且会更快消耗电池。
+                                        </p>
+                                    </div>
+                                    <button
+                                        onClick={() => {
+                                            const next = !config.forceWakeLock;
+                                            updateConfig({ forceWakeLock: next });
+                                            toast.success(next ? '已开启常开阻睡' : '已关闭常开阻睡');
+                                        }}
+                                        className={`relative h-6 w-11 shrink-0 cursor-pointer rounded-full transition-colors ${
+                                            config.forceWakeLock
+                                                ? 'bg-[var(--accent)]'
+                                                : 'bg-[var(--line-strong)]'
+                                        }`}
+                                    >
+                                        <span
+                                            className={`absolute left-0.5 top-0.5 h-5 w-5 rounded-full bg-[var(--toggle-thumb)] shadow transition-transform ${
+                                                config.forceWakeLock ? 'translate-x-5' : 'translate-x-0'
+                                            }`}
+                                        />
+                                    </button>
+                                </div>
+
                                 {/* 主题 */}
                                 <div className="mt-6 flex items-center justify-between">
                                     <div>
