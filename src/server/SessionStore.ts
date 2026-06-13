@@ -521,11 +521,17 @@ export async function appendSessionMessage(sessionId: string, message: SessionMe
  * `allowShrink: false` so a spurious short array refuses to delete on-disk data
  * instead of silently nuking it.
  */
+export type SaveSessionMessagesResult =
+    | { ok: true; action: 'appended' | 'rewritten' | 'noop'; count: number; totalCount: number }
+    | { ok: false; reason: 'unindexed-create-refused'; count: number }
+    | { ok: false; reason: 'shrink-refused'; count: number; existingCount: number }
+    | { ok: false; reason: 'write-error'; count: number; error: string };
+
 export async function saveSessionMessages(
     sessionId: string,
     messages: SessionMessage[],
     opts?: { allowShrink?: boolean },
-): Promise<void> {
+): Promise<SaveSessionMessagesResult> {
     const allowShrink = opts?.allowShrink ?? true;
     ensureStorageDir();
 
@@ -536,7 +542,7 @@ export async function saveSessionMessages(
         // Pattern 5: serialize JSONL append/rewrite against any other writer of the
         // same session (cross-tab cron, background completion). Lock hold time is
         // ~1ms per call (single append + sessions.json stats update).
-        await withSessionFileLock(sessionId, async () => {
+        return await withSessionFileLock(sessionId, async () => {
             // Index⟺data invariant (issue #336): never CREATE a JSONL for a session
             // that has no sessions.json entry. The one real-world producer of that
             // state is deleteSession() racing a live sidecar: the delete removes the
@@ -555,7 +561,7 @@ export async function saveSessionMessages(
                 // an orphan file into a silently dropped first message — the
                 // stack is the only way to identify that caller from the log.
                 console.warn(`[SessionStore] REFUSING to create JSONL for unindexed session ${sessionId} (${messages.length} in-memory messages): no sessions.json entry (deleted or never registered). Callers must persist metadata BEFORE messages.\n${new Error().stack}`);
-                return;
+                return { ok: false, reason: 'unindexed-create-refused', count: messages.length };
             }
 
             // Get existing message count (use cached line count for performance)
@@ -577,7 +583,7 @@ export async function saveSessionMessages(
             if (messages.length < existingCount) {
                 if (!allowShrink) {
                     console.error(`[SessionStore] REFUSING shrink-rewrite for session ${sessionId}: in-memory ${messages.length} < on-disk ${existingCount} but allowShrink=false (likely a partial/failed load). Keeping the on-disk file intact, skipping write.`);
-                    return;
+                    return { ok: false, reason: 'shrink-refused', count: messages.length, existingCount };
                 }
                 console.log(`[SessionStore] Intentional truncation: messages.length=${messages.length} < existingCount=${existingCount}, rewriting JSONL for session ${sessionId}`);
                 const fullContent = messages.map(msg => JSON.stringify(msg)).join('\n') + (messages.length > 0 ? '\n' : '');
@@ -606,7 +612,7 @@ export async function saveSessionMessages(
                         atomicWriteSessionsFile(JSON.stringify(all, null, 2));
                     }
                 });
-                return;
+                return { ok: true, action: 'rewritten', count: messages.length, totalCount: messages.length };
             }
 
             // Only append new messages
@@ -664,10 +670,19 @@ export async function saveSessionMessages(
                         atomicWriteSessionsFile(JSON.stringify(all, null, 2));
                     }
                 });
+                return { ok: true, action: 'appended', count: newMessages.length, totalCount: messages.length };
             }
+
+            return { ok: true, action: 'noop', count: 0, totalCount: messages.length };
         });
     } catch (error) {
         console.error('[SessionStore] Failed to save session messages:', error);
+        return {
+            ok: false,
+            reason: 'write-error',
+            count: messages.length,
+            error: error instanceof Error ? error.message : String(error),
+        };
     }
 }
 

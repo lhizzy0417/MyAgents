@@ -26,10 +26,19 @@ import { TurnFinalizationGate } from './external-turn-finalization';
 import type { RuntimeType } from '../../shared/types/runtime';
 import { deriveSessionTitle } from '../../shared/sessionTitle';
 import { isPendingSessionId } from '../../shared/constants';
-import { saveSessionMetadata, saveSessionMessages, updateSessionMetadata, getSessionMetadata, getSessionData } from '../SessionStore';
+import {
+  saveSessionMetadata,
+  saveSessionMessages,
+  updateSessionMetadata,
+  getSessionMetadata,
+  getSessionData,
+  type SaveSessionMessagesResult,
+} from '../SessionStore';
 import { firePostTurnTitleHook } from '../turn-hooks';
-import { createSessionMetadata } from '../types/session';
-import { snapshotForImSession, snapshotForOwnedSession } from '../utils/session-snapshot';
+import {
+  createMaterializedSessionMetadata,
+  type SessionMaterializationScenario,
+} from '../utils/session-materialization';
 import { findAgentByWorkspacePath } from '../utils/admin-config';
 import type { AgentConfig } from '../../shared/types/agent';
 import type { MessageUsage, SessionMessage } from '../types/session';
@@ -272,10 +281,18 @@ function clearExternalQueueWithCancellation(): void {
   }
   externalMessageQueue.length = 0;
 }
-// Deferred runtimeSessionId: set when session_init fires before metadata exists (pre-warm).
-// Consumed by registerSessionMetadataIfNew to patch runtimeSessionId onto newly created metadata.
-// Includes forSessionId to prevent cross-session contamination if session switches between set and consume.
-let deferredRuntimeSessionId: { forSessionId: string; runtimeSessionId: string } | null = null;
+interface PendingExternalSessionBirth {
+  sessionId: string;
+  workspacePath: string;
+  scenario: InteractionScenario;
+  runtimeSessionId?: string;
+}
+
+// Pre-warm can create a runtime thread before MyAgents has a durable
+// sessions.json entry. Keep that narrow "birth" state explicit so the first
+// real user turn may materialize metadata, while missing metadata for ordinary
+// resume/delete races still fails closed.
+let pendingExternalSessionBirth: PendingExternalSessionBirth | null = null;
 const pendingExternalInteractiveRequests = new Map<string, ExternalPendingInteractiveRequest>();
 
 function setExternalSessionState(state: ExternalSessionState): void {
@@ -325,7 +342,7 @@ function resetModuleState(): void {
   externalSessionState = 'idle';
   isPrewarmingSession = false;
   earlyBroadcastedUserMsg = null;
-  deferredRuntimeSessionId = null;
+  pendingExternalSessionBirth = null;
   // Issue #289-followup — a queued desktop message MUST NOT survive a session switch/reset:
   // it would otherwise drain into the new session with the old session's text + context.
   clearExternalQueueWithCancellation();
@@ -615,50 +632,192 @@ function clearPendingThinking(): void {
   pendingThinkingStartedAt = 0;
 }
 
-/** Register a new session in SessionStore on first user message.
- *  Idempotent: no-op if metadata already exists. Used by both the initial
- *  message path (_doStartExternalSession) and the post-pre-warm Case 3 path
- *  (sendExternalMessage) — both need the same registration, so the logic
- *  lives here to prevent drift.
- *
- *  Snapshot policy mirrors agent-session.ts:enqueueUserMessage — desktop/cron
- *  owners freeze config into the session (D2/D3/D9), IM owners live-follow
- *  agent config (D4). The scenario flag is what v0.1.69 pre-warm broke:
- *  pre-warm Tab → Case 3 first message used to always take the IM path, which
- *  silently leaked agent config changes into owned desktop sessions. */
-async function registerSessionMetadataIfNew(
-  sessionId: string,
-  workspacePath: string,
-  messageText: string,
-  origin: string,
+type ExternalMetadataTurnPath = 'fresh-start' | 'resume-start' | 'active-process';
+
+export function shouldCreateMissingExternalMetadataForRealUserTurn(
+  turnPath: ExternalMetadataTurnPath,
+  hasPendingBirth: boolean,
+): boolean {
+  return turnPath === 'fresh-start' || hasPendingBirth;
+}
+
+export function shouldTrackPendingExternalSessionBirth(params: {
+  hasInitialMessage: boolean;
+  hasResumeSessionId: boolean;
+  hasMetadata: boolean;
+}): boolean {
+  return !params.hasInitialMessage && !params.hasResumeSessionId && !params.hasMetadata;
+}
+
+function materializationScenarioFromInteraction(
   scenario: InteractionScenario,
-): Promise<void> {
-  if (!sessionId || getSessionMetadata(sessionId)) return;
-  const useLiveFollow = scenario.type === 'im' || scenario.type === 'agent-channel';
-  // Runtime field is overwritten below with `getCurrentRuntimeType()` to honor
-  // the actual sidecar runtime regardless of what the agent record claims
-  // (defense in depth — pre-warm Tab might have forced a different runtime).
-  const lazyAgent = findAgentByWorkspacePath(workspacePath) as AgentConfig | undefined;
-  const lazySnapshot = lazyAgent
-    ? (useLiveFollow ? snapshotForImSession(lazyAgent) : snapshotForOwnedSession(lazyAgent))
-    : undefined;
-  const meta = createSessionMetadata(workspacePath, lazySnapshot);
-  meta.id = sessionId;
-  meta.runtime = getCurrentRuntimeType();
-  // Patch deferred runtimeSessionId from pre-warm session_init (if any).
-  // During pre-warm, session_init fires before metadata exists, so runtimeSessionId
-  // couldn't be persisted. Consume it here when metadata is first created.
-  // Session affinity check prevents cross-session contamination.
-  if (deferredRuntimeSessionId && deferredRuntimeSessionId.forSessionId === sessionId) {
-    meta.runtimeSessionId = deferredRuntimeSessionId.runtimeSessionId;
-    deferredRuntimeSessionId = null;
+): SessionMaterializationScenario {
+  return scenario.type;
+}
+
+function pendingBirthForSession(sessionId: string): PendingExternalSessionBirth | null {
+  return pendingExternalSessionBirth?.sessionId === sessionId ? pendingExternalSessionBirth : null;
+}
+
+function clearPendingExternalSessionBirth(sessionId: string): void {
+  if (pendingExternalSessionBirth?.sessionId === sessionId) {
+    pendingExternalSessionBirth = null;
   }
-  const trimmed = messageText.trim();
-  // Strip the <system-reminder>/<CRON_TASK>/<HEARTBEAT> wrapper before the
-  // 40-char cap (cron-title fix) so cron/heartbeat turns don't persist a
-  // wrapper-only scrap like "执行任务：请你帮 E...".
-  meta.title = deriveSessionTitle(trimmed, 40) || meta.title || 'New Chat';
+}
+
+function describeSaveSessionMessagesFailure(
+  result: Extract<SaveSessionMessagesResult, { ok: false }>,
+): string {
+  switch (result.reason) {
+    case 'unindexed-create-refused':
+      return `session metadata is missing; refused to create JSONL (${result.count} message(s))`;
+    case 'shrink-refused':
+      return `append-only save saw shorter memory history (${result.count}) than disk (${result.existingCount})`;
+    case 'write-error':
+      return result.error;
+  }
+}
+
+function assertSessionMessagesPersisted(
+  result: SaveSessionMessagesResult,
+  context: string,
+): void {
+  if (!result.ok) {
+    throw new Error(`${context}: ${describeSaveSessionMessagesFailure(result)}`);
+  }
+}
+
+function removeMessageFromInMemoryHistory(messageId: string): boolean {
+  for (let i = allSessionMessages.length - 1; i >= 0; i -= 1) {
+    if (allSessionMessages[i]?.id === messageId) {
+      allSessionMessages.splice(i, 1);
+      return true;
+    }
+  }
+  return false;
+}
+
+function rollbackPreDispatchUserTurn(userMsg: SessionMessage, reason: string): void {
+  const removed = removeMessageFromInMemoryHistory(userMsg.id);
+  emitExternalTurnTrace('dispatch_aborted', {
+    status: 'error',
+    detail: {
+      reason,
+      userMessageRemoved: removed,
+    },
+  });
+  clearWatchdog();
+  currentTurnStartTime = 0;
+  turnCompleted = false;
+  lastTurnSucceeded = false;
+  earlyBroadcastedUserMsg = null;
+  resetTurnAccumulators();
+  clearExternalTurnTrace();
+  if (externalSessionState !== 'idle') {
+    setExternalSessionState('idle');
+  }
+}
+
+async function persistUserMessageBeforeRuntimeDispatch(params: {
+  sessionId: string;
+  workspacePath: string;
+  messageText: string;
+  origin: string;
+  scenario: InteractionScenario;
+  turnPath: ExternalMetadataTurnPath;
+  userMsg: SessionMessage;
+  failureContext: string;
+}): Promise<void> {
+  try {
+    await ensureExternalSessionMetadataForRealUserTurn({
+      sessionId: params.sessionId,
+      workspacePath: params.workspacePath,
+      messageText: params.messageText,
+      origin: params.origin,
+      scenario: params.scenario,
+      turnPath: params.turnPath,
+    });
+    const saveResult = await saveSessionMessages(params.sessionId, allSessionMessages, { allowShrink: false });
+    assertSessionMessagesPersisted(saveResult, params.failureContext);
+  } catch (err) {
+    rollbackPreDispatchUserTurn(params.userMsg, err instanceof Error ? err.message : String(err));
+    throw err;
+  }
+}
+
+/** Register a new session in SessionStore on the first real user message.
+ *  Idempotent: no-op if metadata already exists. Used by the initial-message
+ *  path and the post-pre-warm active-process path so snapshot policy cannot
+ *  drift. Missing metadata is only materialized for true fresh starts or for
+ *  an explicit pre-warm birth state; ordinary resume/delete races fail closed.
+ */
+async function ensureExternalSessionMetadataForRealUserTurn(params: {
+  sessionId: string;
+  workspacePath: string;
+  messageText: string;
+  origin: string;
+  scenario: InteractionScenario;
+  turnPath: ExternalMetadataTurnPath;
+}): Promise<void> {
+  const { sessionId, workspacePath, messageText, origin, scenario, turnPath } = params;
+  if (!sessionId) {
+    throw new Error(`[external-session] Cannot persist ${origin}: missing sessionId`);
+  }
+
+  const pendingBirth = pendingBirthForSession(sessionId);
+  const existing = getSessionMetadata(sessionId);
+  if (existing) {
+    if (pendingBirth?.runtimeSessionId && existing.runtimeSessionId !== pendingBirth.runtimeSessionId) {
+      try {
+        const updated = await updateSessionMetadata(sessionId, { runtimeSessionId: pendingBirth.runtimeSessionId });
+        if (!updated) {
+          console.warn(`[external-session] runtimeSessionId patch skipped for ${sessionId}: metadata disappeared during ${origin}`);
+        }
+      } catch (err) {
+        console.warn('[external-session] runtimeSessionId patch failed:', err);
+      }
+    }
+    clearPendingExternalSessionBirth(sessionId);
+    return;
+  }
+
+  if (!shouldCreateMissingExternalMetadataForRealUserTurn(turnPath, Boolean(pendingBirth))) {
+    throw new Error(
+      `[external-session] Refusing to create missing metadata for ${sessionId} during ${origin}; `
+      + 'no pending pre-warm birth exists, so this may be a deleted or invalid resume session.',
+    );
+  }
+
+  if (pendingBirth && (pendingBirth.workspacePath !== workspacePath || pendingBirth.scenario.type !== scenario.type)) {
+    console.warn(
+      `[external-session] pending birth context changed for ${sessionId}: `
+      + `birth=${pendingBirth.workspacePath}/${pendingBirth.scenario.type}, `
+      + `turn=${workspacePath}/${scenario.type}`,
+    );
+  }
+
+  const agent = findAgentByWorkspacePath(workspacePath) as AgentConfig | undefined;
+  const title = deriveSessionTitle(messageText.trim(), 40) || 'New Chat';
+  const meta = createMaterializedSessionMetadata({
+    agentDir: workspacePath,
+    sessionId,
+    scenario: materializationScenarioFromInteraction(scenario),
+    agent,
+    fallbackRuntime: getCurrentRuntimeType(),
+    title,
+  });
+  // Honor the runtime currently driving this sidecar even if the agent record
+  // has drifted since pre-warm.
+  meta.runtime = getCurrentRuntimeType();
+  if (pendingBirth?.runtimeSessionId) {
+    meta.runtimeSessionId = pendingBirth.runtimeSessionId;
+  }
+
   await saveSessionMetadata(meta);
+  if (!getSessionMetadata(sessionId)) {
+    throw new Error(`[external-session] Failed to materialize session metadata for ${sessionId} during ${origin}`);
+  }
+  clearPendingExternalSessionBirth(sessionId);
   console.log(`[external-session] session ${sessionId} persisted to SessionStore (${origin})`);
 }
 
@@ -1724,6 +1883,22 @@ async function _doStartExternalSession(options: {
     options.sessionId = realId;
   }
 
+  const existingMetadataAtStart = getSessionMetadata(options.sessionId);
+  if (shouldTrackPendingExternalSessionBirth({
+    hasInitialMessage: Boolean(options.initialMessage),
+    hasResumeSessionId: Boolean(options.resumeSessionId),
+    hasMetadata: Boolean(existingMetadataAtStart),
+  })) {
+    pendingExternalSessionBirth = {
+      sessionId: options.sessionId,
+      workspacePath: options.workspacePath,
+      scenario: options.scenario,
+      runtimeSessionId: pendingBirthForSession(options.sessionId)?.runtimeSessionId,
+    };
+  } else if (existingMetadataAtStart) {
+    clearPendingExternalSessionBirth(options.sessionId);
+  }
+
   console.log(`[external-session] Starting ${runtimeType} session for ${options.sessionId}, model=${options.model || '(default)'}, permissionMode=${options.permissionMode || '(default)'}, scenario=${options.scenario.type}, resume=${options.resumeSessionId || 'none'}`);
   // Detect pre-warm: prewarmExternalSession calls us with initialMessage=undefined.
   // Stamp this onto the session_init broadcast so the frontend doesn't enter the
@@ -1773,15 +1948,16 @@ async function _doStartExternalSession(options: {
     // SessionStore enforces the index⟺data invariant (issue #336): a JSONL is
     // never CREATED for a session without a sessions.json entry — persisting
     // first would get the write refused and drop the user's first message.
-    if (!options.resumeSessionId) {
-      await registerSessionMetadataIfNew(options.sessionId, options.workspacePath, options.initialMessage, 'initial message', options.scenario);
-    }
-
-    // Persist user message immediately (crash safety — don't wait for turn_complete).
-    // Append-only: allSessionMessages only grows here, so forbid the shrink-rewrite
-    // (a shorter array would mean a partial load — never delete the on-disk tail).
-    try { await saveSessionMessages(options.sessionId, allSessionMessages, { allowShrink: false }); }
-    catch (err) { console.error('[external-session] Failed to persist user message:', err); }
+    await persistUserMessageBeforeRuntimeDispatch({
+      sessionId: options.sessionId,
+      workspacePath: options.workspacePath,
+      messageText: options.initialMessage,
+      origin: 'initial message',
+      scenario: options.scenario,
+      turnPath: options.resumeSessionId ? 'resume-start' : 'fresh-start',
+      userMsg,
+      failureContext: '[external-session] Failed to persist initial user message',
+    });
   }
 
   // Pre-warm path (no initialMessage) keeps state as 'idle' so the UI doesn't
@@ -1840,11 +2016,17 @@ async function _doStartExternalSession(options: {
             console.warn('[external-session] Failed to clear stale runtimeSessionId on disk:', metaErr);
           }
         }
-        // Also drop any pre-warm deferred pointer that belongs to a now-dead
-        // resume — letting it survive would re-patch the stale id onto the
-        // next metadata registration.
-        if (deferredRuntimeSessionId?.forSessionId === options.sessionId) {
-          deferredRuntimeSessionId = null;
+        // Also drop any pre-warm birth runtime pointer that belongs to a
+        // now-dead resume — letting it survive would re-patch the stale id
+        // onto the next metadata registration.
+        if (
+          pendingExternalSessionBirth?.sessionId === options.sessionId
+          && pendingExternalSessionBirth.runtimeSessionId === err.runtimeSessionId
+        ) {
+          pendingExternalSessionBirth = {
+            ...pendingExternalSessionBirth,
+            runtimeSessionId: undefined,
+          };
         }
         process = await startOnce(undefined);
         console.log(`[external-session] ${runtimeType} recovered via fresh start after stale resume`);
@@ -2158,13 +2340,16 @@ export async function sendExternalMessage(
     // Normally this happens inside startExternalSession's initialMessage block,
     // but pre-warm calls startExternalSession WITHOUT an initialMessage, so we
     // have to register here when the first actual message arrives via Case 3.
-    await registerSessionMetadataIfNew(lastSessionId, lastWorkspacePath, text, 'first message after pre-warm', lastScenario);
-
-    // Persist user message immediately (crash safety). Append-only → forbid shrink.
-    if (lastSessionId) {
-      try { await saveSessionMessages(lastSessionId, allSessionMessages, { allowShrink: false }); }
-      catch (err) { console.error('[external-session] Failed to persist user message:', err); }
-    }
+    await persistUserMessageBeforeRuntimeDispatch({
+      sessionId: lastSessionId,
+      workspacePath: lastWorkspacePath,
+      messageText: text,
+      origin: 'first message after pre-warm',
+      scenario: lastScenario,
+      turnPath: 'active-process',
+      userMsg,
+      failureContext: '[external-session] Failed to persist active-process user message',
+    });
 
     setExternalSessionState('running');
     await activeRuntime.sendMessage(activeProcess, text, hasImages ? images : undefined);
@@ -2617,7 +2802,8 @@ export async function popLastUserMessageForRetry(userMessageId: string): Promise
   // `messages.length < existingCount` and rewrites the JSONL.
   allSessionMessages.length = targetIndex;
   try {
-    await saveSessionMessages(lastSessionId, allSessionMessages);
+    const saveResult = await saveSessionMessages(lastSessionId, allSessionMessages);
+    assertSessionMessagesPersisted(saveResult, '[external-session] popLastUserMessageForRetry failed to persist truncation');
   } catch (err) {
     console.error('[external-session] popLastUserMessageForRetry: failed to persist truncation:', err);
     return { success: false, error: 'Failed to persist truncation' };
@@ -2853,6 +3039,7 @@ async function persistTurnResult(): Promise<void> {
   const turnContextUsage = currentTurnContextUsage;
   const persistTraceStarted = nowMs();
   let persistFailed = false;
+  let persistFailureReason: string | undefined;
 
   // PRD 0.2.18 Session Inbox — capture turn text BEFORE resetTurnAccumulators()
   // wipes it (cross-review CC + Architecture: the original impl read
@@ -2941,22 +3128,29 @@ async function persistTurnResult(): Promise<void> {
     // in-memory array ever deleting the on-disk tail).
     if (allSessionMessages.length > 0 && lastSessionId) {
       try {
-        await saveSessionMessages(lastSessionId, allSessionMessages, { allowShrink: false });
-        const { found: foundRealUserMessage, preview: lastMessagePreview } =
-          resolveLastRealUserMessagePreview(allSessionMessages);
-        await updateSessionMetadata(lastSessionId, {
-          ...(foundRealUserMessage ? { lastActiveAt: new Date().toISOString() } : {}),
-          lastMessagePreview,
-          runtimeUsageTotals: lastPersistedRuntimeUsageTotals ?? undefined,
-          // PRD 0.2.32 — 持久化**本轮**算出的 context 快照（turn-scoped snapshot 取于上方）。
-          // **只在本轮真有快照时才写**：无 usage 事件的轮（早退/错误/中止/CC 斜杠命令/adapter 不报）
-          // turnContextUsage 为 null → 整个 key 省略，保留上轮持久值；绝不写 `undefined`（会被
-          // spread+JSON.stringify 丢键 → 抹掉上轮值，review Critical 1）。turn-scoped 又确保不会把
-          // 上一轮快照在本轮误持久（review Critical 2）。
-          ...(turnContextUsage ? { lastContextUsage: turnContextUsage } : {}),
-        });
+        const saveResult = await saveSessionMessages(lastSessionId, allSessionMessages, { allowShrink: false });
+        if (!saveResult.ok) {
+          persistFailed = true;
+          persistFailureReason = describeSaveSessionMessagesFailure(saveResult);
+          console.error(`[external-session] Failed to save session messages: ${persistFailureReason}`);
+        } else {
+          const { found: foundRealUserMessage, preview: lastMessagePreview } =
+            resolveLastRealUserMessagePreview(allSessionMessages);
+          await updateSessionMetadata(lastSessionId, {
+            ...(foundRealUserMessage ? { lastActiveAt: new Date().toISOString() } : {}),
+            lastMessagePreview,
+            runtimeUsageTotals: lastPersistedRuntimeUsageTotals ?? undefined,
+            // PRD 0.2.32 — 持久化**本轮**算出的 context 快照（turn-scoped snapshot 取于上方）。
+            // **只在本轮真有快照时才写**：无 usage 事件的轮（早退/错误/中止/CC 斜杠命令/adapter 不报）
+            // turnContextUsage 为 null → 整个 key 省略，保留上轮持久值；绝不写 `undefined`（会被
+            // spread+JSON.stringify 丢键 → 抹掉上轮值，review Critical 1）。turn-scoped 又确保不会把
+            // 上一轮快照在本轮误持久（review Critical 2）。
+            ...(turnContextUsage ? { lastContextUsage: turnContextUsage } : {}),
+          });
+        }
       } catch (err) {
         persistFailed = true;
+        persistFailureReason = err instanceof Error ? err.message : String(err);
         console.error('[external-session] Failed to save session messages:', err);
       }
     }
@@ -2964,20 +3158,32 @@ async function persistTurnResult(): Promise<void> {
       durationMs: elapsedMs(persistTraceStarted),
       status: persistFailed ? 'error' : 'ok',
       count: allSessionMessages.length,
-      detail: { toolCount: turnToolCount },
+      detail: {
+        toolCount: turnToolCount,
+        ...(persistFailureReason ? { reason: persistFailureReason } : {}),
+      },
     });
 
-    broadcast('chat:message-complete', {
-      ...(usageData ? {
-        model: usageData.model,
-        input_tokens: usageData.inputTokens,
-        output_tokens: usageData.outputTokens,
-        cache_read_tokens: usageData.cacheReadTokens,
-        cache_creation_tokens: usageData.cacheCreationTokens,
-      } : {}),
-      ...(turnToolCount > 0 ? { tool_count: turnToolCount } : {}),
-      ...(turnDurationMs ? { duration_ms: turnDurationMs } : {}),
-    });
+    if (persistFailed) {
+      lastTurnSucceeded = false;
+      const message = persistFailureReason
+        ? `Failed to persist external runtime turn: ${persistFailureReason}`
+        : 'Failed to persist external runtime turn';
+      broadcast('chat:agent-error', { message });
+      broadcast('chat:message-error', message);
+    } else {
+      broadcast('chat:message-complete', {
+        ...(usageData ? {
+          model: usageData.model,
+          input_tokens: usageData.inputTokens,
+          output_tokens: usageData.outputTokens,
+          cache_read_tokens: usageData.cacheReadTokens,
+          cache_creation_tokens: usageData.cacheCreationTokens,
+        } : {}),
+        ...(turnToolCount > 0 ? { tool_count: turnToolCount } : {}),
+        ...(turnDurationMs ? { duration_ms: turnDurationMs } : {}),
+      });
+    }
     // PRD 0.2.19 — session_id joins back to renderer session_new for full funnel.
     // `lastSessionId` is typed `string` and bootstrap-initialized to `''`, so we
     // coerce empty to null here. Analytics tolerates null and groups those as
@@ -3034,10 +3240,14 @@ async function persistTurnResult(): Promise<void> {
     // Always reach idle, even if the body above threw. The
     // session_complete handler counts on us to drain the deferred idle.
     setExternalSessionState('idle');
-    fireImCallback('complete', '');
+    if (lastTurnSucceeded) {
+      fireImCallback('complete', '');
+    } else {
+      fireImCallback('error', persistFailureReason ?? 'external runtime turn did not complete successfully');
+    }
     // Pattern B/C: turn complete — clear active trace ID + unregister from registry.
     if (activeRequestId) {
-      imRequestRegistry.setStatus(activeRequestId, 'completed');
+      imRequestRegistry.setStatus(activeRequestId, lastTurnSucceeded ? 'completed' : 'failed');
       imRequestRegistry.unregister(activeRequestId);
     }
     activeRequestId = null;
@@ -3438,27 +3648,33 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
       if (event.sessionId) {
         lastRuntimeSessionId = event.sessionId;
         // Persist to SessionMetadata for cross-restart resume.
-        // During pre-warm, metadata may not exist yet (registerSessionMetadataIfNew
-        // runs on first user message, not on pre-warm). Attempt update; if metadata
-        // doesn't exist yet, store the ID in-memory — it will be persisted when
-        // registerSessionMetadataIfNew runs and then updateSessionMetadata succeeds
-        // on the next session_init or turn_complete.
+        // During pre-warm, metadata may not exist yet. Attempt update; if
+        // metadata doesn't exist yet, store the ID in the pending birth record
+        // so the first real user turn can materialize metadata with the
+        // runtime thread id attached.
         if (lastSessionId && event.sessionId !== lastSessionId) {
-          // Eagerly schedule the deferred patch with session affinity. If
-          // updateSessionMetadata succeeds (metadata already exists), clear it.
-          // If metadata doesn't exist yet (pre-warm path), the deferred entry
-          // will be consumed later by registerSessionMetadataIfNew.
+          // Eagerly schedule the patch with session affinity. If
+          // updateSessionMetadata succeeds, clear the pending birth because
+          // metadata already exists.
           // handleUnifiedEvent is a sync stream callback — fire-and-forget the
           // async lock-protected write.
           const targetSessionId = lastSessionId;
           const targetRuntimeId = event.sessionId;
-          deferredRuntimeSessionId = { forSessionId: targetSessionId, runtimeSessionId: targetRuntimeId };
+          if (pendingExternalSessionBirth?.sessionId === targetSessionId) {
+            pendingExternalSessionBirth = {
+              ...pendingExternalSessionBirth,
+              runtimeSessionId: targetRuntimeId,
+            };
+          }
           void updateSessionMetadata(targetSessionId, { runtimeSessionId: targetRuntimeId })
             .then((updated) => {
-              if (updated && deferredRuntimeSessionId?.forSessionId === targetSessionId
-                  && deferredRuntimeSessionId.runtimeSessionId === targetRuntimeId) {
-                // Metadata existed — persist succeeded; drop the deferred slot.
-                deferredRuntimeSessionId = null;
+              if (
+                updated
+                && pendingExternalSessionBirth?.sessionId === targetSessionId
+                && pendingExternalSessionBirth.runtimeSessionId === targetRuntimeId
+              ) {
+                // Metadata existed — persist succeeded; birth is no longer pending.
+                pendingExternalSessionBirth = null;
               }
             })
             .catch((err) => console.warn('[external-session] runtimeSessionId persist failed:', err));

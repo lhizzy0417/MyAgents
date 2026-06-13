@@ -68,7 +68,8 @@ describe('issue #336 — delete vs persist resurrection', () => {
     it('a post-delete persist must NOT resurrect the JSONL (the #336 race)', async () => {
         const meta = await store.createSession('/tmp/workspace-a');
         const history = [msg(0), msg(1)];
-        await store.saveSessionMessages(meta.id, history);
+        const initialSave = await store.saveSessionMessages(meta.id, history);
+        expect(initialSave.ok).toBe(true);
         expect(existsSync(jsonlPath(meta.id))).toBe(true);
 
         const deleted = await store.deleteSession(meta.id);
@@ -78,7 +79,11 @@ describe('issue #336 — delete vs persist resurrection', () => {
 
         // Simulate the live owner sidecar persisting its in-memory array after
         // the delete (resetSession's "persist before clearing" / turn complete).
-        await store.saveSessionMessages(meta.id, [...history, msg(2)]);
+        const postDeleteSave = await store.saveSessionMessages(meta.id, [...history, msg(2)]);
+        expect(postDeleteSave.ok).toBe(false);
+        if (!postDeleteSave.ok) {
+            expect(postDeleteSave.reason).toBe('unindexed-create-refused');
+        }
 
         // Old code: the file is re-created with ALL messages (full orphan).
         expect(existsSync(jsonlPath(meta.id))).toBe(false);
@@ -88,7 +93,11 @@ describe('issue #336 — delete vs persist resurrection', () => {
 
     it('refuses to CREATE a JSONL for a never-registered session id', async () => {
         const ghostId = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
-        await store.saveSessionMessages(ghostId, [msg(0)]);
+        const result = await store.saveSessionMessages(ghostId, [msg(0)]);
+        expect(result.ok).toBe(false);
+        if (!result.ok) {
+            expect(result.reason).toBe('unindexed-create-refused');
+        }
         expect(existsSync(jsonlPath(ghostId))).toBe(false);
     });
 
@@ -97,7 +106,8 @@ describe('issue #336 — delete vs persist resurrection', () => {
         mkdirSync(sessionsDir(), { recursive: true });
         writeFileSync(jsonlPath(orphanId), JSON.stringify(msg(0)) + '\n', 'utf-8');
 
-        await store.saveSessionMessages(orphanId, [msg(0), msg(1)]);
+        const result = await store.saveSessionMessages(orphanId, [msg(0), msg(1)]);
+        expect(result.ok).toBe(true);
 
         const lines = readFileSync(jsonlPath(orphanId), 'utf-8').trim().split('\n');
         expect(lines).toHaveLength(2);
