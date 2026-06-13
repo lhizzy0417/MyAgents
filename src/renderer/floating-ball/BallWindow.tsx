@@ -14,6 +14,7 @@ import { invoke } from '@tauri-apps/api/core';
 
 import { listenWithCleanup } from '@/utils/tauriListen';
 
+import { computeDragOrigin } from './fbDrag';
 import './fb.css';
 
 export type FbBallState = 'idle' | 'running' | 'blocked' | 'done';
@@ -46,15 +47,33 @@ export default function BallWindow() {
     // updater — updaters must stay pure under concurrent rendering).
     const prevStateRef = useRef<FbBallState>('idle');
 
+    // 绝对落点拖拽（修跨屏闪烁，见 fbDrag.ts）：
+    //   grabX/Y  = pointerdown 时光标在 92×92 窗口内的偏移，全程恒定
+    //   startX/Y = pointerdown 的光标全局点，仅用于跨过 DRAG_THRESHOLD 判定
+    //   targetX/Y= 最新一帧算出的窗口绝对落点（rAF 节流后送 Rust）
     const dragRef = useRef<{
         active: boolean;
         moved: boolean;
-        lastX: number;
-        lastY: number;
-        pendingDx: number;
-        pendingDy: number;
+        startX: number;
+        startY: number;
+        grabX: number;
+        grabY: number;
+        targetX: number;
+        targetY: number;
+        hasTarget: boolean;
         raf: number | null;
-    }>({ active: false, moved: false, lastX: 0, lastY: 0, pendingDx: 0, pendingDy: 0, raf: null });
+    }>({
+        active: false,
+        moved: false,
+        startX: 0,
+        startY: 0,
+        grabX: 0,
+        grabY: 0,
+        targetX: 0,
+        targetY: 0,
+        hasTarget: false,
+        raf: null,
+    });
 
     // ── state pushed from the companion (it owns the session SSE) ──
     useEffect(() => {
@@ -165,14 +184,14 @@ export default function BallWindow() {
     }, [relayToCompanion]);
 
     // ── drag / snap ──
+    // 绝对落点：每帧把「最新算出的窗口原点」整笔送 Rust（last-wins），而不是
+    // 送增量。Rust 不回读窗口位置 → 无「读改写振荡」→ 跨屏不闪（见 fbDrag.ts）。
     const flushDrag = useCallback(() => {
         const d = dragRef.current;
         d.raf = null;
-        const { pendingDx, pendingDy } = d;
-        if (pendingDx === 0 && pendingDy === 0) return;
-        d.pendingDx = 0;
-        d.pendingDy = 0;
-        void invoke('cmd_fb_drag_ball', { dx: pendingDx, dy: pendingDy });
+        if (!d.hasTarget) return;
+        d.hasTarget = false;
+        void invoke('cmd_fb_move_ball_to', { x: d.targetX, y: d.targetY });
     }, []);
 
     const onPointerDown = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
@@ -180,8 +199,15 @@ export default function BallWindow() {
         const d = dragRef.current;
         d.active = true;
         d.moved = false;
-        d.lastX = e.screenX;
-        d.lastY = e.screenY;
+        d.startX = e.screenX;
+        d.startY = e.screenY;
+        // 抓取偏移 = 光标在窗口内的位置（clientX/Y）。落点 = 光标 − 它，让抓取
+        // 点始终钉在光标下。pointerdown 时光标必在窗口内，故 clientX/Y 可信；
+        // 之后即便 setPointerCapture 把光标拖出窗外也不再用 clientX/Y（只用
+        // 全局的 screenX/Y）。
+        d.grabX = e.clientX;
+        d.grabY = e.clientY;
+        d.hasTarget = false;
         (e.target as HTMLElement).setPointerCapture(e.pointerId);
     }, []);
 
@@ -189,20 +215,23 @@ export default function BallWindow() {
         (e: React.PointerEvent<HTMLDivElement>) => {
             const d = dragRef.current;
             if (!d.active) return;
-            const dx = e.screenX - d.lastX;
-            const dy = e.screenY - d.lastY;
             if (!d.moved) {
-                if (Math.abs(dx) < DRAG_THRESHOLD && Math.abs(dy) < DRAG_THRESHOLD) return;
+                if (
+                    Math.abs(e.screenX - d.startX) < DRAG_THRESHOLD &&
+                    Math.abs(e.screenY - d.startY) < DRAG_THRESHOLD
+                ) {
+                    return;
+                }
                 d.moved = true;
                 setDragging(true);
                 // Drop any peek while dragging.
                 void invoke('cmd_fb_hide_companion');
                 void invoke('cmd_fb_relay', { target: 'companion', event: 'fb:force-hidden', payload: {} });
             }
-            d.lastX = e.screenX;
-            d.lastY = e.screenY;
-            d.pendingDx += dx;
-            d.pendingDy += dy;
+            const t = computeDragOrigin(e.screenX, e.screenY, d.grabX, d.grabY);
+            d.targetX = t.x;
+            d.targetY = t.y;
+            d.hasTarget = true;
             if (d.raf === null) {
                 d.raf = requestAnimationFrame(flushDrag);
             }
@@ -210,30 +239,30 @@ export default function BallWindow() {
         [flushDrag],
     );
 
-    const endDrag = useCallback(
-        (e: React.PointerEvent<HTMLDivElement>): boolean => {
-            const d = dragRef.current;
-            if (!d.active) return false;
-            d.active = false;
-            try {
-                (e.target as HTMLElement).releasePointerCapture(e.pointerId);
-            } catch {
-                // capture may already be lost (pointercancel path)
-            }
-            if (d.raf !== null) {
-                cancelAnimationFrame(d.raf);
-                flushDrag();
-            }
-            if (d.moved) {
-                d.moved = false;
-                setDragging(false);
-                void invoke('cmd_fb_snap_ball');
-                return true;
-            }
-            return false;
-        },
-        [flushDrag],
-    );
+    const endDrag = useCallback((e: React.PointerEvent<HTMLDivElement>): boolean => {
+        const d = dragRef.current;
+        if (!d.active) return false;
+        d.active = false;
+        try {
+            (e.target as HTMLElement).releasePointerCapture(e.pointerId);
+        } catch {
+            // capture may already be lost (pointercancel path)
+        }
+        // 丢掉未派发的那一帧 move：松手落点 (targetX/Y) 直接交给 snap 作权威
+        // 落点（snap 用它算吸边/屏、不回读 outer_position），免得尾随的一帧
+        // move 在 snap 之后又把球拽回光标位置。
+        if (d.raf !== null) {
+            cancelAnimationFrame(d.raf);
+            d.raf = null;
+        }
+        if (d.moved) {
+            d.moved = false;
+            setDragging(false);
+            void invoke('cmd_fb_snap_ball', { x: d.targetX, y: d.targetY });
+            return true;
+        }
+        return false;
+    }, []);
 
     const onPointerUp = useCallback(
         (e: React.PointerEvent<HTMLDivElement>) => {

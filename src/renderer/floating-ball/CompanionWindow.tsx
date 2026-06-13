@@ -16,6 +16,7 @@ import Markdown from '@/components/Markdown';
 import OverlayBackdrop from '@/components/OverlayBackdrop';
 import { track } from '@/analytics';
 import { isImeComposingEvent, resolveEnterKeyAction } from '@/utils/chatSendKey';
+import { computeDragOrigin } from './fbDrag';
 import { isNearBottom } from './convoAutoFollow';
 import { useFloatingSession, type FbActivity, type FbMsg } from './useFloatingSession';
 
@@ -455,6 +456,10 @@ export default function CompanionWindow() {
     }, []);
 
     // ── 高度调节（顶/底边拖） + 移动（顶部标题栏地带拖） ──
+    // 位置一律走绝对落点（与球同源，见 fbDrag.ts），绝不回读 outer_position：
+    // 底边拖只改高度（origin 不动，height 是 JS 本地累计、本就无回读）；顶边拖
+    // 锚定底边、让顶边跟随光标（newTop=光标−抓取偏移、height=底锚−newTop）；
+    // 标题栏自由拖是纯平移（origin=光标−抓取偏移）。
     const bindResize = useCallback((edge: 'top' | 'bottom') => {
         return (e: React.PointerEvent<HTMLDivElement>) => {
             if (modeRef.current !== 'pin') return;
@@ -462,18 +467,27 @@ export default function CompanionWindow() {
             const target = e.currentTarget;
             target.setPointerCapture(e.pointerId);
             target.classList.add('active');
-            let lastY = e.screenY;
-            let height = window.innerHeight;
+            // 按下时锁定的几何锚（全局点，左上原点），全程不再回读窗口几何。
+            const winLeft = e.screenX - e.clientX;
+            const winTop = e.screenY - e.clientY;
+            const h0 = window.innerHeight;
+            const bottomY = winTop + h0; // 顶边拖时的固定底锚
+            const startScreenY = e.screenY;
+            const grabY = e.clientY;
+            let height = h0;
             const onMove = (ev: PointerEvent) => {
-                const dy = ev.screenY - lastY;
-                lastY = ev.screenY;
                 if (edge === 'bottom') {
-                    height = Math.max(360, height + dy);
+                    // 底边跟随光标、顶边（origin）不动 → 纯改高度（起始高度 + 光标
+                    // 位移），无需移动窗口。
+                    height = Math.max(360, h0 + (ev.screenY - startScreenY));
                     void invoke('cmd_fb_set_companion_size', { width: WIN_W, height });
                 } else {
-                    height = Math.max(360, height - dy);
+                    // 顶边跟随光标、底边锚定：绝对算 newTop/height，不送增量。
+                    let newTop = ev.screenY - grabY;
+                    height = Math.max(360, bottomY - newTop);
+                    newTop = bottomY - height; // 触底夹紧后回算顶，保持底锚不动
                     void invoke('cmd_fb_set_companion_size', { width: WIN_W, height });
-                    void invoke('cmd_fb_drag_companion', { dx: 0, dy });
+                    void invoke('cmd_fb_move_companion_to', { x: winLeft, y: newTop });
                 }
             };
             const onUp = (ev: PointerEvent) => {
@@ -494,14 +508,13 @@ export default function CompanionWindow() {
         const target = e.currentTarget;
         target.setPointerCapture(e.pointerId);
         target.classList.add('active');
-        let lastX = e.screenX;
-        let lastY = e.screenY;
+        // 抓取偏移在按下时锁定；落点 = 光标 − 抓取偏移（绝对，跨屏不闪）。尺寸
+        // 不变，纯平移走 move（不动 size）。
+        const grabX = e.clientX;
+        const grabY = e.clientY;
         const onMove = (ev: PointerEvent) => {
-            const dx = ev.screenX - lastX;
-            const dy = ev.screenY - lastY;
-            lastX = ev.screenX;
-            lastY = ev.screenY;
-            void invoke('cmd_fb_drag_companion', { dx, dy });
+            const { x, y } = computeDragOrigin(ev.screenX, ev.screenY, grabX, grabY);
+            void invoke('cmd_fb_move_companion_to', { x, y });
         };
         const onUp = (ev: PointerEvent) => {
             target.releasePointerCapture(ev.pointerId);

@@ -298,17 +298,11 @@ mod imp {
         (pos.x, pos.y, size.width, size.height)
     }
 
-    /// 球中心所在的显示器。**不**用 `current_monitor()`（= NSWindow.screen）
-    /// ——拖拽的 set_position 是排队到主线程的异步 setFrameTopLeftPoint，
-    /// 松手瞬间从命令线程读 screen 拿到的可能还是旧屏，叠加其 None→主屏
-    /// 回退，吸边就把球弹回原屏（0613 用户实测：球拖不到另一块屏）。这里
-    /// 在全局逻辑点空间（tao 物理坐标 ÷ 各自 scale 还原出的 CG 点空间）对
-    /// 全显示器列表做包含判定；球心落在缝隙/越界时取最近的显示器。
-    fn monitor_for_ball_center(app: &AppHandle) -> Option<tauri::Monitor> {
-        let ball = app.get_webview_window(BALL_LABEL)?;
-        let scale = ball.scale_factor().ok()?;
-        let pos = ball.outer_position().ok()?.to_logical::<f64>(scale);
-        let (cx, cy) = (pos.x + BALL_WIN / 2.0, pos.y + BALL_WIN / 2.0);
+    /// 点（全局逻辑点空间）落在哪个显示器；落缝隙/越界取最近者。**不**用
+    /// `current_monitor()`（= NSWindow.screen，拖拽中途读到的可能是旧屏 +
+    /// None→主屏回退，吸边就把球弹回原屏）。在全局逻辑点空间（各显示器
+    /// position/size ÷ 各自 scale 还原出的 CG 点空间）对全显示器列表做包含判定。
+    fn monitor_for_point(app: &AppHandle, cx: f64, cy: f64) -> Option<tauri::Monitor> {
         let monitors = app.available_monitors().ok()?;
         let mut nearest: Option<(f64, tauri::Monitor)> = None;
         for m in monitors {
@@ -330,6 +324,16 @@ mod imp {
             }
         }
         nearest.map(|(_, m)| m)
+    }
+
+    /// 球中心所在的显示器，回读球当前 frame。**仅**用于 boot / companion
+    /// 定位等没有光标上下文的路径——拖拽吸附改走 `snap_ball` 传入的权威落点
+    /// （不回读，见 `snap_ball` 注释）。
+    fn monitor_for_ball_center(app: &AppHandle) -> Option<tauri::Monitor> {
+        let ball = app.get_webview_window(BALL_LABEL)?;
+        let scale = ball.scale_factor().ok()?;
+        let pos = ball.outer_position().ok()?.to_logical::<f64>(scale);
+        monitor_for_point(app, pos.x + BALL_WIN / 2.0, pos.y + BALL_WIN / 2.0)
     }
 
     /// Work area of the monitor the ball lives on (logical coordinates),
@@ -708,16 +712,19 @@ mod imp {
         fade_companion_to(app, generation, 0.0, FADE_OUT_MS, true);
     }
 
-    pub fn drag_ball(app: &AppHandle, dx: f64, dy: f64) -> Result<(), String> {
+    /// 拖拽落点（绝对）：球原点直接置到 (x, y)——全局逻辑点、左上原点，与
+    /// 浏览器 `e.screenX/Y`（CSS 点）同空间。**绝不回读 `outer_position`**：
+    /// tao 的 set_frame 是 GCD 异步（`exec_async` 排到主队列尾、本次 set 调用
+    /// 返回时尚未落地，见 tao util/async.rs），连续多个 drag 闭包会读到同一未
+    /// 更新的旧 frame、增量互相覆盖 → 位置在「累计落点」与「旧点+单帧增量」
+    /// 间高频振荡 = 跨屏拖拽闪烁，跨 Retina↔非 Retina 边界还反复重建透明
+    /// backing store = 闪空、拖不过去。绝对落点是纯函数（无回读、无累计、
+    /// last-wins 即正确终态），按构造收敛、天然跨屏（点空间统一、scale 无关）。
+    pub fn move_ball_to(app: &AppHandle, x: f64, y: f64) -> Result<(), String> {
         let ball = app
             .get_webview_window(BALL_LABEL)
             .ok_or("[fb] ball window missing")?;
-        let scale = ball.scale_factor().unwrap_or(2.0);
-        let pos = ball
-            .outer_position()
-            .map_err(|e| format!("[fb] ball position: {e}"))?
-            .to_logical::<f64>(scale);
-        let _ = ball.set_position(LogicalPosition::new(pos.x + dx, pos.y + dy));
+        let _ = ball.set_position(LogicalPosition::new(x, y));
         Ok(())
     }
 
@@ -727,35 +734,34 @@ mod imp {
         pub dock: String,
     }
 
-    /// Snap the ball to the nearest screen edge and persist placement.
-    /// MUST run on the main thread（经命令层 run_on_main_thread 调度）：拖拽
-    /// 的 setFrameTopLeftPoint 都排在主队列里，排在它们之后执行才能读到
-    /// 拖拽落定后的真实位置——命令线程上立刻读会拿到旧 frame，跨屏拖拽
-    /// 会被按旧屏吸回去。
-    pub fn snap_ball(app: &AppHandle) -> Result<SnapResult, String> {
+    /// 吸附决策（纯函数，可单测）：球落点 + 显示器 work area → 停靠边 + 高度比。
+    /// `cx` = 球心 x；`ball_y` = 球原点 y；`ax/ay/aw/ah` = work area 左/顶/宽/高。
+    fn snap_decision(cx: f64, ball_y: f64, ax: f64, ay: f64, aw: f64, ah: f64) -> (&'static str, f64) {
+        let dock = if cx < ax + aw / 2.0 { "left" } else { "right" };
+        let y_ratio = ((ball_y - ay) / ah).clamp(0.02, 0.92);
+        (dock, y_ratio)
+    }
+
+    /// 吸附到最近屏幕边并持久化。落点 (ball_x, ball_y) 由 JS 传入（松手时光标
+    /// 推算的权威全局点），**不回读** `outer_position`——回读会撞上 set_frame 的
+    /// GCD 异步：读到拖拽尾帧尚未落地的旧值，按旧屏/主屏吸回 = 跨屏拖不过去
+    /// （#bb535240 的残根，与 `move_ball_to` 同源）。仍 channel-join 到主线程，
+    /// 因为 work_area / available_monitors 读 NSScreen 须主线程。
+    pub fn snap_ball(app: &AppHandle, ball_x: f64, ball_y: f64) -> Result<SnapResult, String> {
         let ball = app
             .get_webview_window(BALL_LABEL)
             .ok_or("[fb] ball window missing")?;
-        let scale = ball.scale_factor().unwrap_or(2.0);
-        let pos = ball
-            .outer_position()
-            .map_err(|e| format!("[fb] ball position: {e}"))?
-            .to_logical::<f64>(scale);
-        let monitor = monitor_for_ball_center(app)
-            .or_else(|| app.primary_monitor().ok().flatten());
+        let (cx, cy) = (ball_x + BALL_WIN / 2.0, ball_y + BALL_WIN / 2.0);
+        let monitor =
+            monitor_for_point(app, cx, cy).or_else(|| app.primary_monitor().ok().flatten());
         let (ax, ay, aw, ah) = monitor
             .as_ref()
             .map(monitor_work_area)
             .unwrap_or((0.0, 28.0, 1440.0, 872.0));
-
-        let dock = if pos.x + BALL_WIN / 2.0 < ax + aw / 2.0 {
-            "left"
-        } else {
-            "right"
-        };
+        let (dock, y_ratio) = snap_decision(cx, ball_y, ax, ay, aw, ah);
         let placement = FbPlacement {
             dock: dock.to_string(),
-            y_ratio: ((pos.y - ay) / ah).clamp(0.02, 0.92),
+            y_ratio,
             monitor: monitor.as_ref().and_then(|m| m.name().cloned()),
         };
         let (x, y) = ball_xy_for_placement(app, &placement);
@@ -774,16 +780,15 @@ mod imp {
         Ok(())
     }
 
-    pub fn drag_companion(app: &AppHandle, dx: f64, dy: f64) -> Result<(), String> {
+    /// 伴侣窗拖拽落点（绝对）：窗口原点直接置到 (x, y)，与球的 `move_ball_to`
+    /// 同源——**不回读** `outer_position`（避免 GCD 异步 set × 同步 read 的读改写
+    /// 振荡 = 跨屏拖拽闪烁）。(x, y) 为全局逻辑点、左上原点（与浏览器 e.screenX/Y
+    /// 同空间）。
+    pub fn move_companion_to(app: &AppHandle, x: f64, y: f64) -> Result<(), String> {
         let companion = app
             .get_webview_window(COMPANION_LABEL)
             .ok_or("[fb] companion window missing")?;
-        let scale = companion.scale_factor().unwrap_or(2.0);
-        let pos = companion
-            .outer_position()
-            .map_err(|e| format!("[fb] companion position: {e}"))?
-            .to_logical::<f64>(scale);
-        let _ = companion.set_position(LogicalPosition::new(pos.x + dx, pos.y + dy));
+        let _ = companion.set_position(LogicalPosition::new(x, y));
         Ok(())
     }
 
@@ -978,6 +983,44 @@ mod imp {
             ulog_error!("[fb] relay {event} → {label} failed: {e}");
         }
     }
+
+    #[cfg(test)]
+    mod tests {
+        use super::snap_decision;
+
+        // work area: 主屏 (0,28) 1440×872。
+        const AX: f64 = 0.0;
+        const AY: f64 = 28.0;
+        const AW: f64 = 1440.0;
+        const AH: f64 = 872.0;
+
+        #[test]
+        fn dock_by_center_relative_to_work_area_midline() {
+            // 球心在左半 → left；右半 → right（按 work area 中线，不是屏幕中线）。
+            assert_eq!(snap_decision(100.0, 400.0, AX, AY, AW, AH).0, "left");
+            assert_eq!(snap_decision(1300.0, 400.0, AX, AY, AW, AH).0, "right");
+            // 正好中线（720）算 right（`<` 判据）。
+            assert_eq!(snap_decision(720.0, 400.0, AX, AY, AW, AH).0, "right");
+        }
+
+        #[test]
+        fn y_ratio_clamped_into_visible_band() {
+            // 顶到边外/底到边外都夹进 [0.02, 0.92]，球不会被吸到 Dock 下/菜单栏上。
+            assert_eq!(snap_decision(100.0, AY - 500.0, AX, AY, AW, AH).1, 0.02);
+            assert_eq!(snap_decision(100.0, AY + AH + 500.0, AX, AY, AW, AH).1, 0.92);
+            // 居中：(ay + 0.4*ah - ay)/ah = 0.4。
+            let y = AY + 0.4 * AH;
+            assert!((snap_decision(100.0, y, AX, AY, AW, AH).1 - 0.4).abs() < 1e-9);
+        }
+
+        #[test]
+        fn second_screen_to_the_right_uses_its_own_work_area_origin() {
+            // 副屏在主屏右侧：work area 原点 x=1440。球心落副屏左半 → left（相对副屏）。
+            let (ax, aw) = (1440.0, 1920.0);
+            assert_eq!(snap_decision(1600.0, 400.0, ax, AY, aw, AH).0, "left");
+            assert_eq!(snap_decision(3200.0, 400.0, ax, AY, aw, AH).0, "right");
+        }
+    }
 }
 
 // ════════════════════════════════════════════════════════════════════════
@@ -1047,34 +1090,30 @@ mod commands {
             .map_err(|e| format!("[fb] main thread dispatch: {e}"))
     }
 
-    /// 主线程执行（fire-and-forget）：读 frame + setFrameTopLeftPoint 在主
-    /// 队列上串行化。命令线程上"读旧 frame + 排队异步 set"会丢增量、且让
-    /// 紧随其后的 snap 读到拖拽中途的位置。
+    /// 拖拽落点（绝对，fire-and-forget）。set_position 本身是 GCD 异步、线程
+    /// 安全，无需 run_on_main_thread。绝对落点不依赖回读，IPC 批处理/丢帧只
+    /// 意味着球跳到最新光标目标，正确收敛（见 imp::move_ball_to）。
     #[tauri::command]
-    pub async fn cmd_fb_drag_ball(app: AppHandle, dx: f64, dy: f64) -> Result<(), String> {
-        app.clone()
-            .run_on_main_thread(move || {
-                let _ = imp::drag_ball(&app, dx, dy);
-            })
-            .map_err(|e| format!("[fb] main thread dispatch: {e}"))
+    pub async fn cmd_fb_move_ball_to(app: AppHandle, x: f64, y: f64) -> Result<(), String> {
+        imp::move_ball_to(&app, x, y)
     }
 
-    /// channel-join 主线程：排在拖拽的全部异步 set 之后执行，读到的才是
-    /// 松手时的真实位置（见 imp::snap_ball 注释——跨屏拖拽弹回的根因）。
+    /// channel-join 主线程（work_area/available_monitors 读 NSScreen 须主线程）。
+    /// 落点 (x, y) = 松手时光标推算的权威全局点，snap 不回读 frame。
     #[tauri::command]
-    pub async fn cmd_fb_snap_ball(app: AppHandle) -> Result<imp::SnapResult, String> {
+    pub async fn cmd_fb_snap_ball(app: AppHandle, x: f64, y: f64) -> Result<imp::SnapResult, String> {
         let (tx, rx) = std::sync::mpsc::channel();
         app.clone()
             .run_on_main_thread(move || {
-                let _ = tx.send(imp::snap_ball(&app));
+                let _ = tx.send(imp::snap_ball(&app, x, y));
             })
             .map_err(|e| format!("[fb] main thread dispatch: {e}"))?;
         rx.recv().map_err(|e| format!("[fb] snap join: {e}"))?
     }
 
     #[tauri::command]
-    pub async fn cmd_fb_drag_companion(app: AppHandle, dx: f64, dy: f64) -> Result<(), String> {
-        imp::drag_companion(&app, dx, dy)
+    pub async fn cmd_fb_move_companion_to(app: AppHandle, x: f64, y: f64) -> Result<(), String> {
+        imp::move_companion_to(&app, x, y)
     }
 
     #[tauri::command]
@@ -1179,7 +1218,7 @@ mod commands {
     }
 
     #[tauri::command]
-    pub async fn cmd_fb_drag_ball(_app: AppHandle, _dx: f64, _dy: f64) -> Result<(), String> {
+    pub async fn cmd_fb_move_ball_to(_app: AppHandle, _x: f64, _y: f64) -> Result<(), String> {
         Err(UNSUPPORTED.to_string())
     }
 
@@ -1189,12 +1228,12 @@ mod commands {
     }
 
     #[tauri::command]
-    pub async fn cmd_fb_snap_ball(_app: AppHandle) -> Result<SnapResult, String> {
+    pub async fn cmd_fb_snap_ball(_app: AppHandle, _x: f64, _y: f64) -> Result<SnapResult, String> {
         Err(UNSUPPORTED.to_string())
     }
 
     #[tauri::command]
-    pub async fn cmd_fb_drag_companion(_app: AppHandle, _dx: f64, _dy: f64) -> Result<(), String> {
+    pub async fn cmd_fb_move_companion_to(_app: AppHandle, _x: f64, _y: f64) -> Result<(), String> {
         Err(UNSUPPORTED.to_string())
     }
 
