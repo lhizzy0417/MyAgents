@@ -9,9 +9,10 @@
  * - Local bundle (no CDN) for Tauri CSP compatibility
  */
 import Editor, { loader, type Monaco } from '@monaco-editor/react';
-import { Loader2, Quote } from 'lucide-react';
+import { ClipboardPaste, Copy, Loader2, Quote, Scissors, Search, TextSelect } from 'lucide-react';
 import * as monaco from 'monaco-editor';
 import { retainFocusOnMouseDown } from '@/utils/focusRetention';
+import ContextMenu, { type ContextMenuItem } from './ContextMenu';
 import editorWorker from 'monaco-editor/esm/vs/editor/editor.worker?worker';
 import jsonWorker from 'monaco-editor/esm/vs/language/json/json.worker?worker';
 import cssWorker from 'monaco-editor/esm/vs/language/css/css.worker?worker';
@@ -20,6 +21,7 @@ import tsWorker from 'monaco-editor/esm/vs/language/typescript/ts.worker?worker'
 // CRITICAL: Must import Monaco CSS for styles to work in Vite bundled mode
 import 'monaco-editor/min/vs/editor/editor.main.css';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import type { FilePreviewFocusTarget } from '@/types/filePreview';
 
 // Configure Monaco Environment for bundled workers (required for Tauri CSP)
@@ -474,6 +476,92 @@ export default function MonacoEditor({
     // again. So no `useEffect`-based clear is needed — that would also trip the
     // `react-hooks/set-state-in-effect` rule by writing state from an effect.
 
+    // Right-click context menu. Monaco's own menu is disabled (`contextmenu: false`
+    // below) — it ships English labels and Monaco's own theme, and on macOS its
+    // clipboard actions historically leaned on the native menu. We render the app's
+    // shared <ContextMenu> instead (Chinese labels, design tokens) and drive the editor
+    // through reliable APIs: model edits for cut/paste and the async Clipboard API
+    // (the menu click is a user gesture, so read/write are permitted). This restores the
+    // right-click fallback that was missing alongside the ⌘A fix.
+    const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number } | null>(null);
+
+    const copySelection = useCallback(() => {
+        const editor = editorRef.current;
+        const model = editor?.getModel();
+        const sel = editor?.getSelection();
+        if (!editor || !model || !sel || sel.isEmpty()) return;
+        void navigator.clipboard.writeText(model.getValueInRange(sel)).catch(() => {});
+        editor.focus();
+    }, []);
+
+    const cutSelection = useCallback(() => {
+        const editor = editorRef.current;
+        const model = editor?.getModel();
+        const sel = editor?.getSelection();
+        if (!editor || !model || !sel || sel.isEmpty()) return;
+        const text = model.getValueInRange(sel);
+        // Delete ONLY after the clipboard write succeeds — otherwise a denied
+        // write would remove the text without copying it (silent data loss).
+        // The captured `sel` range stays valid: nothing mutates the model in between.
+        void navigator.clipboard.writeText(text).then(() => {
+            editorRef.current?.executeEdits('ctx-cut', [{ range: sel, text: '' }]);
+            editorRef.current?.focus();
+        }).catch(() => {});
+    }, []);
+
+    const pasteClipboard = useCallback(() => {
+        const editor = editorRef.current;
+        const sel = editor?.getSelection();
+        if (!editor || !sel) return;
+        // readText() must run inside the click gesture; the edit afterwards is
+        // programmatic. Use the range captured at invocation so a focus/selection
+        // change while the read is pending can't redirect the paste elsewhere.
+        void navigator.clipboard.readText().then((text) => {
+            if (!text) return;
+            editorRef.current?.executeEdits('ctx-paste', [{ range: sel, text }]);
+            editorRef.current?.focus();
+        }).catch(() => {});
+    }, []);
+
+    const selectAllText = useCallback(() => {
+        const editor = editorRef.current;
+        const model = editor?.getModel();
+        if (!editor || !model) return;
+        editor.setSelection(model.getFullModelRange());
+        editor.focus();
+    }, []);
+
+    const openFind = useCallback(() => {
+        const editor = editorRef.current;
+        editor?.focus();
+        editor?.getAction('actions.find')?.run();
+    }, []);
+
+    const handleContextMenu = useCallback((e: React.MouseEvent) => {
+        if (!editorRef.current) return;
+        e.preventDefault();
+        setCtxMenu({ x: e.clientX, y: e.clientY });
+    }, []);
+
+    /** Built fresh each open so disabled states reflect the live selection. */
+    const buildContextMenuItems = useCallback((): ContextMenuItem[] => {
+        const sel = editorRef.current?.getSelection();
+        const hasSelection = !!sel && !sel.isEmpty();
+        const items: ContextMenuItem[] = [];
+        if (!readOnly) {
+            items.push({ label: '剪切', icon: <Scissors className="h-4 w-4" />, disabled: !hasSelection, onClick: cutSelection });
+        }
+        items.push({ label: '复制', icon: <Copy className="h-4 w-4" />, disabled: !hasSelection, onClick: copySelection });
+        if (!readOnly) {
+            items.push({ label: '粘贴', icon: <ClipboardPaste className="h-4 w-4" />, onClick: pasteClipboard });
+        }
+        items.push({ separator: true });
+        items.push({ label: '全选', icon: <TextSelect className="h-4 w-4" />, onClick: selectAllText });
+        items.push({ separator: true });
+        items.push({ label: '查找', icon: <Search className="h-4 w-4" />, onClick: openFind });
+        return items;
+    }, [readOnly, cutSelection, copySelection, pasteClipboard, selectAllText, openFind]);
+
     // Monaco editor options optimized for performance
     const options = useMemo(() => ({
         readOnly,
@@ -556,7 +644,10 @@ export default function MonacoEditor({
     // scrollbar) within the reduced area. Monaco's own `padding` option only supports
     // top/bottom — wrapper padding is the supported workaround for horizontal padding.
     return (
-        <div className={`monaco-editor-host relative h-full w-full overflow-hidden ${className}`}>
+        <div
+            className={`monaco-editor-host relative h-full w-full overflow-hidden ${className}`}
+            onContextMenu={handleContextMenu}
+        >
             <Editor
                 height="100%"
                 language={language}
@@ -600,6 +691,23 @@ export default function MonacoEditor({
                         引用
                     </button>
                 </div>
+            )}
+            {/* Portaled to <body> so the host's `overflow-hidden` (and any transformed
+                modal ancestor) can never clip the floating menu — same reason
+                FilePreviewModal portals itself. x/y are viewport coords, which is what
+                <ContextMenu>'s fixed positioning + viewport clamping expect. */}
+            {ctxMenu && createPortal(
+                <ContextMenu
+                    x={ctxMenu.x}
+                    y={ctxMenu.y}
+                    items={buildContextMenuItems()}
+                    onClose={() => setCtxMenu(null)}
+                    // Above FilePreviewModal (z-[210]) and the quote menu (z-[300]) —
+                    // the editor is most often mounted inside that modal, where the
+                    // default z-50 would render the menu behind the backdrop.
+                    zIndex={320}
+                />,
+                document.body,
             )}
         </div>
     );

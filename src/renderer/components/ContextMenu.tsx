@@ -18,13 +18,21 @@ interface ContextMenuProps {
     y: number;
     items: ContextMenuItem[];
     onClose: () => void;
+    /**
+     * Stacking layer. Defaults to 50 (matches inline panel usages like the file
+     * tree). Callers that portal the menu OVER a higher overlay (e.g. Monaco
+     * inside the z-[210] FilePreviewModal) must pass a value above that overlay so
+     * the menu isn't rendered behind it — and so Cmd+W/Esc close ordering stays
+     * correct (useCloseLayer uses the same value).
+     */
+    zIndex?: number;
 }
 
-export default function ContextMenu({ x, y, items, onClose }: ContextMenuProps) {
+export default function ContextMenu({ x, y, items, onClose, zIndex = 50 }: ContextMenuProps) {
     const menuRef = useRef<HTMLDivElement>(null);
 
     // Cmd+W dismissal: always active while mounted (component only renders when open)
-    useCloseLayer(() => { onClose(); return true; }, 50);
+    useCloseLayer(() => { onClose(); return true; }, zIndex);
 
     useEffect(() => {
         const handleClickOutside = (event: MouseEvent) => {
@@ -73,8 +81,11 @@ export default function ContextMenu({ x, y, items, onClose }: ContextMenuProps) 
     return (
         <div
             ref={menuRef}
-            className="fixed z-50 min-w-[160px] rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] py-1.5 shadow-lg backdrop-blur"
-            style={{ left: x, top: y }}
+            className="fixed min-w-[160px] rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] py-1.5 shadow-lg backdrop-blur"
+            style={{ left: x, top: y, zIndex }}
+            // A right-click on the menu itself must not bubble (incl. through a
+            // React portal) to a parent's onContextMenu and re-open another menu.
+            onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); }}
         >
             {items.map((item, index) =>
                 'separator' in item && item.separator ? (
