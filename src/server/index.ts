@@ -3718,9 +3718,9 @@ async function main() {
 
       // POST /sessions - Create a new session
       if (pathname === '/sessions' && request.method === 'POST') {
-        let payload: { agentDir: string; runtime?: string };
+        let payload: { agentDir: string; runtime?: string; seedMaxPermission?: boolean };
         try {
-          payload = (await request.json()) as { agentDir: string; runtime?: string };
+          payload = (await request.json()) as { agentDir: string; runtime?: string; seedMaxPermission?: boolean };
         } catch {
           return jsonResponse({ success: false, error: 'Invalid JSON payload.' }, 400);
         }
@@ -3743,6 +3743,16 @@ async function main() {
         const agent = findAgentByWorkspacePath(agentDirValue) as AgentConfig | undefined;
         const baseSnapshot = agent ? snapshotForOwnedSession(agent) : {};
         if (runtimeValue) baseSnapshot.runtime = runtimeValue;
+        // PRD 0.2.34 §14 D14/D15 — 桌面渠道（悬浮球）创建 owned session 时把权限
+        // 种成该 runtime 的「最宽松」档（发完就走渠道默认无脑执行）。原子地在快照
+        // 构造期种入（复用既有 getMaxPermissionForRuntime），而非"创建后再 PATCH"
+        // ——后者 PATCH 失败会被吞、UI 与磁盘快照不一致（cross-review）。opt-in：
+        // 只有悬浮球传 seedMaxPermission，Tab/其它 createSession 行为不变。
+        if (payload?.seedMaxPermission === true) {
+          baseSnapshot.permissionMode = getMaxPermissionForRuntime(
+            (baseSnapshot.runtime ?? 'builtin') as RuntimeType,
+          );
+        }
         const session = await createSession(agentDirValue, baseSnapshot);
         return jsonResponse({ success: true, session });
       }

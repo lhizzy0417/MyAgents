@@ -309,38 +309,53 @@ html.fb-transparent #root {
   color: var(--error, #dc2626);
 }
 
-/* 等确认：琥珀细线 */
-.fbw-perm {
-  border-left: 2px solid var(--warning, #d97706);
-  padding: 1px 0 1px 12px;
-  margin: 2px 0 16px;
+/* 交互表单容器（权限 / 提问 / 方案审核，D13：复用主 Chat 组件
+   PermissionPrompt/AskUserQuestionPrompt/ExitPlanModePrompt）。组件自带卡片
+   样式（Tailwind + @theme token），这里只负责在会话流里的间距收口。 */
+.fbw-forms {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin: 4px 0 14px;
 }
-.fbw-perm .p-title { font-size: var(--text-sm, 14px); font-weight: 500; color: var(--ink, #1c1612); }
-.fbw-perm .p-desc {
-  font-size: var(--text-xs, 12px);
-  line-height: 1.55;
-  color: var(--ink-muted, #6f6156);
-  margin: 3px 0 7px;
-  word-break: break-all;
-  display: -webkit-box;
-  -webkit-line-clamp: 3;
-  -webkit-box-orient: vertical;
-  overflow: hidden;
+
+/* 设置面板（齿轮，D17）：居中于遮罩上的暖纸小卡。当前内容 = 工作区绑定 + 新对话。 */
+.fbw-settings {
+  width: 300px;
+  max-width: calc(100% - 48px);
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 20px;
+  border-radius: 16px;
+  background: var(--paper-elevated, #fff);
+  border: 1px solid var(--line, rgba(28, 22, 18, 0.1));
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.18);
 }
-.fbw-perm .p-row { display: flex; gap: 16px; }
-.fbw-perm button {
+.fbw-settings-title {
+  font-size: var(--text-base, 16px);
+  font-weight: 600;
+  color: var(--ink, #1c1612);
+}
+.fbw-settings-row { display: flex; flex-direction: column; gap: 6px; }
+.fbw-settings-label { font-size: var(--text-sm, 14px); color: var(--ink-muted, #6f6156); }
+.fbw-settings-action {
   font-size: var(--text-sm, 14px);
   font-weight: 500;
-  padding: 1px 0;
-  background: none;
-  border: none;
+  padding: 9px 0;
+  border-radius: 10px;
+  background: var(--paper-inset, rgba(28, 22, 18, 0.04));
+  border: 1px solid var(--line-subtle, rgba(28, 22, 18, 0.06));
+  color: var(--ink, #1c1612);
   cursor: pointer;
-  transition: color 150ms;
+  transition: background 150ms;
 }
-.fbw-perm .deny { color: var(--ink-muted, #6f6156); }
-.fbw-perm .deny:hover { color: var(--ink, #1c1612); }
-.fbw-perm .allow { color: var(--accent, #c26d3a); font-weight: 600; }
-.fbw-perm .allow:hover { color: var(--accent-warm-hover, #e18a58); }
+.fbw-settings-action:hover { background: var(--hover-bg, rgba(28, 22, 18, 0.08)); }
+.fbw-settings-hint {
+  font-size: var(--text-xs, 12px);
+  line-height: 1.55;
+  color: var(--ink-subtle, #a69a90);
+}
 
 /* 状态行 */
 .fbw-statusline {

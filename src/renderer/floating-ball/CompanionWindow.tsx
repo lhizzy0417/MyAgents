@@ -14,6 +14,10 @@ import { invoke } from '@tauri-apps/api/core';
 import { listenWithCleanup } from '@/utils/tauriListen';
 import Markdown from '@/components/Markdown';
 import OverlayBackdrop from '@/components/OverlayBackdrop';
+import CustomSelect from '@/components/CustomSelect';
+import { PermissionPrompt } from '@/components/PermissionPrompt';
+import { AskUserQuestionPrompt } from '@/components/AskUserQuestionPrompt';
+import { ExitPlanModePrompt } from '@/components/ExitPlanModePrompt';
 import { track } from '@/analytics';
 import { isImeComposingEvent, resolveEnterKeyAction } from '@/utils/chatSendKey';
 import { computeDragOrigin } from './fbDrag';
@@ -82,6 +86,7 @@ export default function CompanionWindow() {
     const [who, setWho] = useState<string>('Mino');
     const [input, setInput] = useState('');
     const [axNeeded, setAxNeeded] = useState(false);
+    const [showSettings, setShowSettings] = useState(false); // 设置面板（齿轮，D17）
 
     const convoRef = useRef<HTMLDivElement | null>(null);
     const inputRef = useRef<HTMLTextAreaElement | null>(null);
@@ -119,6 +124,7 @@ export default function CompanionWindow() {
             hideTimerRef.current = null;
         }
         setShotPreview(false); // 大图预览不跨一次显隐
+        setShowSettings(false); // 设置面板不跨一次显隐
         applyMode('hidden');
         void invoke('cmd_fb_hide_companion');
     }, [applyMode]);
@@ -245,6 +251,11 @@ export default function CompanionWindow() {
         };
         const onKey = (e: KeyboardEvent) => {
             if (e.key !== 'Escape') return;
+            // Esc 逐层收口：设置面板 → 大图预览 → 关窗。
+            if (showSettings) {
+                setShowSettings(false);
+                return;
+            }
             if (shotPreview) {
                 setShotPreview(false);
                 return;
@@ -257,7 +268,7 @@ export default function CompanionWindow() {
             window.removeEventListener('blur', onBlur);
             window.removeEventListener('keydown', onKey);
         };
-    }, [hideSelf, shotPreview]);
+    }, [hideSelf, shotPreview, showSettings]);
 
     // ── peek → pin 升格（窗内有效行为 = 激活 + 执行该行为，0612 用户裁决） ──
     // 点击带处境抓取（点击 = "我要说话"）；滚轮只升格不抓处境（滚轮 = "我要
@@ -546,6 +557,9 @@ export default function CompanionWindow() {
             {/* chrome：pin 悬停浮现 */}
             <div className="fbw-chrome">
                 <span className="who">{who}</span>
+                <button onClick={() => setShowSettings((s) => !s)} title="悬浮球设置（工作区 / 新对话）">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" /></svg>
+                </button>
                 <button onClick={onExpand} title="在 MyAgents 中打开（新 Tab 接上这条会话）">
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M7 17L17 7" /><path d="M9 7h8v8" /></svg>
                 </button>
@@ -594,14 +608,33 @@ export default function CompanionWindow() {
                         <span className="fbw-caret" />
                     </div>
                 )}
-                {session.permReq && (
-                    <div className="fbw-perm">
-                        <div className="p-title">需要你的确认 · {session.permReq.toolName}</div>
-                        <div className="p-desc">{session.permReq.input}</div>
-                        <div className="p-row">
-                            <button className="deny" onClick={() => void session.respondPermission('deny')}>拒绝</button>
-                            <button className="allow" onClick={() => void session.respondPermission('allow_once')}>允许</button>
-                        </div>
+                {/* 交互表单（D13）：复用主 Chat 同款组件，能力对等、视觉随设计
+                    token 收敛。fb 窗是主 Vite app 的懒加载路由，Tailwind + @theme
+                    token 天然可用，组件原样渲染。每类卡片缺一不可——漏接会让本轮
+                    永久 hang（PRD §14.1）。 */}
+                {(session.permReq || session.askReq || session.planReq) && (
+                    <div className="fbw-forms">
+                        {session.permReq && (
+                            <PermissionPrompt
+                                request={session.permReq}
+                                onDecision={(_, decision) => void session.respondPermission(decision)}
+                            />
+                        )}
+                        {session.askReq && (
+                            <AskUserQuestionPrompt
+                                request={session.askReq}
+                                onSubmit={(_, answers) => void session.respondAskUserQuestion(answers)}
+                                onCancel={() => void session.respondAskUserQuestion(null)}
+                            />
+                        )}
+                        {session.planReq && (
+                            <ExitPlanModePrompt
+                                key={session.planReq.requestId}
+                                request={session.planReq}
+                                onApprove={() => void session.respondExitPlanMode(true)}
+                                onReject={(feedback) => void session.respondExitPlanMode(false, feedback)}
+                            />
+                        )}
                     </div>
                 )}
             </div>
@@ -712,6 +745,46 @@ export default function CompanionWindow() {
                         className="fbw-shot-full"
                         onClick={() => setShotPreview(false)}
                     />
+                </OverlayBackdrop>
+            )}
+
+            {/* 设置面板（齿轮，D17）：当前唯一有效内容 = 工作区绑定 + 新对话。
+                遮罩同 lightbox 走 OverlayBackdrop（伴侣窗无 Tab 体系不接
+                useCloseLayer）。OverlayBackdrop 以 onMouseDown + target===currentTarget
+                判关闭，子元素点击本就不冒泡触发关闭，故面板无需 stopPropagation。 */}
+            {showSettings && (
+                <OverlayBackdrop
+                    variant="dark"
+                    onClose={() => setShowSettings(false)}
+                    className="z-20 rounded-[24px]"
+                >
+                    <div className="fbw-settings">
+                        <div className="fbw-settings-title">悬浮球设置</div>
+                        <div className="fbw-settings-row">
+                            <span className="fbw-settings-label">绑定工作区</span>
+                            <CustomSelect
+                                value={session.workspaceOverride ?? ''}
+                                size="md"
+                                options={[
+                                    { value: '', label: '跟随默认工作区' },
+                                    ...session.projects.map((p) => ({ value: p.path, label: p.name })),
+                                ]}
+                                onChange={(v) => void session.setWorkspaceBinding(v || null)}
+                            />
+                        </div>
+                        <button
+                            className="fbw-settings-action"
+                            onClick={() => {
+                                void session.newConversation();
+                                setShowSettings(false);
+                            }}
+                        >
+                            新对话
+                        </button>
+                        <div className="fbw-settings-hint">
+                            默认跟随启动页默认工作区；选具体工作区则钉死在它。切换工作区或新对话都会开启一条全新会话（旧会话留在历史，可经 ↗ 找回）。
+                        </div>
+                    </div>
                 </OverlayBackdrop>
             )}
         </div>

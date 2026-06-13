@@ -123,10 +123,20 @@ export async function getSessions(agentDir?: string): Promise<SessionMetadata[]>
 /**
  * Create a new session
  */
-export async function createSession(agentDir: string, runtime?: string): Promise<SessionMetadata> {
+export async function createSession(
+    agentDir: string,
+    runtime?: string,
+    opts?: { seedMaxPermission?: boolean },
+): Promise<SessionMetadata> {
     const result = await apiPostJson<{ success: boolean; session: SessionMetadata }>(
         '/sessions',
-        { agentDir, ...(runtime ? { runtime } : {}) }
+        {
+            agentDir,
+            ...(runtime ? { runtime } : {}),
+            // PRD 0.2.34 §14 D14：桌面渠道创建时由服务端原子地种「最宽松权限 per
+            // runtime」（getMaxPermissionForRuntime），避免创建后再 PATCH 的吞错窗口。
+            ...(opts?.seedMaxPermission ? { seedMaxPermission: true } : {}),
+        },
     );
     return result.session;
 }

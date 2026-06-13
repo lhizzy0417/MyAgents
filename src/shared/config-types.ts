@@ -549,6 +549,10 @@ export interface AppConfig {
    *  SDK 的对话树按工作区落盘，跨工作区 resume 必然 "No conversation found"；
    *  默认工作区变更时必须轮换新 session（验收实战教训）。 */
   floatingBallSessionWorkspace?: string;
+  /** 悬浮球工作区绑定覆盖（PRD 0.2.34 §14 D17）。null / 缺省 = 跟随主端默认
+   *  工作区（config.defaultWorkspacePath）；设为具体工作区路径 = 钉死在该工作区
+   *  （不再跟随默认）。切换它触发 session 轮换（铸新 owned session）。 */
+  floatingBallWorkspaceOverride?: string | null;
   /** 开发者：定期从 LiteLLM (GitHub) 拉取 model_prices_and_context_window.json，
    *  作为模型 contextLength/maxOutputTokens 的最低优先级兜底数据源。缺省视同 true。
    *  抓取在 Rust 侧（启动条件检查 + 24h interval，ETag/If-None-Match 增量）。 */
