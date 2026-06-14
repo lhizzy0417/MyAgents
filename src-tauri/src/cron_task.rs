@@ -3682,7 +3682,7 @@ async fn execute_task_directly(
 
     // Send notification if enabled
     if task.notify_enabled {
-        send_task_notification(handle, task, &result);
+        send_task_notification(handle, task, &result, &effective_session_id);
     }
 
     let ai_exit_reason = if result.ai_requested_exit == Some(true) {
@@ -3800,6 +3800,7 @@ fn send_task_notification(
     handle: &AppHandle,
     task: &CronTask,
     result: &crate::sidecar::CronExecuteResponse,
+    effective_session_id: &str,
 ) {
     let title = if result.success {
         "定时任务执行完成".to_string()
@@ -3815,12 +3816,22 @@ fn send_task_notification(
         format!("任务 #{} 已完成", task.execution_count + 1)
     };
 
+    let session_id = result
+        .session_id
+        .clone()
+        .unwrap_or_else(|| effective_session_id.to_string());
+    let navigation = crate::notification::NotificationNavigation::for_session(
+        task.tab_id.clone(),
+        session_id,
+        task.workspace_path.clone(),
+    );
+
     // Send the OS notification through the unified notification module so the
     // click handler is wired structurally (Windows toast Activated, macOS /
-    // Linux fallback). Bypassing this and emitting a raw event would resurrect
-    // the fragile "front-end forwards to plugin-notification" path that lost
-    // tab_id on click.
-    crate::notification::show_with_navigation(handle, &title, &body, task.tab_id.clone());
+    // Linux fallback). Cron completion must deep-link by session, not only by
+    // tab: scheduled/background tasks frequently have no live Tab, and
+    // new_session mode rotates a fresh session id per execution.
+    crate::notification::show_with_navigation_target(handle, &title, &body, navigation);
 }
 
 /// Global singleton instance

@@ -52,7 +52,13 @@ async function notify(title: string, body?: string, tabId?: string): Promise<voi
     lastNotifyTime = now;
 
     try {
-        await invoke('cmd_show_notification', { title, body: body ?? '', tabId: tabId ?? null });
+        await invoke('cmd_show_notification', {
+            title,
+            body: body ?? '',
+            tabId: tabId ?? null,
+            sessionId: null,
+            workspacePath: null,
+        });
     } catch (error) {
         console.warn('[Notification] cmd_show_notification failed:', error);
     }

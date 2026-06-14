@@ -72,6 +72,7 @@ import { dispatchAppShortcut } from '@/utils/appShortcuts';
 import { handleSelectAllKeydown } from '@/utils/selectAllRouter';
 import { forceFlushLogs, setLogServerUrl, clearLogServerUrl } from '@/utils/frontendLogger';
 import { normalizeRuntime, resolveEffectiveRuntime, planSessionOpen } from '@/utils/sessionOpenPlan';
+import { resolveNotificationClickRoute } from '@/utils/notificationClickRoute';
 import { applyTerminalSessionToTabs } from '@/utils/sessionTermination';
 import { listenWithCleanup } from '@/utils/tauriListen';
 import { CUSTOM_EVENTS, createPendingSessionId, isPendingSessionId } from '../shared/constants';
@@ -2846,8 +2847,10 @@ export default function App() {
         (p) => workspacePathsEqual(p.path, workspacePath),
       );
       if (!workspace) {
-        toastRef.current?.error('找不到对应的工作区，可能已被删除');
-        return;
+        console.warn(
+          '[App] OPEN_SESSION_IN_NEW_TAB workspace not in projects; opening by path:',
+          workspacePath,
+        );
       }
 
       // Dedup + cron-aware routing — mirror handleOpenSessionInNewTab (the in-tab
@@ -2878,8 +2881,8 @@ export default function App() {
       }
       await spawnTabForExistingSession(
         sessionId,
-        workspace.path,
-        workspace.displayName || getFolderName(workspace.path),
+        workspace?.path ?? workspacePath,
+        workspace?.displayName || getFolderName(workspace?.path ?? workspacePath),
         {
           preserveCronActivation: plan.type === 'attach-existing-sidecar',
           pendingFilePreview,
@@ -3106,22 +3109,41 @@ export default function App() {
   // - Windows: directly from the WinRT toast `Activated` callback
   // - macOS / Linux: when the front-end calls `cmd_consume_notification_click`
   //   on focus-regain (handled inside `useTrayEvents`)
-  // Both converge here so tab routing has one entry point.
+  // Both converge here so routing has one entry point. Chat completion toasts
+  // usually carry a tabId and can jump directly; cron/background toasts carry
+  // sessionId + workspacePath so they can open a session even when no Tab exists.
   useEffect(() => {
     if (!isTauriEnvironment()) return;
     const ac = new AbortController();
-    void listenWithCleanup<{ tabId: string }>(
+    void listenWithCleanup<{ tabId?: string; sessionId?: string; workspacePath?: string }>(
       'notification:click',
       (event) => {
-        const { tabId } = event.payload;
-        if (!tabId) return;
-        const exists = tabsRef.current.some((t) => t.id === tabId);
-        if (exists) {
-          console.log('[App] notification:click → handleSelectTab', tabId);
-          handleSelectTab(tabId);
-        } else {
-          console.warn('[App] notification:click for missing tab:', tabId);
+        const route = resolveNotificationClickRoute(event.payload, (tabId) =>
+          tabsRef.current.some((t) => t.id === tabId),
+        );
+        if (route.type === 'select-tab') {
+          console.log('[App] notification:click → handleSelectTab', route.tabId);
+          handleSelectTab(route.tabId);
+          return;
         }
+
+        if (route.type === 'open-session') {
+          console.log('[App] notification:click → open session', route.sessionId);
+          window.dispatchEvent(
+            new CustomEvent(CUSTOM_EVENTS.OPEN_SESSION_IN_NEW_TAB, {
+              detail: {
+                sessionId: route.sessionId,
+                workspacePath: route.workspacePath,
+              },
+            }),
+          );
+          return;
+        }
+
+        console.warn(
+          '[App] notification:click without routable target:',
+          event.payload,
+        );
       },
       ac.signal,
     );
