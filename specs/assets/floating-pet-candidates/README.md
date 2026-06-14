@@ -2,7 +2,7 @@
 
 Version: `0.2.34_desktop_pet_settings`
 
-This folder contains first-pass Mino desktop-pet candidates generated with the installed `hatch-pet` skill contract and image-gen. These are candidate assets for choosing future built-in presets; they are not wired into the product bundle yet.
+This folder contains single-icon Mino desktop-pet candidates for choosing future built-in presets. The visual direction comes from image-gen reference art, while the final Codex Pets atlases were rebuilt deterministically so every used cell contains one complete centered icon and every unused cell is transparent.
 
 Each candidate folder contains:
 
@@ -11,8 +11,7 @@ Each candidate folder contains:
 - `contact-sheet.png` — hatch-pet contact sheet for quick visual review.
 - `validation.json` — output from `hatch-pet/scripts/validate_atlas.py`.
 
-All 11 candidates pass `validate_atlas.py` with zero errors and zero warnings.
-Original generated source images remain in the local Codex generated-images cache; candidate source filenames are recorded in `index.json`.
+All 11 candidates pass `validate_atlas.py` with zero errors and zero warnings. Matching packages are also copied to local Codex/MyAgents pet libraries for manual import testing.
 
 ## Candidates
 
@@ -40,4 +39,4 @@ for dir in "$ROOT"/mino-*; do
 done
 ```
 
-`overview.png` is a stitched visual index of all contact sheets.
+`overview.png` is a stitched visual index of the candidate idle icons.
