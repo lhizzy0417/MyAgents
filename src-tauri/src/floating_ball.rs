@@ -539,7 +539,10 @@ mod imp {
                 .resizable(false) // JS-driven resize via cmd_fb_set_companion_size
                 .decorations(false)
                 .transparent(true)
-                .shadow(true)
+                // Native window shadows follow the rectangular NSWindow, not the
+                // DOM panel radius, so they show up as square corners around the
+                // transparent companion. The panel owns its visual treatment in CSS.
+                .shadow(false)
                 .visible(false)
                 .skip_taskbar(true)
                 // 同球窗：peek 态（非 key）的第一击必须进 DOM，见上注释。
@@ -662,9 +665,9 @@ mod imp {
 
     // ── 伴侣窗出入场渐变（窗口层 alpha） ──
     //
-    // 为什么仍在 NSWindow 层做：窗口阴影和整块 transparent webview 需要跟
-    // DOM 内容一起淡入淡出；只改 DOM opacity 会留下平台窗口层的时序差异。
-    // NSWindow.alphaValue 把纸片、内容、窗口阴影作为一个整体处理。
+    // 为什么仍在 NSWindow 层做：整块 transparent webview 需要跟 DOM 内容
+    // 一起淡入淡出；只改 DOM opacity 会留下平台窗口层的时序差异。
+    // NSWindow.alphaValue 把纸片和内容作为一个整体处理。
     //
     // 为什么是 Rust 步进而不是 NSAnimationContext + animator：隐式动画在本
     // app 实测**不产生动画**——setAlphaValue 瞬间生效（0612 真机 + 日志取

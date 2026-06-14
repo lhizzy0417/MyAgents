@@ -11,6 +11,17 @@ html.fb-transparent #root {
   height: 100%;
 }
 
+html.fb-transparent body::before {
+  content: none !important;
+  display: none !important;
+}
+
+html.fb-transparent #root {
+  min-height: 100%;
+  position: static;
+  z-index: auto;
+}
+
 /* ════════ Ball（92×92 透明窗，球 48px 居中） ════════ */
 .fbw-ball-stage {
   position: fixed;
@@ -258,6 +269,10 @@ html.fb-transparent #root {
   box-shadow: 0 18px 48px rgb(0 0 0 / 0.22);
   -webkit-backdrop-filter: blur(18px) saturate(1.08);
   backdrop-filter: blur(18px) saturate(1.08);
+  background-clip: padding-box;
+  clip-path: inset(0 round 24px);
+  contain: paint;
+  isolation: isolate;
   overflow: hidden;
   transition: background 280ms ease, transform 260ms cubic-bezier(0.22, 1, 0.36, 1),
     opacity 200ms ease;
@@ -266,7 +281,7 @@ html.fb-transparent #root {
 }
 .fbw-win.peek {
   cursor: pointer;
-  background: color-mix(in srgb, var(--paper-elevated) 90%, transparent);
+  background: color-mix(in srgb, var(--paper-elevated) 85%, transparent);
 }
 .fbw-win.pin {
   background: color-mix(in srgb, var(--paper-elevated) 99%, transparent);
