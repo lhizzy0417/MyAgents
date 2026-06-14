@@ -87,6 +87,7 @@ import { isAbortedTerminalReason, shouldTitleCompletedTurn } from '../shared/ter
 import { trackServer } from './analytics';
 import { getCurrentRuntimeType, isExternalRuntime } from './runtimes/factory';
 import { resolveLastRealUserMessagePreview } from './utils/session-message-preview';
+import { decideBuiltinSessionResume } from './utils/builtin-session-resume';
 import { elapsedMs, emitPerfTrace, nowMs } from './utils/perf-trace';
 import type { ImagePayload } from './runtimes/types';
 import { buildBuiltinMediaAttachments, saveExtractedToolResultAttachments } from './runtimes/builtin-media-attachments';
@@ -6730,24 +6731,35 @@ export async function initializeAgent(
     // Use caller-specified session_id (IM / Tab opening existing session / CronTask)
     sessionId = initialSessionId as typeof sessionId;
 
-    // Check if this session has any prior metadata → decide resume vs create.
-    // We check for metadata existence (not just sdkSessionId) because sdkSessionId
-    // is only written after system_init succeeds. If the previous Bun process crashed
-    // before system_init, metadata exists (with unifiedSession:true) but sdkSessionId
-    // is absent — yet the SDK session directory already exists on disk.
+    // Metadata alone is not enough to resume the Claude Agent SDK. POST /sessions
+    // creates MyAgents metadata before the SDK has ever persisted a transcript,
+    // so `query({ resume })` would fail with "No conversation found". If
+    // sdkSessionId is missing, only recover the rare crash-before-metadata-update
+    // case when the SDK transcript probe finds real persisted messages.
     const meta = initMeta;
     if (meta) {
-      // Cross-runtime guard: if session was created by a DIFFERENT runtime than the current one,
-      // attempting to resume would fail (SDK: "No conversation found", CC/Codex: unknown session ID).
-      // Covers all mismatch combinations: builtin↔CC, builtin↔Codex, CC↔Codex.
       const currentRuntimeType = getCurrentRuntimeType();
-      const isCrossRuntime = meta.runtime && meta.runtime !== currentRuntimeType;
-      if (isCrossRuntime) {
-        sessionRegistered = false;
-        console.log(`[agent] initializeAgent: cross-runtime session ${initialSessionId} (created by ${meta.runtime}, current=${currentRuntimeType}), will NOT resume`);
-      } else {
+      const resumeDecision = await decideBuiltinSessionResume({
+        meta,
+        currentRuntime: currentRuntimeType,
+        agentDir: nextAgentDir,
+        probeSdkTranscript: sdkGetSessionMessages,
+      });
+      if (resumeDecision.shouldResume) {
         sessionRegistered = true;
-        console.log(`[agent] initializeAgent: will resume session ${initialSessionId} (sdkSessionId=${meta.sdkSessionId ?? 'unknown'})`);
+        console.log(`[agent] initializeAgent: will resume session ${resumeDecision.resumeSessionId} (reason=${resumeDecision.reason}, sdkSessionId=${meta.sdkSessionId ?? 'unknown'})`);
+      } else {
+        sessionRegistered = false;
+        if (resumeDecision.reason === 'runtime-mismatch') {
+          console.log(`[agent] initializeAgent: cross-runtime session ${initialSessionId} (created by ${meta.runtime}, current=${currentRuntimeType}), will NOT resume`);
+        } else if (resumeDecision.reason === 'external-runtime') {
+          console.log(`[agent] initializeAgent: external runtime ${currentRuntimeType}, builtin SDK resume disabled for ${initialSessionId}`);
+        } else if (resumeDecision.reason === 'probe-error') {
+          const msg = resumeDecision.error instanceof Error ? resumeDecision.error.message : String(resumeDecision.error);
+          console.warn(`[agent] initializeAgent: SDK transcript probe failed for ${initialSessionId}, will create fresh session: ${msg}`);
+        } else {
+          console.log(`[agent] initializeAgent: will create fresh SDK session ${initialSessionId} (resume skipped: ${resumeDecision.reason})`);
+        }
       }
     } else {
       sessionRegistered = false;
@@ -6890,8 +6902,8 @@ export async function initializeAgent(
  * 
  * Key behavior:
  * - Preserves target sessionId so messages are saved to the same session
- * - Sets sessionRegistered if sdkSessionId exists so SDK continues conversation context
- * - If no sdkSessionId exists (old session), starts fresh but keeps same session ID
+ * - Sets sessionRegistered only when the SDK can resume the target transcript
+ * - Metadata-only sessions start fresh but keep the same session ID
  */
 export async function switchToSession(targetSessionId: string): Promise<boolean> {
   console.log(`[agent] switchToSession: ${targetSessionId}`);
@@ -6966,19 +6978,30 @@ export async function switchToSession(targetSessionId: string): Promise<boolean>
     console.log(`[agent] switchToSession: loaded ${sessionData.messages.length} existing messages`);
   }
 
-  // Set sessionRegistered based on whether SDK has this session
-  if (sessionMeta.sdkSessionId) {
-    // SDK 已注册此 session，后续 query 必须用 resume
+  // Set sessionRegistered based on whether the SDK can actually resume this
+  // session. Metadata-only sessions must start fresh with the same sessionId.
+  const targetAgentDir = sessionMeta.agentDir || agentDir;
+  const resumeDecision = await decideBuiltinSessionResume({
+    meta: sessionMeta,
+    currentRuntime: getCurrentRuntimeType(),
+    agentDir: targetAgentDir,
+    probeSdkTranscript: sdkGetSessionMessages,
+  });
+  if (resumeDecision.shouldResume) {
     sessionRegistered = true;
-    console.log(`[agent] switchToSession: will resume session ${sessionId}`);
-  } else if (isExternalRuntime(getCurrentRuntimeType())) {
-    // External runtimes (codex/gemini/CC) don't use sdkSessionId — resume is
-    // driven by runtimeSessionId in external-session.ts. Not a problem.
+    console.log(`[agent] switchToSession: will resume session ${resumeDecision.resumeSessionId} (reason=${resumeDecision.reason})`);
+  } else if (resumeDecision.reason === 'external-runtime') {
+    // External runtimes (codex/gemini/CC) don't use builtin SDK resume state.
+    // Their resume is driven by runtimeSessionId in external-session.ts.
     sessionRegistered = false;
+  } else if (resumeDecision.reason === 'probe-error') {
+    sessionRegistered = false;
+    const msg = resumeDecision.error instanceof Error ? resumeDecision.error.message : String(resumeDecision.error);
+    console.warn(`[agent] switchToSession: SDK transcript probe failed, will start fresh: ${msg}`);
   } else {
     // 从未 query 过的 session，用 sessionId 创建
     sessionRegistered = false;
-    console.warn(`[agent] switchToSession: no SDK session_id, will start fresh`);
+    console.warn(`[agent] switchToSession: will start fresh (resume skipped: ${resumeDecision.reason})`);
   }
 
   // Update agentDir from session
