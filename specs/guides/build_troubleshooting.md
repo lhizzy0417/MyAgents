@@ -3,10 +3,11 @@
 ## 目录
 
 1. [Windows 构建脚本常见问题](#windows-构建脚本常见问题)
-2. [CSP 配置错误](#csp-配置错误)
-3. [Rust toolchain / rustfmt 漂移](#rust-toolchain--rustfmt-漂移)
-4. [Resources 缓存问题](#resources-缓存问题)
-5. [代理配置问题](#代理配置问题)
+2. [macOS Claude SDK native binary 签名失败](#macos-claude-sdk-native-binary-签名失败)
+3. [CSP 配置错误](#csp-配置错误)
+4. [Rust toolchain / rustfmt 漂移](#rust-toolchain--rustfmt-漂移)
+5. [Resources 缓存问题](#resources-缓存问题)
+6. [代理配置问题](#代理配置问题)
 
 ---
 
@@ -68,6 +69,70 @@ Remove-Item src-tauri\target\x86_64-pc-windows-msvc\release -Recurse -Force
 # 重新构建
 .\build_windows.ps1
 ```
+
+---
+
+## macOS Claude SDK native binary 签名失败
+
+### 问题：x86_64 阶段 `claude` 报 `main executable failed strict validation`
+
+**症状**：
+
+```
+━━━ 构建目标: x86_64-apple-darwin ━━━
+  拷贝 Claude native binary (darwin-x64)...
+src-tauri/resources/claude-agent-sdk/claude: main executable failed strict validation
+    ✗ claude 签名失败
+```
+
+**根本原因**：
+
+`build_macos.sh` 会按 target 从
+`node_modules/@anthropic-ai/claude-agent-sdk-darwin-{arm64,x64}/claude`
+拷贝 SDK native binary。早期脚本只检查 `claude` 文件是否存在；如果某次
+跨架构 npm 安装被中断或留下半截目录，后续构建会复用坏文件。
+
+典型坏状态：
+
+```bash
+ls -lh node_modules/@anthropic-ai/claude-agent-sdk-darwin-x64/claude
+# 只有十几 MB；正常约 215 MB
+
+ls node_modules/@anthropic-ai/claude-agent-sdk-darwin-x64/package.json
+# 不存在
+
+otool -l node_modules/@anthropic-ai/claude-agent-sdk-darwin-x64/claude | grep "past end of file"
+# load command 指向文件末尾之后
+```
+
+这种半截 Mach-O 仍可能通过 `file` / `lipo` 的架构判断，但 `codesign`
+会在严格校验阶段失败。
+
+**修复**：
+
+当前 `build_macos.sh` 已在构建前校验本次 target 需要的 darwin SDK 包
+（Both 模式会校验 arm64 + x64）：
+
+- `package.json` 存在，且 package name / version 符合 `package.json` 的 pin
+- `claude` Mach-O 架构匹配目标
+- `otool -l` 没有 `(past end of file)`
+
+发现损坏后会自动删除对应目录，并用 `npm install --force --no-save ...`
+重新安装目标架构包。`--force` 是必要的：npm 10+ direct install
+非 host CPU 的 platform package 时，即使带 `--os=darwin --cpu=x64`，
+仍会按 host CPU 抛 `EBADPLATFORM`。
+
+手动修复旧 checkout：
+
+```bash
+SDK_VERSION=$(node -p "require('./package.json').optionalDependencies['@anthropic-ai/claude-agent-sdk-darwin-x64']")
+rm -rf node_modules/@anthropic-ai/claude-agent-sdk-darwin-x64
+npm install --force --no-save --no-audit --no-fund --ignore-scripts \
+  --os=darwin --cpu=x64 \
+  @anthropic-ai/claude-agent-sdk-darwin-x64@"$SDK_VERSION"
+```
+
+版本号必须与项目 `package.json` 中的 optional dependency 保持一致。
 
 ---
 
