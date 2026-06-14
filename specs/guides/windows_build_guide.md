@@ -89,6 +89,30 @@ NSIS 安装程序会内置 Git for Windows，需要手动放置安装包：
 
 ## 构建流程
 
+### build_dev_win.ps1
+
+**用途**：快速打一个带 DevTools 的 Windows debug 构建，用于真机功能验证；默认不生成安装包。
+
+**运行方式**：
+
+```powershell
+.\build_dev_win.ps1
+```
+
+默认产物：
+
+```
+src-tauri/target/x86_64-pc-windows-msvc/debug/myagents.exe
+```
+
+如果需要验证安装器、NSIS hook、VC++ Runtime app-local 部署或安装后启动行为，再显式构建 Debug NSIS：
+
+```powershell
+.\build_dev_win.ps1 -BundleNsis
+```
+
+`build_dev_win.ps1` 会清理 `debug/resources` 缓存、启用 `VITE_DEBUG_MODE=true`、构建 web/Sidecar/Plugin Bridge/CLI 一次，并在 Tauri build 阶段禁用重复的 `beforeBuildCommand`；这条路径用于快速测试，不替代正式发布构建。
+
 ### build_windows.ps1
 
 **运行方式**：

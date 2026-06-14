@@ -25,7 +25,7 @@
 
 ## 1. 怎么在 Windows 上验证（准备）
 
-1. 拉本分支，按 `guides/windows_build_guide.md` 出一个 **debug build**（`build_dev_win.ps1`，带 DevTools + `VITE_DEBUG_MODE=true`），或生产 `build_windows.ps1`。debug build 可开 DevTools 看 console（关键）。
+1. 拉本分支，按 `guides/windows_build_guide.md` 出一个 **debug build**（`build_dev_win.ps1` 默认生成可直接运行的 debug exe，带 DevTools + `VITE_DEBUG_MODE=true`），或生产 `build_windows.ps1`。只有需要验证安装器时才跑 `build_dev_win.ps1 -BundleNsis`。debug build 可开 DevTools 看 console（关键）。
 2. **打开 DevTools console**（debug build）。CSP 违例会以红字 `Refused to load … because it violates the following Content Security Policy directive: …` 出现 —— 这是 W1/W2 最直接的证据。
 3. 按下面每项的「验证步骤」逐条走。把 console 报错 + 截图记下来，回填到本文或 PRD。
 4. **最小烟测优先**：W1/W3/W4 三项只需各做一个动作即可证实/排除，先把这三项跑了。

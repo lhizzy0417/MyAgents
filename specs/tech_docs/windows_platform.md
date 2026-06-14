@@ -179,7 +179,7 @@ let client = proxy_config::build_client_with_proxy(builder)?;
 - 如果不清理，配置更新后构建仍使用旧缓存
 - 导致 CSP 等配置修改不生效
 
-**正确的清理脚本**（`build_windows.ps1`）：
+**正确的清理脚本**（`build_windows.ps1` 发布构建）：
 ```powershell
 # 杀死残留 MyAgents 进程
 Get-Process | Where-Object { $_.ProcessName -eq "MyAgents" } | Stop-Process -Force
@@ -190,6 +190,18 @@ Remove-Item src-tauri\target\x86_64-pc-windows-msvc\release\bundle -Recurse -For
 
 # CRITICAL: 清理 resources 缓存
 Remove-Item src-tauri\target\x86_64-pc-windows-msvc\release\resources -Recurse -Force
+```
+
+**快速 debug 构建**：
+
+```powershell
+.\build_dev_win.ps1
+```
+
+默认只生成 `src-tauri\target\x86_64-pc-windows-msvc\debug\myagents.exe`，不打 NSIS，便于 Windows 真机快速验证功能。脚本仍会清理 `debug\resources`，避免 Tauri 复用旧配置；需要验证安装器时使用：
+
+```powershell
+.\build_dev_win.ps1 -BundleNsis
 ```
 
 **详见**：[build_troubleshooting.md](./build_troubleshooting.md)

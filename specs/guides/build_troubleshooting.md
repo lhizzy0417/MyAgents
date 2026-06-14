@@ -178,7 +178,8 @@ Remove-Item src-tauri/target/x86_64-pc-windows-msvc/release/resources -Recurse -
 或使用构建脚本（已自动处理）：
 ```powershell
 .\build_windows.ps1  # 自动清理 release/resources
-.\build_dev_win.ps1  # 自动清理 debug/resources
+.\build_dev_win.ps1  # 默认快速 Debug exe，自动清理 debug/resources
+.\build_dev_win.ps1 -BundleNsis  # 需要验证安装器时，额外清理 debug/bundle 并打 Debug NSIS
 ```
 
 ---

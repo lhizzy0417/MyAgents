@@ -1,11 +1,17 @@
 ﻿#!/usr/bin/env pwsh
 # MyAgents Windows Dev 构建脚本
 # 构建带 DevTools 的调试版本，启动时自动打开控制台
-# 只构建 NSIS 安装包 (Debug 模式)
+# 默认只构建可直接运行的 Debug exe（不打安装包，便于快速测试）
+# 如需验证安装器，可传入 -BundleNsis 构建 Debug NSIS 安装包。
+
+param(
+    [switch]$BundleNsis
+)
 
 $ErrorActionPreference = "Stop"
 
 $PROJECT_DIR = $PSScriptRoot
+$BUILD_MODE_LABEL = if ($BundleNsis) { "Debug NSIS 安装包" } else { "快速 Debug exe（不打安装包）" }
 
 # 加载 .env 文件（如果存在）
 $envFile = Join-Path $PROJECT_DIR ".env"
@@ -33,7 +39,7 @@ function Write-ColorOutput {
 Write-Host ""
 Write-ColorOutput "╔═══════════════════════════════════════════════════════╗" "Cyan"
 Write-ColorOutput "║  🤖 MyAgents Windows Dev 构建                         ║" "Cyan"
-Write-ColorOutput "║  ⚠ DevTools 启用 + Debug 模式                        ║" "Cyan"
+Write-ColorOutput "║  ⚠ DevTools 启用 + $BUILD_MODE_LABEL                 ║" "Cyan"
 Write-ColorOutput "╚═══════════════════════════════════════════════════════╝" "Cyan"
 Write-Host ""
 
@@ -97,9 +103,11 @@ Write-ColorOutput "[准备] 清理旧构建..." "Blue"
 # 清理构建输出目录
 $dirsToClean = @(
     @{ Path = (Join-Path $PROJECT_DIR "dist"); Name = "前端构建输出" },
-    @{ Path = (Join-Path $PROJECT_DIR "src-tauri/target/x86_64-pc-windows-msvc/debug/bundle"); Name = "Debug 打包输出" },
     @{ Path = (Join-Path $PROJECT_DIR "src-tauri/target/x86_64-pc-windows-msvc/debug/resources"); Name = "Debug resources 缓存" }
 )
+if ($BundleNsis) {
+    $dirsToClean += @{ Path = (Join-Path $PROJECT_DIR "src-tauri/target/x86_64-pc-windows-msvc/debug/bundle"); Name = "Debug 打包输出" }
+}
 
 foreach ($dir in $dirsToClean) {
     if (Test-Path $dir.Path) {
@@ -114,9 +122,8 @@ foreach ($dir in $dirsToClean) {
 }
 
 # 创建占位符资源目录（满足 Tauri bundle 阶段的资源校验）。
-# server-dist.js / plugin-bridge-dist.mjs / cli/myagents.js 由 tauri:build
-# 的 beforeBuildCommand（tauri.conf.json）通过 npm run build:server/bridge/cli
-# 在构建期间生成；不需要额外占位文件。
+# server-dist.js / plugin-bridge-dist.mjs / cli/myagents.js 在下面的
+# [2/3] 步骤显式生成；Tauri build 阶段会禁掉 beforeBuildCommand，避免重复打包。
 #   - claude-agent-sdk/ : SDK native binary 占位目录
 #   - sharp-runtime/ : sharp 在 dev 走 walk-up 加载，目录只是 bundler 的资源指针
 #   - cli/ : 仅占位，CLI bundle 由 esbuild-bundle.mjs 的 post-build hook 写入
@@ -173,8 +180,8 @@ if ($LASTEXITCODE -ne 0) {
 Write-ColorOutput "✓ TypeScript 检查通过" "Green"
 Write-Host ""
 
-# 构建前端
-Write-ColorOutput "[2/3] 构建前端..." "Blue"
+# 构建前端和运行时资源
+Write-ColorOutput "[2/3] 构建前端和运行时资源..." "Blue"
 $env:VITE_DEBUG_MODE = "true"
 Write-ColorOutput "  VITE_DEBUG_MODE=$env:VITE_DEBUG_MODE" "Yellow"
 & npm run build:web
@@ -182,12 +189,26 @@ if ($LASTEXITCODE -ne 0) {
     Write-ColorOutput "✗ 前端构建失败" "Red"
     exit 1
 }
-Write-ColorOutput "✓ 前端构建完成" "Green"
+& npm run build:server
+if ($LASTEXITCODE -ne 0) {
+    Write-ColorOutput "✗ Sidecar 打包失败" "Red"
+    exit 1
+}
+& npm run build:bridge
+if ($LASTEXITCODE -ne 0) {
+    Write-ColorOutput "✗ Plugin Bridge 打包失败" "Red"
+    exit 1
+}
+& npm run build:cli
+if ($LASTEXITCODE -ne 0) {
+    Write-ColorOutput "✗ myagents CLI 打包失败" "Red"
+    exit 1
+}
+Write-ColorOutput "✓ 前端和运行时资源构建完成" "Green"
 Write-Host ""
 
-# myagents CLI 的打包不在这里——`npm run tauri:build` 的 beforeBuildCommand
-# (tauri.conf.json) 已包含 `npm run build:cli`，由 `scripts/esbuild-bundle.mjs`
-# 的 post-build hook 同步把 myagents.cmd 拷贝到 resources/cli/。
+# 下面会用临时 Tauri config 把 beforeBuildCommand 置空，避免 Tauri build
+# 再重复执行 build:web/server/bridge/cli。dev 脚本自己已经完成这些步骤。
 
 # 强制触发 Rust 重新编译 (确保 sidecar.rs 的逻辑修改生效)
 # build_dev.sh 用 `touch` 只更新 mtime；旧版本这里写的是
@@ -200,7 +221,7 @@ $mainFile = Join-Path $PROJECT_DIR "src-tauri/src/main.rs"
 (Get-Item $mainFile).LastWriteTime = Get-Date
 
 # 构建 Tauri 应用
-Write-ColorOutput "[3/3] 构建 Tauri 应用 (Debug 模式, NSIS)..." "Blue"
+Write-ColorOutput "[3/3] 构建 Tauri 应用 ($BUILD_MODE_LABEL)..." "Blue"
 
 # 强制移除旧的可执行文件，防止 cargo 偷懒不重新链接
 $oldExe = Join-Path $PROJECT_DIR "src-tauri/target/x86_64-pc-windows-msvc/debug/myagents.exe"
@@ -208,31 +229,59 @@ if (Test-Path $oldExe) {
     Remove-Item $oldExe -Force
 }
 
-# 如果没有设置 TAURI_SIGNING_PRIVATE_KEY，跳过签名错误
-# (App 本身会正常构建，只是 updater 签名会失败)
-if (-not $env:TAURI_SIGNING_PRIVATE_KEY) {
-    Write-ColorOutput "⚠ 未设置 TAURI_SIGNING_PRIVATE_KEY，更新签名将被跳过" "Yellow"
-}
-
 Write-ColorOutput "这可能需要几分钟..." "Yellow"
 
-# 使用 --target 指定架构，确保构建正确的版本
+$fastConfig = Join-Path $env:TEMP "myagents-tauri-dev-fast-$PID.json"
+$fastConfigJson = @'
+{
+  "build": {
+    "beforeBuildCommand": null
+  }
+}
+'@
+[System.IO.File]::WriteAllText(
+    $fastConfig,
+    $fastConfigJson,
+    [System.Text.UTF8Encoding]::new($false)
+)
+
 try {
-    & npm run tauri:build -- --debug --bundles nsis --target x86_64-pc-windows-msvc --config src-tauri/tauri.windows.conf.json
-    if ($LASTEXITCODE -ne 0 -and $env:TAURI_SIGNING_PRIVATE_KEY) {
-        throw "Tauri build failed"
+    if ($BundleNsis) {
+        # 如果没有设置 TAURI_SIGNING_PRIVATE_KEY，跳过签名错误
+        # (App 本身会正常构建，只是 updater 签名会失败)
+        if (-not $env:TAURI_SIGNING_PRIVATE_KEY) {
+            Write-ColorOutput "⚠ 未设置 TAURI_SIGNING_PRIVATE_KEY，更新签名将被跳过" "Yellow"
+        }
+
+        & npm run tauri:build -- --debug --bundles nsis --target x86_64-pc-windows-msvc --config src-tauri/tauri.windows.conf.json --config $fastConfig
+        if ($LASTEXITCODE -ne 0 -and $env:TAURI_SIGNING_PRIVATE_KEY) {
+            throw "Tauri build failed"
+        }
+    } else {
+        & npm run tauri:build -- --debug --no-bundle --target x86_64-pc-windows-msvc --config src-tauri/tauri.windows.conf.json --config $fastConfig
+        if ($LASTEXITCODE -ne 0) {
+            throw "Tauri build failed"
+        }
     }
 } catch {
-    if (-not $env:TAURI_SIGNING_PRIVATE_KEY) {
+    if ($BundleNsis -and -not $env:TAURI_SIGNING_PRIVATE_KEY) {
         Write-ColorOutput "⚠ 构建完成（签名跳过）" "Yellow"
     } else {
         throw
     }
+} finally {
+    Remove-Item $fastConfig -Force -ErrorAction SilentlyContinue
 }
 
 # 查找输出
-$BUNDLE_DIR = Join-Path $PROJECT_DIR "src-tauri/target/x86_64-pc-windows-msvc/debug/bundle/nsis"
-$SETUP_EXE = Get-ChildItem -Path $BUNDLE_DIR -Filter "*-setup.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
+$DEBUG_DIR = Join-Path $PROJECT_DIR "src-tauri/target/x86_64-pc-windows-msvc/debug"
+$EXE_PATH = Join-Path $DEBUG_DIR "myagents.exe"
+$BUNDLE_DIR = Join-Path $DEBUG_DIR "bundle/nsis"
+$SETUP_EXE = if ($BundleNsis) {
+    Get-ChildItem -Path $BUNDLE_DIR -Filter "*-setup.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
+} else {
+    $null
+}
 
 Write-Host ""
 Write-ColorOutput "═══════════════════════════════════════════════════════" "Green"
@@ -240,7 +289,18 @@ Write-ColorOutput "  Dev 构建完成!" "Green"
 Write-ColorOutput "═══════════════════════════════════════════════════════" "Green"
 Write-Host ""
 
-if ($SETUP_EXE) {
+if (-not $BundleNsis -and (Test-Path $EXE_PATH)) {
+    $APP_SIZE = "{0:N2} MB" -f ((Get-Item $EXE_PATH).Length / 1MB)
+    Write-ColorOutput "  应用路径:" "Cyan"
+    Write-Host "    🪟 $EXE_PATH"
+    Write-ColorOutput "    📏 大小: $APP_SIZE" "White"
+    Write-Host ""
+    Write-ColorOutput "  Dev 特性:" "Cyan"
+    Write-ColorOutput "    ✅ 启动时自动打开 DevTools" "White"
+    Write-ColorOutput "    ✅ 宽松 CSP (允许 IPC)" "White"
+    Write-ColorOutput "    ✅ 不打 NSIS，适合快速功能验证" "White"
+    Write-Host ""
+} elseif ($BundleNsis -and $SETUP_EXE) {
     $APP_SIZE = "{0:N2} MB" -f ($SETUP_EXE.Length / 1MB)
     Write-ColorOutput "  应用路径:" "Cyan"
     Write-Host "    🪟 $($SETUP_EXE.FullName)"
@@ -253,11 +313,18 @@ if ($SETUP_EXE) {
     Write-Host ""
 } else {
     Write-ColorOutput "  未找到构建产物，请检查上方输出" "Yellow"
-    Write-ColorOutput "  预期路径: $BUNDLE_DIR" "Yellow"
+    if ($BundleNsis) {
+        Write-ColorOutput "  预期路径: $BUNDLE_DIR" "Yellow"
+    } else {
+        Write-ColorOutput "  预期路径: $EXE_PATH" "Yellow"
+    }
 }
 
 Write-ColorOutput "  运行方式:" "Cyan"
-if ($SETUP_EXE) {
+if (-not $BundleNsis -and (Test-Path $EXE_PATH)) {
+    Write-Host "    & `"$EXE_PATH`""
+    Write-Host "    如需测试安装器: .\build_dev_win.ps1 -BundleNsis"
+} elseif ($BundleNsis -and $SETUP_EXE) {
     Write-Host "    1. 安装: .\$($SETUP_EXE.Name)"
     Write-Host "    2. 或直接运行安装包测试"
 } else {
