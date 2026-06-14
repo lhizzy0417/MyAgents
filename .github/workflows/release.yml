@@ -49,8 +49,9 @@ jobs:
           bun-version: latest
 
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.92.0
         with:
+          components: rustfmt, clippy
           targets: ${{ matrix.target }}
 
       - name: Setup Rust cache
