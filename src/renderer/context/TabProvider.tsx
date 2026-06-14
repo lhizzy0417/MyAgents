@@ -27,7 +27,7 @@ import type { PermissionRequest } from '@/components/PermissionPrompt';
 import type { AskUserQuestionRequest, AskUserQuestion } from '../../shared/types/askUserQuestion';
 import type { ExitPlanModeRequest, EnterPlanModeRequest, ExitPlanModeAllowedPrompt } from '../../shared/types/planMode';
 import { CUSTOM_EVENTS, isPendingSessionId } from '../../shared/constants';
-import { TabContext, TabApiContext, TabActiveContext, type SessionState, type TabContextValue, type TabApiContextValue } from './TabContext';
+import { TabContext, TabApiContext, TabActiveContext, type SessionState, type SystemNotice, type TabContextValue, type TabApiContextValue } from './TabContext';
 import { shouldSkipHistoryReplay, shouldClearHistoryOnInit } from './sessionRestoreGuards';
 import { isSubagentContainerTool } from '@/components/tools/toolBadgeConfig';
 import type { Message, ContentBlock, ToolUseSimple, ToolInput, TaskStats, SubagentToolCall } from '@/types/chat';
@@ -430,6 +430,7 @@ export default function TabProvider({
     const [runtimeDiagnostics, setRuntimeDiagnostics] = useState<RuntimeDiagnostics | null>(null);
     const [agentError, setAgentError] = useState<string | null>(null);
     const [systemStatus, setSystemStatus] = useState<string | null>(null);  // e.g., 'compacting'
+    const [systemNotice, setSystemNotice] = useState<SystemNotice | null>(null);
     // PRD 0.2.32 — 归一化 context 用量快照（tab-scoped）。Set on chat:context-usage,
     // cleared on session switch / reset. 见 ContextUsageIndicator。
     const [contextUsage, setContextUsage] = useState<ContextUsage | null>(null);
@@ -626,6 +627,7 @@ export default function TabProvider({
         setIsLoading(false);
         setSessionState('idle');  // Reset session state for new conversation
         setSystemStatus(null);
+        setSystemNotice(null);
         setAgentError(null);
         setLastTerminalReason(null);
         setUnifiedLogs([]);
@@ -732,6 +734,7 @@ export default function TabProvider({
         setIsLoading(false);
         setSessionState('idle');
         setSystemStatus(null);
+        setSystemNotice(null);
         setAgentError(null);
         setLastTerminalReason(null);
         setUnifiedLogs([]);
@@ -1233,6 +1236,7 @@ export default function TabProvider({
             setIsLoading(false);
             setSessionState('idle');
             setSystemStatus(null);
+            setSystemNotice(null);
         });
     }, [moveStreamingToHistory, clearSessionActive]);
 
@@ -1282,6 +1286,7 @@ export default function TabProvider({
                     adoptedStreamRef.current = false;
                     setAgentError(null);
                     setLastTerminalReason(null);
+                    setSystemNotice(null);
                     clearInteractiveState();
                 }
 
@@ -1449,8 +1454,27 @@ export default function TabProvider({
 
             case 'chat:system-status': {
                 // System status from SDK (e.g., 'compacting' for context compression)
-                const payload = data as { status: string | null } | null;
+                const payload = data as {
+                    status: string | null;
+                    compactResult?: 'success' | 'failed';
+                    compactError?: string;
+                } | null;
                 setSystemStatus(payload?.status ?? null);
+                if (payload?.compactResult === 'success') {
+                    setSystemNotice({
+                        kind: 'compact',
+                        level: 'success',
+                        message: '上下文已压缩',
+                    });
+                } else if (payload?.compactResult === 'failed') {
+                    const message = payload.compactError?.trim() || '上下文压缩失败';
+                    setSystemNotice({
+                        kind: 'compact',
+                        level: 'error',
+                        message,
+                    });
+                    setAgentError(message);
+                }
                 break;
             }
 
@@ -1977,6 +2001,7 @@ export default function TabProvider({
                     terminal_reason?: TerminalReason;
                     assistant_sdk_uuid?: string;
                     assistant_message_id?: string;
+                    compact_result?: 'success';
                 } | null;
 
                 // SDK 0.2.91+: map terminal_reason to UI banner. Only SET when reason is
@@ -1991,6 +2016,14 @@ export default function TabProvider({
                     if (reason && reason !== 'completed') {
                         setLastTerminalReason(reason);
                     }
+                }
+
+                if (completePayload?.compact_result === 'success') {
+                    setSystemNotice({
+                        kind: 'compact',
+                        level: 'success',
+                        message: '上下文已压缩',
+                    });
                 }
 
                 // Apply backend's real message ID + sdkUuid to the just-moved history message.
@@ -3071,6 +3104,7 @@ export default function TabProvider({
         // while the new stream renders (and chat:message-complete no longer wipes it
         // since that caused the external-runtime bug).
         setLastTerminalReason(null);
+        setSystemNotice(null);
 
         // Store attachments for merging with SSE replay
         if (hasImages) {
@@ -3492,6 +3526,7 @@ export default function TabProvider({
                 setSessionState(isLiveRunning ? 'running' : 'idle');  // Preserve live external session state when reopening mid-turn
             }
             setSystemStatus(null);
+            setSystemNotice(null);
             setAgentError(null);
             setLastTerminalReason(null);
             // Issue #194 — clear runtime diagnostics when loading a different
@@ -4035,6 +4070,7 @@ export default function TabProvider({
         runtimeDiagnostics,
         agentError,
         systemStatus,
+        systemNotice,
         contextUsage,
         lastTerminalReason,
         pendingPermission,
@@ -4053,6 +4089,7 @@ export default function TabProvider({
         setSystemInitInfo,
         setAgentError,
         setLastTerminalReason,
+        setSystemNotice,
         setSessionMeta,
         sendMessage,
         stopResponse,
@@ -4074,7 +4111,7 @@ export default function TabProvider({
         onCronTaskExitRequested: onCronTaskExitRequestedRef,
     }), [
         tabId, agentDir, currentSessionId, messages, historyMessages, streamingMessage, firstItemIndex, hasMoreBefore, isLoading, isSessionLoading, sessionState, sessionRuntime, sessionMeta,
-        logs, unifiedLogs, systemInitInfo, runtimeDiagnostics, agentError, systemStatus, contextUsage, lastTerminalReason, pendingPermission, pendingAskUserQuestion, pendingExitPlanMode, pendingEnterPlanMode, toolCompleteCount, queuedMessages, isConnected,
+        logs, unifiedLogs, systemInitInfo, runtimeDiagnostics, agentError, systemStatus, systemNotice, contextUsage, lastTerminalReason, pendingPermission, pendingAskUserQuestion, pendingExitPlanMode, pendingEnterPlanMode, toolCompleteCount, queuedMessages, isConnected,
         setMessages, appendLog, appendUnifiedLog, clearUnifiedLogs, sendMessage, stopResponse, loadSession, loadOlderMessages, resetSession, adoptMigratedSession,
         apiGetJson, postJson, apiPutJson, apiDeleteJson, respondPermission, respondAskUserQuestion, respondExitPlanMode, cancelQueuedMessage, forceExecuteQueuedMessage
     ]);

@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
   isEmptySuccessfulSdkResult,
+  isSuccessfulCompactControlTurn,
   isRecoveredAssistantMessageError,
   findTurnUsageStampIndex,
   extractTurnUsageFromSdkResult,
@@ -109,6 +110,40 @@ describe('isRecoveredAssistantMessageError', () => {
       isError: false,
       terminalReason: 'completed',
       emptySuccessfulResult: true,
+    })).toBe(false);
+  });
+});
+
+describe('isSuccessfulCompactControlTurn', () => {
+  it('accepts an empty successful result when SDK status reports compact success', () => {
+    expect(isSuccessfulCompactControlTurn({
+      emptySuccessfulResult: true,
+      compactResult: 'success',
+      sawCompactBoundary: false,
+    })).toBe(true);
+  });
+
+  it('accepts an empty successful result when SDK emits compact_boundary', () => {
+    expect(isSuccessfulCompactControlTurn({
+      emptySuccessfulResult: true,
+      compactResult: null,
+      sawCompactBoundary: true,
+    })).toBe(true);
+  });
+
+  it('does not accept compact failure as a successful control turn', () => {
+    expect(isSuccessfulCompactControlTurn({
+      emptySuccessfulResult: true,
+      compactResult: 'failed',
+      sawCompactBoundary: true,
+    })).toBe(false);
+  });
+
+  it('does not accept non-empty-result turns as compact control turns', () => {
+    expect(isSuccessfulCompactControlTurn({
+      emptySuccessfulResult: false,
+      compactResult: 'success',
+      sawCompactBoundary: true,
     })).toBe(false);
   });
 });

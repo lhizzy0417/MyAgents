@@ -26,7 +26,7 @@ import {
   type InFlightAsyncCancelResult,
 } from './utils/inflight-terminal';
 import { shouldBlockToolInPlanMode, planModeDenyMessage, isPlanModeInEffect, PLAN_MODE_READONLY_TOOLS, PLAN_MODE_HOST_INTERACTION_TOOLS, applyPermissionModeSelection, computePlanExitState, computeRestoredPlanState } from './utils/plan-mode-gate';
-import { isEmptySuccessfulSdkResult, isRecoveredAssistantMessageError, findTurnUsageStampIndex, extractTurnUsageFromSdkResult } from './utils/sdk-turn-outcome';
+import { isEmptySuccessfulSdkResult, isRecoveredAssistantMessageError, findTurnUsageStampIndex, extractTurnUsageFromSdkResult, isSuccessfulCompactControlTurn } from './utils/sdk-turn-outcome';
 import { planRetraction } from './utils/message-retraction';
 import { diagnoseSdkSubprocessFailure } from './utils/sdk-subprocess-diagnostics';
 import { InactivityWatchdog } from './utils/inactivity-watchdog';
@@ -1792,6 +1792,8 @@ let currentTurnHasOutput = false;
 // SDK result later succeeds. Keep it turn-local until the authoritative result.
 let currentTurnHadAssistantMessageError = false;
 let currentTurnLastAssistantMessageError: string | null = null;
+let currentTurnCompactResult: 'success' | 'failed' | null = null;
+let currentTurnSawCompactBoundary = false;
 // Whether the current turn observed any non-init SDK frame (assistant /
 // user / tool_result / stream_event / result / rate_limit_event etc.).
 // Cheaper signal than currentTurnHasOutput — flips on the FIRST substantive
@@ -1891,6 +1893,8 @@ function resetTurnUsage(): void {
   currentTurnHasOutput = false;
   currentTurnHadAssistantMessageError = false;
   currentTurnLastAssistantMessageError = null;
+  currentTurnCompactResult = null;
+  currentTurnSawCompactBoundary = false;
   turnHadSubstantiveActivity = false;
   currentTurnTextBlocks.length = 0;
   // Note: currentTurnInboxMeta is NOT reset here — it's bound on dequeue
@@ -5098,26 +5102,38 @@ function parseSystemInitInfo(message: unknown): SystemInitInfo | null {
  * - A status message with status: null (clearing the status)
  * - A status message with status: 'compacting' etc.
  */
-function parseSystemStatus(message: unknown): { isStatusMessage: boolean; status: string | null; permissionMode: string | null } {
+function parseSystemStatus(message: unknown): {
+  isStatusMessage: boolean;
+  status: string | null;
+  permissionMode: string | null;
+  compactResult: 'success' | 'failed' | null;
+  compactError: string | null;
+} {
   if (!message || typeof message !== 'object') {
-    return { isStatusMessage: false, status: null, permissionMode: null };
+    return { isStatusMessage: false, status: null, permissionMode: null, compactResult: null, compactError: null };
   }
   const record = message as Record<string, unknown>;
   if (record.type !== 'system' || record.subtype !== 'status') {
-    return { isStatusMessage: false, status: null, permissionMode: null };
+    return { isStatusMessage: false, status: null, permissionMode: null, compactResult: null, compactError: null };
   }
   // SDK 0.2.108+: emits status:'requesting' before every API request when includePartialMessages is on.
   // Treat as transient/no-op — we already surface thinking/streaming via partial message events,
   // and propagating it would flash the send button into a disabled state on every tool-call round trip.
   const statusValue = typeof record.status === 'string' ? record.status : null;
   if (statusValue === 'requesting') {
-    return { isStatusMessage: false, status: null, permissionMode: null };
+    return { isStatusMessage: false, status: null, permissionMode: null, compactResult: null, compactError: null };
   }
+  const compactResult =
+    record.compact_result === 'success' || record.compact_result === 'failed'
+      ? record.compact_result
+      : null;
   // This IS a status message, status can be 'compacting' or null, permissionMode can be 'plan'/'acceptEdits'/etc.
   return {
     isStatusMessage: true,
     status: statusValue,
     permissionMode: typeof record.permissionMode === 'string' ? record.permissionMode : null,
+    compactResult,
+    compactError: typeof record.compact_error === 'string' ? record.compact_error : null,
   };
 }
 
@@ -10317,8 +10333,19 @@ async function startStreamingSession(preWarm = false): Promise<void> {
       // Handle system status (e.g., compacting, plan mode changes)
       const statusResult = parseSystemStatus(sdkMessage);
       if (statusResult.isStatusMessage) {
-        console.log(`[agent] System status: ${statusResult.status}`);
-        broadcast('chat:system-status', { status: statusResult.status });
+        if (statusResult.status === 'compacting') {
+          currentTurnCompactResult = null;
+        }
+        if (statusResult.compactResult) {
+          currentTurnCompactResult = statusResult.compactResult;
+        }
+        console.log(`[agent] System status: ${statusResult.status}` +
+          (statusResult.compactResult ? ` compact_result=${statusResult.compactResult}` : ''));
+        broadcast('chat:system-status', {
+          status: statusResult.status,
+          compactResult: statusResult.compactResult ?? undefined,
+          compactError: statusResult.compactError ?? undefined,
+        });
 
         // Detect SDK-initiated plan mode changes (EnterPlanMode is auto-allowed by SDK).
         // Both branches go through the shared transition so the prePlanPermissionMode
@@ -10339,6 +10366,13 @@ async function startStreamingSession(preWarm = false): Promise<void> {
           prePlanPermissionMode = next.prePlanPermissionMode;
           broadcast('chat:permission-mode-changed', { permissionMode: currentPermissionMode });
           console.log(`[agent] SDK exited plan mode, restored currentPermissionMode=${currentPermissionMode}`);
+        }
+      }
+
+      if (sdkMessage.type === 'system' && (sdkMessage as { subtype?: string }).subtype === 'compact_boundary') {
+        currentTurnSawCompactBoundary = true;
+        if (!currentTurnCompactResult) {
+          currentTurnCompactResult = 'success';
         }
       }
 
@@ -11413,24 +11447,30 @@ async function startStreamingSession(preWarm = false): Promise<void> {
           toolCount: currentTurnToolCount,
           outputTokens: currentTurnUsage.outputTokens,
         });
+        const successfulCompactControlTurn = isSuccessfulCompactControlTurn({
+          emptySuccessfulResult,
+          compactResult: currentTurnCompactResult,
+          sawCompactBoundary: currentTurnSawCompactBoundary,
+        });
         const recoveredAssistantMessageError = isRecoveredAssistantMessageError({
           hadAssistantMessageError: currentTurnHadAssistantMessageError,
           isError: resultMessage.is_error,
           terminalReason: resultMessage.terminal_reason,
-          emptySuccessfulResult,
+          emptySuccessfulResult: emptySuccessfulResult && !successfulCompactControlTurn,
         });
 
         if (recoveredAssistantMessageError && currentTurnLastAssistantMessageError) {
           console.log('[agent] SDK assistant message error recovered by successful result:', currentTurnLastAssistantMessageError);
         }
         emitBuiltinTurnTrace('final', {
-          status: resultMessage.is_error || emptySuccessfulResult ? 'error' : 'ok',
+          status: resultMessage.is_error || (emptySuccessfulResult && !successfulCompactControlTurn) ? 'error' : 'ok',
           durationMs,
           count: currentTurnToolCount,
           detail: {
             terminalReason: resultMessage.terminal_reason ?? 'completed',
             hasOutput: currentTurnHasOutput,
             emptySuccessfulResult,
+            successfulCompactControlTurn,
           },
         });
 
@@ -11451,7 +11491,7 @@ async function startStreamingSession(preWarm = false): Promise<void> {
           console.log(`[agent][terminal_reason] ${resultMessage.terminal_reason} scenario=${currentScenario.type} model=${currentTurnUsage.model ?? 'unknown'} duration_ms=${durationMs} tool_count=${currentTurnToolCount}`);
         }
 
-        if (emptySuccessfulResult) {
+        if (emptySuccessfulResult && !successfulCompactControlTurn) {
           const emptyResultError = 'AI 未返回任何内容，但 SDK 将本轮标记为完成。请在当前会话重试；如果使用第三方兼容供应商，建议切换模型、减少上下文或压缩后重试。';
           console.warn(`[agent][empty_result] model=${currentTurnUsage.model ?? 'unknown'} terminal_reason=${resultMessage.terminal_reason ?? 'none'} input=${currentTurnUsage.inputTokens} output=${currentTurnUsage.outputTokens} duration_ms=${durationMs} provisional_error=${currentTurnLastAssistantMessageError ?? 'none'}`);
           lastAgentError = emptyResultError;
@@ -11492,6 +11532,7 @@ async function startStreamingSession(preWarm = false): Promise<void> {
             // Frontend streaming messages use Date.now() IDs that don't match backend messageSequence IDs.
             assistant_sdk_uuid: lastAssistant?.sdkUuid,
             assistant_message_id: lastAssistant?.id,
+            compact_result: successfulCompactControlTurn ? 'success' : undefined,
           });
 
           // PRD 0.2.32 — 并发 context 用量快照。快路径取「最近一条主轮 message」per-call usage；

@@ -33,6 +33,12 @@ import type { ContextUsage } from '../../shared/types/context-usage';
 // the up-to-10-minute startup-timeout window.
 export type SessionState = 'idle' | 'starting' | 'running' | 'stopping' | 'error';
 
+export interface SystemNotice {
+    kind: 'compact';
+    level: 'success' | 'error';
+    message: string;
+}
+
 /**
  * Tab state - all the state that belongs to a single Tab
  */
@@ -75,6 +81,7 @@ export interface TabState {
     runtimeDiagnostics: RuntimeDiagnostics | null;
     agentError: string | null;
     systemStatus: string | null;  // SDK system status (e.g., 'compacting')
+    systemNotice: SystemNotice | null;
     /**
      * PRD 0.2.32 — 归一化的「当前 context 窗口用量」快照。Set on `chat:context-usage`
      * (builtin 每轮末 / Codex 亚轮流式)，cleared on session switch / reset. Null until
@@ -137,6 +144,8 @@ export interface TabContextValue extends TabState {
 
     // SDK terminal_reason banner dismissal
     setLastTerminalReason: Dispatch<SetStateAction<TerminalReason | null>>;
+
+    setSystemNotice: Dispatch<SetStateAction<SystemNotice | null>>;
 
     // v0.1.69 session snapshot — call after PATCH /sessions/:id to refresh derivation source
     setSessionMeta: Dispatch<SetStateAction<SessionMetadata | null>>;
@@ -225,6 +234,7 @@ const defaultContextValue: TabContextValue = {
     runtimeDiagnostics: null,
     agentError: null,
     systemStatus: null,
+    systemNotice: null,
     contextUsage: null,
     lastTerminalReason: null,
     pendingPermission: null,
@@ -243,6 +253,7 @@ const defaultContextValue: TabContextValue = {
     setSystemInitInfo: () => { },
     setAgentError: () => { },
     setLastTerminalReason: () => { },
+    setSystemNotice: () => { },
     setSessionMeta: () => { },
     sendMessage: async () => false,
     stopResponse: async () => false,

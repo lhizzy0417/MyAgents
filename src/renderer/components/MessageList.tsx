@@ -1,4 +1,4 @@
-import { Loader2 } from 'lucide-react';
+import { AlertCircle, CheckCircle, Loader2, X } from 'lucide-react';
 import React, { memo, useCallback, useMemo, useState, useEffect, useLayoutEffect, useRef } from 'react';
 import { Virtuoso } from 'react-virtuoso';
 import type { VirtuosoHandle } from 'react-virtuoso';
@@ -9,7 +9,7 @@ import { AskUserQuestionPrompt, type AskUserQuestionRequest } from '@/components
 import { ExitPlanModePrompt } from '@/components/ExitPlanModePrompt';
 import type { ExitPlanModeRequest } from '../../shared/types/planMode';
 import type { Message as MessageType } from '@/types/chat';
-import type { SessionState } from '@/context/TabContext';
+import type { SessionState, SystemNotice } from '@/context/TabContext';
 import { resolveChatBottomSpacerPx } from '@/utils/chatBottomSpacer';
 
 function formatElapsedTime(totalSeconds: number): string {
@@ -57,6 +57,8 @@ interface MessageListProps {
   onExitPlanModeApprove?: () => void;
   onExitPlanModeReject?: (feedback?: string) => void;
   systemStatus?: string | null;
+  systemNotice?: SystemNotice | null;
+  onDismissSystemNotice?: () => void;
   isStreaming?: boolean;
   /**
    * (issue #174) Pulled in so the loading footer can swap the random
@@ -115,6 +117,33 @@ const StatusTimer = memo(function StatusTimer({ message }: { message: string }) 
   );
 });
 
+const SystemNoticeRow = memo(function SystemNoticeRow({
+  notice,
+  onDismiss,
+}: {
+  notice: SystemNotice;
+  onDismiss?: () => void;
+}) {
+  const isError = notice.level === 'error';
+  const Icon = isError ? AlertCircle : CheckCircle;
+  return (
+    <div className="flex items-center gap-2 px-3 py-1.5 text-xs text-[var(--ink-muted)]">
+      <Icon className={`h-3 w-3 flex-shrink-0 ${isError ? 'text-[var(--error)]' : 'text-[var(--success)]'}`} />
+      <span className="flex-1">{notice.message}</span>
+      {onDismiss && (
+        <button
+          type="button"
+          onClick={onDismiss}
+          className="rounded p-0.5 text-[var(--ink-subtle)] transition-colors hover:bg-[var(--hover-bg)] hover:text-[var(--ink-muted)]"
+          title="关闭"
+        >
+          <X className="h-3 w-3" />
+        </button>
+      )}
+    </div>
+  );
+});
+
 function hasExitPlanModeTool(message: MessageType): boolean {
   if (message.role !== 'assistant' || typeof message.content === 'string') return false;
   return message.content.some(
@@ -129,6 +158,7 @@ const VirtuosoFooter = memo(function VirtuosoFooter({
   pendingPermission, onPermissionDecision,
   pendingAskUserQuestion, onAskUserQuestionSubmit, onAskUserQuestionCancel,
   showStatus, statusMessage,
+  systemNotice, onDismissSystemNotice,
   bottomSpacerPx,
 }: {
   pendingPermission?: PermissionRequest | null;
@@ -138,6 +168,8 @@ const VirtuosoFooter = memo(function VirtuosoFooter({
   onAskUserQuestionCancel?: (requestId: string) => void;
   showStatus: boolean;
   statusMessage: string;
+  systemNotice?: SystemNotice | null;
+  onDismissSystemNotice?: () => void;
   bottomSpacerPx?: number;
 }) {
   const spacerHeight = resolveChatBottomSpacerPx(bottomSpacerPx);
@@ -154,6 +186,9 @@ const VirtuosoFooter = memo(function VirtuosoFooter({
         </div>
       )}
       {showStatus && <StatusTimer message={statusMessage} />}
+      {!showStatus && systemNotice && (
+        <SystemNoticeRow notice={systemNotice} onDismiss={onDismissSystemNotice} />
+      )}
       {/* Footer spacer follows the measured floating input stack. A fixed large
           value makes the scrollbar expose a half-screen blank tail on short
           chats; the measured value still keeps the final message clear of the
@@ -191,6 +226,8 @@ const MessageList = memo(function MessageList({
   onExitPlanModeApprove,
   onExitPlanModeReject,
   systemStatus,
+  systemNotice,
+  onDismissSystemNotice,
   isStreaming,
   sessionState,
   onRewind,
@@ -506,11 +543,13 @@ const MessageList = memo(function MessageList({
           onAskUserQuestionCancel={onAskUserQuestionCancel}
           showStatus={showStatus}
           statusMessage={statusMessage}
+          systemNotice={systemNotice}
+          onDismissSystemNotice={onDismissSystemNotice}
           bottomSpacerPx={bottomSpacerPx}
         />
       );
     };
-  }, [pendingPermission, onPermissionDecision, pendingAskUserQuestion, onAskUserQuestionSubmit, onAskUserQuestionCancel, showStatus, statusMessage, bottomSpacerPx]);
+  }, [pendingPermission, onPermissionDecision, pendingAskUserQuestion, onAskUserQuestionSubmit, onAskUserQuestionCancel, showStatus, statusMessage, systemNotice, onDismissSystemNotice, bottomSpacerPx]);
 
   // ── Stable components object ──
   const components = useMemo(() => ({ Footer: FooterComponent }), [FooterComponent]);

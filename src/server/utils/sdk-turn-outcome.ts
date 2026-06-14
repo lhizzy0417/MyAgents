@@ -16,6 +16,25 @@ export function isEmptySuccessfulSdkResult(input: EmptySuccessfulSdkResultInput)
     && (input.outputTokens ?? 0) === 0;
 }
 
+export interface SuccessfulCompactControlTurnInput {
+  emptySuccessfulResult: boolean;
+  compactResult?: 'success' | 'failed' | null;
+  sawCompactBoundary: boolean;
+}
+
+/**
+ * `/compact` is an SDK-owned control turn: the useful output is the compacted
+ * context itself, not assistant text. The SDK proves success either via the
+ * terminal status payload (`compact_result:'success'`) or, on older/alternate
+ * streams, by emitting the `compact_boundary` system message before an otherwise
+ * empty successful result.
+ */
+export function isSuccessfulCompactControlTurn(input: SuccessfulCompactControlTurnInput): boolean {
+  if (!input.emptySuccessfulResult) return false;
+  if (input.compactResult === 'failed') return false;
+  return input.compactResult === 'success' || input.sawCompactBoundary;
+}
+
 export interface RecoveredAssistantMessageErrorInput {
   hadAssistantMessageError: boolean;
   isError?: boolean;

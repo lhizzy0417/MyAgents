@@ -239,6 +239,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
     runtimeDiagnostics,
     agentError,
     systemStatus,
+    systemNotice,
     lastTerminalReason,
     pendingPermission,
     pendingAskUserQuestion,
@@ -250,6 +251,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
     setIsLoading,
     setAgentError,
     setLastTerminalReason,
+    setSystemNotice,
     sendMessage,
     stopResponse,
     loadSession,
@@ -3199,6 +3201,10 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
     if (!ok) toastRef.current.error('提交失败，请重试');
   }, [respondExitPlanMode]);
 
+  const handleDismissSystemNotice = useCallback(() => {
+    setSystemNotice(null);
+  }, [setSystemNotice]);
+
   // React to plan mode changes: auto-approved by SDK, or user-approved via card
   // Single source of truth for permission mode switch during plan mode
   useEffect(() => {
@@ -3870,6 +3876,8 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
               onExitPlanModeApprove={handleExitPlanModeApprove}
               onExitPlanModeReject={handleExitPlanModeReject}
               systemStatus={rewindStatus || systemStatus}
+              systemNotice={systemNotice}
+              onDismissSystemNotice={handleDismissSystemNotice}
               isStreaming={isLoading || sessionState === 'running' || sessionState === 'starting'}
               sessionState={sessionState}
               onRewind={isExternalRuntime ? undefined : handleRewind}
