@@ -37,7 +37,7 @@ const TAG_STYLES = {
 const TAG_LABELS: Record<string, string> = {
     cron: '定时',
     background: '后台',
-    floatingBall: '悬浮球',
+    floatingBall: '桌面宠物',
 };
 
 export default function SessionTagBadge({ tag }: { tag: SessionTag }) {
