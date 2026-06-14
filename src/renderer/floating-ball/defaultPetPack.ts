@@ -1,34 +1,43 @@
+import minoManifest from '@/assets/floating-pets/mino/pet.json';
 import minoSpritesheetUrl from '@/assets/floating-pets/mino/spritesheet.webp';
+import minoPixelManifest from '@/assets/floating-pets/mino-pixel/pet.json';
+import minoPixelSpritesheetUrl from '@/assets/floating-pets/mino-pixel/spritesheet.webp';
+import minoRunnerManifest from '@/assets/floating-pets/mino-runner/pet.json';
+import minoRunnerSpritesheetUrl from '@/assets/floating-pets/mino-runner/spritesheet.webp';
 
-import { CODEX_PET_ATLAS, type PetPack } from './petAtlas';
+import { normalizePetManifest, type PetPack } from './petAtlas';
 
-export const MINO_DEFAULT_PET_PACK: PetPack = {
-    id: 'mino-default',
-    displayName: 'Mino',
-    description: '内置宠物 · 默认',
-    source: 'builtin',
-    spritesheetUrl: minoSpritesheetUrl,
-    atlas: CODEX_PET_ATLAS,
-};
+export const DEFAULT_PET_PACK_ID = 'mino';
+export const LEGACY_DEFAULT_PET_PACK_ID = 'mino-default';
 
-export const MINO_MONO_PET_PACK: PetPack = {
-    ...MINO_DEFAULT_PET_PACK,
-    id: 'mino-mono',
-    displayName: 'Mino Mono',
-    description: '低饱和 · 更安静',
-    spriteFilter: 'saturate(0.62) contrast(1.04) brightness(0.98) drop-shadow(0 2px 2px color-mix(in srgb, var(--ink) 18%, transparent))',
-};
+function createBuiltinPetPack(manifestInput: unknown, spritesheetUrl: string): PetPack {
+    const manifest = normalizePetManifest(manifestInput);
+    if (!manifest) {
+        throw new Error('[fb-pet] bundled pet manifest is invalid');
+    }
+    return {
+        id: manifest.id,
+        displayName: manifest.displayName,
+        description: manifest.description,
+        source: 'builtin',
+        spritesheetUrl,
+        atlas: manifest.atlas,
+    };
+}
 
-export const MINO_FOCUS_PET_PACK: PetPack = {
-    ...MINO_DEFAULT_PET_PACK,
-    id: 'mino-focus',
-    displayName: 'Mino Focus',
-    description: '轻提亮 · 更聚焦',
-    spriteFilter: 'saturate(0.92) contrast(1.08) brightness(1.04) drop-shadow(0 2px 2px color-mix(in srgb, var(--accent) 16%, transparent))',
-};
+export function normalizeBuiltinPetPackId(id: string | null | undefined): string | null {
+    if (!id) return null;
+    return id === LEGACY_DEFAULT_PET_PACK_ID ? DEFAULT_PET_PACK_ID : id;
+}
+
+export const MINO_DEFAULT_PET_PACK = createBuiltinPetPack(minoManifest, minoSpritesheetUrl);
+export const MINO_PIXEL_PET_PACK = createBuiltinPetPack(minoPixelManifest, minoPixelSpritesheetUrl);
+export const MINO_RUNNER_PET_PACK = createBuiltinPetPack(minoRunnerManifest, minoRunnerSpritesheetUrl);
 
 export const BUILTIN_PET_PACKS = [
     MINO_DEFAULT_PET_PACK,
-    MINO_MONO_PET_PACK,
-    MINO_FOCUS_PET_PACK,
+    MINO_PIXEL_PET_PACK,
+    MINO_RUNNER_PET_PACK,
 ] as const;
+
+export const BUILTIN_PET_PACK_IDS = BUILTIN_PET_PACKS.map((pack) => pack.id);

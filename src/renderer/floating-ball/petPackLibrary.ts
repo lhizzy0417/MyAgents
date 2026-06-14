@@ -2,7 +2,7 @@ import { convertFileSrc, invoke } from '@tauri-apps/api/core';
 
 import { isTauriEnvironment } from '@/utils/browserMock';
 
-import { BUILTIN_PET_PACKS, MINO_DEFAULT_PET_PACK } from './defaultPetPack';
+import { BUILTIN_PET_PACKS, MINO_DEFAULT_PET_PACK, normalizeBuiltinPetPackId } from './defaultPetPack';
 import { normalizePetManifest, type PetPack } from './petAtlas';
 
 export interface InstalledPetRecord {
@@ -26,7 +26,8 @@ export interface PetImportSummary {
 export const BUILTIN_ORB_STYLE_ID = 'classic-orb';
 
 export function getBuiltinPetPack(id: string | null | undefined): PetPack | null {
-    return BUILTIN_PET_PACKS.find((pack) => pack.id === id) ?? null;
+    const normalizedId = normalizeBuiltinPetPackId(id);
+    return BUILTIN_PET_PACKS.find((pack) => pack.id === normalizedId) ?? null;
 }
 
 function normalizeInstalledPet(record: InstalledPetRecord): PetPack | null {

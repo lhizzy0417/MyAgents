@@ -14,7 +14,12 @@ import { track } from '@/analytics';
 import { isTauriEnvironment } from '@/utils/browserMock';
 import { shortenPathForDisplay } from '@/utils/pathDetection';
 import { workspacePathsEqual } from '../../shared/workspacePath';
-import { BUILTIN_PET_PACKS } from '@/floating-ball/defaultPetPack';
+import {
+    BUILTIN_PET_PACKS,
+    BUILTIN_PET_PACK_IDS,
+    DEFAULT_PET_PACK_ID,
+    normalizeBuiltinPetPackId,
+} from '@/floating-ball/defaultPetPack';
 import {
     deleteInstalledPetPack,
     importPetFromPath,
@@ -264,12 +269,15 @@ export default function FloatingBallPetSettings() {
     const refreshSeqRef = useRef(0);
     const mountedRef = useRef(true);
 
-    const selectedPetId = config.floatingBallPetId ?? 'mino-default';
+    const selectedPetId = normalizeBuiltinPetPackId(config.floatingBallPetId) ?? DEFAULT_PET_PACK_ID;
     const hoverPeekEnabled = config.floatingBallHoverPeekEnabled !== false;
-    const stylePacks = useMemo<PetPack[]>(
-        () => [...BUILTIN_PET_PACKS, ...installedPacks],
-        [installedPacks],
-    );
+    const stylePacks = useMemo<PetPack[]>(() => {
+        const builtinIds = new Set(BUILTIN_PET_PACK_IDS);
+        return [
+            ...BUILTIN_PET_PACKS,
+            ...installedPacks.filter((pack) => !builtinIds.has(pack.id)),
+        ];
+    }, [installedPacks]);
     const workspaceOptions = useMemo(
         () => [
             { value: '', label: '跟随默认工作区' },
@@ -330,7 +338,7 @@ export default function FloatingBallPetSettings() {
             try {
                 await deleteInstalledPetPack(pack.id);
                 if (selectedPetId === pack.id) {
-                    await updateConfig({ floatingBallPetId: 'mino-default' });
+                    await updateConfig({ floatingBallPetId: DEFAULT_PET_PACK_ID });
                     if ((config.floatingBallAppearance ?? 'pet') === 'pet') {
                         notifyBallConfigChanged();
                     }
