@@ -9,6 +9,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+$PSNativeCommandUseErrorActionPreference = $false
 $BuildSuccess = $false
 
 try {
@@ -185,13 +186,10 @@ try {
     function Test-Command {
         param([string]$Command, [string]$HelpUrl)
         Refresh-ProcessPath
-        try {
-            $null = Invoke-Expression $Command 2>&1
-            if ($LASTEXITCODE -eq 0 -or $?) {
-                return $true
-            }
+        & cmd.exe /d /s /c "$Command >NUL 2>NUL"
+        if ($LASTEXITCODE -eq 0) {
+            return $true
         }
-        catch { }
         Write-Host "  X - $Command 未安装" -ForegroundColor Red
         Write-Host "      请安装: $HelpUrl" -ForegroundColor Yellow
         return $false

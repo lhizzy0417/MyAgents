@@ -6,6 +6,7 @@
 #>
 
 $ErrorActionPreference = "Stop"
+$PSNativeCommandUseErrorActionPreference = $false
 
 try {
     $ProjectDir = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -69,13 +70,11 @@ try {
         param($Name, $Command, $InstallHint)
         Refresh-ProcessPath
         Write-Host "  检查 $Name... " -NoNewline
-        try {
-            Invoke-Expression $Command 2>&1 | Out-Null
-            if ($LASTEXITCODE -eq 0 -or $?) {
-                Write-Host "OK" -ForegroundColor Green
-                return $true
-            }
-        } catch { }
+        & cmd.exe /d /s /c "$Command >NUL 2>NUL"
+        if ($LASTEXITCODE -eq 0) {
+            Write-Host "OK" -ForegroundColor Green
+            return $true
+        }
         Write-Host "MISSING" -ForegroundColor Red
         return $false
     }
@@ -114,7 +113,7 @@ try {
                 Copy-Item -Path $installer -Destination $rustupPath -Force
                 Refresh-ProcessPath
             }
-            & $rustupPath --version 2>&1 | Out-Null
+            & cmd.exe /d /s /c "`"$rustupPath`" --version >NUL 2>NUL"
             if ($LASTEXITCODE -ne 0) {
                 throw "rustup.exe is not usable at $rustupPath"
             }
@@ -423,10 +422,8 @@ try {
 
     # Check winget availability for auto-install
     $HasWinget = $false
-    try {
-        winget --version 2>&1 | Out-Null
-        if ($LASTEXITCODE -eq 0 -or $?) { $HasWinget = $true }
-    } catch { }
+    & cmd.exe /d /s /c "winget --version >NUL 2>NUL"
+    if ($LASTEXITCODE -eq 0) { $HasWinget = $true }
 
     Refresh-ProcessPath
 
