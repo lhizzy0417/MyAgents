@@ -553,28 +553,10 @@ mod imp {
             // (user-verified symptom).
             position_companion_near_ball(app, &win);
 
-            // True frosted glass: NSVisualEffectView under the (transparent)
-            // webview, rounded to match the DOM panel radius.
-            //
-            // 透明度模型（用户两轮实测收敛）：模糊永远全强度，透明度只由 DOM
-            // 着色层（fb.css --glass-ghost/--glass-solid）控制。两个坑别再踩：
-            // ① 材质必须够通透（Popover 太奶白，把 CSS tint 差全部吃掉）；
-            // ② state 必须强制 Active——默认 FollowsWindowActiveState，而本
-            //   app 永不激活（nonactivating panel），模糊会按 Inactive 弱化；
-            // ③ 不要用 NSWindow.alphaValue 做 peek 半透明——它把模糊输出一起
-            //   淡掉，背景文字"不模糊地"透进来，叠字不可读。
-            // 材质选型只为 peek 服务（pin 的 0.96 着色会盖住材质）：要的是
-            // "重模糊高透"——背后内容成模糊色块但明确可感。Sidebar 是系统
-            // 材质里通透度最好的浅色系之一（访达侧栏透桌面那种）；
-            // UnderWindowBackground/Popover 固有白度都太高，peek 像实纸。
-            if let Err(e) = window_vibrancy::apply_vibrancy(
-                &win,
-                window_vibrancy::NSVisualEffectMaterial::Sidebar,
-                Some(window_vibrancy::NSVisualEffectState::Active),
-                Some(24.0),
-            ) {
-                ulog_warn!("[fb] companion vibrancy failed (non-fatal): {e}");
-            }
+            // Visual surface is DOM-only (fb.css). macOS native vibrancy made
+            // peek read as a cool, opaque Sidebar material while pin read as
+            // warm paper, so hover and click felt like two different panels.
+            // Keep Rust responsible only for window/focus/position lifecycle.
 
             let panel = win
                 .to_panel::<FbCompanionPanel>()
@@ -680,10 +662,9 @@ mod imp {
 
     // ── 伴侣窗出入场渐变（窗口层 alpha） ──
     //
-    // 为什么必须在 NSWindow 层做而不是 CSS：毛玻璃 NSVisualEffectView 垫在
-    // （透明的）webview 底下，DOM opacity 管不到它——CSS 渐显会让模糊背板
-    // "啪"地全强度出现（与 peek 透明度同一个坑，见 ensure_windows 注释）。
-    // NSWindow.alphaValue 把模糊层、内容、窗口阴影一起淡入/淡出。
+    // 为什么仍在 NSWindow 层做：窗口阴影和整块 transparent webview 需要跟
+    // DOM 内容一起淡入淡出；只改 DOM opacity 会留下平台窗口层的时序差异。
+    // NSWindow.alphaValue 把纸片、内容、窗口阴影作为一个整体处理。
     //
     // 为什么是 Rust 步进而不是 NSAnimationContext + animator：隐式动画在本
     // app 实测**不产生动画**——setAlphaValue 瞬间生效（0612 真机 + 日志取
@@ -804,8 +785,7 @@ mod imp {
             // frontmost because of the nonactivating style mask.
             panel.make_key_window();
         }
-        // Peek: visible but never key — D1. 半透明由 DOM 着色层表达
-        // （毛玻璃常开，见 ensure_windows 的 vibrancy 注释）。
+        // Peek: visible but never key — D1. 半透明完全由 DOM 暖纸表达。
         // 已可见时（含淡出半程被重新唤起）从 tracked alpha 续渐到 1，无跳变。
         let dur = if mode == "pin" {
             FADE_IN_PIN_MS

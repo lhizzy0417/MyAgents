@@ -98,9 +98,6 @@ core-graphics = "0.22"
 get-selected-text = "0.1"
 # AXIsProcessTrusted probe + one-shot system prompt for the permission flow.
 macos-accessibility-client = "0.0.1"
-# True NSVisualEffectView frosted glass behind the companion panel (already a
-# transitive dep of tauri — adding directly so we can call apply_vibrancy).
-window-vibrancy = "0.6"
 objc2 = "0.6"
 objc2-foundation = { version = "0.3.2", features = ["NSString"] }
 objc2-web-kit = { version = "0.3.2", features = ["WKWebView", "block2"] }

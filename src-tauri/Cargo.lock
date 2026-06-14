@@ -3718,7 +3718,6 @@ dependencies = [
  "trash",
  "uuid",
  "which 8.0.2",
- "window-vibrancy",
  "windows-sys 0.59.0",
  "zip 2.4.2",
 ]

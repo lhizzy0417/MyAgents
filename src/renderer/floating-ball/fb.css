@@ -243,64 +243,44 @@ html.fb-transparent #root {
   }
 }
 
-/* ════════ Companion（透明窗，DOM = 一块玻璃） ════════ */
+/* ════════ Companion（透明窗，DOM = 一块暖纸） ════════ */
 .fbw-win {
   position: fixed;
   inset: 0;
   display: flex;
   flex-direction: column;
   border-radius: 24px;
-  /* macOS 真模糊由 Rust 侧 NSVisualEffectView 提供（Sidebar 材质 + 强制
-     Active，模糊常开全强度）；透明度只由这层暖纸着色控制——
-     peek 0.15（几乎纯毛玻璃背板，背后内容成模糊色块、明确可感）
-     → pin 0.96（凝固成实纸）。 */
-  background: var(--fb-surface-peek);
-  border: 1px solid var(--fb-glass-border-soft);
+  /* 单一视觉 owner：macOS / Windows 都只显示这块 DOM 暖纸。
+     peek = 同一张纸半透明；pin = 同一张纸凝实。不要在 Rust 侧再垫
+     native material，否则 hover 会被系统材质染成另一种冷色表面。 */
+  background: color-mix(in srgb, var(--paper-elevated) 92%, transparent);
+  border: 1px solid color-mix(in srgb, var(--line-strong) 78%, transparent);
+  box-shadow: 0 18px 48px rgb(0 0 0 / 0.22);
+  -webkit-backdrop-filter: blur(18px) saturate(1.08);
+  backdrop-filter: blur(18px) saturate(1.08);
   overflow: hidden;
   transition: background 280ms ease, transform 260ms cubic-bezier(0.22, 1, 0.36, 1),
     opacity 200ms ease;
   -webkit-user-select: none;
   user-select: none;
 }
-.fbw-win.pin { background: var(--fb-surface-pin); }
-/* 出入场二段式、严格成对：『显形/散去』主层是 NSWindow.alphaValue（Rust
-   NSAnimationContext——毛玻璃 NSVisualEffectView 垫在 webview 下面，CSS
-   opacity 管不到它，只有窗口层 alpha 能把模糊背板连同内容一起淡）；DOM
-   这层是对称的『升起/下沉 + 渐显/渐隐』——hidden 下沉轻缩且 opacity 0。
-   DOM opacity 同时是出场动画的双保险：内容先隐、玻璃后散，层次更细腻。 */
-.fbw-win.hidden { transform: translateY(8px) scale(0.98); opacity: 0; }
-.fbw-win.peek { cursor: pointer; }
-.fbw-win.peek .fbw-inputarea { opacity: 0.5; pointer-events: none; }
-.fbw-win.peek .fbw-convo { opacity: 0.82; pointer-events: none; }
-
-/* Windows 不用 native acrylic：HWND/material 是矩形，无法被 DOM 圆角裁切，
-   会在四角漏出灰底。这里让 DOM 圆角面板成为唯一可见层。 */
-html.platform-windows.fb-transparent .fbw-win {
-  background: color-mix(in srgb, var(--paper-elevated) 92%, transparent);
-  border-color: color-mix(in srgb, var(--line-strong) 78%, transparent);
-  box-shadow: 0 18px 48px rgb(0 0 0 / 0.22);
-  -webkit-backdrop-filter: blur(18px) saturate(1.08);
-  backdrop-filter: blur(18px) saturate(1.08);
-}
-html.platform-windows.fb-transparent .fbw-win.peek {
+.fbw-win.peek {
+  cursor: pointer;
   background: color-mix(in srgb, var(--paper-elevated) 90%, transparent);
 }
-html.platform-windows.fb-transparent .fbw-win.pin {
+.fbw-win.pin {
   background: color-mix(in srgb, var(--paper-elevated) 99%, transparent);
 }
-html.platform-windows.fb-transparent .fbw-win.peek .fbw-inputarea { opacity: 0.86; }
-html.platform-windows.fb-transparent .fbw-win.peek .fbw-convo { opacity: 0.94; }
-html.platform-windows.fb-transparent .fbw-inputarea {
-  background: linear-gradient(
-    to bottom,
-    color-mix(in srgb, var(--paper-elevated) 58%, transparent),
-    color-mix(in srgb, var(--paper-elevated) 94%, transparent)
-  );
-}
+/* 出入场二段式、严格成对：『显形/散去』主层是 NSWindow.alphaValue（Rust
+   侧步进，整窗 alpha 把 DOM 纸片、内容、窗口阴影一起淡）；DOM 这层是
+   对称的『升起/下沉 + 渐显/渐隐』——hidden 下沉轻缩且 opacity 0。 */
+.fbw-win.hidden { transform: translateY(8px) scale(0.98); opacity: 0; }
+.fbw-win.peek .fbw-inputarea { opacity: 0.86; pointer-events: none; }
+.fbw-win.peek .fbw-convo { opacity: 0.94; pointer-events: none; }
 
 /* 顶部暖纸渐隐幕（pin 态收口）：浮动 chrome 本身无背板，靠这层正向的纸幕
    给标题一块可读的「纸架」，会话正文随 .fbw-convo 顶部 mask 向上溶进幕里，
-   不再与标题字叠字。幕下整片保持通透。只在 pin 出现——peek 是纯毛玻璃纯视觉，
+   不再与标题字叠字。幕下整片保持通透。只在 pin 出现——peek 是半透明纸片，
    一条不透明纸带会破掉它的通透。z 序：convo(in-flow) < 幕(1) < mv(2) < chrome(3)。
    父容器 overflow:hidden 已把幕裁进 24px 圆角，不溢出窗口弧度。 */
 .fbw-win.pin::before {
@@ -527,6 +507,11 @@ html.platform-windows.fb-transparent .fbw-inputarea {
   border-top: 1px solid var(--fb-line-input);
   padding: 11px 14px 13px 22px;
   flex: none;
+  background: linear-gradient(
+    to bottom,
+    color-mix(in srgb, var(--paper-elevated) 58%, transparent),
+    color-mix(in srgb, var(--paper-elevated) 94%, transparent)
+  );
   transition: opacity 280ms ease;
 }
 .fbw-win.dragging-files .fbw-inputarea {
