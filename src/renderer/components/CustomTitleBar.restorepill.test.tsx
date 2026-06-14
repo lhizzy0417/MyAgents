@@ -4,13 +4,6 @@
 // the pill's visibility gate + click wiring.
 import { render, screen, fireEvent } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
-import {
-    ConfigActionsContext,
-    ConfigDataContext,
-    type ConfigActionsValue,
-    type ConfigDataValue,
-} from '@/config/ConfigProvider';
-import { DEFAULT_CONFIG } from '@/config/types';
 
 vi.mock('@/api/tauriClient', () => ({ isTauri: () => false }));
 vi.mock('./FeedbackPopover', () => ({ default: () => null }));
@@ -20,30 +13,14 @@ import CustomTitleBar from './CustomTitleBar';
 function renderBar(over: Partial<React.ComponentProps<typeof CustomTitleBar>> = {}) {
     const onRestoreSession = vi.fn();
     const onDismissRestore = vi.fn();
-    const configData = {
-        config: { ...DEFAULT_CONFIG, floatingBallDevGate: false, floatingBallEnabled: false },
-        projects: [],
-        providers: [],
-        apiKeys: {},
-        providerVerifyStatus: {},
-        isLoading: false,
-        error: null,
-    } satisfies ConfigDataValue;
-    const configActions = {
-        updateConfig: async () => undefined,
-    } as unknown as ConfigActionsValue;
     render(
-        <ConfigDataContext.Provider value={configData}>
-            <ConfigActionsContext.Provider value={configActions}>
-                <CustomTitleBar
-                    onRestoreSession={onRestoreSession}
-                    onDismissRestore={onDismissRestore}
-                    {...over}
-                >
-                    <div data-testid="tabbar" />
-                </CustomTitleBar>
-            </ConfigActionsContext.Provider>
-        </ConfigDataContext.Provider>,
+        <CustomTitleBar
+            onRestoreSession={onRestoreSession}
+            onDismissRestore={onDismissRestore}
+            {...over}
+        >
+            <div data-testid="tabbar" />
+        </CustomTitleBar>,
     );
     return { onRestoreSession, onDismissRestore };
 }

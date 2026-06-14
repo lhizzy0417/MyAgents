@@ -553,7 +553,7 @@ export interface AppConfig {
    *  本身以及 cron / task / widget / thought 等已发布 CLI 能力。 */
   cliToolRegistryEnabled?: boolean;
   /** 开发者总门控：桌面悬浮球（PRD 0.2.35，先开发不发布）。默认关。
-   *  关闭时 Tab 顶显隐开关与悬浮球本体均不存在（D10）。 */
+   *  关闭时设置页入口与悬浮球本体均不存在（D10）。 */
   floatingBallDevGate?: boolean;
   /** 悬浮球本体显隐开关（总门控开启后才有意义）。 */
   floatingBallEnabled?: boolean;

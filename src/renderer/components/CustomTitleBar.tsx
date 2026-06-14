@@ -9,13 +9,10 @@
  * we use decorations: false on Windows for custom title bar styling.
  */
 
-import { Bot, CircleDot, Minus, Square, X, RefreshCw, RotateCcw, Settings, Copy, CheckSquare } from 'lucide-react';
+import { Bot, Minus, Square, X, RefreshCw, RotateCcw, Settings, Copy, CheckSquare } from 'lucide-react';
 import { type ReactNode, useCallback, useEffect, useRef, useState } from 'react';
-import { invoke } from '@tauri-apps/api/core';
 import { isTauri } from '@/api/tauriClient';
 import { CUSTOM_EVENTS } from '@/../shared/constants';
-import { track } from '@/analytics';
-import { useConfig } from '@/hooks/useConfig';
 import FeedbackPopover from './FeedbackPopover';
 
 interface CustomTitleBarProps {
@@ -69,19 +66,6 @@ export default function CustomTitleBar({
     const [isMaximized, setIsMaximized] = useState(false);
     const [showFeedback, setShowFeedback] = useState(false);
 
-    // Floating ball (PRD 0.2.35): the Tab-strip show/hide toggle only exists
-    // while the developer gate is on (D10 — gate off ⇒ no entry point at all).
-    const { config, updateConfig } = useConfig();
-    const ballGate = Boolean(config.floatingBallDevGate);
-    const ballOn = Boolean(config.floatingBallEnabled);
-    const handleToggleBall = useCallback(() => {
-        const next = !ballOn;
-        updateConfig({ floatingBallEnabled: next });
-        track('floating_ball_toggle', { gate: false, enabled: next });
-        void invoke(next ? 'cmd_fb_enable' : 'cmd_fb_disable').catch((err) => {
-            console.warn('[CustomTitleBar] floating ball toggle failed:', err);
-        });
-    }, [ballOn, updateConfig]);
     const feedbackBtnRef = useRef<HTMLDivElement>(null);
 
     const handleOpenBugReport = useCallback(() => {
@@ -303,22 +287,6 @@ export default function CustomTitleBar({
                     >
                         <CheckSquare className="h-4 w-4" />
                         <span className="text-sm font-medium">任务</span>
-                    </button>
-                )}
-
-                {/* 悬浮球显隐开关 — 仅开发者门控开启时存在（PRD 0.2.35 §2.1） */}
-                {isTauri() && ballGate && (
-                    <button
-                        onClick={handleToggleBall}
-                        className={`flex h-7 items-center gap-1.5 rounded-md px-2.5 transition-colors ${
-                            ballOn
-                                ? 'bg-[var(--paper-inset)] text-[var(--ink)]'
-                                : 'text-[var(--ink-muted)] hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]'
-                        }`}
-                        title={ballOn ? '隐藏桌面悬浮球' : '显示桌面悬浮球'}
-                    >
-                        <CircleDot className="h-4 w-4" />
-                        <span className="text-sm font-medium">悬浮球</span>
                     </button>
                 )}
 

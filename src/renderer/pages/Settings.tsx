@@ -82,6 +82,10 @@ import { DEFAULT_SUMMON_ACCELERATOR } from '../../shared/config-types';
 import { workspacePathsEqual } from '../../shared/workspacePath';
 import ProviderEnableOrderDialog from '@/components/ProviderEnableOrderDialog';
 import FloatingBallPetSettings from '@/components/FloatingBallPetSettings';
+import {
+    describeNativeFloatingBallError,
+    setNativeFloatingBallEnabled,
+} from '@/floating-ball/nativeFloatingBall';
 
 /** Parse a string as a positive integer, returning undefined for invalid/non-positive values */
 function parsePositiveInt(value: string): number | undefined {
@@ -257,6 +261,7 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
     const [claudeTranscriptCleanupDaysDraft, setClaudeTranscriptCleanupDaysDraft] = useState(
         String(DEFAULT_CLAUDE_TRANSCRIPT_CLEANUP_PERIOD_DAYS),
     );
+    const [floatingBallGateBusy, setFloatingBallGateBusy] = useState(false);
     useEffect(() => {
         setClaudeTranscriptCleanupDaysDraft(String(claudeTranscriptCleanupPeriodDays));
     }, [claudeTranscriptCleanupPeriodDays]);
@@ -269,6 +274,26 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
             void updateConfig({ claudeTranscriptCleanupPeriodDays: next });
         }
     }, [claudeTranscriptCleanupDaysDraft, claudeTranscriptCleanupPeriodDays, updateConfig]);
+
+    const toggleFloatingBallGate = useCallback(async () => {
+        if (floatingBallGateBusy) return;
+        const next = !config.floatingBallDevGate;
+        setFloatingBallGateBusy(true);
+        try {
+            await setNativeFloatingBallEnabled(next);
+            await updateConfig({
+                floatingBallDevGate: next,
+                // 总门控开 → 球默认随之启用；关 → 球一并收走
+                floatingBallEnabled: next,
+            });
+            track('floating_ball_toggle', { gate: true, enabled: next });
+            toast.success(next ? '已启用桌面宠物' : '已关闭桌面宠物');
+        } catch (err) {
+            toast.error(`${next ? '启用' : '关闭'}桌面宠物失败：${describeNativeFloatingBallError(err)}`);
+        } finally {
+            setFloatingBallGateBusy(false);
+        }
+    }, [config.floatingBallDevGate, floatingBallGateBusy, toast, updateConfig]);
 
     // Determine initial section: use initialSection if valid, otherwise default to 'providers'
     const getInitialSection = (): SettingsSection => {
@@ -2611,6 +2636,17 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                     >
                         聊天机器人 Bot
                     </button>
+                    {config.floatingBallDevGate && (
+                        <button
+                            onClick={() => setActiveSection('desktop-pet')}
+                            className={`w-full rounded-lg px-3 py-2.5 text-left text-base font-medium transition-colors ${activeSection === 'desktop-pet'
+                                ? 'settings-nav-active bg-[var(--hover-bg)] text-[var(--ink)]'
+                                : 'text-[var(--ink-muted)] hover:text-[var(--ink)]'
+                                }`}
+                        >
+                            桌面宠物
+                        </button>
+                    )}
                     <button
                         onClick={() => setActiveSection('usage-stats')}
                         className={`w-full rounded-lg px-3 py-2.5 text-left text-base font-medium transition-colors ${activeSection === 'usage-stats'
@@ -2629,17 +2665,6 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                     >
                         通用设置
                     </button>
-                    {config.floatingBallDevGate && (
-                        <button
-                            onClick={() => setActiveSection('desktop-pet')}
-                            className={`w-full rounded-lg px-3 py-2.5 text-left text-base font-medium transition-colors ${activeSection === 'desktop-pet'
-                                ? 'settings-nav-active bg-[var(--hover-bg)] text-[var(--ink)]'
-                                : 'text-[var(--ink-muted)] hover:text-[var(--ink)]'
-                                }`}
-                        >
-                            桌面宠物
-                        </button>
-                    )}
                     <button
                         onClick={() => setActiveSection('shortcuts')}
                         className={`w-full rounded-lg px-3 py-2.5 text-left text-base font-medium transition-colors ${activeSection === 'shortcuts'
@@ -3725,23 +3750,14 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                     <div className="flex-1 pr-4">
                                         <p className="text-sm font-medium text-[var(--ink)]">桌面宠物</p>
                                         <p className="text-xs text-[var(--ink-muted)]">
-                                            Mino 的桌面宠物：屏幕边缘常驻悬浮球，hover 瞥一眼、点击即问，发完就走由球替你跑（仅 macOS）。开启后 Tab 栏出现显隐开关。
+                                            Mino 的桌面宠物：屏幕边缘常驻悬浮球，hover 瞥一眼、点击即问，发完就走由球替你跑。开启后可在设置页管理桌面宠物。
                                         </p>
                                     </div>
                                     <button
-                                        onClick={() => {
-                                            const next = !config.floatingBallDevGate;
-                                            updateConfig({
-                                                floatingBallDevGate: next,
-                                                // 总门控开 → 球默认随之启用；关 → 球一并收走
-                                                floatingBallEnabled: next,
-                                            });
-                                            track('floating_ball_toggle', { gate: true, enabled: next });
-                                            void invoke(next ? 'cmd_fb_enable' : 'cmd_fb_disable').catch((err) => {
-                                                console.warn('[Settings] floating ball toggle:', err);
-                                            });
-                                        }}
-                                        className={`relative h-6 w-11 shrink-0 cursor-pointer rounded-full transition-colors ${config.floatingBallDevGate ? 'bg-[var(--accent)]' : 'bg-[var(--line-strong)]'
+                                        onClick={() => void toggleFloatingBallGate()}
+                                        disabled={floatingBallGateBusy}
+                                        aria-pressed={!!config.floatingBallDevGate}
+                                        className={`relative h-6 w-11 shrink-0 cursor-pointer rounded-full transition-colors disabled:cursor-wait disabled:opacity-70 ${config.floatingBallDevGate ? 'bg-[var(--accent)]' : 'bg-[var(--line-strong)]'
                                             }`}
                                     >
                                         <span

@@ -1,26 +1,23 @@
-// Floating ball desktop companion (PRD 0.2.35, phase 1 · macOS).
+// Floating ball desktop companion (PRD 0.2.35/0.2.34 desktop pet).
 //
-// Two OS windows, both NSPanels via tauri-nspanel so they NEVER activate the
-// app (the user's frontmost app keeps focus — D1/D2 of the PRD):
+// Two OS windows, implemented as platform-native floating tool windows. Peek
+// mode must not activate the app, so the user's frontmost app keeps focus:
 //
 //   fb-ball       92×92 transparent panel, can_become_key_window = false.
 //                 Pure visual + mouse target. Hover/click logic lives in the
 //                 webview (src/renderer/floating-ball/BallWindow.tsx).
-//   fb-companion  chat panel, can_become_key_window = true + nonactivating
-//                 style mask: peek = order_front_regardless (no key, pure
-//                 visual), pin = make_key_window (keyboard goes to the panel
-//                 while the user's app stays frontmost). Hiding the panel
-//                 hands keyboard focus straight back to the frontmost app
-//                 because our app was never activated.
+//   fb-companion  chat panel. Peek is visual-only; pin activates/focuses the
+//                 companion long enough for keyboard input and restores the
+//                 previous foreground window when hidden where the OS allows.
 //
-// Context probes (frontmost app / selection / screenshot) are Tauri commands
-// (D9: OS-level work goes through Rust invoke, never sidecar HTTP). Selection
-// capture is only called on explicit summon — never on hover (PRD D3 red
-// line: the clipboard fallback inside get-selected-text simulates Cmd+C and
-// must never run on a fly-by hover).
+// Context probes (frontmost app / selection where supported / screenshot) are
+// Tauri commands (D9: OS-level work goes through Rust invoke, never sidecar
+// HTTP). Selection capture is only called on explicit summon — never on hover
+// (PRD D3 red line: the macOS clipboard fallback inside get-selected-text
+// simulates Cmd+C and must never run on a fly-by hover).
 //
-// Non-macOS builds compile a stub that reports `supported: false`; the
-// renderer gates all UI behind that flag.
+// macOS and Windows provide native floating-window implementations; Linux and
+// other desktop targets compile a stub that reports `supported: false`.
 
 use serde::{Deserialize, Serialize};
 
@@ -1176,32 +1173,1000 @@ mod imp {
 }
 
 // ════════════════════════════════════════════════════════════════════════
-// Tauri commands (cross-platform surface; stubs on non-macOS)
+// Windows implementation
+// ════════════════════════════════════════════════════════════════════════
+#[cfg(target_os = "windows")]
+mod imp {
+    use super::{FbCapabilities, FbContext, FbPlacement, FbScreenshot};
+    use crate::{ulog_error, ulog_info, ulog_warn};
+    use base64::Engine;
+    use serde::Serialize;
+    use std::collections::HashMap;
+    use std::ffi::OsString;
+    use std::os::windows::ffi::OsStringExt;
+    use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::{Mutex, OnceLock};
+    use tauri::{
+        AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, PhysicalPosition, WebviewUrl,
+        WebviewWindow, WebviewWindowBuilder,
+    };
+    use windows_sys::Win32::Foundation::{CloseHandle, HWND, LPARAM, LRESULT, POINT, WPARAM};
+    use windows_sys::Win32::System::Threading::{
+        OpenProcess, QueryFullProcessImageNameW, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        CallWindowProcW, DefWindowProcW, GetCursorPos, GetForegroundWindow, GetWindowLongPtrW,
+        GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId, IsWindow, IsWindowVisible,
+        SetForegroundWindow, SetWindowLongPtrW, SetWindowPos, GWLP_WNDPROC, GWL_EXSTYLE,
+        HWND_TOPMOST, MA_NOACTIVATE, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE,
+        SWP_NOOWNERZORDER, SWP_NOSIZE, SWP_SHOWWINDOW, WM_MOUSEACTIVATE, WNDPROC, WS_EX_LAYERED,
+        WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
+    };
+
+    pub const BALL_LABEL: &str = "fb-ball";
+    pub const COMPANION_LABEL: &str = "fb-companion";
+
+    const BALL_WIN: f64 = 92.0;
+    const EDGE_MARGIN: f64 = 6.0;
+    const COMPANION_W: f64 = 440.0;
+    const COMPANION_H: f64 = 660.0;
+    const COMPANION_GAP: f64 = 10.0;
+
+    static HOVER_POLLER_RUNNING: AtomicBool = AtomicBool::new(false);
+    static COMPANION_PINNED: AtomicBool = AtomicBool::new(false);
+    static BALL_HWND: AtomicUsize = AtomicUsize::new(0);
+    static COMPANION_HWND: AtomicUsize = AtomicUsize::new(0);
+    static LAST_FOREGROUND_HWND: AtomicUsize = AtomicUsize::new(0);
+
+    #[derive(Debug, Clone, Copy)]
+    struct NativeDragSession {
+        grab_x: f64,
+        grab_y: f64,
+        last_x: f64,
+        last_y: f64,
+    }
+
+    static BALL_DRAG: Mutex<Option<NativeDragSession>> = Mutex::new(None);
+    static COMPANION_DRAG: Mutex<Option<NativeDragSession>> = Mutex::new(None);
+    static LAST_CONTEXT: Mutex<Option<FbContext>> = Mutex::new(None);
+
+    fn original_procs() -> &'static Mutex<HashMap<usize, isize>> {
+        static PROCS: OnceLock<Mutex<HashMap<usize, isize>>> = OnceLock::new();
+        PROCS.get_or_init(|| Mutex::new(HashMap::new()))
+    }
+
+    unsafe extern "system" fn fb_window_proc(
+        hwnd: HWND,
+        msg: u32,
+        wparam: WPARAM,
+        lparam: LPARAM,
+    ) -> LRESULT {
+        if msg == WM_MOUSEACTIVATE {
+            let hwnd_key = hwnd as usize;
+            let companion = COMPANION_HWND.load(Ordering::SeqCst);
+            let companion_can_activate =
+                hwnd_key == companion && COMPANION_PINNED.load(Ordering::SeqCst);
+            if !companion_can_activate {
+                return MA_NOACTIVATE as LRESULT;
+            }
+        }
+
+        let original = original_procs()
+            .lock()
+            .ok()
+            .and_then(|m| m.get(&(hwnd as usize)).copied())
+            .unwrap_or(0);
+        if original != 0 {
+            let proc: WNDPROC = unsafe { std::mem::transmute(original) };
+            unsafe { CallWindowProcW(proc, hwnd, msg, wparam, lparam) }
+        } else {
+            unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
+        }
+    }
+
+    fn hwnd_for(win: &WebviewWindow) -> Result<HWND, String> {
+        let hwnd = win.hwnd().map_err(|e| format!("[fb] hwnd: {e}"))?;
+        Ok(hwnd.0 as HWND)
+    }
+
+    fn hwnd_is_ours(hwnd: HWND) -> bool {
+        let raw = hwnd as usize;
+        raw != 0
+            && (raw == BALL_HWND.load(Ordering::SeqCst)
+                || raw == COMPANION_HWND.load(Ordering::SeqCst))
+    }
+
+    fn install_noactivate_proc(hwnd: HWND) -> Result<(), String> {
+        let key = hwnd as usize;
+        let mut map = original_procs()
+            .lock()
+            .map_err(|_| "[fb] wndproc map poisoned".to_string())?;
+        if map.contains_key(&key) {
+            return Ok(());
+        }
+        unsafe {
+            let original = GetWindowLongPtrW(hwnd, GWLP_WNDPROC);
+            if original == 0 {
+                return Err("[fb] GetWindowLongPtrW(GWLP_WNDPROC) returned 0".to_string());
+            }
+            SetWindowLongPtrW(hwnd, GWLP_WNDPROC, fb_window_proc as usize as isize);
+            map.insert(key, original);
+        }
+        Ok(())
+    }
+
+    fn apply_tool_window_styles(win: &WebviewWindow, no_activate: bool) -> Result<(), String> {
+        let hwnd = hwnd_for(win)?;
+        unsafe {
+            let mut ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE) as u32;
+            ex |= WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_LAYERED;
+            if no_activate {
+                ex |= WS_EX_NOACTIVATE;
+            } else {
+                ex &= !WS_EX_NOACTIVATE;
+            }
+            SetWindowLongPtrW(hwnd, GWL_EXSTYLE, ex as isize);
+            SetWindowPos(
+                hwnd,
+                HWND_TOPMOST,
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_FRAMECHANGED | SWP_NOOWNERZORDER,
+            );
+        }
+        install_noactivate_proc(hwnd)?;
+        Ok(())
+    }
+
+    fn show_no_activate(win: &WebviewWindow) -> Result<(), String> {
+        let hwnd = hwnd_for(win)?;
+        unsafe {
+            SetWindowPos(
+                hwnd,
+                HWND_TOPMOST,
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW | SWP_NOOWNERZORDER,
+            );
+        }
+        Ok(())
+    }
+
+    fn placement_path() -> Option<PathBuf> {
+        crate::app_dirs::myagents_data_dir().map(|d| d.join("floating_ball.json"))
+    }
+
+    fn load_placement() -> FbPlacement {
+        placement_path()
+            .and_then(|p| std::fs::read_to_string(p).ok())
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default()
+    }
+
+    fn save_placement(p: &FbPlacement) {
+        if let Some(path) = placement_path() {
+            if let Ok(json) = serde_json::to_string(p) {
+                let _ = std::fs::write(path, json);
+            }
+        }
+    }
+
+    fn monitor_work_area(m: &tauri::Monitor) -> (f64, f64, f64, f64) {
+        let area = m.work_area();
+        (
+            area.position.x as f64,
+            area.position.y as f64,
+            area.size.width as f64,
+            area.size.height as f64,
+        )
+    }
+
+    fn monitor_for_point(app: &AppHandle, cx: f64, cy: f64) -> Option<tauri::Monitor> {
+        let monitors = app.available_monitors().ok()?;
+        let mut nearest: Option<(f64, tauri::Monitor)> = None;
+        for m in monitors {
+            let area = m.work_area();
+            let ax = area.position.x as f64;
+            let ay = area.position.y as f64;
+            let aw = area.size.width as f64;
+            let ah = area.size.height as f64;
+            if cx >= ax && cx < ax + aw && cy >= ay && cy < ay + ah {
+                return Some(m);
+            }
+            let dx = (ax - cx).max(cx - (ax + aw)).max(0.0);
+            let dy = (ay - cy).max(cy - (ay + ah)).max(0.0);
+            let d2 = dx * dx + dy * dy;
+            if nearest.as_ref().map(|(best, _)| d2 < *best).unwrap_or(true) {
+                nearest = Some((d2, m));
+            }
+        }
+        nearest.map(|(_, m)| m)
+    }
+
+    fn work_area_for_window(app: &AppHandle, win: &WebviewWindow) -> Option<(f64, f64, f64, f64)> {
+        let pos = win.outer_position().ok()?;
+        let size = win.outer_size().ok()?;
+        let cx = pos.x as f64 + size.width as f64 / 2.0;
+        let cy = pos.y as f64 + size.height as f64 / 2.0;
+        let monitor =
+            monitor_for_point(app, cx, cy).or_else(|| app.primary_monitor().ok().flatten())?;
+        Some(monitor_work_area(&monitor))
+    }
+
+    fn ball_xy_for_placement(
+        app: &AppHandle,
+        p: &FbPlacement,
+        ball_extent: Option<f64>,
+    ) -> (f64, f64) {
+        let monitor = p
+            .monitor
+            .as_deref()
+            .and_then(|name| {
+                app.available_monitors()
+                    .ok()?
+                    .into_iter()
+                    .find(|m| m.name().map(|n| n.as_str()) == Some(name))
+            })
+            .or_else(|| app.primary_monitor().ok().flatten());
+        let extent = ball_extent.unwrap_or_else(|| {
+            BALL_WIN * monitor.as_ref().map(|m| m.scale_factor()).unwrap_or(1.0)
+        });
+        let (ax, ay, aw, ah) = monitor
+            .as_ref()
+            .map(monitor_work_area)
+            .unwrap_or((0.0, 0.0, 1440.0, 900.0));
+        let x = if p.dock == "left" {
+            ax + EDGE_MARGIN
+        } else {
+            ax + aw - extent - EDGE_MARGIN
+        };
+        let y = (ay + p.y_ratio * ah).clamp(ay, ay + ah - extent);
+        (x, y)
+    }
+
+    fn ensure_windows(app: &AppHandle) -> Result<(), String> {
+        if app.get_webview_window(BALL_LABEL).is_none() {
+            let win = WebviewWindowBuilder::new(app, BALL_LABEL, WebviewUrl::default())
+                .title("MyAgents Ball")
+                .inner_size(BALL_WIN, BALL_WIN)
+                .resizable(false)
+                .decorations(false)
+                .transparent(true)
+                .shadow(false)
+                .focused(false)
+                .focusable(false)
+                .always_on_top(true)
+                .visible(false)
+                .skip_taskbar(true)
+                .build()
+                .map_err(|e| format!("[fb] create windows ball window: {e}"))?;
+            let hwnd = hwnd_for(&win)?;
+            BALL_HWND.store(hwnd as usize, Ordering::SeqCst);
+            apply_tool_window_styles(&win, true)?;
+            let placement = load_placement();
+            let ball_extent = win.outer_size().ok().map(|s| s.width.max(s.height) as f64);
+            let (x, y) = ball_xy_for_placement(app, &placement, ball_extent);
+            let _ = win.set_position(PhysicalPosition::new(x.round() as i32, y.round() as i32));
+        }
+
+        if app.get_webview_window(COMPANION_LABEL).is_none() {
+            let win = WebviewWindowBuilder::new(app, COMPANION_LABEL, WebviewUrl::default())
+                .title("MyAgents Companion")
+                .inner_size(COMPANION_W, COMPANION_H)
+                .resizable(false)
+                .decorations(false)
+                .transparent(true)
+                .shadow(false)
+                .focused(false)
+                .focusable(true)
+                .always_on_top(true)
+                .visible(false)
+                .skip_taskbar(true)
+                .build()
+                .map_err(|e| format!("[fb] create windows companion window: {e}"))?;
+            let hwnd = hwnd_for(&win)?;
+            COMPANION_HWND.store(hwnd as usize, Ordering::SeqCst);
+            apply_tool_window_styles(&win, true)?;
+            position_companion_near_ball(app, &win);
+        }
+        Ok(())
+    }
+
+    pub fn enable(app: &AppHandle) -> Result<(), String> {
+        ensure_windows(app)?;
+        if let Some(ball) = app.get_webview_window(BALL_LABEL) {
+            apply_tool_window_styles(&ball, true)?;
+            show_no_activate(&ball)?;
+        }
+        let _ = app.emit_to(
+            COMPANION_LABEL,
+            "fb:lifecycle",
+            serde_json::json!({ "active": true }),
+        );
+        start_hover_poller(app);
+        ulog_info!("[fb] floating ball enabled on Windows");
+        Ok(())
+    }
+
+    pub fn disable(app: &AppHandle) {
+        COMPANION_PINNED.store(false, Ordering::SeqCst);
+        if let Some(companion) = app.get_webview_window(COMPANION_LABEL) {
+            let _ = companion.hide();
+        }
+        if let Some(ball) = app.get_webview_window(BALL_LABEL) {
+            let _ = ball.hide();
+        }
+        let _ = app.emit_to(
+            COMPANION_LABEL,
+            "fb:lifecycle",
+            serde_json::json!({ "active": false }),
+        );
+        stop_hover_poller();
+        ulog_info!("[fb] floating ball disabled on Windows");
+    }
+
+    pub fn capabilities(app: &AppHandle) -> FbCapabilities {
+        let active = app
+            .get_webview_window(BALL_LABEL)
+            .map(|w| w.is_visible().unwrap_or(false))
+            .unwrap_or(false);
+        FbCapabilities {
+            supported: true,
+            active,
+        }
+    }
+
+    fn mouse_location() -> Option<(f64, f64)> {
+        unsafe {
+            let mut p = POINT { x: 0, y: 0 };
+            if GetCursorPos(&mut p) == 0 {
+                None
+            } else {
+                Some((p.x as f64, p.y as f64))
+            }
+        }
+    }
+
+    fn mouse_in_window(win: &WebviewWindow, mouse: (f64, f64)) -> bool {
+        let Ok(pos) = win.outer_position() else {
+            return false;
+        };
+        let Ok(size) = win.outer_size() else {
+            return false;
+        };
+        let (mx, my) = mouse;
+        mx >= pos.x as f64
+            && mx <= pos.x as f64 + size.width as f64
+            && my >= pos.y as f64
+            && my <= pos.y as f64 + size.height as f64
+    }
+
+    fn start_hover_poller(app: &AppHandle) {
+        if HOVER_POLLER_RUNNING.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let app = app.clone();
+        tauri::async_runtime::spawn(async move {
+            let mut ball_inside = false;
+            let mut comp_inside = false;
+            loop {
+                if !HOVER_POLLER_RUNNING.load(Ordering::SeqCst) {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(60)).await;
+                let mouse = mouse_location();
+                let ball = app
+                    .get_webview_window(BALL_LABEL)
+                    .filter(|w| w.is_visible().unwrap_or(false));
+                let comp = app
+                    .get_webview_window(COMPANION_LABEL)
+                    .filter(|w| w.is_visible().unwrap_or(false));
+                let ball_in = match (&mouse, &ball) {
+                    (Some(m), Some(w)) => Some(mouse_in_window(w, *m)),
+                    _ => ball.map(|_| false),
+                };
+                let comp_in = match (&mouse, &comp) {
+                    (Some(m), Some(w)) => Some(mouse_in_window(w, *m)),
+                    _ => comp.map(|_| false),
+                };
+                if let Some(inside) = ball_in {
+                    if inside != ball_inside {
+                        ball_inside = inside;
+                        let _ = app.emit_to(
+                            BALL_LABEL,
+                            "fb:native-hover",
+                            serde_json::json!({ "inside": inside }),
+                        );
+                    }
+                }
+                if let Some(inside) = comp_in {
+                    if inside != comp_inside {
+                        comp_inside = inside;
+                        let _ = app.emit_to(
+                            COMPANION_LABEL,
+                            "fb:native-hover",
+                            serde_json::json!({ "inside": inside }),
+                        );
+                    }
+                }
+            }
+            ulog_info!("[fb] windows hover poller stopped");
+        });
+        ulog_info!("[fb] windows hover poller started");
+    }
+
+    fn stop_hover_poller() {
+        HOVER_POLLER_RUNNING.store(false, Ordering::SeqCst);
+    }
+
+    fn window_origin(win: &WebviewWindow) -> Result<(f64, f64), String> {
+        let pos = win
+            .outer_position()
+            .map_err(|e| format!("[fb] read window position: {e}"))?;
+        Ok((pos.x as f64, pos.y as f64))
+    }
+
+    fn start_native_drag(
+        app: &AppHandle,
+        label: &str,
+        slot: &Mutex<Option<NativeDragSession>>,
+    ) -> Result<(), String> {
+        let win = app
+            .get_webview_window(label)
+            .ok_or_else(|| format!("[fb] {label} window missing"))?;
+        let (mx, my) = mouse_location().ok_or("[fb] mouse location unavailable")?;
+        let (wx, wy) = window_origin(&win)?;
+        let mut guard = slot
+            .lock()
+            .map_err(|_| "[fb] native drag lock poisoned".to_string())?;
+        *guard = Some(NativeDragSession {
+            grab_x: mx - wx,
+            grab_y: my - wy,
+            last_x: wx,
+            last_y: wy,
+        });
+        Ok(())
+    }
+
+    fn move_native_drag_to_mouse(
+        app: &AppHandle,
+        label: &str,
+        slot: &Mutex<Option<NativeDragSession>>,
+    ) -> Result<Option<(f64, f64)>, String> {
+        let win = app
+            .get_webview_window(label)
+            .ok_or_else(|| format!("[fb] {label} window missing"))?;
+        let Some((mx, my)) = mouse_location() else {
+            return Ok(None);
+        };
+        let mut guard = slot
+            .lock()
+            .map_err(|_| "[fb] native drag lock poisoned".to_string())?;
+        let Some(session) = guard.as_mut() else {
+            return Ok(None);
+        };
+        let x = mx - session.grab_x;
+        let y = my - session.grab_y;
+        session.last_x = x;
+        session.last_y = y;
+        let _ = win.set_position(PhysicalPosition::new(x.round() as i32, y.round() as i32));
+        Ok(Some((x, y)))
+    }
+
+    fn end_native_drag(
+        slot: &Mutex<Option<NativeDragSession>>,
+    ) -> Result<Option<NativeDragSession>, String> {
+        let mut guard = slot
+            .lock()
+            .map_err(|_| "[fb] native drag lock poisoned".to_string())?;
+        Ok(guard.take())
+    }
+
+    pub fn start_ball_drag(app: &AppHandle) -> Result<(), String> {
+        start_native_drag(app, BALL_LABEL, &BALL_DRAG)
+    }
+
+    pub fn move_ball_drag(app: &AppHandle) -> Result<(), String> {
+        let _ = move_native_drag_to_mouse(app, BALL_LABEL, &BALL_DRAG)?;
+        Ok(())
+    }
+
+    pub fn end_ball_drag(app: &AppHandle) -> Result<SnapResult, String> {
+        let session = end_native_drag(&BALL_DRAG)?.ok_or("[fb] ball native drag is not active")?;
+        let (x, y) = if let Some((mx, my)) = mouse_location() {
+            (mx - session.grab_x, my - session.grab_y)
+        } else {
+            (session.last_x, session.last_y)
+        };
+        snap_ball(app, x, y)
+    }
+
+    pub fn cancel_ball_drag() -> Result<(), String> {
+        let _ = end_native_drag(&BALL_DRAG)?;
+        Ok(())
+    }
+
+    pub fn start_companion_drag(app: &AppHandle) -> Result<(), String> {
+        start_native_drag(app, COMPANION_LABEL, &COMPANION_DRAG)
+    }
+
+    pub fn move_companion_drag(app: &AppHandle) -> Result<(), String> {
+        let _ = move_native_drag_to_mouse(app, COMPANION_LABEL, &COMPANION_DRAG)?;
+        Ok(())
+    }
+
+    pub fn end_companion_drag() -> Result<(), String> {
+        let _ = end_native_drag(&COMPANION_DRAG)?;
+        Ok(())
+    }
+
+    fn position_companion_near_ball(app: &AppHandle, companion: &WebviewWindow) {
+        let Some(ball) = app.get_webview_window(BALL_LABEL) else {
+            return;
+        };
+        let Ok(bpos) = ball.outer_position() else {
+            return;
+        };
+        let Ok(bsize) = ball.outer_size() else {
+            return;
+        };
+        let Ok(csize) = companion.outer_size() else {
+            return;
+        };
+        let (ax, ay, aw, ah) =
+            work_area_for_window(app, &ball).unwrap_or((0.0, 0.0, 1440.0, 900.0));
+        let scale = ball.scale_factor().unwrap_or(1.0);
+        let gap = COMPANION_GAP * scale;
+        let margin = 8.0 * scale;
+        let ball_w = bsize.width as f64;
+        let ball_h = bsize.height as f64;
+        let comp_w = csize.width as f64;
+        let comp_h = csize.height as f64;
+        let dock_right = bpos.x as f64 + ball_w / 2.0 > ax + aw / 2.0;
+        let mut x = if dock_right {
+            bpos.x as f64 - gap - comp_w
+        } else {
+            bpos.x as f64 + ball_w + gap
+        };
+        x = x.clamp(ax + margin, ax + aw - comp_w - margin);
+        let mut y = bpos.y as f64 + ball_h / 2.0 - comp_h * 0.25;
+        y = y.clamp(ay + margin, (ay + ah - comp_h - margin).max(ay + margin));
+        let _ = companion.set_position(PhysicalPosition::new(x.round() as i32, y.round() as i32));
+    }
+
+    pub fn show_companion(app: &AppHandle, mode: &str) -> Result<(), String> {
+        ensure_windows(app)?;
+        let companion = app
+            .get_webview_window(COMPANION_LABEL)
+            .ok_or("[fb] companion window missing")?;
+        position_companion_near_ball(app, &companion);
+        if mode == "pin" {
+            remember_foreground_context();
+            apply_tool_window_styles(&companion, false)?;
+            COMPANION_PINNED.store(true, Ordering::SeqCst);
+            let _ = companion.show();
+            unsafe {
+                let hwnd = hwnd_for(&companion)?;
+                SetForegroundWindow(hwnd);
+            }
+            let _ = companion.set_focus();
+        } else {
+            COMPANION_PINNED.store(false, Ordering::SeqCst);
+            apply_tool_window_styles(&companion, true)?;
+            show_no_activate(&companion)?;
+        }
+        Ok(())
+    }
+
+    pub fn pin_companion(app: &AppHandle) -> Result<(), String> {
+        ensure_windows(app)?;
+        let companion = app
+            .get_webview_window(COMPANION_LABEL)
+            .ok_or("[fb] companion window missing")?;
+        remember_foreground_context();
+        apply_tool_window_styles(&companion, false)?;
+        COMPANION_PINNED.store(true, Ordering::SeqCst);
+        let _ = companion.show();
+        unsafe {
+            let hwnd = hwnd_for(&companion)?;
+            SetForegroundWindow(hwnd);
+        }
+        let _ = companion.set_focus();
+        Ok(())
+    }
+
+    pub fn hide_companion(app: &AppHandle) {
+        COMPANION_PINNED.store(false, Ordering::SeqCst);
+        let should_restore_focus = unsafe { hwnd_is_ours(GetForegroundWindow()) };
+        if let Some(companion) = app.get_webview_window(COMPANION_LABEL) {
+            let _ = apply_tool_window_styles(&companion, true);
+            let _ = companion.hide();
+        }
+        let prev = LAST_FOREGROUND_HWND.swap(0, Ordering::SeqCst) as HWND;
+        if should_restore_focus && !prev.is_null() && !hwnd_is_ours(prev) {
+            unsafe {
+                if IsWindow(prev) != 0 && IsWindowVisible(prev) != 0 {
+                    SetForegroundWindow(prev);
+                }
+            }
+        }
+    }
+
+    pub fn move_ball_to(app: &AppHandle, x: f64, y: f64) -> Result<(), String> {
+        let ball = app
+            .get_webview_window(BALL_LABEL)
+            .ok_or("[fb] ball window missing")?;
+        let _ = ball.set_position(LogicalPosition::new(x, y));
+        Ok(())
+    }
+
+    #[derive(Serialize)]
+    #[serde(rename_all = "camelCase")]
+    pub struct SnapResult {
+        pub dock: String,
+    }
+
+    fn snap_decision(
+        cx: f64,
+        ball_y: f64,
+        ax: f64,
+        ay: f64,
+        aw: f64,
+        ah: f64,
+    ) -> (&'static str, f64) {
+        let dock = if cx < ax + aw / 2.0 { "left" } else { "right" };
+        let y_ratio = ((ball_y - ay) / ah).clamp(0.02, 0.92);
+        (dock, y_ratio)
+    }
+
+    pub fn snap_ball(app: &AppHandle, ball_x: f64, ball_y: f64) -> Result<SnapResult, String> {
+        let ball = app
+            .get_webview_window(BALL_LABEL)
+            .ok_or("[fb] ball window missing")?;
+        let size = ball
+            .outer_size()
+            .map_err(|e| format!("[fb] ball size: {e}"))?;
+        let (cx, cy) = (
+            ball_x + size.width as f64 / 2.0,
+            ball_y + size.height as f64 / 2.0,
+        );
+        let monitor =
+            monitor_for_point(app, cx, cy).or_else(|| app.primary_monitor().ok().flatten());
+        let (ax, ay, aw, ah) = monitor
+            .as_ref()
+            .map(monitor_work_area)
+            .unwrap_or((0.0, 0.0, 1440.0, 900.0));
+        let (dock, y_ratio) = snap_decision(cx, ball_y, ax, ay, aw, ah);
+        let placement = FbPlacement {
+            dock: dock.to_string(),
+            y_ratio,
+            monitor: monitor.as_ref().and_then(|m| m.name().cloned()),
+        };
+        save_placement(&placement);
+        let ball_extent = Some(size.width.max(size.height) as f64);
+        let (x, y) = ball_xy_for_placement(app, &placement, ball_extent);
+        let _ = ball.set_position(PhysicalPosition::new(x.round() as i32, y.round() as i32));
+        Ok(SnapResult {
+            dock: dock.to_string(),
+        })
+    }
+
+    pub fn set_companion_size(app: &AppHandle, width: f64, height: f64) -> Result<(), String> {
+        let companion = app
+            .get_webview_window(COMPANION_LABEL)
+            .ok_or("[fb] companion window missing")?;
+        let _ = companion.set_size(LogicalSize::new(width.max(360.0), height.max(320.0)));
+        Ok(())
+    }
+
+    pub fn move_companion_to(app: &AppHandle, x: f64, y: f64) -> Result<(), String> {
+        let companion = app
+            .get_webview_window(COMPANION_LABEL)
+            .ok_or("[fb] companion window missing")?;
+        let _ = companion.set_position(LogicalPosition::new(x, y));
+        Ok(())
+    }
+
+    fn title_for_hwnd(hwnd: HWND) -> Option<String> {
+        if hwnd.is_null() {
+            return None;
+        }
+        unsafe {
+            let len = GetWindowTextLengthW(hwnd);
+            if len <= 0 {
+                return None;
+            }
+            let mut buf = vec![0u16; len as usize + 1];
+            let read = GetWindowTextW(hwnd, buf.as_mut_ptr(), buf.len() as i32);
+            if read <= 0 {
+                return None;
+            }
+            let title = String::from_utf16_lossy(&buf[..read as usize]);
+            let trimmed = title.trim();
+            (!trimmed.is_empty()).then(|| trimmed.to_string())
+        }
+    }
+
+    fn process_name_for_hwnd(hwnd: HWND) -> Option<String> {
+        unsafe {
+            let mut pid = 0u32;
+            GetWindowThreadProcessId(hwnd, &mut pid);
+            if pid == 0 || pid == std::process::id() {
+                return None;
+            }
+            let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+            if process.is_null() {
+                return None;
+            }
+            let mut buf = vec![0u16; 32768];
+            let mut size = buf.len() as u32;
+            let ok = QueryFullProcessImageNameW(process, 0, buf.as_mut_ptr(), &mut size);
+            let _ = CloseHandle(process);
+            if ok == 0 || size == 0 {
+                return None;
+            }
+            let os = OsString::from_wide(&buf[..size as usize]);
+            let name = PathBuf::from(os)
+                .file_stem()
+                .map(|s| s.to_string_lossy().to_string());
+            name.filter(|s| !s.is_empty() && s != "MyAgents")
+        }
+    }
+
+    fn capture_hwnd_context(hwnd: HWND) -> FbContext {
+        if hwnd.is_null() || hwnd_is_ours(hwnd) {
+            return FbContext::default();
+        }
+        FbContext {
+            app_name: process_name_for_hwnd(hwnd),
+            window_title: title_for_hwnd(hwnd),
+            selection: None,
+        }
+    }
+
+    fn current_foreground_context() -> FbContext {
+        unsafe {
+            let hwnd = GetForegroundWindow();
+            capture_hwnd_context(hwnd)
+        }
+    }
+
+    fn remember_foreground_context() {
+        unsafe {
+            let hwnd = GetForegroundWindow();
+            if hwnd.is_null() || hwnd_is_ours(hwnd) {
+                return;
+            }
+            LAST_FOREGROUND_HWND.store(hwnd as usize, Ordering::SeqCst);
+            let ctx = capture_hwnd_context(hwnd);
+            if let Ok(mut guard) = LAST_CONTEXT.lock() {
+                *guard = Some(ctx);
+            }
+        }
+    }
+
+    pub fn capture_context() -> FbContext {
+        unsafe {
+            let hwnd = GetForegroundWindow();
+            if hwnd_is_ours(hwnd) {
+                return LAST_CONTEXT
+                    .lock()
+                    .ok()
+                    .and_then(|g| g.clone())
+                    .unwrap_or_default();
+            }
+            let ctx = capture_hwnd_context(hwnd);
+            if let Ok(mut guard) = LAST_CONTEXT.lock() {
+                *guard = Some(ctx.clone());
+            }
+            ctx
+        }
+    }
+
+    pub fn ax_trusted(_prompt: bool) -> bool {
+        true
+    }
+
+    fn ps_single_quote(s: &str) -> String {
+        s.replace('\'', "''")
+    }
+
+    fn encode_powershell(script: &str) -> String {
+        let mut utf16le = Vec::with_capacity(script.len() * 2);
+        for c in script.encode_utf16() {
+            utf16le.extend_from_slice(&c.to_le_bytes());
+        }
+        base64::engine::general_purpose::STANDARD.encode(utf16le)
+    }
+
+    fn run_powershell(script: &str) -> Result<(), String> {
+        let encoded = encode_powershell(script);
+        let status = crate::process_cmd::new("powershell")
+            .args([
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-EncodedCommand",
+                &encoded,
+            ])
+            .status()
+            .map_err(|e| format!("[fb] powershell spawn: {e}"))?;
+        if status.success() {
+            Ok(())
+        } else {
+            Err("[fb] powershell command failed".to_string())
+        }
+    }
+
+    fn capture_screen_jpeg(path: &Path, max_dim: u32, quality: u32) -> Result<(), String> {
+        let path_str = path
+            .to_str()
+            .ok_or("[fb] screenshot temp path is not utf-8")?;
+        let script = format!(
+            r#"
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName System.Drawing
+$path = '{path}'
+$maxDim = [double]{max_dim}
+$quality = [int64]{quality}
+$bounds = [System.Windows.Forms.SystemInformation]::VirtualScreen
+$bitmap = New-Object System.Drawing.Bitmap($bounds.Width, $bounds.Height)
+$graphics = [System.Drawing.Graphics]::FromImage($bitmap)
+try {{
+  $graphics.CopyFromScreen($bounds.Left, $bounds.Top, 0, 0, $bounds.Size)
+  $scale = [Math]::Min(1.0, $maxDim / [Math]::Max($bounds.Width, $bounds.Height))
+  $width = [Math]::Max(1, [int][Math]::Round($bounds.Width * $scale))
+  $height = [Math]::Max(1, [int][Math]::Round($bounds.Height * $scale))
+  $resized = New-Object System.Drawing.Bitmap($width, $height)
+  $resizeGraphics = [System.Drawing.Graphics]::FromImage($resized)
+  try {{
+    $resizeGraphics.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
+    $resizeGraphics.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::HighQuality
+    $resizeGraphics.PixelOffsetMode = [System.Drawing.Drawing2D.PixelOffsetMode]::HighQuality
+    $resizeGraphics.DrawImage($bitmap, 0, 0, $width, $height)
+    $codec = [System.Drawing.Imaging.ImageCodecInfo]::GetImageEncoders() | Where-Object {{ $_.MimeType -eq 'image/jpeg' }} | Select-Object -First 1
+    $params = New-Object System.Drawing.Imaging.EncoderParameters(1)
+    $params.Param[0] = New-Object System.Drawing.Imaging.EncoderParameter([System.Drawing.Imaging.Encoder]::Quality, $quality)
+    $resized.Save($path, $codec, $params)
+  }} finally {{
+    $resizeGraphics.Dispose()
+    $resized.Dispose()
+  }}
+}} finally {{
+  $graphics.Dispose()
+  $bitmap.Dispose()
+}}
+"#,
+            path = ps_single_quote(path_str),
+            max_dim = max_dim,
+            quality = quality,
+        );
+        run_powershell(&script).map_err(|e| format!("{e}: screenshot capture"))
+    }
+
+    pub fn screenshot() -> Result<FbScreenshot, String> {
+        let ctx = LAST_CONTEXT
+            .lock()
+            .ok()
+            .and_then(|g| g.clone())
+            .unwrap_or_else(current_foreground_context);
+        let id = uuid::Uuid::new_v4();
+        const SCREENSHOT_BUDGET_BYTES: usize = 192 * 1024;
+        const ATTEMPTS: &[(u32, u32)] = &[
+            (1600, 72),
+            (1280, 62),
+            (1024, 54),
+            (800, 46),
+            (640, 40),
+            (480, 34),
+        ];
+        let mut selected: Option<Vec<u8>> = None;
+        let mut last_size = 0usize;
+        for (idx, (max_dim, quality)) in ATTEMPTS.iter().copied().enumerate() {
+            let jpg =
+                std::env::temp_dir().join(format!("myagents-fb-shot-{id}-{max_dim}-{quality}.jpg"));
+            capture_screen_jpeg(&jpg, max_dim, quality)?;
+            let bytes = std::fs::read(&jpg).map_err(|e| format!("[fb] read screenshot: {e}"))?;
+            let _ = std::fs::remove_file(&jpg);
+            if bytes.is_empty() {
+                return Err("[fb] empty screenshot".to_string());
+            }
+            last_size = bytes.len();
+            if last_size <= SCREENSHOT_BUDGET_BYTES || idx + 1 == ATTEMPTS.len() {
+                selected = Some(bytes);
+                break;
+            }
+        }
+        let bytes = selected.ok_or("[fb] screenshot compression failed")?;
+        if bytes.len() > SCREENSHOT_BUDGET_BYTES {
+            ulog_warn!(
+                "[fb] compressed Windows screenshot still above IPC budget: {last_size} bytes"
+            );
+            return Err(format!(
+                "[fb] screenshot too large after compression: {last_size} bytes"
+            ));
+        }
+        if bytes.is_empty() {
+            return Err("[fb] empty screenshot".to_string());
+        }
+        let b64 = base64::engine::general_purpose::STANDARD.encode(bytes);
+        Ok(FbScreenshot {
+            data_url: format!("data:image/jpeg;base64,{b64}"),
+            app_name: ctx.app_name,
+            window_title: ctx.window_title,
+        })
+    }
+
+    pub fn relay(app: &AppHandle, target: &str, event: &str, payload: serde_json::Value) {
+        let label = match target {
+            "ball" => BALL_LABEL,
+            _ => COMPANION_LABEL,
+        };
+        if let Err(e) = app.emit_to(label, event, payload) {
+            ulog_error!("[fb] relay {event} -> {label} failed: {e}");
+        }
+    }
+}
+
+// ════════════════════════════════════════════════════════════════════════
+// Tauri commands (cross-platform surface; stubs on unsupported desktop OSes)
 // ════════════════════════════════════════════════════════════════════════
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 mod commands {
     use super::imp;
     use super::{FbCapabilities, FbContext, FbScreenshot};
     use tauri::AppHandle;
 
-    #[tauri::command]
-    pub async fn cmd_fb_enable(app: AppHandle) -> Result<(), String> {
-        // Window/panel creation must happen on the main thread.
+    #[cfg(target_os = "macos")]
+    fn run_native_window_op<T, F>(
+        app: AppHandle,
+        join_label: &'static str,
+        f: F,
+    ) -> Result<T, String>
+    where
+        T: Send + 'static,
+        F: FnOnce(&AppHandle) -> Result<T, String> + Send + 'static,
+    {
         let (tx, rx) = std::sync::mpsc::channel();
         app.clone()
             .run_on_main_thread(move || {
-                let _ = tx.send(imp::enable(&app));
+                let _ = tx.send(f(&app));
             })
             .map_err(|e| format!("[fb] main thread dispatch: {e}"))?;
-        rx.recv().map_err(|e| format!("[fb] enable join: {e}"))?
+        rx.recv()
+            .map_err(|e| format!("[fb] {join_label} join: {e}"))?
+    }
+
+    #[cfg(target_os = "windows")]
+    fn run_native_window_op<T, F>(
+        app: AppHandle,
+        _join_label: &'static str,
+        f: F,
+    ) -> Result<T, String>
+    where
+        T: Send + 'static,
+        F: FnOnce(&AppHandle) -> Result<T, String> + Send + 'static,
+    {
+        f(&app)
+    }
+
+    #[tauri::command]
+    pub async fn cmd_fb_enable(app: AppHandle) -> Result<(), String> {
+        run_native_window_op(app, "enable", imp::enable)
     }
 
     #[tauri::command]
     pub async fn cmd_fb_disable(app: AppHandle) -> Result<(), String> {
-        app.clone()
-            .run_on_main_thread(move || imp::disable(&app))
-            .map_err(|e| format!("[fb] main thread dispatch: {e}"))
+        run_native_window_op(app, "disable", |app| {
+            imp::disable(app);
+            Ok(())
+        })
     }
 
     #[tauri::command]
@@ -1211,115 +2176,71 @@ mod commands {
 
     #[tauri::command]
     pub async fn cmd_fb_show_companion(app: AppHandle, mode: String) -> Result<(), String> {
-        app.clone()
-            .run_on_main_thread(move || {
-                if let Err(e) = imp::show_companion(&app, &mode) {
-                    crate::ulog_error!("[fb] show_companion: {e}");
-                }
-            })
-            .map_err(|e| format!("[fb] main thread dispatch: {e}"))
+        run_native_window_op(app, "show companion", move |app| {
+            imp::show_companion(app, &mode)
+        })
     }
 
-    /// NOTE: channel-join 等主线程真正执行完 make_key_window 才 resolve——
-    /// `run_on_main_thread` 只是派发不等待，renderer 的 `await invoke(pin)`
-    /// 之后立刻 focus() 需要窗口已是 key window（非 key 窗口 focus 不出
-    /// 光标，0612 二轮实测）。cmd_fb_enable 同款模式。
+    /// NOTE: on macOS, channel-join waits until `make_key_window` has really
+    /// run on the main thread. On Windows, WebView2 windows are not created via
+    /// `run_on_main_thread`, so the same command surface calls the native op
+    /// directly.
     #[tauri::command]
     pub async fn cmd_fb_pin_companion(app: AppHandle) -> Result<(), String> {
-        let (tx, rx) = std::sync::mpsc::channel();
-        app.clone()
-            .run_on_main_thread(move || {
-                let _ = tx.send(imp::pin_companion(&app));
-            })
-            .map_err(|e| format!("[fb] main thread dispatch: {e}"))?;
-        rx.recv().map_err(|e| format!("[fb] pin join: {e}"))?
+        run_native_window_op(app, "pin", imp::pin_companion)
     }
 
     #[tauri::command]
     pub async fn cmd_fb_hide_companion(app: AppHandle) -> Result<(), String> {
-        app.clone()
-            .run_on_main_thread(move || imp::hide_companion(&app))
-            .map_err(|e| format!("[fb] main thread dispatch: {e}"))
+        run_native_window_op(app, "hide companion", |app| {
+            imp::hide_companion(app);
+            Ok(())
+        })
     }
 
     #[tauri::command]
     pub async fn cmd_fb_drag_ball_start(app: AppHandle) -> Result<(), String> {
-        let (tx, rx) = std::sync::mpsc::channel();
-        app.clone()
-            .run_on_main_thread(move || {
-                let _ = tx.send(imp::start_ball_drag(&app));
-            })
-            .map_err(|e| format!("[fb] main thread dispatch: {e}"))?;
-        rx.recv()
-            .map_err(|e| format!("[fb] ball drag start join: {e}"))?
+        run_native_window_op(app, "ball drag start", imp::start_ball_drag)
     }
 
     #[tauri::command]
     pub async fn cmd_fb_drag_ball_move(app: AppHandle) -> Result<(), String> {
-        app.clone()
-            .run_on_main_thread(move || {
-                if let Err(e) = imp::move_ball_drag(&app) {
-                    crate::ulog_warn!("[fb] ball drag move failed: {e}");
-                }
-            })
-            .map_err(|e| format!("[fb] main thread dispatch: {e}"))
+        run_native_window_op(app, "ball drag move", |app| {
+            if let Err(e) = imp::move_ball_drag(app) {
+                crate::ulog_warn!("[fb] ball drag move failed: {e}");
+            }
+            Ok(())
+        })
     }
 
     #[tauri::command]
     pub async fn cmd_fb_drag_ball_end(app: AppHandle) -> Result<imp::SnapResult, String> {
-        let (tx, rx) = std::sync::mpsc::channel();
-        app.clone()
-            .run_on_main_thread(move || {
-                let _ = tx.send(imp::end_ball_drag(&app));
-            })
-            .map_err(|e| format!("[fb] main thread dispatch: {e}"))?;
-        rx.recv()
-            .map_err(|e| format!("[fb] ball drag end join: {e}"))?
+        run_native_window_op(app, "ball drag end", imp::end_ball_drag)
     }
 
     #[tauri::command]
     pub async fn cmd_fb_drag_ball_cancel(app: AppHandle) -> Result<(), String> {
-        let (tx, rx) = std::sync::mpsc::channel();
-        app.run_on_main_thread(move || {
-            let _ = tx.send(imp::cancel_ball_drag());
-        })
-        .map_err(|e| format!("[fb] main thread dispatch: {e}"))?;
-        rx.recv()
-            .map_err(|e| format!("[fb] ball drag cancel join: {e}"))?
+        run_native_window_op(app, "ball drag cancel", |_app| imp::cancel_ball_drag())
     }
 
     #[tauri::command]
     pub async fn cmd_fb_drag_companion_start(app: AppHandle) -> Result<(), String> {
-        let (tx, rx) = std::sync::mpsc::channel();
-        app.clone()
-            .run_on_main_thread(move || {
-                let _ = tx.send(imp::start_companion_drag(&app));
-            })
-            .map_err(|e| format!("[fb] main thread dispatch: {e}"))?;
-        rx.recv()
-            .map_err(|e| format!("[fb] companion drag start join: {e}"))?
+        run_native_window_op(app, "companion drag start", imp::start_companion_drag)
     }
 
     #[tauri::command]
     pub async fn cmd_fb_drag_companion_move(app: AppHandle) -> Result<(), String> {
-        app.clone()
-            .run_on_main_thread(move || {
-                if let Err(e) = imp::move_companion_drag(&app) {
-                    crate::ulog_warn!("[fb] companion drag move failed: {e}");
-                }
-            })
-            .map_err(|e| format!("[fb] main thread dispatch: {e}"))
+        run_native_window_op(app, "companion drag move", |app| {
+            if let Err(e) = imp::move_companion_drag(app) {
+                crate::ulog_warn!("[fb] companion drag move failed: {e}");
+            }
+            Ok(())
+        })
     }
 
     #[tauri::command]
     pub async fn cmd_fb_drag_companion_end(app: AppHandle) -> Result<(), String> {
-        let (tx, rx) = std::sync::mpsc::channel();
-        app.run_on_main_thread(move || {
-            let _ = tx.send(imp::end_companion_drag());
-        })
-        .map_err(|e| format!("[fb] main thread dispatch: {e}"))?;
-        rx.recv()
-            .map_err(|e| format!("[fb] companion drag end join: {e}"))?
+        run_native_window_op(app, "companion drag end", |_app| imp::end_companion_drag())
     }
 
     /// Legacy absolute-position command. Runtime drag uses `cmd_fb_drag_ball_*`
@@ -1338,13 +2259,7 @@ mod commands {
         x: f64,
         y: f64,
     ) -> Result<imp::SnapResult, String> {
-        let (tx, rx) = std::sync::mpsc::channel();
-        app.clone()
-            .run_on_main_thread(move || {
-                let _ = tx.send(imp::snap_ball(&app, x, y));
-            })
-            .map_err(|e| format!("[fb] main thread dispatch: {e}"))?;
-        rx.recv().map_err(|e| format!("[fb] snap join: {e}"))?
+        run_native_window_op(app, "snap", move |app| imp::snap_ball(app, x, y))
     }
 
     #[tauri::command]
@@ -1438,12 +2353,12 @@ mod commands {
     }
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 mod commands {
     use super::{FbCapabilities, FbContext, FbScreenshot};
     use tauri::AppHandle;
 
-    const UNSUPPORTED: &str = "[fb] floating ball is macOS-only in phase 1";
+    const UNSUPPORTED: &str = "[fb] floating ball is unsupported on this OS";
 
     #[tauri::command]
     pub async fn cmd_fb_enable(_app: AppHandle) -> Result<(), String> {
@@ -1604,19 +2519,28 @@ pub fn setup_on_startup(app: &tauri::AppHandle) {
     {
         let app = app.clone();
         let _ = app.clone().run_on_main_thread(move || {
-            if let Err(e) = self::macos_enable(&app) {
+            if let Err(e) = self::platform_enable(&app) {
                 crate::ulog_warn!("[fb] startup enable failed: {e}");
             }
         });
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "windows")]
+    {
+        let app = app.clone();
+        tauri::async_runtime::spawn(async move {
+            if let Err(e) = self::platform_enable(&app) {
+                crate::ulog_warn!("[fb] startup enable failed: {e}");
+            }
+        });
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
         let _ = app;
         crate::ulog_info!("[fb] enabled in config but unsupported on this OS — skipping");
     }
 }
 
-#[cfg(target_os = "macos")]
-fn macos_enable(app: &tauri::AppHandle) -> Result<(), String> {
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+fn platform_enable(app: &tauri::AppHandle) -> Result<(), String> {
     imp::enable(app)
 }

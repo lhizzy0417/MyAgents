@@ -21,6 +21,10 @@ import {
     normalizeBuiltinPetPackId,
 } from '@/floating-ball/defaultPetPack';
 import {
+    describeNativeFloatingBallError,
+    setNativeFloatingBallEnabled,
+} from '@/floating-ball/nativeFloatingBall';
+import {
     deleteInstalledPetPack,
     importPetFromPath,
     importPetFromPetdex,
@@ -32,11 +36,6 @@ import {
 import { PetSprite } from '@/floating-ball/PetSprite';
 import type { PetPack } from '@/floating-ball/petAtlas';
 import '@/floating-ball/fb.css';
-
-interface FbCapabilities {
-    supported: boolean;
-    active: boolean;
-}
 
 function notifyBallConfigChanged() {
     if (!isTauriEnvironment()) return;
@@ -359,28 +358,15 @@ export default function FloatingBallPetSettings() {
 
     const setEnabled = useCallback(
         async (enabled: boolean) => {
-            if (enabled && isTauriEnvironment()) {
-                const capabilities = await invoke<FbCapabilities>('cmd_fb_capabilities');
-                if (!capabilities.supported) {
-                    toast.error('当前系统暂不支持桌面宠物');
-                    return;
-                }
-                try {
-                    await invoke('cmd_fb_enable');
-                } catch (err) {
-                    toast.error(`启用桌面宠物失败：${err instanceof Error ? err.message : String(err)}`);
-                    return;
-                }
+            try {
+                await setNativeFloatingBallEnabled(enabled);
+            } catch (err) {
+                toast.error(`${enabled ? '启用' : '关闭'}桌面宠物失败：${describeNativeFloatingBallError(err)}`);
+                return;
             }
 
             await updateConfig({ floatingBallEnabled: enabled });
             track('floating_ball_toggle', { gate: false, enabled });
-
-            if (!enabled && isTauriEnvironment()) {
-                void invoke('cmd_fb_disable').catch((err) => {
-                    console.warn('[FloatingBallPetSettings] toggle floating ball failed:', err);
-                });
-            }
             toast.success(enabled ? '已启用桌面宠物' : '已关闭桌面宠物');
         },
         [toast, updateConfig],
@@ -506,7 +492,7 @@ export default function FloatingBallPetSettings() {
             <div className="mb-8">
                 <h2 className="text-xl font-semibold text-[var(--ink)]">桌面宠物</h2>
                 <p className="mt-2 max-w-2xl text-sm leading-6 text-[var(--ink-muted)]">
-                    用 Codex Pets 兼容资源替换悬浮球视觉，让 Mino 在桌面边缘用不同动作反馈空闲、运行、等待确认和完成等状态。
+                    悬浮桌面宠物伴你在任何时刻唤起 MyAgents，与 AI 对话或发起任务。
                 </p>
             </div>
 

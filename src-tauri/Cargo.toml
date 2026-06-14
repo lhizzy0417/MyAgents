@@ -112,13 +112,16 @@ objc2-web-kit = { version = "0.3.2", features = ["WKWebView", "block2"] }
 # can import the AppKit types.
 objc2-app-kit = { version = "0.3.2", default-features = false, features = ["NSWindow", "NSView", "NSResponder", "NSButton", "NSControl", "std"] }
 
-# Pattern 5: Windows pid-liveness + start-time probe via OpenProcess +
-# GetProcessTimes (PROCESS_QUERY_LIMITED_INFORMATION). Minimal feature set —
-# version 0.59 is already pulled transitively, so no new lock entry.
+# Windows platform APIs:
+# - pid-liveness/start-time probes via PROCESS_QUERY_LIMITED_INFORMATION
+# - floating-ball tool-window styles, no-activate behavior, focus restoration
+# - wake-lock power requests below
+# Minimal feature set — version 0.59 is already pulled transitively, so no new lock entry.
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = [
     "Win32_Foundation",
     "Win32_System_Threading",
+    "Win32_UI_WindowsAndMessaging",
     # `wake_lock::windows::PlatformImpl` calls `PowerCreateRequest` +
     # `PowerSetRequest` (PowerRequestSystemRequired | PowerRequestAwayModeRequired)
     # to keep the OS from idle-sleeping during long-running cron tasks.
