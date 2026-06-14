@@ -409,6 +409,7 @@ pub fn run() {
             floating_ball_pets::cmd_fb_pet_list_installed,
             floating_ball_pets::cmd_fb_pet_import_path,
             floating_ball_pets::cmd_fb_pet_import_codex,
+            floating_ball_pets::cmd_fb_pet_import_petdex,
             floating_ball::cmd_fb_show_companion,
             floating_ball::cmd_fb_pin_companion,
             floating_ball::cmd_fb_hide_companion,

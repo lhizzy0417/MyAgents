@@ -73,6 +73,11 @@ export async function importPetsFromCodex(): Promise<PetImportSummary> {
     return invoke<PetImportSummary>('cmd_fb_pet_import_codex');
 }
 
+export async function importPetFromPetdex(url: string): Promise<PetImportSummary> {
+    if (!isTauriEnvironment()) throw new Error('当前环境不支持 Petdex 链接导入');
+    return invoke<PetImportSummary>('cmd_fb_pet_import_petdex', { url });
+}
+
 export async function resolveSelectedPetPack(petId: string | null | undefined): Promise<PetPack> {
     const builtin = getBuiltinPetPack(petId);
     if (builtin) return builtin;

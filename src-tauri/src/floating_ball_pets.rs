@@ -3,13 +3,21 @@
 //! Runtime windows live in `floating_ball.rs`; this module owns filesystem
 //! concerns for user-installed pet packs under `~/.myagents/pets`.
 
+use futures_util::StreamExt;
 use serde::Serialize;
-use std::io::Read;
+use std::io::{Cursor, Read, Seek};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use std::time::Duration;
 
 const MAX_MANIFEST_BYTES: u64 = 64 * 1024;
 const MAX_SPRITESHEET_BYTES: u64 = 24 * 1024 * 1024;
+const MAX_PET_ZIP_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_PET_ZIP_ENTRY_BYTES: u64 = 32 * 1024 * 1024;
+const MAX_PET_ZIP_TOTAL_UNCOMPRESSED_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_PET_ZIP_ENTRIES: usize = 128;
+const MAX_PETDEX_PAGE_BYTES: u64 = 2 * 1024 * 1024;
+const PETDEX_DOWNLOAD_TIMEOUT_SECS: u64 = 45;
 const CODEX_ATLAS_WIDTH: u32 = 1536;
 const CODEX_ATLAS_HEIGHT: u32 = 1872;
 const CODEX_ATLAS_COLUMNS: u64 = 8;
@@ -28,6 +36,8 @@ const CODEX_ANIMATION_NAMES: [&str; 9] = [
     "review",
 ];
 const RESERVED_BUILTIN_PET_IDS: [&str; 3] = ["mino-default", "mino-mono", "mino-focus"];
+const PETDEX_HOSTS: [&str; 2] = ["petdex.dev", "www.petdex.dev"];
+const PETDEX_ASSETS_HOST: &str = "assets.petdex.dev";
 
 static PET_IMPORT_LOCK: Mutex<()> = Mutex::new(());
 
@@ -384,6 +394,12 @@ fn remove_path_if_exists(path: &Path) -> Result<(), String> {
     }
 }
 
+fn is_zip_file_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|s| s.to_str())
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("zip"))
+}
+
 fn find_manifest_root(raw_path: &str) -> Result<PathBuf, String> {
     let path = crate::commands::validate_file_path(raw_path)?;
     let meta = std::fs::symlink_metadata(&path)
@@ -394,18 +410,179 @@ fn find_manifest_root(raw_path: &str) -> Result<PathBuf, String> {
     if meta.is_dir() {
         return prepare_source_root(&path);
     }
-    let ext = path
-        .extension()
-        .and_then(|s| s.to_str())
-        .unwrap_or("")
-        .to_ascii_lowercase();
-    if ext == "zip" {
-        return Err("暂不直接解包 zip；请先解压后拖入包含 pet.json 的文件夹".to_string());
-    }
     let parent = path
         .parent()
         .ok_or_else(|| format!("无法定位 pet.json 所在目录：{}", path.display()))?;
     prepare_source_root(parent)
+}
+
+fn collect_pet_manifest_paths(
+    dir: &Path,
+    manifests: &mut Vec<PathBuf>,
+    depth: usize,
+) -> Result<(), String> {
+    if depth > 8 {
+        return Err(format!("zip 解包目录层级过深：{}", dir.display()));
+    }
+    let entries = std::fs::read_dir(dir)
+        .map_err(|e| format!("读取 zip 解包目录失败：{} ({})", dir.display(), e))?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let meta = std::fs::symlink_metadata(&path)
+            .map_err(|e| format!("读取 zip 解包路径失败：{} ({})", path.display(), e))?;
+        if meta.file_type().is_symlink() {
+            return Err(format!("zip 解包结果不能包含符号链接：{}", path.display()));
+        }
+        if meta.is_dir() {
+            collect_pet_manifest_paths(&path, manifests, depth + 1)?;
+        } else if meta.is_file()
+            && path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.eq_ignore_ascii_case("pet.json"))
+        {
+            manifests.push(path);
+        }
+    }
+    Ok(())
+}
+
+fn find_extracted_pet_root(root: &Path) -> Result<PathBuf, String> {
+    let mut manifests = Vec::new();
+    collect_pet_manifest_paths(root, &mut manifests, 0)?;
+    match manifests.len() {
+        0 => Err("zip 包内缺少 pet.json".to_string()),
+        1 => manifests[0]
+            .parent()
+            .map(Path::to_path_buf)
+            .ok_or_else(|| "无法定位 zip 包内 pet.json 所在目录".to_string()),
+        _ => Err("zip 包内包含多个 pet.json，请只导入一个桌宠素材包".to_string()),
+    }
+}
+
+fn extract_pet_zip_to_temp<R: Read + Seek>(
+    reader: R,
+    temp_root: &Path,
+    label: &str,
+) -> Result<(), String> {
+    let mut archive =
+        zip::ZipArchive::new(reader).map_err(|e| format!("读取 zip 失败：{} ({})", label, e))?;
+    if archive.is_empty() {
+        return Err(format!("zip 包为空：{}", label));
+    }
+    if archive.len() > MAX_PET_ZIP_ENTRIES {
+        return Err(format!(
+            "zip 包文件数量超过上限 {}：{}",
+            MAX_PET_ZIP_ENTRIES, label
+        ));
+    }
+
+    let mut total_uncompressed = 0_u64;
+    for index in 0..archive.len() {
+        let mut file = archive
+            .by_index(index)
+            .map_err(|e| format!("读取 zip 条目失败：{} ({})", label, e))?;
+        if file.is_dir() {
+            continue;
+        }
+        if !file.is_file() {
+            return Err(format!("zip 包不能包含符号链接或特殊文件：{}", file.name()));
+        }
+        if file.size() > MAX_PET_ZIP_ENTRY_BYTES {
+            return Err(format!(
+                "zip 包条目超过大小上限 {}MB：{}",
+                MAX_PET_ZIP_ENTRY_BYTES / 1024 / 1024,
+                file.name()
+            ));
+        }
+        total_uncompressed = total_uncompressed
+            .checked_add(file.size())
+            .ok_or_else(|| "zip 包解压后大小溢出".to_string())?;
+        if total_uncompressed > MAX_PET_ZIP_TOTAL_UNCOMPRESSED_BYTES {
+            return Err(format!(
+                "zip 包解压后超过大小上限 {}MB：{}",
+                MAX_PET_ZIP_TOTAL_UNCOMPRESSED_BYTES / 1024 / 1024,
+                label
+            ));
+        }
+
+        let enclosed = file
+            .enclosed_name()
+            .ok_or_else(|| format!("zip 包条目路径不安全：{}", file.name()))?;
+        let dest = temp_root.join(&enclosed);
+        ensure_child_of(&dest, temp_root, "zip 条目")?;
+        if std::fs::symlink_metadata(&dest).is_ok() {
+            return Err(format!("zip 包包含重复文件路径：{}", enclosed.display()));
+        }
+        if let Some(parent) = dest.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("创建 zip 解包目录失败：{} ({})", parent.display(), e))?;
+        }
+        let mut out = std::fs::File::create(&dest)
+            .map_err(|e| format!("创建 zip 解包文件失败：{} ({})", dest.display(), e))?;
+        let copied = std::io::copy(&mut file, &mut out)
+            .map_err(|e| format!("解包 zip 条目失败：{} ({})", file.name(), e))?;
+        if copied > MAX_PET_ZIP_ENTRY_BYTES {
+            return Err(format!(
+                "zip 包条目超过大小上限 {}MB：{}",
+                MAX_PET_ZIP_ENTRY_BYTES / 1024 / 1024,
+                file.name()
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn import_pet_zip_reader<R: Read + Seek>(
+    reader: R,
+    label: &str,
+) -> Result<FbPetImportSummary, String> {
+    let pets_root = pets_dir()?;
+    std::fs::create_dir_all(&pets_root)
+        .map_err(|e| format!("创建 pets 目录失败：{} ({})", pets_root.display(), e))?;
+    let pets_root_canon = canonicalize_checked(&pets_root)?;
+    let temp_root = pets_root_canon.join(format!(".zip-source-{}", uuid::Uuid::new_v4()));
+    remove_path_if_exists(&temp_root)?;
+    std::fs::create_dir_all(&temp_root)
+        .map_err(|e| format!("创建 zip 临时目录失败：{} ({})", temp_root.display(), e))?;
+
+    let result = (|| {
+        extract_pet_zip_to_temp(reader, &temp_root, label)?;
+        let source_root = find_extracted_pet_root(&temp_root)?;
+        let pet = import_pet_from_root(&source_root)?;
+        Ok(FbPetImportSummary {
+            imported: 1,
+            skipped: 0,
+            pets: vec![pet],
+        })
+    })();
+
+    if let Err(err) = remove_path_if_exists(&temp_root) {
+        crate::ulog_warn!(
+            "[fb-pet] failed to cleanup zip import temp {}: {}",
+            temp_root.display(),
+            err
+        );
+    }
+    result
+}
+
+fn import_pet_zip_file(path: &Path) -> Result<FbPetImportSummary, String> {
+    ensure_regular_file(path, "zip 文件", MAX_PET_ZIP_BYTES)?;
+    let file = std::fs::File::open(path)
+        .map_err(|e| format!("读取 zip 文件失败：{} ({})", path.display(), e))?;
+    import_pet_zip_reader(file, &path.to_string_lossy())
+}
+
+fn import_pet_zip_bytes(bytes: Vec<u8>, label: &str) -> Result<FbPetImportSummary, String> {
+    if bytes.len() as u64 > MAX_PET_ZIP_BYTES {
+        return Err(format!(
+            "zip 包超过大小上限 {}MB：{}",
+            MAX_PET_ZIP_BYTES / 1024 / 1024,
+            label
+        ));
+    }
+    import_pet_zip_reader(Cursor::new(bytes), label)
 }
 
 fn import_pet_from_root(root: &Path) -> Result<FbPetEntry, String> {
@@ -516,6 +693,15 @@ fn list_installed_pets_blocking() -> Result<Vec<FbPetEntry>, String> {
 }
 
 fn import_pet_path_blocking(path: String) -> Result<FbPetImportSummary, String> {
+    let validated = crate::commands::validate_file_path(&path)?;
+    let meta = std::fs::symlink_metadata(&validated)
+        .map_err(|e| format!("导入路径不存在或不可读：{} ({})", validated.display(), e))?;
+    if meta.file_type().is_symlink() {
+        return Err(format!("导入路径不能是符号链接：{}", validated.display()));
+    }
+    if meta.is_file() && is_zip_file_path(&validated) {
+        return import_pet_zip_file(&validated);
+    }
     let root = find_manifest_root(&path)?;
     let pet = import_pet_from_root(&root)?;
     Ok(FbPetImportSummary {
@@ -523,6 +709,169 @@ fn import_pet_path_blocking(path: String) -> Result<FbPetImportSummary, String> 
         skipped: 0,
         pets: vec![pet],
     })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PetdexImportSource {
+    Page(reqwest::Url),
+    Zip(reqwest::Url),
+}
+
+fn is_safe_petdex_slug(slug: &str) -> bool {
+    !slug.is_empty()
+        && slug.len() <= 96
+        && slug
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+}
+
+fn is_petdex_zip_url(url: &reqwest::Url) -> bool {
+    url.scheme() == "https"
+        && url.host_str() == Some(PETDEX_ASSETS_HOST)
+        && url.path().starts_with("/pets/")
+        && url.path().ends_with("/zip.zip")
+}
+
+fn parse_petdex_import_source(input: &str) -> Result<PetdexImportSource, String> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return Err("请输入 Petdex 链接".to_string());
+    }
+    let mut url =
+        reqwest::Url::parse(trimmed).map_err(|e| format!("Petdex 链接格式不正确：{}", e))?;
+    if is_petdex_zip_url(&url) {
+        url.set_query(None);
+        url.set_fragment(None);
+        return Ok(PetdexImportSource::Zip(url));
+    }
+
+    if url.scheme() != "https" || !PETDEX_HOSTS.contains(&url.host_str().unwrap_or("")) {
+        return Err("只支持 https://petdex.dev/pets/... 链接".to_string());
+    }
+    let segments: Vec<&str> = url
+        .path_segments()
+        .ok_or_else(|| "Petdex 链接路径不正确".to_string())?
+        .filter(|segment| !segment.is_empty())
+        .collect();
+    let pet_index = segments
+        .iter()
+        .position(|segment| *segment == "pets")
+        .ok_or_else(|| "Petdex 链接必须指向 /pets/<name>".to_string())?;
+    if pet_index > 1 || segments.len() != pet_index + 2 {
+        return Err("Petdex 链接必须指向单个宠物页面".to_string());
+    }
+    let slug = segments[pet_index + 1];
+    if !is_safe_petdex_slug(slug) {
+        return Err("Petdex 宠物名称不安全".to_string());
+    }
+    url.set_query(None);
+    url.set_fragment(None);
+    Ok(PetdexImportSource::Page(url))
+}
+
+fn extract_petdex_zip_url(page_html: &str) -> Result<reqwest::Url, String> {
+    let mut rest = page_html;
+    while let Some(offset) = rest.find("https://") {
+        let candidate_start = &rest[offset..];
+        let end = candidate_start
+            .find(|c: char| {
+                !(c.is_ascii_alphanumeric()
+                    || matches!(c, ':' | '/' | '.' | '-' | '_' | '%' | '?' | '='))
+            })
+            .unwrap_or(candidate_start.len());
+        let candidate = &candidate_start[..end];
+        if let Ok(mut url) = reqwest::Url::parse(candidate) {
+            url.set_query(None);
+            url.set_fragment(None);
+            if is_petdex_zip_url(&url) {
+                return Ok(url);
+            }
+        }
+        rest = &candidate_start[end..];
+    }
+    Err("Petdex 页面里没有找到可下载的 zip 包".to_string())
+}
+
+fn build_external_http_client(timeout_secs: u64) -> Result<reqwest::Client, String> {
+    // External host — system/user proxy is wanted here. The allow is required by
+    // the repo-wide localhost no_proxy lint; proxy_config owns the final client.
+    #[allow(clippy::disallowed_methods)]
+    let builder = reqwest::Client::builder()
+        .timeout(Duration::from_secs(timeout_secs))
+        .redirect(reqwest::redirect::Policy::limited(5))
+        .user_agent(format!("MyAgents/{}", env!("CARGO_PKG_VERSION")));
+    crate::proxy_config::build_client_with_proxy(builder)
+}
+
+async fn download_limited_bytes(
+    client: &reqwest::Client,
+    url: reqwest::Url,
+    max_bytes: u64,
+    label: &str,
+) -> Result<Vec<u8>, String> {
+    let response = client
+        .get(url.clone())
+        .send()
+        .await
+        .map_err(|e| format!("下载 {} 失败：{} ({})", label, url, e))?;
+    let status = response.status();
+    if !status.is_success() {
+        return Err(format!("下载 {} 失败：HTTP {} ({})", label, status, url));
+    }
+    if let Some(length) = response.content_length() {
+        if length > max_bytes {
+            return Err(format!(
+                "{} 超过大小上限 {}MB：{}",
+                label,
+                max_bytes / 1024 / 1024,
+                url
+            ));
+        }
+    }
+
+    let mut bytes = Vec::new();
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|e| format!("读取 {} 下载内容失败：{} ({})", label, url, e))?;
+        if bytes.len() as u64 + chunk.len() as u64 > max_bytes {
+            return Err(format!(
+                "{} 超过大小上限 {}MB：{}",
+                label,
+                max_bytes / 1024 / 1024,
+                url
+            ));
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    Ok(bytes)
+}
+
+async fn resolve_petdex_zip_url(
+    client: &reqwest::Client,
+    source: PetdexImportSource,
+) -> Result<reqwest::Url, String> {
+    match source {
+        PetdexImportSource::Zip(url) => Ok(url),
+        PetdexImportSource::Page(url) => {
+            let page_bytes =
+                download_limited_bytes(client, url, MAX_PETDEX_PAGE_BYTES, "Petdex 页面").await?;
+            let page_html = String::from_utf8(page_bytes)
+                .map_err(|e| format!("Petdex 页面不是 UTF-8：{}", e))?;
+            extract_petdex_zip_url(&page_html)
+        }
+    }
+}
+
+async fn import_petdex_link(url: String) -> Result<FbPetImportSummary, String> {
+    let source = parse_petdex_import_source(&url)?;
+    let client = build_external_http_client(PETDEX_DOWNLOAD_TIMEOUT_SECS)?;
+    let zip_url = resolve_petdex_zip_url(&client, source).await?;
+    let zip_label = zip_url.to_string();
+    let zip_bytes =
+        download_limited_bytes(&client, zip_url, MAX_PET_ZIP_BYTES, "Petdex zip").await?;
+    tauri::async_runtime::spawn_blocking(move || import_pet_zip_bytes(zip_bytes, &zip_label))
+        .await
+        .map_err(|e| format!("[fb-pet] petdex import join: {e}"))?
 }
 
 fn import_codex_pets_blocking() -> Result<FbPetImportSummary, String> {
@@ -606,4 +955,69 @@ pub async fn cmd_fb_pet_import_codex() -> Result<FbPetImportSummary, String> {
     tauri::async_runtime::spawn_blocking(import_codex_pets_blocking)
         .await
         .map_err(|e| format!("[fb-pet] codex import join: {e}"))?
+}
+
+#[tauri::command]
+pub async fn cmd_fb_pet_import_petdex(url: String) -> Result<FbPetImportSummary, String> {
+    import_petdex_link(url).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_petdex_page_urls() {
+        assert_eq!(
+            parse_petdex_import_source("https://petdex.dev/pets/bluebow").unwrap(),
+            PetdexImportSource::Page(
+                reqwest::Url::parse("https://petdex.dev/pets/bluebow").unwrap()
+            )
+        );
+        assert_eq!(
+            parse_petdex_import_source("https://petdex.dev/zh/pets/bluebow?ref=x#install").unwrap(),
+            PetdexImportSource::Page(
+                reqwest::Url::parse("https://petdex.dev/zh/pets/bluebow").unwrap()
+            )
+        );
+    }
+
+    #[test]
+    fn parses_petdex_asset_zip_urls() {
+        let url = "https://assets.petdex.dev/pets/bluebow-c8b9e9491708/zip.zip?download=1";
+        assert_eq!(
+            parse_petdex_import_source(url).unwrap(),
+            PetdexImportSource::Zip(
+                reqwest::Url::parse("https://assets.petdex.dev/pets/bluebow-c8b9e9491708/zip.zip")
+                    .unwrap()
+            )
+        );
+    }
+
+    #[test]
+    fn rejects_non_petdex_urls() {
+        assert!(parse_petdex_import_source("https://example.com/pets/bluebow").is_err());
+        assert!(parse_petdex_import_source("http://petdex.dev/pets/bluebow").is_err());
+        assert!(parse_petdex_import_source("https://petdex.dev/pets/../bluebow").is_err());
+    }
+
+    #[test]
+    fn extracts_zip_url_from_petdex_html() {
+        let html = r#"self.__next_f.push([1,"zipUrl\":\"https://assets.petdex.dev/pets/bluebow-c8b9e9491708/zip.zip\""])"#;
+        assert_eq!(
+            extract_petdex_zip_url(html).unwrap(),
+            reqwest::Url::parse("https://assets.petdex.dev/pets/bluebow-c8b9e9491708/zip.zip")
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn extracts_zip_url_before_html_entities() {
+        let html = r#"<div data-url="https://assets.petdex.dev/pets/bluebow-c8b9e9491708/zip.zip&quot;"></div>"#;
+        assert_eq!(
+            extract_petdex_zip_url(html).unwrap(),
+            reqwest::Url::parse("https://assets.petdex.dev/pets/bluebow-c8b9e9491708/zip.zip")
+                .unwrap()
+        );
+    }
 }

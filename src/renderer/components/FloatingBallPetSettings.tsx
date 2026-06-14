@@ -1,11 +1,13 @@
-import { Check, Download, ExternalLink as ExternalLinkIcon, FolderOpen, Loader2, RefreshCw, UploadCloud } from 'lucide-react';
+import { Check, Download, ExternalLink as ExternalLinkIcon, FolderOpen, Link2, Loader2, RefreshCw, UploadCloud, X } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 
 import CustomSelect from '@/components/CustomSelect';
 import { ExternalLink } from '@/components/ExternalLink';
+import OverlayBackdrop from '@/components/OverlayBackdrop';
 import { useToast } from '@/components/Toast';
 import { useConfig } from '@/hooks/useConfig';
+import { useCloseLayer } from '@/hooks/useCloseLayer';
 import { useTauriFileDrop } from '@/hooks/useTauriFileDrop';
 import { track } from '@/analytics';
 import { isTauriEnvironment } from '@/utils/browserMock';
@@ -14,6 +16,7 @@ import { workspacePathsEqual } from '../../shared/workspacePath';
 import { BUILTIN_PET_PACKS } from '@/floating-ball/defaultPetPack';
 import {
     importPetFromPath,
+    importPetFromPetdex,
     importPetsFromCodex,
     installedPetRecordsToPacks,
     listInstalledPetPacks,
@@ -83,12 +86,112 @@ function PetStyleCard({
     );
 }
 
+function PetdexImportDialog({
+    open,
+    value,
+    importing,
+    onValueChange,
+    onSubmit,
+    onClose,
+}: {
+    open: boolean;
+    value: string;
+    importing: boolean;
+    onValueChange: (value: string) => void;
+    onSubmit: () => void;
+    onClose: () => void;
+}) {
+    const inputRef = useRef<HTMLInputElement | null>(null);
+    useCloseLayer(() => {
+        if (!open) return false;
+        if (importing) return true;
+        onClose();
+        return true;
+    }, 50);
+
+    useEffect(() => {
+        if (!open) return;
+        const frame = requestAnimationFrame(() => {
+            inputRef.current?.focus();
+            inputRef.current?.select();
+        });
+        return () => cancelAnimationFrame(frame);
+    }, [open]);
+
+    if (!open) return null;
+
+    return (
+        <OverlayBackdrop onClose={importing ? undefined : onClose} className="z-50 px-4">
+            <form
+                className="w-full max-w-lg rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5 shadow-2xl"
+                onSubmit={(event) => {
+                    event.preventDefault();
+                    onSubmit();
+                }}
+            >
+                <div className="flex items-start justify-between gap-4">
+                    <div>
+                        <h3 className="text-lg font-semibold text-[var(--ink)]">Petdex 链接导入</h3>
+                        <p className="mt-1 text-sm leading-6 text-[var(--ink-muted)]">
+                            粘贴 Petdex 宠物页面链接，MyAgents 会下载 zip 包并按 Codex Pets 协议校验后导入。
+                        </p>
+                    </div>
+                    <button
+                        type="button"
+                        onClick={onClose}
+                        disabled={importing}
+                        className="rounded-lg p-1 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)] disabled:cursor-wait disabled:opacity-60"
+                        aria-label="关闭"
+                    >
+                        <X className="h-5 w-5" />
+                    </button>
+                </div>
+
+                <label className="mt-5 block text-sm font-medium text-[var(--ink)]" htmlFor="petdex-import-url">
+                    Petdex 链接
+                </label>
+                <input
+                    ref={inputRef}
+                    id="petdex-import-url"
+                    type="url"
+                    value={value}
+                    onChange={(event) => onValueChange(event.target.value)}
+                    disabled={importing}
+                    placeholder="例如 https://petdex.dev/pets/bluebow"
+                    className="mt-2 w-full rounded-lg border border-[var(--line)] bg-[var(--paper)] px-3 py-2 text-base text-[var(--ink)] placeholder-[var(--ink-muted)] outline-none transition-colors focus:border-[var(--accent)] focus:ring-2 focus:ring-[var(--accent)]/20 disabled:cursor-wait disabled:opacity-70"
+                />
+
+                <div className="mt-5 flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
+                    <button
+                        type="button"
+                        onClick={onClose}
+                        disabled={importing}
+                        className="rounded-lg border border-[var(--line)] bg-[var(--paper)] px-4 py-2 text-sm font-semibold text-[var(--ink)] transition-colors hover:bg-[var(--paper-inset)] disabled:cursor-wait disabled:opacity-70"
+                    >
+                        取消
+                    </button>
+                    <button
+                        type="submit"
+                        disabled={importing || !value.trim()}
+                        className="inline-flex items-center justify-center gap-2 rounded-lg bg-[var(--button-primary-bg)] px-4 py-2 text-sm font-semibold text-[var(--button-primary-text)] transition-colors hover:bg-[var(--button-primary-bg-hover)] disabled:cursor-wait disabled:opacity-70"
+                    >
+                        {importing ? <Loader2 className="h-4 w-4 animate-spin" /> : <Link2 className="h-4 w-4" />}
+                        导入
+                    </button>
+                </div>
+            </form>
+        </OverlayBackdrop>
+    );
+}
+
 export default function FloatingBallPetSettings() {
     const { config, updateConfig, projects, addProject } = useConfig();
     const toast = useToast();
     const [installedPacks, setInstalledPacks] = useState<PetPack[]>([]);
     const [loadingInstalled, setLoadingInstalled] = useState(false);
     const [importing, setImporting] = useState(false);
+    const [petdexDialogOpen, setPetdexDialogOpen] = useState(false);
+    const [petdexUrl, setPetdexUrl] = useState('');
     const dropZoneRef = useRef<HTMLDivElement | null>(null);
     const refreshSeqRef = useRef(0);
     const mountedRef = useRef(true);
@@ -224,14 +327,38 @@ export default function FloatingBallPetSettings() {
         }
     }, [refreshInstalled, selectPetPack, toast]);
 
+    const importFromPetdex = useCallback(async () => {
+        const url = petdexUrl.trim();
+        if (!url) {
+            toast.error('请输入 Petdex 链接');
+            return;
+        }
+        setImporting(true);
+        try {
+            const summary = await importPetFromPetdex(url);
+            const packs = installedPetRecordsToPacks(summary.pets);
+            await refreshInstalled();
+            if (packs.length > 0) {
+                await selectPetPack(packs[0]);
+            }
+            setPetdexDialogOpen(false);
+            setPetdexUrl('');
+            toast.success(formatImportToast(summary));
+        } catch (err) {
+            toast.error(`Petdex 链接导入失败：${err instanceof Error ? err.message : String(err)}`);
+        } finally {
+            setImporting(false);
+        }
+    }, [petdexUrl, refreshInstalled, selectPetPack, toast]);
+
     const chooseFile = useCallback(async () => {
         try {
             const { open } = await import('@tauri-apps/plugin-dialog');
             const selected = await open({
                 multiple: true,
-                title: '选择 Codex Pets 的 pet.json 或 spritesheet 文件',
+                title: '选择 Codex Pets .zip 文件',
                 filters: [
-                    { name: 'Codex Pets', extensions: ['json', 'webp', 'png'] },
+                    { name: 'Codex Pets ZIP', extensions: ['zip'] },
                 ],
             });
             if (!selected) return;
@@ -252,6 +379,14 @@ export default function FloatingBallPetSettings() {
 
     return (
         <div className="mx-auto max-w-4xl px-4 py-8 sm:px-8">
+            <PetdexImportDialog
+                open={petdexDialogOpen}
+                value={petdexUrl}
+                importing={importing}
+                onValueChange={setPetdexUrl}
+                onSubmit={() => void importFromPetdex()}
+                onClose={() => setPetdexDialogOpen(false)}
+            />
             <div className="mb-8">
                 <h2 className="text-xl font-semibold text-[var(--ink)]">桌面宠物</h2>
                 <p className="mt-2 max-w-2xl text-sm leading-6 text-[var(--ink-muted)]">
@@ -365,14 +500,14 @@ export default function FloatingBallPetSettings() {
                             <UploadCloud className="h-8 w-8 text-[var(--ink-muted)]" />
                             <h4 className="mt-4 text-base font-semibold text-[var(--ink)]">拖拽导入 Codex Pets 素材</h4>
                             <p className="mt-2 max-w-xl whitespace-normal break-words text-sm leading-6 text-[var(--ink-muted)]">
-                                拖入包含 pet.json 和 spritesheet.webp/png 的文件夹，导入时会校验 9 状态素材尺寸与 manifest 引用。
+                                拖入包含 pet.json 和 spritesheet.webp/png 的文件夹或 Codex Pets .zip 文件，导入时会校验 9 状态素材尺寸与 manifest 引用。
                             </p>
-                            <div className="mt-5 flex w-full flex-col items-stretch gap-2 rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-2 shadow-sm sm:w-auto sm:flex-row sm:items-center sm:gap-3">
+                            <div className="mt-5 flex w-full flex-col items-stretch gap-2 rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-2 shadow-sm lg:w-auto lg:flex-row lg:items-center lg:gap-3">
                                 <button
                                     type="button"
                                     onClick={() => void importFromCodex()}
                                     disabled={importing}
-                                    className="inline-flex w-full min-w-0 flex-wrap items-center justify-center gap-2 whitespace-normal rounded-lg bg-[var(--button-primary-bg)] px-4 py-2 text-sm font-semibold text-[var(--button-primary-text)] transition-colors hover:bg-[var(--button-primary-bg-hover)] disabled:cursor-wait disabled:opacity-70 sm:w-auto"
+                                    className="inline-flex w-full min-w-0 flex-wrap items-center justify-center gap-2 whitespace-normal rounded-lg bg-[var(--button-primary-bg)] px-4 py-2 text-sm font-semibold text-[var(--button-primary-text)] transition-colors hover:bg-[var(--button-primary-bg-hover)] disabled:cursor-wait disabled:opacity-70 lg:w-auto"
                                 >
                                     {importing ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}
                                     从 Codex 导入
@@ -381,10 +516,19 @@ export default function FloatingBallPetSettings() {
                                     type="button"
                                     onClick={() => void chooseFile()}
                                     disabled={importing}
-                                    className="inline-flex w-full min-w-0 flex-wrap items-center justify-center gap-2 whitespace-normal rounded-lg border border-[var(--line)] bg-[var(--paper)] px-4 py-2 text-sm font-semibold text-[var(--ink)] transition-colors hover:bg-[var(--paper-inset)] disabled:cursor-wait disabled:opacity-70 sm:w-auto"
+                                    className="inline-flex w-full min-w-0 flex-wrap items-center justify-center gap-2 whitespace-normal rounded-lg border border-[var(--line)] bg-[var(--paper)] px-4 py-2 text-sm font-semibold text-[var(--ink)] transition-colors hover:bg-[var(--paper-inset)] disabled:cursor-wait disabled:opacity-70 lg:w-auto"
                                 >
                                     <FolderOpen className="h-4 w-4" />
-                                    选择文件
+                                    选择 .zip 文件
+                                </button>
+                                <button
+                                    type="button"
+                                    onClick={() => setPetdexDialogOpen(true)}
+                                    disabled={importing}
+                                    className="inline-flex w-full min-w-0 flex-wrap items-center justify-center gap-2 whitespace-normal rounded-lg border border-[var(--line)] bg-[var(--paper)] px-4 py-2 text-sm font-semibold text-[var(--ink)] transition-colors hover:bg-[var(--paper-inset)] disabled:cursor-wait disabled:opacity-70 lg:w-auto"
+                                >
+                                    <Link2 className="h-4 w-4" />
+                                    Petdex 链接导入
                                 </button>
                             </div>
                         </div>
