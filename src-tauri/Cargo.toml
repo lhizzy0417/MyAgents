@@ -130,6 +130,9 @@ windows-sys = { version = "0.59", features = [
     # `src/wake_lock/windows.rs` for the trade-off.
     "Win32_System_Power",
 ] }
+# Native acrylic/blur substrate for the floating companion, matching the
+# macOS NSVisualEffectView contract while keeping CSS as fallback.
+window-vibrancy = "0.6"
 # `junction` creates NTFS directory junctions without admin / Developer Mode
 # (`std::os::windows::fs::symlink_dir` would otherwise need ERROR_PRIVILEGE_NOT_HELD
 # elevated rights). Used by `workspace_files::skill_sync` to mirror

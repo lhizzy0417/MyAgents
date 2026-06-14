@@ -19,6 +19,16 @@ initFrontendLogger();
 // document-level capture handler is attached when the first input fires.
 installMacFunctionKeyGuard();
 
+function installPlatformClass(): void {
+  const platformText = `${navigator.platform || ''} ${navigator.userAgent || ''}`.toLowerCase();
+  const html = document.documentElement;
+  html.classList.toggle('platform-windows', platformText.includes('win'));
+  html.classList.toggle('platform-macos', platformText.includes('mac'));
+  html.classList.toggle('platform-linux', platformText.includes('linux') || platformText.includes('x11'));
+}
+
+installPlatformClass();
+
 // Block native "Reload / Inspect Element" context menu in production.
 // Keep native menu for: input fields, text selection, contenteditable, links, images, media.
 if (!import.meta.env.DEV) {

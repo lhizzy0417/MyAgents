@@ -1321,6 +1321,15 @@ mod imp {
         Ok(())
     }
 
+    fn apply_companion_material(win: &WebviewWindow) {
+        // Mirror the macOS native-material contract. The renderer still keeps a
+        // high-opacity Windows fallback because acrylic can be disabled by OS
+        // version, battery/accessibility settings, or remote/virtualized GPUs.
+        if let Err(e) = window_vibrancy::apply_acrylic(win, Some((253, 250, 244, 96))) {
+            ulog_warn!("[fb] companion windows acrylic failed (css fallback active): {e}");
+        }
+    }
+
     fn show_no_activate(win: &WebviewWindow) -> Result<(), String> {
         let hwnd = hwnd_for(win)?;
         unsafe {
@@ -1472,6 +1481,7 @@ mod imp {
             let hwnd = hwnd_for(&win)?;
             COMPANION_HWND.store(hwnd as usize, Ordering::SeqCst);
             apply_tool_window_styles(&win, true)?;
+            apply_companion_material(&win);
             position_companion_near_ball(app, &win);
         }
         Ok(())

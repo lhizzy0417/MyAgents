@@ -273,6 +273,31 @@ html.fb-transparent #root {
 .fbw-win.peek .fbw-inputarea { opacity: 0.5; pointer-events: none; }
 .fbw-win.peek .fbw-convo { opacity: 0.82; pointer-events: none; }
 
+/* Windows 没有 macOS 的 NSVisualEffectView 兜底时，透明 layered WebView 会
+   直接透出桌面。原生 acrylic 失败或被系统禁用时，用更实的纸面保证可读。 */
+html.platform-windows.fb-transparent .fbw-win {
+  background: color-mix(in srgb, var(--paper-elevated) 92%, transparent);
+  border-color: color-mix(in srgb, var(--line-strong) 78%, transparent);
+  box-shadow: 0 18px 48px rgb(0 0 0 / 0.22);
+  -webkit-backdrop-filter: blur(18px) saturate(1.08);
+  backdrop-filter: blur(18px) saturate(1.08);
+}
+html.platform-windows.fb-transparent .fbw-win.peek {
+  background: color-mix(in srgb, var(--paper-elevated) 90%, transparent);
+}
+html.platform-windows.fb-transparent .fbw-win.pin {
+  background: color-mix(in srgb, var(--paper-elevated) 99%, transparent);
+}
+html.platform-windows.fb-transparent .fbw-win.peek .fbw-inputarea { opacity: 0.86; }
+html.platform-windows.fb-transparent .fbw-win.peek .fbw-convo { opacity: 0.94; }
+html.platform-windows.fb-transparent .fbw-inputarea {
+  background: linear-gradient(
+    to bottom,
+    color-mix(in srgb, var(--paper-elevated) 58%, transparent),
+    color-mix(in srgb, var(--paper-elevated) 94%, transparent)
+  );
+}
+
 /* 顶部暖纸渐隐幕（pin 态收口）：浮动 chrome 本身无背板，靠这层正向的纸幕
    给标题一块可读的「纸架」，会话正文随 .fbw-convo 顶部 mask 向上溶进幕里，
    不再与标题字叠字。幕下整片保持通透。只在 pin 出现——peek 是纯毛玻璃纯视觉，
@@ -349,6 +374,18 @@ html.fb-transparent #root {
   -webkit-user-select: text;
   user-select: text;
 }
+.fbw-convo.boot-state {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding-bottom: 18px;
+  -webkit-mask-image: none;
+          mask-image: none;
+}
+.fbw-convo.boot-state .fbw-divider,
+.fbw-convo.boot-state .fbw-error {
+  margin: 0;
+}
 .fbw-convo::-webkit-scrollbar { width: 5px; }
 .fbw-convo::-webkit-scrollbar-thumb { background: var(--fb-scroll-thumb); border-radius: 3px; }
 
@@ -406,6 +443,12 @@ html.fb-transparent #root {
 /* 错误条 */
 .fbw-error {
   margin: 0 22px 8px;
+  width: fit-content;
+  max-width: calc(100% - 44px);
+  padding: 8px 10px;
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--error-bg) 82%, var(--paper-elevated));
+  border: 1px solid color-mix(in srgb, var(--error) 26%, transparent);
   font-size: var(--text-xs, 12px);
   line-height: 1.5;
   color: var(--error);

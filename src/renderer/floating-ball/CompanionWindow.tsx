@@ -1023,6 +1023,13 @@ export default function CompanionWindow() {
     }, []);
 
     const sendReady = (input.trim().length > 0 || imageDrafts.length > 0) && !session.busy && session.ready;
+    const hasConversationSurface =
+        session.messages.length > 0 ||
+        Boolean(session.liveMessage) ||
+        Boolean(session.permReq) ||
+        Boolean(session.askReq) ||
+        Boolean(session.planReq);
+    const isBootState = !session.ready && !hasConversationSurface;
 
     return (
         <div
@@ -1063,7 +1070,7 @@ export default function CompanionWindow() {
                 menuProfile="floatingBall"
                 onOpenMyAgentsPreview={onOpenMyAgentsPreview}
             >
-            <div className="fbw-convo" ref={convoRef} onScroll={onConvoScroll}>
+            <div className={`fbw-convo${isBootState ? ' boot-state' : ''}`} ref={convoRef} onScroll={onConvoScroll}>
                 {!session.ready && !session.error && (
                     <div className="fbw-divider">正在连接 {session.workspaceName}…</div>
                 )}
