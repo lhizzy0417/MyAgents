@@ -53,17 +53,17 @@ export default function ToolImageAttachment({ attachment }: Props) {
   // Ready
   return (
     <>
-      <div className="flex flex-col gap-1">
+      <div className="flex max-w-full flex-col items-start gap-1">
         <button
           type="button"
           onClick={() => setZoomed(true)}
-          className="group block max-w-sm overflow-hidden rounded-md border border-[var(--line)] bg-[var(--paper-inset)]/30 transition-transform hover:scale-[1.01]"
+          className="group inline-flex max-w-full overflow-hidden rounded-md border border-[var(--line)] bg-[var(--paper-inset)]/30 transition-transform hover:scale-[1.01]"
         >
           <img
             src={urlState.url}
             alt={attachment.caption || 'Generated image'}
             loading="lazy"
-            className="block max-h-80 w-auto object-contain"
+            className="block h-auto max-h-80 max-w-full object-contain"
           />
         </button>
         {attachment.caption ? (
