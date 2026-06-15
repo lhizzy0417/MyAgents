@@ -4,6 +4,7 @@ import { join } from 'path';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import {
+  SESSION_PLANS_GITIGNORE_PATTERN,
   clearSessionPlanMarkdown,
   getSessionPlansDirectoryPath,
   getSessionPlansDirectorySetting,
@@ -31,6 +32,7 @@ describe('session plan files', () => {
     expect(sanitizePlanSessionSegment('sid/../bad:value')).toBe('sid_bad_value');
     expect(getSessionPlansDirectorySetting('sid/../bad:value')).toBe('.claude/plans/myagents/sid_bad_value');
     expect(getSessionPlansDirectoryPath('/workspace', 'sid/../bad:value')).toContain(join('.claude', 'plans', 'myagents', 'sid_bad_value'));
+    expect(SESSION_PLANS_GITIGNORE_PATTERN).toBe('.claude/plans/myagents/');
   });
 
   it('reads the latest markdown plan newer than the current-turn cutoff', async () => {

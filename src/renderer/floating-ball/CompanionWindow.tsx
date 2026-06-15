@@ -269,6 +269,8 @@ export default function CompanionWindow() {
     const inputRef = useRef<HTMLTextAreaElement | null>(null);
     const hideTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const mouseInsideRef = useRef(false);
+    const visibilityGenerationRef = useRef(0);
+    const pinRequestSeqRef = useRef(0);
     // 活动行秒表（仅有 running 活动时跳动）
     const [nowTick, setNowTick] = useState(() => Date.now());
     const hasRunningActivity = session.activities.some((a) => a.running);
@@ -323,6 +325,7 @@ export default function CompanionWindow() {
     // ── mode → 通知球（球用它决定点击语义）＋ pin 时清未读 ──
     const applyMode = useCallback(
         (next: FbMode) => {
+            if (next === 'hidden') visibilityGenerationRef.current += 1;
             setMode(next);
             modeRef.current = next;
             void invoke('cmd_fb_relay', {
@@ -334,6 +337,21 @@ export default function CompanionWindow() {
         },
         [markRead],
     );
+
+    const beginPinRequest = useCallback(() => ({
+        seq: ++pinRequestSeqRef.current,
+        generation: visibilityGenerationRef.current,
+    }), []);
+
+    const isCurrentPinRequest = useCallback((token: { seq: number; generation: number }) => (
+        token.seq === pinRequestSeqRef.current && token.generation === visibilityGenerationRef.current
+    ), []);
+
+    const discardStalePinRequest = useCallback((token: { seq: number; generation: number }) => {
+        if (token.generation !== visibilityGenerationRef.current && modeRef.current !== 'pin') {
+            void invoke('cmd_fb_hide_companion').catch(() => undefined);
+        }
+    }, []);
 
     const hideSelf = useCallback(() => {
         if (hideTimerRef.current) {
@@ -392,6 +410,7 @@ export default function CompanionWindow() {
     const summonPinned = useCallback(
         async (ctx: FbCtx | null | undefined) => {
             stickToBottomRef.current = true; // 显式唤起 = 看最新
+            const pinToken = beginPinRequest();
             try {
                 // BallWindow may already have requested native show; companion owns
                 // the final key-window/focus ordering and fails closed on disable.
@@ -402,6 +421,10 @@ export default function CompanionWindow() {
                 console.error('[fb] pin for summon failed:', err);
                 return;
             }
+            if (!isCurrentPinRequest(pinToken)) {
+                discardStalePinRequest(pinToken);
+                return;
+            }
             applyMode('pin');
             await applySummonCtx(ctx);
             track('floating_ball_summon', { kind: 'pin' });
@@ -409,7 +432,7 @@ export default function CompanionWindow() {
             // 唤起时机做按天轮换评估（boot-only 检查跨午夜长跑会失效）。
             void rotateIfStale();
         },
-        [applyMode, applySummonCtx, focusInputWhenPinned, rotateIfStale],
+        [applyMode, applySummonCtx, beginPinRequest, discardStalePinRequest, focusInputWhenPinned, isCurrentPinRequest, rotateIfStale],
     );
 
     // ── 球 → 伴侣窗事件 ──
@@ -495,6 +518,7 @@ export default function CompanionWindow() {
     const promoteToPin = useCallback(
         async (kind: 'click' | 'wheel') => {
             if (modeRef.current !== 'peek') return;
+            const pinToken = beginPinRequest();
             try {
                 // 等 make_key_window 真正落地再聚焦：窗口还不是 key window 时
                 // focus() 不出光标——这就是"点了面板输入框却没光标"的根因。
@@ -503,6 +527,10 @@ export default function CompanionWindow() {
                 applyMode('hidden');
                 void invoke('cmd_fb_hide_companion');
                 console.error('[fb] pin failed:', err);
+                return;
+            }
+            if (!isCurrentPinRequest(pinToken)) {
+                discardStalePinRequest(pinToken);
                 return;
             }
             applyMode('pin');
@@ -521,7 +549,7 @@ export default function CompanionWindow() {
                 })();
             }
         },
-        [applyMode, applySummonCtx, focusInputWhenPinned, rotateIfStale],
+        [applyMode, applySummonCtx, beginPinRequest, discardStalePinRequest, focusInputWhenPinned, isCurrentPinRequest, rotateIfStale],
     );
 
     // ── 焦点纪律：pin 态输入框光标常驻 ──

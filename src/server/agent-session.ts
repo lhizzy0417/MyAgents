@@ -30,7 +30,13 @@ import { isEmptySuccessfulSdkResult, isRecoveredAssistantMessageError, findTurnU
 import { planRetraction } from './utils/message-retraction';
 import { diagnoseSdkSubprocessFailure } from './utils/sdk-subprocess-diagnostics';
 import { InactivityWatchdog } from './utils/inactivity-watchdog';
-import { clearSessionPlanMarkdown, getSessionPlansDirectoryPath, getSessionPlansDirectorySetting, readLatestPlanMarkdownWithRetry } from './utils/plan-files';
+import {
+  SESSION_PLANS_GITIGNORE_PATTERN,
+  clearSessionPlanMarkdown,
+  getSessionPlansDirectoryPath,
+  getSessionPlansDirectorySetting,
+  readLatestPlanMarkdownWithRetry,
+} from './utils/plan-files';
 import { WATCHDOG_RESUME_REMINDER, planWatchdogAutoResume, shouldAdoptPendingContinueIntoScheduledAutoResume, shouldConsumePendingContinueAfterAbort, shouldDeferPendingContinueToScheduledAutoResume, shouldPrependWatchdogAutoResume } from './utils/watchdog-auto-resume';
 import { processImage, resizeToolImageContent, classifyImageError } from './utils/imageResize';
 import { writeBase64FilesToAgentDir } from './utils/workspace-files';
@@ -9144,6 +9150,7 @@ async function startStreamingSession(preWarm = false): Promise<void> {
   const adminConfigForSession = loadAdminConfig();
   const cliToolRegistryEnabled = isCliToolRegistryEnabled(adminConfigForSession);
   syncProjectUserConfig(agentDir, { cliToolRegistryEnabled });
+  ensureGitignorePattern(agentDir, SESSION_PLANS_GITIGNORE_PATTERN);
   // PRD #124: register a FRESH bridge token for this SDK subprocess.
   // `freshToken: true` retires the previous token (if any) so any late
   // requests from the dying old subprocess get rejected with a 400

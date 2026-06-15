@@ -222,9 +222,17 @@ export default function BallWindow() {
         // Small intent delay so a fly-by cursor doesn't flash the panel.
         // 60ms：加上轮询间隔 60ms，hover→出窗最坏 ~120ms + IPC，体感即时。
         hoverTimerRef.current = setTimeout(() => {
+            hoverTimerRef.current = null;
             void (async () => {
                 try {
                     await invoke('cmd_fb_show_companion', { mode: 'peek' });
+                    if (!hoverInsideRef.current || dragRef.current.active) {
+                        if (companionModeRef.current !== 'pin') {
+                            void invoke('cmd_fb_hide_companion').catch(() => undefined);
+                        }
+                        return;
+                    }
+                    if (companionModeRef.current === 'pin') return;
                     relayToCompanion('fb:ball-enter', {});
                 } catch (err) {
                     hoverInsideRef.current = false;

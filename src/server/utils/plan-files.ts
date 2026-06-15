@@ -1,8 +1,11 @@
-import { lstat, open, readdir, realpath, unlink } from 'fs/promises';
+import { constants as fsConstants } from 'fs';
+import { lstat, open, readdir, realpath, unlink, type FileHandle } from 'fs/promises';
 import { join, relative } from 'path';
 
 const SESSION_PLANS_SEGMENTS = ['.claude', 'plans', 'myagents'] as const;
+export const SESSION_PLANS_GITIGNORE_PATTERN = `${SESSION_PLANS_SEGMENTS.join('/')}/`;
 const MAX_PLAN_BYTES = 128 * 1024;
+const OPEN_READ_NOFOLLOW = fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0);
 
 export function sanitizePlanSessionSegment(sessionId: string): string {
   return sessionId.replace(/[^a-zA-Z0-9_-]+/g, '_') || 'session';
@@ -67,15 +70,35 @@ export async function readLatestPlanMarkdown(
   }));
 
   candidates.sort((a, b) => b.mtimeMs - a.mtimeMs || a.path.localeCompare(b.path));
-  const latest = candidates[0];
-  if (!latest) return null;
+  for (const candidate of candidates) {
+    const result = await readPlanCandidate(candidate, options);
+    if (result) return result;
+  }
+  return null;
+}
 
-  const bytesToRead = Math.min(latest.size, MAX_PLAN_BYTES + 1);
-  const buffer = Buffer.alloc(bytesToRead);
-  const file = await open(latest.path, 'r');
+async function readPlanCandidate(
+  candidate: PlanCandidate,
+  options: PlanReadOptions,
+): Promise<LatestPlanReadResult | null> {
+  let file: FileHandle;
   try {
+    file = await open(candidate.path, OPEN_READ_NOFOLLOW);
+  } catch (error) {
+    const code = (error as { code?: string }).code;
+    if (code === 'ENOENT' || code === 'ENOTDIR' || code === 'ELOOP') return null;
+    throw error;
+  }
+
+  try {
+    const stat = await file.stat();
+    if (!stat.isFile()) return null;
+    if (options.minMtimeMs !== undefined && stat.mtimeMs < options.minMtimeMs) return null;
+
+    const bytesToRead = Math.min(stat.size, MAX_PLAN_BYTES + 1);
+    const buffer = Buffer.alloc(bytesToRead);
     const { bytesRead } = await file.read(buffer, 0, bytesToRead, 0);
-    const truncated = bytesRead > MAX_PLAN_BYTES || latest.size > MAX_PLAN_BYTES;
+    const truncated = bytesRead > MAX_PLAN_BYTES || stat.size > MAX_PLAN_BYTES;
     const content = buffer
       .subarray(0, Math.min(bytesRead, MAX_PLAN_BYTES))
       .toString('utf8');
@@ -83,7 +106,7 @@ export async function readLatestPlanMarkdown(
       content: truncated
         ? `${content}\n\n[Plan content truncated at ${MAX_PLAN_BYTES} bytes for display.]`
         : content,
-      path: latest.path,
+      path: candidate.path,
       truncated,
     };
   } finally {
