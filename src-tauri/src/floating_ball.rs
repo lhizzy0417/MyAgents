@@ -1182,10 +1182,10 @@ mod imp {
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         CallWindowProcW, DefWindowProcW, GetCursorPos, GetForegroundWindow, GetWindowLongPtrW,
         GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId, IsWindow, IsWindowVisible,
-        SetForegroundWindow, SetWindowLongPtrW, SetWindowPos, GWLP_WNDPROC, GWL_EXSTYLE,
-        HWND_TOPMOST, MA_NOACTIVATE, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE,
-        SWP_NOOWNERZORDER, SWP_NOSIZE, SWP_SHOWWINDOW, WM_MOUSEACTIVATE, WNDPROC, WS_EX_LAYERED,
-        WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
+        SetForegroundWindow, SetWindowLongPtrW, SetWindowPos, ShowWindow, GWLP_WNDPROC,
+        GWL_EXSTYLE, HWND_TOPMOST, MA_NOACTIVATE, SWP_FRAMECHANGED, SWP_HIDEWINDOW, SWP_NOACTIVATE,
+        SWP_NOMOVE, SWP_NOOWNERZORDER, SWP_NOSIZE, SWP_SHOWWINDOW, SW_HIDE, WM_MOUSEACTIVATE,
+        WNDPROC, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
     };
 
     pub const BALL_LABEL: &str = "fb-ball";
@@ -1199,6 +1199,7 @@ mod imp {
 
     static HOVER_POLLER_RUNNING: AtomicBool = AtomicBool::new(false);
     static FOREGROUND_POLLER_STARTED: AtomicBool = AtomicBool::new(false);
+    static FLOATING_ACTIVE: AtomicBool = AtomicBool::new(false);
     static COMPANION_PINNED: AtomicBool = AtomicBool::new(false);
     static COMPANION_PINNED_AT_MS: AtomicU64 = AtomicU64::new(0);
     static BALL_HWND: AtomicUsize = AtomicUsize::new(0);
@@ -1321,6 +1322,42 @@ mod imp {
             );
         }
         Ok(())
+    }
+
+    fn hide_window_strict(win: &WebviewWindow) {
+        let hwnd = match hwnd_for(win) {
+            Ok(hwnd) => Some(hwnd),
+            Err(e) => {
+                ulog_warn!("[fb] hide hwnd lookup failed: {e}");
+                None
+            }
+        };
+        if let Err(e) = win.hide() {
+            ulog_warn!("[fb] tauri hide failed: {e}");
+        }
+        if let Some(hwnd) = hwnd {
+            unsafe {
+                ShowWindow(hwnd, SW_HIDE);
+                SetWindowPos(
+                    hwnd,
+                    HWND_TOPMOST,
+                    0,
+                    0,
+                    0,
+                    0,
+                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_HIDEWINDOW | SWP_NOOWNERZORDER,
+                );
+            }
+        }
+    }
+
+    fn clear_drag_sessions() {
+        if let Ok(mut guard) = BALL_DRAG.lock() {
+            *guard = None;
+        }
+        if let Ok(mut guard) = COMPANION_DRAG.lock() {
+            *guard = None;
+        }
     }
 
     fn placement_path() -> Option<PathBuf> {
@@ -1464,11 +1501,14 @@ mod imp {
     }
 
     pub fn enable(app: &AppHandle) -> Result<(), String> {
+        FLOATING_ACTIVE.store(false, Ordering::SeqCst);
         ensure_windows(app)?;
-        if let Some(ball) = app.get_webview_window(BALL_LABEL) {
-            apply_tool_window_styles(&ball, true)?;
-            show_no_activate(&ball)?;
-        }
+        let ball = app
+            .get_webview_window(BALL_LABEL)
+            .ok_or("[fb] ball window missing after ensure")?;
+        apply_tool_window_styles(&ball, true)?;
+        show_no_activate(&ball)?;
+        FLOATING_ACTIVE.store(true, Ordering::SeqCst);
         let _ = app.emit_to(
             COMPANION_LABEL,
             "fb:lifecycle",
@@ -1481,19 +1521,23 @@ mod imp {
     }
 
     pub fn disable(app: &AppHandle) {
+        FLOATING_ACTIVE.store(false, Ordering::SeqCst);
         COMPANION_PINNED.store(false, Ordering::SeqCst);
+        COMPANION_PINNED_AT_MS.store(0, Ordering::SeqCst);
+        LAST_FOREGROUND_HWND.store(0, Ordering::SeqCst);
+        clear_drag_sessions();
+        stop_hover_poller();
         if let Some(companion) = app.get_webview_window(COMPANION_LABEL) {
-            let _ = companion.hide();
+            hide_window_strict(&companion);
         }
         if let Some(ball) = app.get_webview_window(BALL_LABEL) {
-            let _ = ball.hide();
+            hide_window_strict(&ball);
         }
         let _ = app.emit_to(
             COMPANION_LABEL,
             "fb:lifecycle",
             serde_json::json!({ "active": false }),
         );
-        stop_hover_poller();
         ulog_info!("[fb] floating ball disabled on Windows");
     }
 
@@ -1771,6 +1815,9 @@ mod imp {
     }
 
     pub fn show_companion(app: &AppHandle, mode: &str) -> Result<(), String> {
+        if !FLOATING_ACTIVE.load(Ordering::SeqCst) {
+            return Err("[fb] floating ball is disabled".to_string());
+        }
         ensure_windows(app)?;
         let companion = app
             .get_webview_window(COMPANION_LABEL)
@@ -1797,6 +1844,9 @@ mod imp {
     }
 
     pub fn pin_companion(app: &AppHandle) -> Result<(), String> {
+        if !FLOATING_ACTIVE.load(Ordering::SeqCst) {
+            return Err("[fb] floating ball is disabled".to_string());
+        }
         ensure_windows(app)?;
         let companion = app
             .get_webview_window(COMPANION_LABEL)
@@ -1820,7 +1870,7 @@ mod imp {
         let should_restore_focus = unsafe { hwnd_is_ours(GetForegroundWindow()) };
         if let Some(companion) = app.get_webview_window(COMPANION_LABEL) {
             let _ = apply_tool_window_styles(&companion, true);
-            let _ = companion.hide();
+            hide_window_strict(&companion);
         }
         let prev = LAST_FOREGROUND_HWND.swap(0, Ordering::SeqCst) as HWND;
         if should_restore_focus && !prev.is_null() && !hwnd_is_ours(prev) {
@@ -2019,22 +2069,75 @@ mod imp {
         base64::engine::general_purpose::STANDARD.encode(utf16le)
     }
 
+    fn powershell_path() -> PathBuf {
+        if let Some(path) = crate::system_binary::find("powershell.exe")
+            .or_else(|| crate::system_binary::find("powershell"))
+        {
+            return path;
+        }
+        let system_root = std::env::var_os("SystemRoot")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(r"C:\Windows"));
+        system_root
+            .join("System32")
+            .join("WindowsPowerShell")
+            .join("v1.0")
+            .join("powershell.exe")
+    }
+
+    fn truncate_process_output(bytes: &[u8]) -> String {
+        const MAX_CHARS: usize = 1200;
+        let text = String::from_utf8_lossy(bytes).trim().to_string();
+        if text.chars().count() <= MAX_CHARS {
+            return text;
+        }
+        let mut truncated = text.chars().take(MAX_CHARS).collect::<String>();
+        truncated.push_str("...");
+        truncated
+    }
+
     fn run_powershell(script: &str) -> Result<(), String> {
         let encoded = encode_powershell(script);
-        let status = crate::process_cmd::new("powershell")
+        let shell = powershell_path();
+        let output = match crate::process_cmd::new(shell.as_os_str())
             .args([
                 "-NoProfile",
+                "-NonInteractive",
                 "-ExecutionPolicy",
                 "Bypass",
                 "-EncodedCommand",
                 &encoded,
             ])
-            .status()
-            .map_err(|e| format!("[fb] powershell spawn: {e}"))?;
-        if status.success() {
+            .output()
+        {
+            Ok(output) => output,
+            Err(e) => {
+                ulog_warn!(
+                    "[fb] powershell spawn failed shell={} error={e}",
+                    shell.display()
+                );
+                return Err(format!("[fb] powershell spawn: {e}"));
+            }
+        };
+        if output.status.success() {
             Ok(())
         } else {
-            Err("[fb] powershell command failed".to_string())
+            let stdout = truncate_process_output(&output.stdout);
+            let stderr = truncate_process_output(&output.stderr);
+            ulog_warn!(
+                "[fb] powershell command failed status={} stdout={} stderr={}",
+                output.status,
+                stdout,
+                stderr
+            );
+            let detail = if !stderr.is_empty() {
+                stderr
+            } else if !stdout.is_empty() {
+                stdout
+            } else {
+                output.status.to_string()
+            };
+            Err(format!("[fb] powershell command failed: {detail}"))
         }
     }
 
@@ -2044,6 +2147,7 @@ mod imp {
             .ok_or("[fb] screenshot temp path is not utf-8")?;
         let script = format!(
             r#"
+$ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 $path = '{path}'
@@ -2105,19 +2209,62 @@ try {{
         for (idx, (max_dim, quality)) in ATTEMPTS.iter().copied().enumerate() {
             let jpg =
                 std::env::temp_dir().join(format!("myagents-fb-shot-{id}-{max_dim}-{quality}.jpg"));
-            capture_screen_jpeg(&jpg, max_dim, quality)?;
-            let bytes = std::fs::read(&jpg).map_err(|e| format!("[fb] read screenshot: {e}"))?;
+            ulog_info!(
+                "[fb] screenshot capture attempt={} max_dim={} quality={} path={}",
+                idx + 1,
+                max_dim,
+                quality,
+                jpg.display()
+            );
+            if let Err(e) = capture_screen_jpeg(&jpg, max_dim, quality) {
+                ulog_warn!(
+                    "[fb] screenshot capture failed attempt={} max_dim={} quality={} error={e}",
+                    idx + 1,
+                    max_dim,
+                    quality
+                );
+                let _ = std::fs::remove_file(&jpg);
+                return Err(e);
+            }
+            let bytes = match std::fs::read(&jpg) {
+                Ok(bytes) => bytes,
+                Err(e) => {
+                    ulog_warn!(
+                        "[fb] screenshot read failed attempt={} path={} error={e}",
+                        idx + 1,
+                        jpg.display()
+                    );
+                    let _ = std::fs::remove_file(&jpg);
+                    return Err(format!("[fb] read screenshot: {e}"));
+                }
+            };
             let _ = std::fs::remove_file(&jpg);
             if bytes.is_empty() {
+                ulog_warn!(
+                    "[fb] screenshot capture returned empty file attempt={} max_dim={} quality={}",
+                    idx + 1,
+                    max_dim,
+                    quality
+                );
                 return Err("[fb] empty screenshot".to_string());
             }
             last_size = bytes.len();
+            ulog_info!(
+                "[fb] screenshot capture produced attempt={} max_dim={} quality={} bytes={}",
+                idx + 1,
+                max_dim,
+                quality,
+                last_size
+            );
             if last_size <= SCREENSHOT_BUDGET_BYTES || idx + 1 == ATTEMPTS.len() {
                 selected = Some(bytes);
                 break;
             }
         }
-        let bytes = selected.ok_or("[fb] screenshot compression failed")?;
+        let bytes = selected.ok_or_else(|| {
+            ulog_warn!("[fb] screenshot compression failed without selected bytes");
+            "[fb] screenshot compression failed".to_string()
+        })?;
         if bytes.len() > SCREENSHOT_BUDGET_BYTES {
             ulog_warn!(
                 "[fb] compressed Windows screenshot still above IPC budget: {last_size} bytes"
@@ -2127,8 +2274,10 @@ try {{
             ));
         }
         if bytes.is_empty() {
+            ulog_warn!("[fb] screenshot selected bytes unexpectedly empty");
             return Err("[fb] empty screenshot".to_string());
         }
+        ulog_info!("[fb] screenshot capture succeeded bytes={}", bytes.len());
         let b64 = base64::engine::general_purpose::STANDARD.encode(bytes);
         Ok(FbScreenshot {
             data_url: format!("data:image/jpeg;base64,{b64}"),
@@ -2328,9 +2477,13 @@ mod commands {
 
     #[tauri::command]
     pub async fn cmd_fb_screenshot() -> Result<FbScreenshot, String> {
-        tauri::async_runtime::spawn_blocking(imp::screenshot)
+        let result = tauri::async_runtime::spawn_blocking(imp::screenshot)
             .await
-            .map_err(|e| format!("[fb] screenshot join: {e}"))?
+            .map_err(|e| format!("[fb] screenshot join: {e}"))?;
+        if let Err(e) = &result {
+            crate::ulog_warn!("[fb] screenshot command failed: {e}");
+        }
+        result
     }
 
     /// Generic ball ⇄ companion event relay.

@@ -35,6 +35,7 @@ import type { ContentBlock } from '@/types/chat';
 import { isNearBottom } from './convoAutoFollow';
 import { useFloatingSession, type FbAttachment, type FbMsg } from './useFloatingSession';
 import { useFloatingComposerKeydown } from './useFloatingComposerKeydown';
+import { describeNativeFloatingBallError } from './nativeFloatingBall';
 
 import './fb.css';
 
@@ -374,17 +375,34 @@ export default function CompanionWindow() {
     // 时强制回贴底。没有它，滚轮上翻阅读会被流式新内容持续拽回底部。
     const stickToBottomRef = useRef(true);
 
+    const focusInputWhenPinned = useCallback(() => {
+        requestAnimationFrame(() => {
+            if (modeRef.current !== 'pin') return;
+            inputRef.current?.focus();
+        });
+    }, []);
+
     const summonPinned = useCallback(
         async (ctx: FbCtx | null | undefined) => {
             stickToBottomRef.current = true; // 显式唤起 = 看最新
+            try {
+                // BallWindow may already have requested native show; companion owns
+                // the final key-window/focus ordering and fails closed on disable.
+                await invoke('cmd_fb_pin_companion');
+            } catch (err) {
+                applyMode('hidden');
+                void invoke('cmd_fb_hide_companion');
+                console.error('[fb] pin for summon failed:', err);
+                return;
+            }
             applyMode('pin');
             await applySummonCtx(ctx);
             track('floating_ball_summon', { kind: 'pin' });
-            requestAnimationFrame(() => inputRef.current?.focus());
+            focusInputWhenPinned();
             // 唤起时机做按天轮换评估（boot-only 检查跨午夜长跑会失效）。
             void rotateIfStale();
         },
-        [applyMode, applySummonCtx, rotateIfStale],
+        [applyMode, applySummonCtx, focusInputWhenPinned, rotateIfStale],
     );
 
     // ── 球 → 伴侣窗事件 ──
@@ -422,8 +440,12 @@ export default function CompanionWindow() {
         void listenWithCleanup<{ active?: boolean }>(
             'fb:lifecycle',
             (e) => {
-                if (e.payload?.active === false) void suspend();
-                else void resume();
+                if (e.payload?.active === false) {
+                    applyMode('hidden');
+                    void suspend();
+                } else {
+                    void resume();
+                }
             },
             ac.signal,
         );
@@ -466,19 +488,19 @@ export default function CompanionWindow() {
     const promoteToPin = useCallback(
         async (kind: 'click' | 'wheel') => {
             if (modeRef.current !== 'peek') return;
-            applyMode('pin');
-            track('floating_ball_summon', { kind: kind === 'click' ? 'pin' : 'wheel' });
             try {
                 // 等 make_key_window 真正落地再聚焦：窗口还不是 key window 时
                 // focus() 不出光标——这就是"点了面板输入框却没光标"的根因。
                 await invoke('cmd_fb_pin_companion');
             } catch (err) {
+                applyMode('hidden');
+                void invoke('cmd_fb_hide_companion');
                 console.error('[fb] pin failed:', err);
+                return;
             }
-            // applyMode 已把 modeRef 翻到 pin；重新读一次（窗口可能在 IPC
-            // 期间被 Esc 关掉，hidden 时不再聚焦）。as FbMode 抵消 TS 对
-            // ref.current 的过期 narrowing（它看不见 applyMode 的写入）。
-            if ((modeRef.current as FbMode) === 'pin') inputRef.current?.focus();
+            applyMode('pin');
+            track('floating_ball_summon', { kind: kind === 'click' ? 'pin' : 'wheel' });
+            focusInputWhenPinned();
             void rotateIfStale();
             if (kind === 'click') {
                 void applySummonCtx(null);
@@ -492,7 +514,7 @@ export default function CompanionWindow() {
                 })();
             }
         },
-        [applyMode, applySummonCtx, rotateIfStale],
+        [applyMode, applySummonCtx, focusInputWhenPinned, rotateIfStale],
     );
 
     // ── 焦点纪律：pin 态输入框光标常驻 ──
@@ -519,11 +541,11 @@ export default function CompanionWindow() {
                 void promoteToPin('click');
                 return;
             }
-            inputRef.current?.focus();
+            focusInputWhenPinned();
         };
         window.addEventListener('focus', onFocus);
         return () => window.removeEventListener('focus', onFocus);
-    }, [promoteToPin]);
+    }, [focusInputWhenPinned, promoteToPin]);
 
     const onWinClick = useCallback(
         (e: React.MouseEvent<HTMLDivElement>) => {
@@ -537,9 +559,9 @@ export default function CompanionWindow() {
             if (target.closest('textarea, input, button, a')) return;
             const sel = window.getSelection();
             if (sel && !sel.isCollapsed) return;
-            inputRef.current?.focus();
+            focusInputWhenPinned();
         },
-        [promoteToPin],
+        [focusInputWhenPinned, promoteToPin],
     );
 
     // ── peek 滚轮：直接滚动会话流 + 升格 pin ──
@@ -863,7 +885,8 @@ export default function CompanionWindow() {
             track('floating_ball_summon', { kind: 'screenshot' });
         } catch (err) {
             console.warn('[fb] screenshot failed:', err);
-            toast.error('截图失败');
+            const detail = describeNativeFloatingBallError(err).trim();
+            toast.error(detail ? `截图失败：${detail.slice(0, 160)}` : '截图失败');
         }
     }, [addImageDrafts, canAttachImages, fileService, insertReferencePaths, toast]);
 

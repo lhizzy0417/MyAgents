@@ -22,6 +22,12 @@ import { getPetAnimationDuration } from './petAtlas';
 import { derivePetAnimation, type FbBallState, type FbPendingKind, type PetDragDirection } from './petStateMapper';
 import './fb.css';
 
+interface FbCtx {
+    appName?: string | null;
+    windowTitle?: string | null;
+    selection?: string | null;
+}
+
 const DRAG_THRESHOLD = 4;
 const BALL_STATE_LABEL: Record<FbBallState, string> = {
     idle: '空闲',
@@ -216,10 +222,17 @@ export default function BallWindow() {
         // Small intent delay so a fly-by cursor doesn't flash the panel.
         // 60ms：加上轮询间隔 60ms，hover→出窗最坏 ~120ms + IPC，体感即时。
         hoverTimerRef.current = setTimeout(() => {
-            void invoke('cmd_fb_show_companion', { mode: 'peek' });
-            void invoke('cmd_fb_relay', { target: 'companion', event: 'fb:ball-enter', payload: {} });
+            void (async () => {
+                try {
+                    await invoke('cmd_fb_show_companion', { mode: 'peek' });
+                    relayToCompanion('fb:ball-enter', {});
+                } catch (err) {
+                    hoverInsideRef.current = false;
+                    console.warn('[fb-ball] show peek failed:', err);
+                }
+            })();
         }, 60);
-    }, []);
+    }, [relayToCompanion]);
     const handleMouseLeave = useCallback(() => {
         if (!hoverInsideRef.current) return;
         hoverInsideRef.current = false;
@@ -259,17 +272,24 @@ export default function BallWindow() {
             return;
         }
         pulseSummon();
-        // 1) 立即出窗 + 进入 pin（伴侣窗瞬时聚焦输入框）
-        void invoke('cmd_fb_show_companion', { mode: 'pin' }).catch((err) => {
-            console.error('[fb-ball] show pin failed:', err);
+        const contextPromise = invoke<FbCtx>('cmd_fb_capture_context').catch((err) => {
+            console.warn('[fb-ball] capture_context failed:', err);
+            return null;
         });
+        // 1) 立即出窗 + 进入 pin（伴侣窗瞬时聚焦输入框）。只有 native
+        // 接受 show 后才发 React 事件；禁用后的 stale click 不能留下逻辑 pin。
+        try {
+            await invoke('cmd_fb_show_companion', { mode: 'pin' });
+        } catch (err) {
+            void contextPromise;
+            console.error('[fb-ball] show pin failed:', err);
+            return;
+        }
         relayToCompanion('fb:summon', {});
         // 2) context 并行抓，到了再补进去（引用条/标题行晚到一拍，可接受）
-        try {
-            const ctx = await invoke('cmd_fb_capture_context');
+        const ctx = await contextPromise;
+        if (ctx) {
             relayToCompanion('fb:summon-ctx', { ctx });
-        } catch (err) {
-            console.warn('[fb-ball] capture_context failed:', err);
         }
     }, [pulseSummon, relayToCompanion]);
 
