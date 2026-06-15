@@ -33,6 +33,7 @@ import { formatDuration, getToolBadgeConfig, getToolLabel, getToolMainLabel, get
 import { groupContentBlocksForDisplay } from '@/utils/contentBlockDisplay';
 import type { ContentBlock } from '@/types/chat';
 import { isNearBottom } from './convoAutoFollow';
+import { createFocusConvergence } from './focusConvergence';
 import { useFloatingSession, type FbAttachment, type FbMsg } from './useFloatingSession';
 import { useFloatingComposerKeydown } from './useFloatingComposerKeydown';
 import { describeNativeFloatingBallError } from './nativeFloatingBall';
@@ -271,6 +272,13 @@ export default function CompanionWindow() {
     const mouseInsideRef = useRef(false);
     const visibilityGenerationRef = useRef(0);
     const pinRequestSeqRef = useRef(0);
+    const inputFocusConvergence = useMemo(
+        () => createFocusConvergence({
+            getTarget: () => inputRef.current,
+            shouldContinue: () => modeRef.current === 'pin',
+        }),
+        [],
+    );
     // 活动行秒表（仅有 running 活动时跳动）
     const [nowTick, setNowTick] = useState(() => Date.now());
     const hasRunningActivity = session.activities.some((a) => a.running);
@@ -326,6 +334,7 @@ export default function CompanionWindow() {
     const applyMode = useCallback(
         (next: FbMode) => {
             if (next === 'hidden') visibilityGenerationRef.current += 1;
+            if (next !== 'pin') inputFocusConvergence.cancel();
             setMode(next);
             modeRef.current = next;
             void invoke('cmd_fb_relay', {
@@ -335,7 +344,7 @@ export default function CompanionWindow() {
             }).catch(() => undefined);
             if (next === 'pin') markRead();
         },
-        [markRead],
+        [inputFocusConvergence, markRead],
     );
 
     const beginPinRequest = useCallback(() => ({
@@ -401,11 +410,10 @@ export default function CompanionWindow() {
     const stickToBottomRef = useRef(true);
 
     const focusInputWhenPinned = useCallback(() => {
-        requestAnimationFrame(() => {
-            if (modeRef.current !== 'pin') return;
-            inputRef.current?.focus();
-        });
-    }, []);
+        inputFocusConvergence.request();
+    }, [inputFocusConvergence]);
+
+    useEffect(() => () => inputFocusConvergence.cancel(), [inputFocusConvergence]);
 
     const summonPinned = useCallback(
         async (ctx: FbCtx | null | undefined) => {

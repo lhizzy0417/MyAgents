@@ -58,9 +58,11 @@ describe('CustomTitleBar — 恢复对话 pill (Issue #309)', () => {
     it('keeps explicit draggable regions around and between titlebar actions', () => {
         const { container } = renderBar({ restoreCount: 0 });
         const dragRegions = Array.from(container.querySelectorAll('[data-tauri-drag-region]'));
+        const tabbarHost = screen.getByTestId('tabbar').parentElement;
 
         expect(dragRegions.length).toBeGreaterThanOrEqual(4);
         expect(dragRegions.some((node) => (node as HTMLElement).style.width === '30px')).toBe(true);
-        expect(dragRegions.some((node) => (node as HTMLElement).className.includes('flex-1'))).toBe(true);
+        expect(dragRegions.some((node) => (node as HTMLElement).className.includes('w-1'))).toBe(true);
+        expect(tabbarHost?.className).toContain('flex-1');
     });
 });

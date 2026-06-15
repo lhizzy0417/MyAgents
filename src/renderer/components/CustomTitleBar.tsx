@@ -190,13 +190,10 @@ export default function CustomTitleBar({
                 />
             )}
 
-            {/* Tabs area - NOT draggable */}
-            <div className="flex h-full min-w-0 flex-shrink items-center overflow-hidden" data-no-drag>
+            {/* Tabs area: owns the available titlebar slot; TabBar leaves unused space draggable internally. */}
+            <div className="flex h-full min-w-0 flex-1 items-center overflow-hidden" data-no-drag>
                 {children}
             </div>
-
-            {/* Empty strip after the last tab stays draggable when tabs do not fill the titlebar. */}
-            <TitlebarDragSpacer className="min-w-0 flex-1" />
 
             {/* Right-edge drag target. Kept fixed so crowded tabs never cover it. */}
             <TitlebarDragSpacer style={{ width: EDGE_DRAG_REGION_WIDTH }} />

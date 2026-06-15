@@ -2,6 +2,7 @@ import { act, fireEvent, render, screen } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import TabBar from './TabBar';
+import { TAB_ITEM_MIN_WIDTH_PX, getTabStripIdealWidth } from './tabBarLayout';
 import { MAX_TABS, type Tab } from '@/types/tab';
 import { dismissTopmost } from '@/utils/closeLayer';
 
@@ -107,7 +108,25 @@ describe('TabBar', () => {
 
     it('uses a compressed tab minimum width for the 12-tab layout', () => {
         renderTabBar();
-        expect(screen.getByText('Session 1').closest('[data-tab-id]')?.className).toContain('min-w-[64px]');
+        expect((screen.getByText('Session 1').closest('[data-tab-id]') as HTMLElement).style.minWidth)
+            .toBe(`${TAB_ITEM_MIN_WIDTH_PX}px`);
+    });
+
+    it('sizes the occupied tab strip from tab count, not title content', () => {
+        const shortTabs = [makeTab('tab-1', 'A'), makeTab('tab-2', 'B')];
+        const longTabs = [
+            makeTab('tab-1', 'A generated title that arrives after the first turn'),
+            makeTab('tab-2', 'Another much longer generated session title'),
+        ];
+        const { rerender, ...props } = renderTabBar({ tabs: shortTabs });
+
+        const strip = screen.getByTestId('tabbar-layout-strip');
+        const initialWidth = strip.style.width;
+        expect(initialWidth).toBe(`${getTabStripIdealWidth(shortTabs.length, { canAddTab: true })}px`);
+
+        rerender(<TabBar {...props} tabs={longTabs} />);
+
+        expect(screen.getByTestId('tabbar-layout-strip').style.width).toBe(initialWidth);
     });
 
     it('lists all tabs in the overflow menu and switches from the menu', () => {

@@ -16,6 +16,13 @@ import { loadAppConfig } from '@/config/services/appConfigService';
 import { listenWithCleanup } from '@/utils/tauriListen';
 
 import { MINO_DEFAULT_PET_PACK } from './defaultPetPack';
+import {
+    createFloatingBallHoverIntentState,
+    enterFloatingBallHover,
+    leaveFloatingBallHover,
+    resetFloatingBallHoverIntent,
+    suppressHoverPeekUntilBallLeave,
+} from './hoverIntent';
 import { resolveSelectedPetPack } from './petPackLibrary';
 import { PetSprite } from './PetSprite';
 import { getPetAnimationDuration } from './petAtlas';
@@ -75,7 +82,7 @@ export default function BallWindow() {
     const popTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const hoverPeekEnabledRef = useRef(true);
     const hoverTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-    const hoverInsideRef = useRef(false);
+    const hoverIntentRef = useRef(createFloatingBallHoverIntentState());
 
     // 原生坐标拖拽（修副屏跳屏）：renderer 只负责 pointer 生命周期和
     // threshold/动画；窗口落点由 Rust 用 NSEvent.mouseLocation + 当前窗口
@@ -156,7 +163,7 @@ export default function BallWindow() {
                 clearTimeout(hoverTimerRef.current);
                 hoverTimerRef.current = null;
             }
-            hoverInsideRef.current = false;
+            resetFloatingBallHoverIntent(hoverIntentRef.current);
             if (companionModeRef.current === 'peek') {
                 void invoke('cmd_fb_hide_companion');
                 relayToCompanion('fb:force-hidden', {});
@@ -214,11 +221,15 @@ export default function BallWindow() {
     // DOM mouseenter（app 激活态）与原生 NSTrackingArea（非激活态，经
     // fb:native-hover）两路信号汇入同一对 handler，用 ref 暴露给监听 effect。
     const handleMouseEnter = useCallback(() => {
-        if (!hoverPeekEnabledRef.current) return;
-        if (hoverInsideRef.current) return; // 双路信号去重
-        hoverInsideRef.current = true;
-        if (dragRef.current.active) return;
-        if (companionModeRef.current === 'pin') return; // already open for real
+        const shouldStartPeek = enterFloatingBallHover(
+            hoverIntentRef.current,
+            {
+                hoverEnabled: hoverPeekEnabledRef.current,
+                dragging: dragRef.current.active,
+                companionPinned: companionModeRef.current === 'pin',
+            },
+        );
+        if (!shouldStartPeek) return;
         // Small intent delay so a fly-by cursor doesn't flash the panel.
         // 60ms：加上轮询间隔 60ms，hover→出窗最坏 ~120ms + IPC，体感即时。
         hoverTimerRef.current = setTimeout(() => {
@@ -226,7 +237,7 @@ export default function BallWindow() {
             void (async () => {
                 try {
                     await invoke('cmd_fb_show_companion', { mode: 'peek' });
-                    if (!hoverInsideRef.current || dragRef.current.active) {
+                    if (!hoverIntentRef.current.inside || dragRef.current.active) {
                         if (companionModeRef.current !== 'pin') {
                             void invoke('cmd_fb_hide_companion').catch(() => undefined);
                         }
@@ -235,15 +246,14 @@ export default function BallWindow() {
                     if (companionModeRef.current === 'pin') return;
                     relayToCompanion('fb:ball-enter', {});
                 } catch (err) {
-                    hoverInsideRef.current = false;
+                    hoverIntentRef.current.inside = false;
                     console.warn('[fb-ball] show peek failed:', err);
                 }
             })();
         }, 60);
     }, [relayToCompanion]);
     const handleMouseLeave = useCallback(() => {
-        if (!hoverInsideRef.current) return;
-        hoverInsideRef.current = false;
+        if (!leaveFloatingBallHover(hoverIntentRef.current)) return;
         if (hoverTimerRef.current) {
             clearTimeout(hoverTimerRef.current);
             hoverTimerRef.current = null;
@@ -252,7 +262,7 @@ export default function BallWindow() {
     }, []);
     // 原生 hover（修 hover 失灵）：app 非激活时 WKWebView 收不到 mouseMoved，
     // DOM mouseenter 不触发——可靠信号来自 NSTrackingArea（Rust 转发）。DOM
-    // 路径保留作激活态冗余，两路经 hoverInsideRef 去重。handlers 是空依赖
+    // 路径保留作激活态冗余，两路经 hoverIntentRef 去重。handlers 是空依赖
     // useCallback（稳定身份），effect 只跑一次。
     useEffect(() => {
         const ac = new AbortController();
@@ -276,7 +286,12 @@ export default function BallWindow() {
     const summon = useCallback(async () => {
         if (companionModeRef.current === 'pin') {
             // Toggle: ball click while pinned closes the companion.
-            void invoke('cmd_fb_relay', { target: 'companion', event: 'fb:close-request', payload: {} });
+            if (hoverTimerRef.current) {
+                clearTimeout(hoverTimerRef.current);
+                hoverTimerRef.current = null;
+            }
+            suppressHoverPeekUntilBallLeave(hoverIntentRef.current);
+            relayToCompanion('fb:close-request', {});
             return;
         }
         pulseSummon();

@@ -7,11 +7,12 @@
  * clicks on the close button.
  */
 
-import { memo } from 'react';
+import { memo, type CSSProperties } from 'react';
 import { useSortable } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
 import { X } from 'lucide-react';
 
+import { TAB_ITEM_MAX_WIDTH_PX, TAB_ITEM_MIN_WIDTH_PX } from '@/components/tabBarLayout';
 import { type Tab, getFolderName } from '@/types/tab';
 
 interface SortableTabItemProps {
@@ -38,11 +39,14 @@ export default memo(function SortableTabItem({
         isDragging,
     } = useSortable({ id: tab.id });
 
-    const style = {
+    const style: CSSProperties = {
         transform: CSS.Translate.toString(transform),
         transition,
         zIndex: isDragging ? 100 : undefined,
         opacity: isDragging ? 0.8 : 1,
+        minWidth: TAB_ITEM_MIN_WIDTH_PX,
+        maxWidth: TAB_ITEM_MAX_WIDTH_PX,
+        flex: `1 1 ${TAB_ITEM_MAX_WIDTH_PX}px`,
     };
 
     // Prefer session title (auto/user) over folder name, fallback to folder name or tab.title
@@ -59,7 +63,7 @@ export default memo(function SortableTabItem({
             data-tab-id={tab.id}
             title={tooltipTitle}
             className={`
-                group/tab relative flex h-8 min-w-[64px] max-w-[180px] flex-[1_1_136px] cursor-default items-center
+                group/tab relative flex h-8 cursor-default items-center
                 rounded-lg px-2.5 transition-colors duration-150
                 ${isDragging ? 'shadow-lg ring-2 ring-[var(--accent)]/30' : ''}
                 ${isActive
@@ -78,7 +82,7 @@ export default memo(function SortableTabItem({
         >
             {/* Tab title — drag handle is bound here, not on the entire tab */}
             <span
-                className="flex-1 truncate text-xs font-medium select-none cursor-grab active:cursor-grabbing"
+                className="min-w-0 flex-1 truncate text-xs font-medium select-none cursor-grab active:cursor-grabbing"
                 {...listeners}
             >
                 {displayTitle}
