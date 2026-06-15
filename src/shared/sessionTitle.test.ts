@@ -10,6 +10,7 @@ import {
   MAX_TITLE_GEN_ATTEMPTS,
   type TitleRoundMessage,
 } from './sessionTitle';
+import { buildFloatingBallContextReminder } from './systemReminder';
 
 describe('stripSystemWrapper', () => {
   it('returns plain text unchanged', () => {
@@ -52,6 +53,15 @@ describe('stripSystemWrapper', () => {
   it('returns empty for an actual wrapper-only string [#7]', () => {
     expect(stripSystemWrapper('<system-reminder>\n<CRON_TASK>\n</CRON_TASK>\n</system-reminder>')).toBe('');
     expect(stripSystemWrapper('<system-reminder></system-reminder>')).toBe('');
+  });
+
+  it('keeps the user query after a floating-ball context reminder', () => {
+    const raw = `${buildFloatingBallContextReminder({
+      appName: 'Safari',
+      selectedText: 'selected text',
+    })}\n\n解释这段选中文字`;
+    expect(stripSystemWrapper(raw)).toBe('解释这段选中文字');
+    expect(stripSystemWrapper(buildFloatingBallContextReminder({ screenshotAttached: true }))).toBe('');
   });
 });
 
@@ -130,14 +140,24 @@ describe('buildTitleRoundsFromMessages', () => {
     expect(rounds[0].user).toBe('[引用回复]\n> 上文\n\n@bot 介绍下项目');
   });
 
-  it('drops system-injected rounds (heartbeat / memory-update / system-reminder)', () => {
+  it('drops pure system-injected rounds but keeps mixed user-visible queries', () => {
+    const floating = `${buildFloatingBallContextReminder({
+      appName: 'Safari',
+      selectedText: 'selected text',
+    })}\n\n解释这段选中文字`;
     const rounds = buildTitleRoundsFromMessages([
       u('<HEARTBEAT> 心跳唤醒'), a('收到'),
       u('<MEMORY_UPDATE> 更新记忆'), a('已更新'),
+      u(buildFloatingBallContextReminder({ screenshotAttached: true })), a('收到截图'),
       u('<system-reminder>\n群聊信息\n</system-reminder>\n\n@bot hi'), a('hello'),
+      u(floating), a('这段文字的意思是...'),
       u('帮我查邮件'), a('好的'),
     ]);
-    expect(rounds).toEqual([{ user: '帮我查邮件', assistant: '好的' }]);
+    expect(rounds).toEqual([
+      { user: '@bot hi', assistant: 'hello' },
+      { user: '解释这段选中文字', assistant: '这段文字的意思是...' },
+      { user: '帮我查邮件', assistant: '好的' },
+    ]);
   });
 
   it('drops error-shaped assistant rounds so the error text never seeds a title (#245)', () => {

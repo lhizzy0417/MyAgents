@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { extractMessageText, parseSessionHistory } from './useFloatingSession';
+import { buildFloatingBallContextReminder } from '../../shared/systemReminder';
 
 // extractMessageText 是伴侣窗历史回填的唯一文本解码器——SessionMessage.content
 // 在磁盘上既可能是纯文本，也可能是 ContentBlock[] 的 JSON 字符串（assistant），
@@ -139,6 +140,24 @@ describe('parseSessionHistory', () => {
         });
         if (out[0].role !== 'user') throw new Error('expected user message');
         expect(out[0].attachments?.[0]?.previewUrl).toContain('/attachment/session-a/screenshot.png');
+    });
+
+    it('strips floating-ball context reminders from restored user messages', () => {
+        const payload = wrap([
+            {
+                id: 'u-floating',
+                role: 'user',
+                content: `${buildFloatingBallContextReminder({
+                    appName: 'Safari',
+                    windowTitle: 'Docs',
+                    selectedText: 'selected text',
+                })}\n\n解释这段内容`,
+            },
+        ]);
+
+        const out = parseSessionHistory(payload, 50);
+        expect(out).toHaveLength(1);
+        expect(out[0]).toMatchObject({ id: 'u-floating', role: 'user', text: '解释这段内容' });
     });
 
     it('tolerates null / malformed payloads', () => {

@@ -61,6 +61,9 @@ interface FbImageDraft {
     size: number;
     data: string;
     previewUrl: string;
+    source: 'upload' | 'screenshot';
+    appName?: string | null;
+    windowTitle?: string | null;
 }
 
 const WIN_W = 440;
@@ -218,6 +221,7 @@ async function fileToImageDraft(file: File): Promise<FbImageDraft> {
         size: file.size,
         data,
         previewUrl,
+        source: 'upload',
     };
 }
 
@@ -231,6 +235,9 @@ function shotToImageDraft(shot: FbShot): FbImageDraft {
         size: Math.floor(data.length * 0.75),
         data,
         previewUrl: shot.dataUrl,
+        source: 'screenshot',
+        appName: shot.appName ?? null,
+        windowTitle: shot.windowTitle ?? null,
     };
 }
 
@@ -744,6 +751,7 @@ export default function CompanionWindow() {
                         size: Math.floor(file.data.length * 0.75),
                         data: file.data,
                         previewUrl: `data:${file.mimeType};base64,${file.data}`,
+                        source: 'upload',
                     });
                 }
                 addImageDrafts(drafts);
@@ -828,6 +836,7 @@ export default function CompanionWindow() {
         const q = quote;
         setQuote(null);
         const ctx = lastCtxRef.current;
+        const screenshotDraft = drafts.find((draft) => draft.source === 'screenshot');
         const attachments: FbAttachment[] = drafts.map((draft) => ({
             id: draft.id,
             name: draft.name,
@@ -844,8 +853,9 @@ export default function CompanionWindow() {
                 data: draft.data,
             })),
             attachments,
-            appName: ctx?.appName ?? null,
-            windowTitle: ctx?.windowTitle ?? null,
+            appName: screenshotDraft?.appName ?? ctx?.appName ?? null,
+            windowTitle: screenshotDraft?.windowTitle ?? ctx?.windowTitle ?? null,
+            screenshotAttached: Boolean(screenshotDraft),
         });
     }, [imageDrafts, input, quote, session.busy, session.ready, send]);
 
@@ -867,6 +877,11 @@ export default function CompanionWindow() {
     const onShot = useCallback(async () => {
         try {
             const res = await invoke<FbShot>('cmd_fb_screenshot');
+            lastCtxRef.current = {
+                ...lastCtxRef.current,
+                appName: res.appName ?? lastCtxRef.current?.appName ?? null,
+                windowTitle: res.windowTitle ?? lastCtxRef.current?.windowTitle ?? null,
+            };
             if (canAttachImages) {
                 addImageDrafts([shotToImageDraft(res)]);
             } else {

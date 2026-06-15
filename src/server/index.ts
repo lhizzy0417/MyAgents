@@ -623,6 +623,7 @@ import { installAutoTitleHook } from './session-title-service';
 import type { ImagePayload } from './runtimes/types';
 import { VALID_RUNTIMES, resolveCronPermissionMode, getMaxPermissionForRuntime } from '../shared/types/runtime';
 import type { RuntimeConfig, RuntimeType } from '../shared/types/runtime';
+import type { InteractionScenario } from './system-prompt';
 // PRD 0.2.18 Session Inbox — sanitize helper for cron envelope wrapping
 import { neutralizeInboxStructuralTags, sanitizeInboxLabel } from './inbox/sanitize-label';
 
@@ -666,7 +667,7 @@ type SendMessagePayload = {
   // #324 — reasoning effort setting ('default' | level). Omitted by IM/Cron
   // callers (keep current session value); desktop sends its picker state.
   reasoningEffort?: string;
-  /** Per-turn analytics attribution; prompt scenario remains desktop. */
+  /** Per-turn analytics attribution; floating_ball also selects the desktop floating surface. */
   analyticsSource?: TurnAnalyticsSource;
   // 'subscription' = explicit switch to Anthropic subscription (from desktop)
   // undefined/missing = "keep current provider" (safe default for IM/Cron callers)
@@ -681,6 +682,23 @@ type SendMessagePayload = {
     upstreamFormat?: 'chat_completions' | 'responses';
   } | 'subscription';
 };
+
+function desktopScenarioForAnalyticsSource(source: TurnAnalyticsSource | undefined): InteractionScenario {
+  return source === 'floating_ball'
+    ? { type: 'desktop', surface: 'floating-ball' }
+    : { type: 'desktop' };
+}
+
+function parseDesktopInteractionScenario(value: unknown): Extract<InteractionScenario, { type: 'desktop' }> | null {
+  if (!value || typeof value !== 'object') return null;
+  const scenario = value as { type?: unknown; surface?: unknown };
+  if (scenario.type !== 'desktop') return null;
+  if (scenario.surface === undefined) return { type: 'desktop' };
+  if (scenario.surface === 'chat' || scenario.surface === 'floating-ball') {
+    return { type: 'desktop', surface: scenario.surface };
+  }
+  return null;
+}
 
 function getRuntimeConfigModel(runtimeConfig?: RuntimeConfig | null): string | undefined {
   const model = runtimeConfig?.model?.trim();
@@ -2262,6 +2280,7 @@ async function main() {
         const reasoningEffort = typeof payload?.reasoningEffort === 'string' ? payload.reasoningEffort : undefined;
         const analyticsSource: TurnAnalyticsSource | undefined =
           payload?.analyticsSource === 'floating_ball' ? 'floating_ball' : undefined;
+        const interactionScenario = desktopScenarioForAnalyticsSource(analyticsSource);
 
         // Allow sending with just images or just text
         if (!text && images.length === 0) {
@@ -2297,7 +2316,7 @@ async function main() {
           const sendCtx = {
             sessionId: getSessionId(),
             workspacePath: agentDir,
-            scenario: { type: 'desktop' as const },
+            scenario: interactionScenario,
             analyticsSource,
             permissionMode,
             model: model ?? undefined,
@@ -2325,6 +2344,7 @@ async function main() {
 
         // ─── Builtin Runtime (existing path) ───
         try {
+          setInteractionScenario(interactionScenario);
           // #264 — apply the background-agent permission policy before enqueue so
           // the PermissionRequest hook sees the current value. Idempotent; the
           // renderer echoes the global AppConfig value on every send.
@@ -4911,6 +4931,28 @@ async function main() {
           console.error('[api/proxy/set] Error:', error);
           return jsonResponse(
             { success: false, error: error instanceof Error ? error.message : 'Failed to set proxy config' },
+            500
+          );
+        }
+      }
+
+      // POST /api/interaction-scenario/set - Set desktop prompt surface before pre-warm
+      if (pathname === '/api/interaction-scenario/set' && request.method === 'POST') {
+        try {
+          const payload = await request.json() as { scenario?: unknown };
+          const scenario = parseDesktopInteractionScenario(payload?.scenario);
+          if (!scenario) {
+            return jsonResponse({ success: false, error: 'Invalid desktop interaction scenario.' }, 400);
+          }
+          if (shouldUseExternalRuntime()) {
+            return jsonResponse({ success: true, skipped: 'external-runtime' });
+          }
+          setInteractionScenario(scenario);
+          return jsonResponse({ success: true });
+        } catch (error) {
+          console.error('[api/interaction-scenario/set] Error:', error);
+          return jsonResponse(
+            { success: false, error: error instanceof Error ? error.message : 'Failed to set interaction scenario' },
             500
           );
         }

@@ -1,4 +1,5 @@
 import type { SessionMessage } from '../types/session';
+import { FLOATING_BALL_CONTEXT_TAG, parseLeadingSystemReminder } from '../../shared/systemReminder';
 
 export const CLIENT_MESSAGE_INLINE_MAX_BYTES = 256 * 1024;
 const PREVIEW_HEAD_BYTES = 24 * 1024;
@@ -135,21 +136,16 @@ function stripSystemReminderPrefix(text: string): string | null {
   if (text.includes('<HEARTBEAT>') || text.includes('<MEMORY_UPDATE>')) {
     return null;
   }
-  if (!text.startsWith('<system-reminder>')) {
+  const reminder = parseLeadingSystemReminder(text);
+  if (!reminder.hasReminder) {
     return text;
   }
+  if (reminder.visibleText) return reminder.visibleText;
+  if (reminder.kind === FLOATING_BALL_CONTEXT_TAG) return null;
 
-  const closeTag = '</system-reminder>';
-  const closeIdx = text.indexOf(closeTag);
-  if (closeIdx < 0) return null;
+  if (!reminder.body.includes('<CRON_TASK>')) return null;
 
-  const tail = text.slice(closeIdx + closeTag.length).trim();
-  if (tail) return tail;
-
-  const inner = text.slice('<system-reminder>'.length, closeIdx).trim();
-  if (!inner.includes('<CRON_TASK>')) return null;
-
-  const withoutCronTags = inner.replace(/<\/?CRON_TASK>/g, ' ');
+  const withoutCronTags = reminder.body.replace(/<\/?CRON_TASK>/g, ' ');
   return withoutCronTags
     .split(/\r?\n/)
     .map((line) => line.trim())

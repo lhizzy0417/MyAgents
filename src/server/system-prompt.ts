@@ -16,7 +16,7 @@ import { buildCliToolsAppend, buildWidgetSection, buildSessionInboxSection } fro
 // ===== Scenario types =====
 
 export type InteractionScenario =
-  | { type: 'desktop' }
+  | { type: 'desktop'; surface?: 'chat' | 'floating-ball' }
   | { type: 'im'; platform: 'telegram' | 'feishu'; sourceType: 'private' | 'group'; botName?: string }
   | { type: 'agent-channel'; platform: string; sourceType: 'private' | 'group'; botName?: string; agentName?: string }
   | { type: 'cron'; taskId: string; intervalMinutes: number; aiCanExit: boolean };
@@ -67,6 +67,14 @@ const TMPL_HEARTBEAT = `<myagents-heartbeat-instructions>
 You will periodically receive heartbeat messages (a user message wrapped in tags like \`<HEARTBEAT>\\nThis is a heartbeat from the system.\\n……\\n</HEARTBEAT>\`).
 When you receive one, follow its instructions.
 </myagents-heartbeat-instructions>`;
+
+const TMPL_FLOATING_BALL = `<myagents-floating-ball-instructions>
+You are talking with the user through the MyAgents desktop floating window.
+
+This is a lightweight, immediate, desktop-adjacent entry point. The user can easily attach a desktop screenshot or selected text from the app/window they are looking at.
+
+Keep responses concise and directly useful for this small-window interaction.
+</myagents-floating-ball-instructions>`;
 
 const TMPL_BROWSER_STORAGE_STATE = `<myagents-browser-storage-instructions>
 当你在浏览器中执行了登录操作或用户帮你完成了登录（输入账号密码、OAuth 授权、扫码登录等），必须在登录成功后**立即**调用 browser_storage_state 工具将登录状态保存到 ~/.myagents/browser-storage-state.json，然后再继续执行后续任务。这样即使后续任务中断或会话异常终止，登录态也不会丢失，后续对话可以复用。
@@ -158,6 +166,10 @@ export function buildSystemPromptAppend(scenario: InteractionScenario, options?:
 
   if (scenario.type === 'im' || scenario.type === 'agent-channel') {
     parts.push(TMPL_HEARTBEAT);
+  }
+
+  if (scenario.type === 'desktop' && scenario.surface === 'floating-ball') {
+    parts.push(TMPL_FLOATING_BALL);
   }
 
   // L3: Generative UI widget guidance — universal across runtimes for desktop

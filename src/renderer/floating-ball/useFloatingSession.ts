@@ -7,8 +7,8 @@
  * space, rotated daily (PRD §6.2: rotation over compaction; cross-session
  * continuity is carried by Mino's memory system, not by session history).
  *
- * Node server side needed ZERO changes: /chat/send + chat:* SSE + GET
- * /sessions/:id are the exact surfaces a Tab uses.
+ * It reuses the Tab send/SSE/session surfaces, plus a tiny scenario-sync
+ * endpoint so sidecar pre-warm receives the floating-window prompt layer.
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
@@ -27,6 +27,7 @@ import { parsePartialJson } from '@/utils/parsePartialJson';
 import { isSubagentContainerTool } from '@/components/tools/toolBadgeConfig';
 import { workspacePathsEqual } from '../../shared/workspacePath';
 import { localDate } from '../../shared/logTime';
+import { buildFloatingBallContextReminder, stripLeadingSystemReminder } from '../../shared/systemReminder';
 import type { AskUserQuestionRequest } from '../../shared/types/askUserQuestion';
 import type { ExitPlanModeRequest } from '../../shared/types/planMode';
 import type { FbPendingKind } from './petStateMapper';
@@ -81,9 +82,10 @@ export interface FbSendOpts {
     quote?: string | null;
     images?: Array<{ name: string; mimeType: string; data: string }>;
     attachments?: FbAttachment[];
-    /** Eager-captured situation（最前台 app / 窗口标题）— D4：进 user 消息。 */
+    /** Eager-captured source window（最前台 app / 窗口标题）— context reminder only. */
     appName?: string | null;
     windowTitle?: string | null;
+    screenshotAttached?: boolean;
 }
 
 const OWNER_ID = 'floating-ball';
@@ -278,7 +280,7 @@ export function parseSessionHistory(payload: unknown, limit: number): FbMsg[] {
             return {
                 id: msg.id ?? `h-${i}`,
                 role: 'user',
-                text: extractMessageText(msg.content ?? ''),
+                text: stripLeadingSystemReminder(extractMessageText(msg.content ?? '')),
                 attachments,
             };
         })
@@ -352,6 +354,14 @@ async function syncFloatingSidecarConfig(
         const effectiveServers = allServers.filter((s) =>
             globalEnabled.has(s.id) && workspaceEnabled.includes(s.id),
         );
+
+        stage = 'scenario-set';
+        const scenarioResp = await floatingProxyFetch(sessionId, `${base}/api/interaction-scenario/set`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ scenario: { type: 'desktop', surface: 'floating-ball' } }),
+        });
+        if (!scenarioResp.ok) throw new Error(`Scenario sync failed: HTTP ${scenarioResp.status}`);
 
         stage = 'mcp-set';
         console.info(`[fb-session] sync mcp start session=${sessionId} servers=${effectiveServers.length}`);
@@ -1385,18 +1395,13 @@ export function useFloatingSession(modeRef: React.MutableRefObject<'hidden' | 'p
 
             const quote = opts?.quote?.trim() || undefined;
 
-            // 处境进 user 消息（D4：放 user message，绝不进 system prompt——
-            // 否则每次唤起打爆前缀缓存）。选区以引文栅栏标注 untrusted 边界。
-            const parts: string[] = [];
-            if (opts?.appName) {
-                parts.push(
-                    `[处境] 用户此刻正在看 ${opts.appName}${opts.windowTitle ? ` — ${opts.windowTitle}` : ''}`,
-                );
-            }
-            if (quote) {
-                parts.push(`[选中内容]（用户在上述应用中选中的原文，仅作上下文）\n"""\n${quote}\n"""`);
-            }
-            if (text.trim()) parts.push(text);
+            const reminder = buildFloatingBallContextReminder({
+                appName: opts?.appName,
+                windowTitle: opts?.windowTitle,
+                selectedText: quote,
+                screenshotAttached: opts?.screenshotAttached === true,
+            });
+            const parts = [reminder, text.trim()].filter(Boolean);
             const finalText = parts.join('\n\n');
 
             setMessages((prev) => [

@@ -1,4 +1,5 @@
 import { isLikelyErrorTitle } from './titleFilters';
+import { FLOATING_BALL_CONTEXT_TAG, parseLeadingSystemReminder } from './systemReminder';
 
 /**
  * Canonical session-title derivation, shared by the sidecar (storage layer,
@@ -27,16 +28,10 @@ export function stripSystemWrapper(raw: string): string {
   let text = (raw ?? '').trim();
   if (!text) return '';
 
-  if (text.startsWith('<system-reminder>')) {
-    const closeTag = '</system-reminder>';
-    const closeIdx = text.indexOf(closeTag);
-    if (closeIdx >= 0) {
-      const tail = text.slice(closeIdx + closeTag.length).trim();
-      text = tail || text.slice('<system-reminder>'.length, closeIdx).trim();
-    } else {
-      // Truncated before the closing tag (the storage-truncation bug): keep the body.
-      text = text.slice('<system-reminder>'.length).trim();
-    }
+  const reminder = parseLeadingSystemReminder(text);
+  if (reminder.hasReminder) {
+    if (!reminder.visibleText && reminder.kind === FLOATING_BALL_CONTEXT_TAG) return '';
+    text = reminder.visibleText || reminder.body;
   }
 
   // The `执行任务：<name>` extraction is a CRON-specific convention. Gate it on an
@@ -156,8 +151,9 @@ function extractMessageText(content: string): string {
 /**
  * Reconstruct completed QA rounds (user → assistant pairs) from an ordered
  * message list, dropping the rounds that must never seed a title:
- *   - system-injected user turns (`<HEARTBEAT>` / `<MEMORY_UPDATE>` /
- *     `<system-reminder>` openers) — pure noise, not a user's real ask.
+ *   - pure system-injected user turns (`<HEARTBEAT>` / `<MEMORY_UPDATE>` /
+ *     `<system-reminder>` without a user-visible tail) — pure noise, not a
+ *     user's real ask. Mixed reminder + user-query turns keep the query tail.
  *   - error-shaped assistant turns (`isLikelyErrorTitle`) — an upstream 4xx/5xx
  *     surfaced as assistant text would otherwise name the session after the error.
  *
@@ -173,10 +169,12 @@ export function buildTitleRoundsFromMessages(messages: readonly TitleRoundMessag
     const next = messages[i + 1];
     if (msg.role !== 'user' || next.role !== 'assistant') continue;
 
-    const userText = extractMessageText(msg.content);
-    if (userText.includes('<HEARTBEAT>')
-      || userText.includes('<MEMORY_UPDATE>')
-      || userText.startsWith('<system-reminder>')) {
+    const rawUserText = extractMessageText(msg.content);
+    const reminder = parseLeadingSystemReminder(rawUserText);
+    const userText = reminder.hasReminder ? reminder.visibleText : rawUserText;
+    if (rawUserText.includes('<HEARTBEAT>')
+      || rawUserText.includes('<MEMORY_UPDATE>')
+      || (reminder.hasReminder && !reminder.visibleText)) {
       i++; // consume the paired assistant turn too
       continue;
     }

@@ -7,6 +7,7 @@ import {
   shrinkReplayContentForClient,
 } from './session-message-preview';
 import type { SessionMessage } from '../types/session';
+import { buildFloatingBallContextReminder } from '../../shared/systemReminder';
 
 function msg(content: string): SessionMessage {
   return {
@@ -162,6 +163,25 @@ describe('session-message-preview', () => {
     ]);
 
     expect(result).toEqual({ found: true, preview: '执行任务：# GitHub Issue 自动化处理' });
+  });
+
+  it('keeps floating-ball mixed queries but skips pure floating context', () => {
+    const result = resolveLastRealUserMessagePreview([
+      {
+        role: 'user',
+        content: buildFloatingBallContextReminder({ screenshotAttached: true }),
+        id: 'shot-only',
+        timestamp: 't1',
+      } as SessionMessage,
+      {
+        role: 'user',
+        content: `${buildFloatingBallContextReminder({ appName: 'Safari', selectedText: 'selected' })}\n\n解释这段文字`,
+        id: 'mixed',
+        timestamp: 't2',
+      } as SessionMessage,
+    ]);
+
+    expect(result).toEqual({ found: true, preview: '解释这段文字' });
   });
 
   // ── shrinkReplayContentForClient (PRD 0.2.27 — /chat/stream replay 256KB cap) ──

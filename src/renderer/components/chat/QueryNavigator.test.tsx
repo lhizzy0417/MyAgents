@@ -2,6 +2,7 @@ import { render } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import QueryNavigator from './QueryNavigator';
 import type { Message } from '../../types/chat';
+import { buildFloatingBallContextReminder } from '../../../shared/systemReminder';
 
 class IntersectionObserverMock {
   observe() {}
@@ -99,5 +100,32 @@ describe('QueryNavigator', () => {
     expect(container).toHaveTextContent('Third question');
     expect(container).not.toHaveTextContent('task-notification');
     expect(container).not.toHaveTextContent('bg-1');
+  });
+
+  it('uses the visible user query after a floating-ball context reminder', () => {
+    const scrollContainerRef = { current: document.createElement('div') };
+    const mixed = `${buildFloatingBallContextReminder({
+      appName: 'Safari',
+      selectedText: 'selected text',
+    })}\n\nExplain this`;
+
+    const { container } = render(
+      <QueryNavigator
+        historyMessages={[
+          userMessage('u1', 'First question'),
+          userMessage('u2', mixed),
+          userMessage('u3', 'Third question'),
+        ]}
+        streamingMessage={null}
+        scrollContainerRef={scrollContainerRef}
+        pauseAutoScroll={vi.fn()}
+      />,
+    );
+
+    expect(container).toHaveTextContent('First question');
+    expect(container).toHaveTextContent('Explain this');
+    expect(container).toHaveTextContent('Third question');
+    expect(container).not.toHaveTextContent('FLOATING_BALL_CONTEXT');
+    expect(container).not.toHaveTextContent('selected text');
   });
 });

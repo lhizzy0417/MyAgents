@@ -4,6 +4,7 @@
 
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import type { Message } from '../../types/chat';
+import { parseLeadingSystemReminder } from '../../../shared/systemReminder';
 
 /** Minimum user queries to show the navigator */
 const MIN_QUERIES = 3;
@@ -29,13 +30,15 @@ function getQueryText(msg: Message): string {
   return '';
 }
 
-/** Check if a user message is a system injection (not real user query) */
-function isSystemInjection(text: string): boolean {
-  return (
-    text.includes('<HEARTBEAT>') ||
-    text.includes('<MEMORY_UPDATE>') ||
-    text.startsWith('<system-reminder>')
-  );
+/** Extract the real user query from a mixed system-reminder + user message. */
+function getVisibleQueryText(text: string): string {
+  const trimmed = text.trim();
+  if (trimmed.includes('<HEARTBEAT>') || trimmed.includes('<MEMORY_UPDATE>')) {
+    return '';
+  }
+  const reminder = parseLeadingSystemReminder(trimmed);
+  if (reminder.hasReminder) return reminder.visibleText;
+  return text;
 }
 
 /** Match Message.tsx's non-bubble system render paths. */
@@ -45,7 +48,7 @@ function isNonUserQueryMessage(msg: Message, text: string): boolean {
     msg.id.startsWith('task-notification-') ||
     trimmed.startsWith('<task-notification>') ||
     trimmed.startsWith('<local-command-stdout>') ||
-    isSystemInjection(trimmed)
+    getVisibleQueryText(trimmed).trim() === ''
   );
 }
 
@@ -70,7 +73,7 @@ export default function QueryNavigator({
     return allMessages
       .flatMap((msg) => {
         if (msg.role !== 'user') return [];
-        const text = getQueryText(msg);
+        const text = getVisibleQueryText(getQueryText(msg));
         if (text.trim() === '' || isNonUserQueryMessage(msg, text)) return [];
         return [{ id: msg.id, text }];
       });

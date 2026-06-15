@@ -15,6 +15,7 @@ import { groupContentBlocksForDisplay } from '@/utils/contentBlockDisplay';
 import { useImagePreview } from '@/context/ImagePreviewContext';
 import type { ContentBlock, Message as MessageType } from '@/types/chat';
 import { SOURCE_LABELS, type MessageSource } from '../../shared/types/im';
+import { FLOATING_BALL_CONTEXT_TAG, parseLeadingSystemReminder } from '../../shared/systemReminder';
 
 interface MessageProps {
   message: MessageType;
@@ -219,6 +220,7 @@ function AssistantActions({ message, onRetry, onFork, className = '' }: {
 const SYSTEM_TAG_MAP: Record<string, string> = {
   'HEARTBEAT': '心跳感知',
   'CRON_TASK': '定时任务',
+  [FLOATING_BALL_CONTEXT_TAG]: '悬浮上下文',
 };
 
 function renderWidgetSegments(text: string, isLoading: boolean): ReactNode {
@@ -299,20 +301,25 @@ const Message = memo(function Message({ message, isLoading = false, onRewind, on
   if (message.role === 'user') {
     const rawUserContent = typeof message.content === 'string' ? message.content : '';
 
+    const reminder = parseLeadingSystemReminder(rawUserContent);
+
     // Detect system injection type from <system-reminder><TAG> wrapper (whitelist)
     let systemTag: string | null = null;
-    const tagMatch = rawUserContent.match(/<system-reminder>\s*<(\w+)>/);
-    if (tagMatch && tagMatch[1] in SYSTEM_TAG_MAP) {
-      systemTag = SYSTEM_TAG_MAP[tagMatch[1]];
+    if (reminder.kind && reminder.kind in SYSTEM_TAG_MAP) {
+      systemTag = SYSTEM_TAG_MAP[reminder.kind];
     }
 
     // Strip system injection tags that wrap delivered content. These HTML-like tags trigger
     // Markdown's HTML block mode, breaking \n rendering and Markdown syntax.
-    const userContent = rawUserContent
+    const displaySource = reminder.hasReminder && (reminder.visibleText || reminder.kind === FLOATING_BALL_CONTEXT_TAG)
+      ? reminder.visibleText
+      : rawUserContent;
+    const userContent = displaySource
       .replace(/<\/?system-reminder>/g, '')
       .replace(/<\/?HEARTBEAT>/g, '')
       .replace(/<\/?MEMORY_UPDATE>/g, '')
       .replace(/<\/?CRON_TASK>/g, '')
+      .replace(/<\/?FLOATING_BALL_CONTEXT>/g, '')
       .trim();
     const hasAttachments = Boolean(message.attachments?.length);
     const attachmentItems =
