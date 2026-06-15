@@ -21,7 +21,7 @@ import {
     enterFloatingBallHover,
     leaveFloatingBallHover,
     resetFloatingBallHoverIntent,
-    suppressHoverPeekAfterBallClose,
+    suppressHoverPeekUntilBallLeave,
 } from './hoverIntent';
 import { resolveSelectedPetPack } from './petPackLibrary';
 import { PetSprite } from './PetSprite';
@@ -36,7 +36,6 @@ interface FbCtx {
 }
 
 const DRAG_THRESHOLD = 4;
-const CLOSE_HOVER_SUPPRESS_MS = 500;
 const BALL_STATE_LABEL: Record<FbBallState, string> = {
     idle: '空闲',
     running: '正在处理',
@@ -229,7 +228,6 @@ export default function BallWindow() {
                 dragging: dragRef.current.active,
                 companionPinned: companionModeRef.current === 'pin',
             },
-            Date.now(),
         );
         if (!shouldStartPeek) return;
         // Small intent delay so a fly-by cursor doesn't flash the panel.
@@ -292,7 +290,7 @@ export default function BallWindow() {
                 clearTimeout(hoverTimerRef.current);
                 hoverTimerRef.current = null;
             }
-            suppressHoverPeekAfterBallClose(hoverIntentRef.current, Date.now(), CLOSE_HOVER_SUPPRESS_MS);
+            suppressHoverPeekUntilBallLeave(hoverIntentRef.current);
             relayToCompanion('fb:close-request', {});
             return;
         }

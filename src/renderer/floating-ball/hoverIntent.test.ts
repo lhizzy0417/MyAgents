@@ -4,7 +4,7 @@ import {
     createFloatingBallHoverIntentState,
     enterFloatingBallHover,
     leaveFloatingBallHover,
-    suppressHoverPeekAfterBallClose,
+    suppressHoverPeekUntilBallLeave,
 } from './hoverIntent';
 
 const ENABLED_GUARDS = {
@@ -17,28 +17,36 @@ describe('floating-ball hover intent', () => {
     it('starts peek only once for duplicate native and DOM enter signals', () => {
         const state = createFloatingBallHoverIntentState();
 
-        expect(enterFloatingBallHover(state, ENABLED_GUARDS, 1000)).toBe(true);
-        expect(enterFloatingBallHover(state, ENABLED_GUARDS, 1001)).toBe(false);
+        expect(enterFloatingBallHover(state, ENABLED_GUARDS)).toBe(true);
+        expect(enterFloatingBallHover(state, ENABLED_GUARDS)).toBe(false);
         expect(leaveFloatingBallHover(state)).toBe(true);
-        expect(enterFloatingBallHover(state, ENABLED_GUARDS, 1002)).toBe(true);
+        expect(enterFloatingBallHover(state, ENABLED_GUARDS)).toBe(true);
     });
 
-    it('suppresses hover reopen after closing pin from the ball', () => {
+    it('suppresses hover reopen after closing pin from the ball until a real leave', () => {
         const state = createFloatingBallHoverIntentState();
 
-        suppressHoverPeekAfterBallClose(state, 1000, 500);
+        suppressHoverPeekUntilBallLeave(state);
+        expect(enterFloatingBallHover(state, ENABLED_GUARDS)).toBe(false);
         expect(leaveFloatingBallHover(state)).toBe(true);
+        expect(enterFloatingBallHover(state, ENABLED_GUARDS)).toBe(true);
+    });
 
-        expect(enterFloatingBallHover(state, ENABLED_GUARDS, 1100)).toBe(false);
+    it('keeps hover suppressed across duplicate enter edges until leave confirms outside', () => {
+        const state = createFloatingBallHoverIntentState();
+
+        suppressHoverPeekUntilBallLeave(state);
+        expect(enterFloatingBallHover(state, ENABLED_GUARDS)).toBe(false);
+        expect(enterFloatingBallHover(state, ENABLED_GUARDS)).toBe(false);
         expect(leaveFloatingBallHover(state)).toBe(true);
-        expect(enterFloatingBallHover(state, ENABLED_GUARDS, 1500)).toBe(true);
+        expect(enterFloatingBallHover(state, ENABLED_GUARDS)).toBe(true);
     });
 
     it('does not peek while the companion is already pinned', () => {
         const state = createFloatingBallHoverIntentState();
 
-        expect(enterFloatingBallHover(state, { ...ENABLED_GUARDS, companionPinned: true }, 1000)).toBe(false);
+        expect(enterFloatingBallHover(state, { ...ENABLED_GUARDS, companionPinned: true })).toBe(false);
         expect(leaveFloatingBallHover(state)).toBe(true);
-        expect(enterFloatingBallHover(state, ENABLED_GUARDS, 1001)).toBe(true);
+        expect(enterFloatingBallHover(state, ENABLED_GUARDS)).toBe(true);
     });
 });
