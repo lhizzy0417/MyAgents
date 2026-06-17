@@ -1981,7 +1981,7 @@ async function broadcastBuiltinContextUsage(): Promise<void> {
     model: snapshotModel,
     lookupWindow: lookupModelContextLength,
   });
-  broadcast('chat:context-usage', usage);
+  broadcast('chat:context-usage', { ...usage, sessionId: snapshotSessionId });
   // PRD 0.2.32 — 持久化**同一个**快照到 session 记录（单一数据源）。每轮末一次写盘，
   // 重开会话时前端从 session metadata seed → 环立即显示且与会话期间一致。fire-and-forget。
   void updateSessionMetadata(snapshotSessionId, { lastContextUsage: usage }).catch((err) =>

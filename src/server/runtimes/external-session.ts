@@ -4318,7 +4318,8 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
           model: currentTurnUsage.model,
           lookupWindow: lookupModelContextLength,
         });
-        broadcast('chat:context-usage', ctxUsage);
+        const ctxSessionId = currentTurnTraceSessionId || lastSessionId || undefined;
+        broadcast('chat:context-usage', ctxSessionId ? { ...ctxUsage, sessionId: ctxSessionId } : ctxUsage);
         // PRD 0.2.32 — 留住本轮最新快照；Codex 亚轮会多次进这里，不每次写盘，turn 末
         // persistTurnResult 快照后写一次（单一数据源，供重开 seed）。
         currentTurnContextUsage = ctxUsage;

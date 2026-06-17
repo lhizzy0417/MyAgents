@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import {
+    decidePersistedContextUsageSeed,
     shouldAcceptSessionScopedSseSnapshot,
     shouldPreserveSnapshotOnPendingBirthPropSync,
 } from './sessionScopedEventGuards';
@@ -80,6 +81,30 @@ describe('shouldAcceptSessionScopedSseSnapshot', () => {
             }),
         ).toBe(true);
     });
+
+    it('accepts a matching payload during SSE bootstrap before the connection id is promoted', () => {
+        expect(
+            shouldAcceptSessionScopedSseSnapshot({
+                connectedSessionId: null,
+                currentSessionId: SID_B,
+                payloadSessionId: SID_B,
+                isConnectedSessionPending: false,
+                isCurrentSessionPending: false,
+            }),
+        ).toBe(true);
+    });
+
+    it('rejects stale payloads during SSE bootstrap', () => {
+        expect(
+            shouldAcceptSessionScopedSseSnapshot({
+                connectedSessionId: null,
+                currentSessionId: SID_B,
+                payloadSessionId: SID_A,
+                isConnectedSessionPending: false,
+                isCurrentSessionPending: false,
+            }),
+        ).toBe(false);
+    });
 });
 
 describe('shouldPreserveSnapshotOnPendingBirthPropSync', () => {
@@ -117,5 +142,51 @@ describe('shouldPreserveSnapshotOnPendingBirthPropSync', () => {
                 isNextSessionPending: false,
             }),
         ).toBe(false);
+    });
+});
+
+describe('decidePersistedContextUsageSeed', () => {
+    it('preserves an already accepted live snapshot for the target session', () => {
+        expect(
+            decidePersistedContextUsageSeed({
+                snapshotSource: 'builtin',
+                seedRuntime: 'builtin',
+                targetSessionId: SID_B,
+                liveSessionId: SID_B,
+            }),
+        ).toBe('preserve-live');
+    });
+
+    it('seeds persisted usage when no live snapshot exists for the target session and runtime matches', () => {
+        expect(
+            decidePersistedContextUsageSeed({
+                snapshotSource: 'builtin',
+                seedRuntime: 'builtin',
+                targetSessionId: SID_B,
+                liveSessionId: null,
+            }),
+        ).toBe('seed');
+    });
+
+    it('does not preserve a live snapshot from a different session', () => {
+        expect(
+            decidePersistedContextUsageSeed({
+                snapshotSource: 'builtin',
+                seedRuntime: 'builtin',
+                targetSessionId: SID_B,
+                liveSessionId: SID_A,
+            }),
+        ).toBe('seed');
+    });
+
+    it('clears persisted usage when no live snapshot exists and runtime mismatches', () => {
+        expect(
+            decidePersistedContextUsageSeed({
+                snapshotSource: 'codex',
+                seedRuntime: 'builtin',
+                targetSessionId: SID_B,
+                liveSessionId: null,
+            }),
+        ).toBe('clear');
     });
 });

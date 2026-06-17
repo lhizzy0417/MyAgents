@@ -18,7 +18,14 @@ export function shouldAcceptSessionScopedSseSnapshot(p: {
     isConnectedSessionPending: boolean;
     isCurrentSessionPending: boolean;
 }): boolean {
+    const isBootstrappingCurrentSession =
+        p.connectedSessionId === null &&
+        p.currentSessionId !== null &&
+        !p.isCurrentSessionPending &&
+        p.payloadSessionId === p.currentSessionId;
+
     const isSameAttachedSession =
+        isBootstrappingCurrentSession ||
         p.connectedSessionId === p.currentSessionId ||
         (
             p.isConnectedSessionPending &&
@@ -62,4 +69,18 @@ export function shouldPreserveSnapshotOnPendingBirthPropSync(p: {
         !p.isNextSessionPending &&
         p.currentSessionIdBeforeSync === p.nextSessionId
     );
+}
+
+export type PersistedContextUsageSeedDecision = 'seed' | 'clear' | 'preserve-live';
+
+export function decidePersistedContextUsageSeed(p: {
+    snapshotSource: string | null | undefined;
+    seedRuntime: string;
+    targetSessionId: string;
+    liveSessionId: string | null;
+}): PersistedContextUsageSeedDecision {
+    if (p.liveSessionId === p.targetSessionId) {
+        return 'preserve-live';
+    }
+    return p.snapshotSource === p.seedRuntime ? 'seed' : 'clear';
 }

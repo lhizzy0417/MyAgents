@@ -30,6 +30,7 @@ import { CUSTOM_EVENTS, isPendingSessionId } from '../../shared/constants';
 import { TabContext, TabApiContext, TabActiveContext, type SessionState, type SystemNotice, type TabContextValue, type TabApiContextValue } from './TabContext';
 import { shouldSkipHistoryReplay, shouldClearHistoryOnInit } from './sessionRestoreGuards';
 import {
+    decidePersistedContextUsageSeed,
     shouldAcceptSessionScopedSseSnapshot,
     shouldPreserveSnapshotOnPendingBirthPropSync,
 } from './sessionScopedEventGuards';
@@ -440,6 +441,7 @@ export default function TabProvider({
     // PRD 0.2.32 — 归一化 context 用量快照（tab-scoped）。Set on chat:context-usage,
     // cleared on session switch / reset. 见 ContextUsageIndicator。
     const [contextUsage, setContextUsage] = useState<ContextUsage | null>(null);
+    const liveContextUsageSessionIdRef = useRef<string | null>(null);
     const [lastTerminalReason, setLastTerminalReason] = useState<TerminalReason | null>(null);
     const [isConnected, setIsConnected] = useState(false);
     const [pendingPermission, setPendingPermission] = useState<PermissionRequest | null>(null);
@@ -477,6 +479,7 @@ export default function TabProvider({
         // paints the previous session's ring / builtin compact button on the new session
         // (review: stale-source transient). loadSession then re-seeds from the persisted
         // lastContextUsage; new-session paths (reset/adopt) also clear explicitly for immediacy.
+        liveContextUsageSessionIdRef.current = null;
         setContextUsage(null);
         if (!shouldPreserveSdkSlashCommands) {
             setSdkSlashCommands([]);
@@ -621,6 +624,7 @@ export default function TabProvider({
         setHistoryMessages([]);
         resetPaginationState();
         setStreamingMessage(null);
+        liveContextUsageSessionIdRef.current = null;
         setContextUsage(null);  // PRD 0.2.32 — 新会话无持久占用；仅清展示态（不碰后端持久数据）
         setSdkSlashCommands([]);
         seenIdsRef.current.clear();
@@ -734,6 +738,7 @@ export default function TabProvider({
         setHistoryMessages([]);
         resetPaginationState();
         setStreamingMessage(null);
+        liveContextUsageSessionIdRef.current = null;
         setContextUsage(null);  // PRD 0.2.32 — 新会话无持久占用；仅清展示态（不碰后端持久数据）
         setSdkSlashCommands([]);
         seenIdsRef.current.clear();
@@ -2105,14 +2110,31 @@ export default function TabProvider({
 
             case 'chat:context-usage': {
                 // PRD 0.2.32 — 归一化 context 用量快照（builtin 每轮末 / Codex 亚轮流式）。
-                // review #W3 — drop events whose connection isn't bound to the current session.
-                // During an A→B switch the old (A) connection can still deliver a context-usage
-                // event before the SSE re-attaches to B; without this guard it would clobber B's
-                // freshly-seeded ring (and re-leak A's source). connectedSse===current only in
-                // steady state, so no legit live event is rejected (B's events imply attach to B).
-                if (connectedSseSessionIdRef.current !== currentSessionIdRef.current) break;
+                // Session-scoped snapshot: Rust can receive/replay the latest context snapshot
+                // while a fresh SSE connection is still being promoted on the renderer side.
+                // Trust the payload session id, then store only the display shape.
+                const payload = data as (ContextUsage & { sessionId?: string | null }) | null;
+                const payloadSessionId = payload?.sessionId ?? null;
+                const currentId = currentSessionIdRef.current;
+                const connectedId = connectedSseSessionIdRef.current;
+                if (!shouldAcceptSessionScopedSseSnapshot({
+                    connectedSessionId: connectedId,
+                    currentSessionId: currentId,
+                    payloadSessionId,
+                    isConnectedSessionPending: connectedId ? isPendingSessionId(connectedId) : false,
+                    isCurrentSessionPending: currentId ? isPendingSessionId(currentId) : false,
+                })) {
+                    break;
+                }
                 // 后端已归一化，前端只存最新值供 <ContextUsageIndicator> 消费。
-                setContextUsage((data as ContextUsage | null) ?? null);
+                liveContextUsageSessionIdRef.current = payloadSessionId ?? currentId;
+                if (!payload) {
+                    setContextUsage(null);
+                } else {
+                    const { sessionId: _payloadSessionId, ...usage } = payload;
+                    void _payloadSessionId;
+                    setContextUsage(usage);
+                }
                 break;
             }
 
@@ -3562,7 +3584,18 @@ export default function TabProvider({
             // now-external session. Mismatch → null; the next live turn seeds the correct one.
             const persistedUsage = response.session.lastContextUsage ?? null;
             const seedRuntime = response.session.runtime || 'builtin';
-            setContextUsage(persistedUsage && persistedUsage.source === seedRuntime ? persistedUsage : null);
+            const seedDecision = decidePersistedContextUsageSeed({
+                snapshotSource: persistedUsage?.source,
+                seedRuntime,
+                targetSessionId,
+                liveSessionId: liveContextUsageSessionIdRef.current,
+            });
+            if (seedDecision === 'seed') {
+                setContextUsage(persistedUsage);
+            } else if (seedDecision === 'clear') {
+                liveContextUsageSessionIdRef.current = null;
+                setContextUsage(null);
+            }
             setSdkSlashCommands([]);
             // Only reset loading state if not explicitly skipped
             // (caller may be managing loading state for an in-progress operation like cron task)
