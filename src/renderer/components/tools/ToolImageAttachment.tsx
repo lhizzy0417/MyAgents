@@ -11,10 +11,14 @@
  * to the current session before mapping it to the desktop attachment protocol.
  */
 
-import { useCallback, useLayoutEffect, useRef, useState } from 'react';
+import { useCallback, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
+import { Copy, Download, FileText } from 'lucide-react';
 
+import ContextMenu, { type ContextMenuItem } from '@/components/ContextMenu';
+import { useToastOptional } from '@/components/Toast';
 import { useTabStateOptional } from '@/context/TabContext';
+import { isTauriEnvironment } from '@/utils/browserMock';
 import { useAttachmentUrl } from '@/utils/toolAttachment';
 import type { ToolAttachment } from '../../../shared/types/tool-attachment';
 
@@ -24,11 +28,14 @@ interface Props {
 
 export default function ToolImageAttachment({ attachment }: Props) {
   const tab = useTabStateOptional();
+  const toast = useToastOptional();
   const sessionId = tab?.sessionId ?? null;
   const urlState = useAttachmentUrl(attachment, sessionId);
   const [zoomed, setZoomed] = useState(false);
+  const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null);
   const mediaRef = useRef<HTMLButtonElement>(null);
   const [captionWidth, setCaptionWidth] = useState<number | null>(null);
+  const localPath = attachment.sourcePath ?? attachment.savedPath ?? null;
 
   const updateCaptionWidth = useCallback(() => {
     const media = mediaRef.current;
@@ -56,6 +63,117 @@ export default function ToolImageAttachment({ attachment }: Props) {
     observer.observe(media);
     return () => observer.disconnect();
   }, [urlState.state, updateCaptionWidth]);
+
+  const handleContextMenu = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setContextMenu({ x: e.clientX, y: e.clientY });
+  }, []);
+
+  const closeContextMenu = useCallback(() => setContextMenu(null), []);
+
+  const copyLocalPath = useCallback(() => {
+    if (!localPath) {
+      toast?.error('没有可复制的本地路径');
+      return;
+    }
+    void writeClipboardText(localPath).then(
+      () => toast?.success('已复制图片路径'),
+      () => toast?.error('复制路径失败'),
+    );
+  }, [localPath, toast]);
+
+  const readImageBlob = useCallback(async (): Promise<Blob> => {
+    const mimeType = attachment.mimeType || 'image/png';
+    if (isTauriEnvironment()) {
+      const { invoke } = await import('@tauri-apps/api/core');
+      const bytes = await invoke<ArrayBuffer>('cmd_read_tool_attachment_bytes', {
+        refPath: attachment.refPath,
+      });
+      return new Blob([bytes], { type: mimeType });
+    }
+    if (urlState.state !== 'ready') {
+      throw new Error('Image URL is not ready');
+    }
+    const res = await fetch(urlState.url);
+    if (!res.ok) {
+      throw new Error(`Image fetch failed: ${res.status}`);
+    }
+    return res.blob();
+  }, [attachment.mimeType, attachment.refPath, urlState]);
+
+  const copyImage = useCallback(() => {
+    void (async () => {
+      try {
+        if (!navigator.clipboard || typeof ClipboardItem === 'undefined') {
+          throw new Error('Clipboard image write is unavailable');
+        }
+        const blob = await readImageBlob();
+        const mimeType = blob.type || attachment.mimeType || 'image/png';
+        await navigator.clipboard.write([new ClipboardItem({ [mimeType]: blob })]);
+        toast?.success('已复制图片');
+      } catch (err) {
+        console.warn('[ToolImageAttachment] copy image failed:', err);
+        if (localPath) {
+          await writeClipboardText(localPath).then(
+            () => toast?.warning('无法复制图片，已复制本地路径'),
+            () => toast?.error('复制图片失败'),
+          );
+        } else {
+          toast?.error('复制图片失败');
+        }
+      }
+    })();
+  }, [attachment.mimeType, localPath, readImageBlob, toast]);
+
+  const saveImageAs = useCallback(() => {
+    void (async () => {
+      if (urlState.state !== 'ready') {
+        toast?.error('图片尚未加载完成');
+        return;
+      }
+      try {
+        const { save } = await import('@tauri-apps/plugin-dialog');
+        const destinationPath = await save({
+          defaultPath: getAttachmentFilename(attachment),
+          filters: [getImageSaveFilter(attachment)],
+        });
+        if (!destinationPath) return;
+
+        const { invoke } = await import('@tauri-apps/api/core');
+        await invoke('cmd_export_tool_attachment', {
+          refPath: attachment.refPath,
+          destinationPath,
+        });
+        toast?.success('图片已另存');
+      } catch (err) {
+        console.error('[ToolImageAttachment] save image failed:', err);
+        toast?.error('另存图片失败');
+      }
+    })();
+  }, [attachment, toast, urlState.state]);
+
+  const contextMenuItems = useMemo((): ContextMenuItem[] => [
+    {
+      label: '复制图片',
+      icon: <Copy className="h-4 w-4" />,
+      disabled: urlState.state !== 'ready',
+      onClick: copyImage,
+    },
+    {
+      label: '另存为…',
+      icon: <Download className="h-4 w-4" />,
+      disabled: urlState.state !== 'ready',
+      onClick: saveImageAs,
+    },
+    { separator: true },
+    {
+      label: '复制本地路径',
+      icon: <FileText className="h-4 w-4" />,
+      disabled: !localPath,
+      onClick: copyLocalPath,
+    },
+  ], [copyImage, copyLocalPath, localPath, saveImageAs, urlState.state]);
 
   if (urlState.state === 'pending') {
     return (
@@ -87,6 +205,7 @@ export default function ToolImageAttachment({ attachment }: Props) {
           ref={mediaRef}
           type="button"
           onClick={() => setZoomed(true)}
+          onContextMenu={handleContextMenu}
           className="group inline-flex max-w-full overflow-hidden rounded-md border border-[var(--line)] bg-[var(--paper-inset)]/30 transition-transform hover:scale-[1.01]"
         >
           <img
@@ -115,12 +234,64 @@ export default function ToolImageAttachment({ attachment }: Props) {
               <img
                 src={urlState.url}
                 alt={attachment.caption || 'Generated image'}
+                onContextMenu={handleContextMenu}
                 className="max-h-full max-w-full"
               />
             </div>,
             document.body,
           )
         : null}
+      {contextMenu
+        ? createPortal(
+            <ContextMenu
+              x={contextMenu.x}
+              y={contextMenu.y}
+              items={contextMenuItems}
+              onClose={closeContextMenu}
+              zIndex={220}
+            />,
+            document.body,
+          )
+        : null}
     </>
   );
+}
+
+async function writeClipboardText(text: string): Promise<void> {
+  if (!navigator.clipboard) {
+    throw new Error('Clipboard text write is unavailable');
+  }
+  await navigator.clipboard.writeText(text);
+}
+
+function getAttachmentFilename(attachment: ToolAttachment): string {
+  const source = attachment.sourcePath ?? attachment.savedPath ?? attachment.refPath;
+  const filename = source.split(/[\\/]/).filter(Boolean).pop();
+  if (filename && filename.includes('.')) return filename;
+  return `tool-image.${mimeToExtension(attachment.mimeType)}`;
+}
+
+function getImageSaveFilter(attachment: ToolAttachment): { name: string; extensions: string[] } {
+  const extension = mimeToExtension(attachment.mimeType);
+  return {
+    name: extension.toUpperCase(),
+    extensions: [extension],
+  };
+}
+
+function mimeToExtension(mimeType: string): string {
+  switch (mimeType.toLowerCase()) {
+    case 'image/jpeg':
+    case 'image/jpg':
+      return 'jpg';
+    case 'image/webp':
+      return 'webp';
+    case 'image/gif':
+      return 'gif';
+    case 'image/svg+xml':
+      return 'svg';
+    case 'image/png':
+    default:
+      return 'png';
+  }
 }

@@ -530,6 +530,8 @@ pub fn run() {
             workspace_files::read_preview::cmd_workspace_read_preview,
             workspace_files::download::cmd_workspace_download_file,
             workspace_files::download::cmd_workspace_download_bytes,
+            workspace_files::attachment_export::cmd_export_tool_attachment,
+            workspace_files::attachment_export::cmd_read_tool_attachment_bytes,
             workspace_files::save_file::cmd_workspace_save_file,
             workspace_files::claude_md::cmd_workspace_read_claude_md,
             workspace_files::claude_md::cmd_workspace_write_claude_md,

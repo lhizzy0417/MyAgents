@@ -26,7 +26,8 @@ export interface ToolAttachment {
 
   /**
    * 落盘绝对路径，**仅在 Tauri 桌面 sidecar 写**（沿用 sessionOwner sidecar 信任根，
-   * 通过 `cmd_read_attachment_base64` 读取时仍需反查 SessionStore 校验三元组）。
+   * 读取/导出字节时走 `refPath` + `cmd_read_tool_attachment_bytes` /
+   * `cmd_export_tool_attachment`，由 session sidecar attachment endpoint 反查注册表）。
    * IM Bot / Cron Sidecar 不写此字段，强制走 refPath HTTP 路径避免跨 sidecar 直读。
    */
   savedPath?: string;

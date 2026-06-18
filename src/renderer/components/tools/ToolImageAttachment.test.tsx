@@ -1,4 +1,4 @@
-import { render, screen } from '@testing-library/react';
+import { fireEvent, render, screen } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 
 import type { ToolAttachment } from '@/types/chat';
@@ -16,6 +16,7 @@ const attachment: ToolAttachment = {
   kind: 'image',
   mimeType: 'image/png',
   refPath: '/api/attachment/tool/session-a/turn-a/image.png',
+  savedPath: '/Users/test/.myagents/generated/tool-attachments/session-a/turn-a/image.png',
   caption: 'Generated reference image',
 };
 
@@ -37,5 +38,15 @@ describe('ToolImageAttachment', () => {
     const caption = screen.getByText('Generated reference image');
     expect(caption).toHaveClass('max-w-full');
     expect(caption).not.toHaveClass('max-w-sm');
+  });
+
+  it('opens the app context menu for image right-click actions', () => {
+    render(<ToolImageAttachment attachment={attachment} />);
+
+    fireEvent.contextMenu(screen.getByRole('button'));
+
+    expect(screen.getByRole('button', { name: '复制图片' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '另存为…' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '复制本地路径' })).toBeInTheDocument();
   });
 });
