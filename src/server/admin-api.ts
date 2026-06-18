@@ -72,7 +72,7 @@ import { loadEnabledAgents } from './agents/agent-loader';
 import { getHomeDirOrNull } from './utils/platform';
 import { join } from 'path';
 import { broadcast } from './sse';
-import { getCronTaskContext, CRON_TASK_EXIT_TEXT } from './tools/cron-tools';
+import { getCronTaskContext, markCronTaskExitRequested, CRON_TASK_EXIT_TEXT } from './tools/cron-tools';
 import { getImCronContext, getSessionCronContext } from './tools/im-cron-tool';
 import { getImMediaContext } from './tools/im-media-tool';
 import { buildReadMeContent } from './tools/generative-ui-tool';
@@ -2526,15 +2526,20 @@ export function handleCronExit(payload: { reason?: string }): AdminResponse {
     return { success: false, error: 'This cron task has "Allow AI to exit" disabled — only the user can stop it from the UI.' };
   }
   const reason = payload.reason?.trim() || 'AI requested task exit';
-  broadcast('cron:task-exit-requested', {
+  const request = markCronTaskExitRequested(reason) ?? {
     taskId: ctx.taskId,
     reason,
     timestamp: new Date().toISOString(),
+  };
+  broadcast('cron:task-exit-requested', {
+    taskId: request.taskId,
+    reason: request.reason,
+    timestamp: request.timestamp,
   });
   return {
     success: true,
-    data: { taskId: ctx.taskId, reason },
-    hint: `${CRON_TASK_EXIT_TEXT}. Reason: ${reason}`,
+    data: { taskId: request.taskId, reason: request.reason },
+    hint: `${CRON_TASK_EXIT_TEXT}. Reason: ${request.reason}`,
   };
 }
 

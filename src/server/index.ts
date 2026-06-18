@@ -115,10 +115,12 @@ import { shouldDropSnapshotPatchOnImSession } from './utils/im-source';
 import {
   setCronTaskContext,
   clearCronTaskContext,
+  consumeCronTaskExitRequest,
   CRON_TASK_COMPLETE_PATTERN,
   CRON_TASK_EXIT_TEXT,
   CRON_TASK_EXIT_REASON_PATTERN,
 } from './tools/cron-tools';
+import { buildCronTaskReminder, type CronScheduleKind } from './utils/cron-reminder';
 import { setImCronContext } from './tools/im-cron-tool';
 // admin-api module (~2900 lines, depends on zod + full config/session/cron surface)
 // is lazy-loaded on first /api/admin/* hit to shave ~150ms off sidecar cold
@@ -839,6 +841,8 @@ type CronExecutePayload = {
   intervalMinutes?: number;
   /** Current execution number, 1-based (for System Prompt context) */
   executionNumber?: number;
+  /** Schedule kind from Rust CronSchedule when available. */
+  scheduleKind?: CronScheduleKind;
 };
 
 function parseArgs(argv: string[]): { agentDir: string; initialPrompt?: string; port: number; sessionId?: string; noPreWarm?: boolean } {
@@ -2850,8 +2854,17 @@ async function main() {
 
         try {
           console.log(`[cron] execute taskId=${taskId} sessionId=${currentSessionId} interval=${intervalMinutes}min exec#=${executionNumber} aiCanExit=${aiCanExit ?? false} prompt="${prompt.slice(0, 100)}..."`);
-          // Wrap cron prompt so AI recognizes it as system-triggered (not a real-time human message)
-          const wrappedPrompt = `<system-reminder>\n<CRON_TASK>\n${prompt}\n</CRON_TASK>\n</system-reminder>`;
+          // Mixed reminder + visible prompt: operational cron instructions stay hidden in
+          // <system-reminder>, while the original task prompt remains the user-visible bubble.
+          const wrappedPrompt = buildCronTaskReminder({
+            prompt,
+            taskId,
+            aiCanExit: aiCanExit ?? false,
+            scheduleKind: payload.scheduleKind,
+            runMode: payload.runMode,
+            intervalMinutes: intervalMinutes ?? 15,
+            executionNumber,
+          });
 
           // PRD #119: intent-driven resolution — see /cron/execute-sync for
           // the full design comment. This endpoint runs against whatever
@@ -3391,9 +3404,18 @@ async function main() {
         try {
           console.log(`[cron] execute-sync taskId=${taskId} runMode=${effectiveRunMode} interval=${intervalMinutes}min exec#${executionNumber} aiCanExit=${aiCanExit ?? false} prompt="${prompt.slice(0, 100)}..."`);
 
-          // Enqueue the message (this starts the async execution)
-          // Wrap cron prompt so AI recognizes it as system-triggered (not a real-time human message)
-          const wrappedPrompt = `<system-reminder>\n<CRON_TASK>\n${prompt}\n</CRON_TASK>\n</system-reminder>`;
+          // Enqueue the message (this starts the async execution).
+          // Mixed reminder + visible prompt keeps cron operations hidden from the UI
+          // while preserving the task text as the visible user bubble.
+          const wrappedPrompt = buildCronTaskReminder({
+            prompt,
+            taskId,
+            aiCanExit: aiCanExit ?? false,
+            scheduleKind: payload.scheduleKind,
+            runMode: effectiveRunMode,
+            intervalMinutes: intervalMinutes ?? 15,
+            executionNumber,
+          });
           console.log('[cron] execute-sync: about to enqueue user message');
 
           let textContent = '';
@@ -3555,6 +3577,12 @@ async function main() {
                 exitReason = reasonMatch[1].trim();
               }
             }
+          }
+
+          const exitRequest = consumeCronTaskExitRequest(effectiveSessionId);
+          if (exitRequest) {
+            aiRequestedExit = true;
+            exitReason = exitRequest.reason;
           }
 
           // Clear cron task context after execution

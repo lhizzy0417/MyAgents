@@ -5206,6 +5206,9 @@ pub struct CronExecutePayload {
     /// Current execution number (1-based, for System Prompt context)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub execution_number: Option<u32>,
+    /// Schedule kind for cron reminder metadata ("at" | "every" | "cron" | "loop").
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub schedule_kind: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -5573,6 +5576,7 @@ pub async fn cmd_execute_cron_task(
         run_mode: runMode,
         interval_minutes: intervalMinutes,
         execution_number: executionNumber,
+        schedule_kind: None,
     };
 
     execute_cron_task(&app_handle, &state, &workspacePath, payload).await

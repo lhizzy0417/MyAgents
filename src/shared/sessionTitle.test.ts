@@ -22,6 +22,22 @@ describe('stripSystemWrapper', () => {
     expect(stripSystemWrapper(raw)).toBe('GitHub Issue 自动化处理');
   });
 
+  it('extracts the task title from mixed cron reminders with visible task text', () => {
+    const raw = [
+      '<system-reminder>',
+      '<CRON_TASK>',
+      'You are running inside a MyAgents scheduled task execution.',
+      'cronTaskId: cron_123',
+      '</CRON_TASK>',
+      '</system-reminder>',
+      '执行任务：# GitHub Issue 自动化处理',
+      '',
+      '每 6 小时自动 triage',
+    ].join('\n');
+
+    expect(stripSystemWrapper(raw)).toBe('GitHub Issue 自动化处理');
+  });
+
   it('recovers content when the wrapper is TRUNCATED before the closing tag (the bug)', () => {
     // This is exactly the shape that used to be stored: slice(0,40) of a wrapped prompt.
     const truncated = '<system-reminder>\n<CRON_TASK>\n执行任务：请你帮 Ethan 查收今天的所有邮件';

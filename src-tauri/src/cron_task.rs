@@ -3467,6 +3467,15 @@ async fn execute_task_directly(
     // Build execution payload
     // execution_number is 1-based (first execution = 1)
     let execution_number = task.execution_count + 1;
+    let schedule_kind = task.schedule.as_ref().map(|schedule| {
+        match schedule {
+            CronSchedule::At { .. } => "at",
+            CronSchedule::Every { .. } => "every",
+            CronSchedule::Cron { .. } => "cron",
+            CronSchedule::Loop => "loop",
+        }
+        .to_string()
+    });
 
     // PRD §9.3.1: if this CronTask is linked to a Task Center task, construct
     // the prompt dynamically from the latest `~/.myagents/tasks/<id>/task.md`
@@ -3594,6 +3603,7 @@ async fn execute_task_directly(
         run_mode: Some(run_mode_str.to_string()),
         interval_minutes: Some(task.interval_minutes),
         execution_number: Some(execution_number),
+        schedule_kind,
     };
 
     let _ = handle.emit("cron:debug", serde_json::json!({

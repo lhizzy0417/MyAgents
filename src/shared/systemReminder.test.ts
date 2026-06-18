@@ -37,6 +37,24 @@ describe('systemReminder', () => {
     expect(stripLeadingSystemReminder(raw)).toBe('Summarize this');
   });
 
+  it('parses mixed cron reminders with hidden operational context and visible task text', () => {
+    const raw = [
+      '<system-reminder>',
+      '<CRON_TASK>',
+      'You are running inside a MyAgents scheduled task execution.',
+      'cronTaskId: cron_123',
+      '</CRON_TASK>',
+      '</system-reminder>',
+      'Goal: polish the wiki',
+    ].join('\n');
+
+    const parsed = parseLeadingSystemReminder(raw);
+    expect(parsed.kind).toBe('CRON_TASK');
+    expect(parsed.body).toContain('cronTaskId: cron_123');
+    expect(parsed.visibleText).toBe('Goal: polish the wiki');
+    expect(stripLeadingSystemReminder(raw)).toBe('Goal: polish the wiki');
+  });
+
   it('treats a pure floating-ball context reminder as non-visible text', () => {
     const raw = buildFloatingBallContextReminder({ screenshotAttached: true });
     expect(stripLeadingSystemReminder(raw)).toBe('');

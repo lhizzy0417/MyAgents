@@ -38,7 +38,14 @@ interface CronTaskContext {
   startedAt: number; // Timestamp for debugging
 }
 
+export interface CronTaskExitRequest {
+  taskId: string;
+  reason: string;
+  timestamp: string;
+}
+
 const cronTaskContextMap = new Map<string, CronTaskContext>();
+const cronTaskExitRequestMap = new Map<string, CronTaskExitRequest>();
 
 // Track the "active" session for backward compatibility
 // This is set when setCronTaskContext is called and used by callers that
@@ -64,6 +71,7 @@ export function setCronTaskContext(taskId: string | null, canExit: boolean = fal
     console.log(`[cron-tools] Context cleared for session: ${key}`);
   } else {
     // Set context for this session
+    cronTaskExitRequestMap.delete(key);
     cronTaskContextMap.set(key, {
       taskId,
       canExit,
@@ -89,6 +97,29 @@ export function getCronTaskContext(sessionId?: string): { taskId: string | null;
   return { taskId: context.taskId, canExit: context.canExit };
 }
 
+export function markCronTaskExitRequested(reason: string, sessionId?: string): CronTaskExitRequest | null {
+  const key = sessionId || activeSessionKey || 'default';
+  const context = cronTaskContextMap.get(key);
+  if (!context) return null;
+
+  const request: CronTaskExitRequest = {
+    taskId: context.taskId,
+    reason,
+    timestamp: new Date().toISOString(),
+  };
+  cronTaskExitRequestMap.set(key, request);
+  return request;
+}
+
+export function consumeCronTaskExitRequest(sessionId?: string): CronTaskExitRequest | null {
+  const key = sessionId || activeSessionKey || 'default';
+  const request = cronTaskExitRequestMap.get(key);
+  if (!request) return null;
+
+  cronTaskExitRequestMap.delete(key);
+  return request;
+}
+
 /**
  * Clear the cron task context
  * Called after task execution completes
@@ -111,6 +142,7 @@ export function clearCronTaskContext(sessionId?: string): void {
  */
 export function clearAllCronTaskContexts(): void {
   cronTaskContextMap.clear();
+  cronTaskExitRequestMap.clear();
   activeSessionKey = null;
   console.log('[cron-tools] All contexts cleared');
 }

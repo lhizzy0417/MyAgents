@@ -29,6 +29,7 @@ export function stripSystemWrapper(raw: string): string {
   if (!text) return '';
 
   const reminder = parseLeadingSystemReminder(text);
+  const isCronReminder = reminder.hasReminder && reminder.kind === 'CRON_TASK';
   if (reminder.hasReminder) {
     if (!reminder.visibleText && reminder.kind === FLOATING_BALL_CONTEXT_TAG) return '';
     text = reminder.visibleText || reminder.body;
@@ -37,10 +38,12 @@ export function stripSystemWrapper(raw: string): string {
   // The `执行任务：<name>` extraction is a CRON-specific convention. Gate it on an
   // actual <CRON_TASK> marker so a normal user message that merely contains
   // "执行任务：" (e.g. "请解释这段日志：执行任务：#123 …") is NOT silently rewritten
-  // to the regex capture. Run it on the PRE-collapse text so the `\n` boundary in
-  // the char-class is honored (a multiline cron prompt stops at the first line
-  // instead of bleeding the body into the title). [adversarial-review fixes #1/#3]
-  if (/<CRON_TASK>/.test(text)) {
+  // to the regex capture. Mixed cron reminders keep <CRON_TASK> hidden in the
+  // parsed reminder body and expose the task prompt as visibleText, so preserve
+  // the reminder kind before replacing `text`. Run the regex on the PRE-collapse
+  // text so the `\n` boundary in the char-class is honored (a multiline cron
+  // prompt stops at the first line instead of bleeding the body into the title).
+  if (isCronReminder || /<CRON_TASK>/.test(text)) {
     const taskTitle = text.match(/执行任务[:：]\s*#?\s*([^。；;\n]+)/);
     if (taskTitle?.[1]?.trim()) {
       return taskTitle[1].trim();
