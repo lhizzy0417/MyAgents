@@ -675,6 +675,7 @@ type SendMessagePayload = {
   // undefined/missing = "keep current provider" (safe default for IM/Cron callers)
   // object = use this specific third-party provider
   providerEnv?: {
+    providerId?: string;
     baseUrl?: string;
     apiKey?: string;
     authType?: 'auth_token' | 'api_key' | 'both' | 'auth_token_clear_api_key';
@@ -796,6 +797,7 @@ type CronExecutePayload = {
   runtimeConfig?: RuntimeConfig;
   model?: string;
   providerEnv?: {
+    providerId?: string;
     baseUrl?: string;
     apiKey?: string;
     authType?: 'auth_token' | 'api_key' | 'both' | 'auth_token_clear_api_key';
@@ -8591,6 +8593,7 @@ async function main() {
               // Legacy frozen env (kept for back-compat); sidecar prefers
               // `providerId` when both are present.
               providerEnv: payloadRuntime === 'builtin' && payload.providerEnv ? {
+                providerId: payload.providerEnv.providerId,
                 baseUrl: payload.providerEnv.baseUrl,
                 apiKey: payload.providerEnv.apiKey,
                 authType: payload.providerEnv.authType,

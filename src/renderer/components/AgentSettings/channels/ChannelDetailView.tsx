@@ -1188,6 +1188,7 @@ export default function ChannelDetailView({
                                 if (provider && provider.type !== 'subscription') {
                                     const aliases = getEffectiveModelAliases(provider, config.providerModelAliases);
                                     providerEnvJson = JSON.stringify({
+                                        providerId: provider.id,
                                         baseUrl: provider.config.baseUrl,
                                         apiKey: apiKeys[provider.id],
                                         authType: provider.authType,

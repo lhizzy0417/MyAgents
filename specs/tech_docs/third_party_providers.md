@@ -140,22 +140,24 @@ interface Provider {
 
 ### 解决方案
 
-检测供应商变化时，**终止当前 SDK 会话并重启**，根据目标 provider 类型决定是否 resume：
+检测供应商变化时，**终止当前 SDK 会话并重启**。重启后是否 resume 旧 SDK transcript 由 `canResumeAcrossProviderBoundary(...)` 统一判断：
 
 ```typescript
 if (providerChanged && querySession) {
-  // Resume 策略：Anthropic 官方会校验 thinking block 签名
-  // 三方 → 官方：不 resume（签名不兼容）
-  // 其他组合：resume（保留上下文）
-  const switchingFromThirdPartyToAnthropic = currentProviderEnv?.baseUrl && !providerEnv?.baseUrl;
-  resumeSessionId = switchingFromThirdPartyToAnthropic ? undefined : systemInitInfo?.session_id;
-
+  const crossesProviderHistoryBoundary = !canResumeAcrossProviderBoundary(
+    toProviderHistoryEnv(currentProviderEnv, currentModel),
+    toProviderHistoryEnv(providerEnv, nextModel),
+  );
   currentProviderEnv = providerEnv;
   abortPersistentSession();  // 统一中止：设置标志 + 唤醒 generator 门控 + interrupt
 
   // 等待旧会话完全终止，避免竞态条件
   if (sessionTerminationPromise) {
     await sessionTerminationPromise;
+  }
+
+  if (crossesProviderHistoryBoundary) {
+    resetForProviderHistoryBoundary(); // sessionRegistered=false，下一次 query({ sessionId }) fresh start
   }
 
   // schedulePreWarm() 会在 finally 中自动触发
@@ -175,27 +177,37 @@ if (providerChanged && querySession) {
 
 ### 问题
 
-Anthropic 官方 API 会在 thinking block 中嵌入签名，resume session 时校验签名。第三方供应商（DeepSeek、GLM 等）即使暴露 Anthropic-compatible API，也只证明 fresh turn 可用，不证明能 replay 另一个供应商生成的完整 SDK transcript。
+Anthropic 官方 API 会在 thinking block 中嵌入签名，resume session 时校验签名。普通第三方供应商（DeepSeek、GLM 等）默认进入 portable protocol family：provider env 变化仍会重启 SDK subprocess，但重启后可以 resume 旧 transcript，保留用户在同一会话中切换模型 / provider 的工作流。
 
 从第三方供应商切换到 Anthropic 官方后 resume session 会报错：`Invalid signature in thinking block`
-从三方 A 切换到三方 B 后 resume 也可能在 SDK/native 侧提前崩溃或被上游拒绝，典型表现是子进程在 `system_init` 前退出且只给 generic `Unexpected`。
+如果未来确认某个 provider / model / endpoint 无法 replay 其他历史，才把它加入 `src/shared/providerHistory.ts::ISOLATED_PROVIDER_HISTORY_KEYS`。进入或离开 isolated entry 时，前端必须提示"创建新会话"，后端必须 fresh SDK session reset；isolated entries 之间也不能共享 transcript。
 
 ### Resume 规则
 
 | From | To | Resume | 原因 |
 |------|-----|--------|------|
-| 三方（有 baseUrl） | Anthropic 官方（无 baseUrl） | ❌ 新 session | 签名 / transcript replay 边界不同 |
-| Anthropic 官方 | 三方 | ❌ 新 session | provider 历史边界不同 |
-| 三方 A | 三方 B | ❌ 新 session | 三方兼容层只保证 fresh turn，不保证跨供应商 transcript replay |
+| 三方 portable | Anthropic 官方 | ❌ 新 session | Anthropic signed history 边界不同 |
+| Anthropic 官方 | 三方 portable | ❌ 新 session | Anthropic signed history 边界不同 |
+| 三方 portable A | 三方 portable B（同协议） | ✅ resume | 保留同一会话内切换 GLM / DeepSeek 等普通三方模型的工作流 |
+| Anthropic-protocol 三方 | OpenAI-bridge 三方 | ❌ 新 session | SDK transcript 经过的协议入口不同 |
+| 任意 non-isolated | isolated entry | ❌ 新 session | 已知该 entry 不支持跨边界 replay |
+| isolated entry A | isolated entry B | ❌ 新 session | isolated entries 不互串 transcript |
 | Anthropic 订阅 | Anthropic API Key | ✅ resume | 签名兼容 |
 
 ### 区分标准
 
 ```typescript
 // Provider history identity:
-// - no baseUrl, or https://api.anthropic.com = Anthropic family
-// - otherwise protocol + normalized baseUrl = one third-party family
-// Only identical identities may resume the SDK transcript.
+// - no baseUrl, or https://api.anthropic.com = Anthropic signed family
+// - ordinary third-party providers share `third-party:<apiProtocol>`
+// - entries listed in ISOLATED_PROVIDER_HISTORY_KEYS get an `isolated:*`
+//   identity that also includes provider/model/endpoint context
+//
+// ISOLATED_PROVIDER_HISTORY_KEYS is intentionally empty initially.
+// Add exact keys only after a concrete incompatibility is confirmed:
+// - provider:<providerId>
+// - model:<modelId>
+// - endpoint:<apiProtocol>:<normalizedBaseUrl>
 ```
 
 ---

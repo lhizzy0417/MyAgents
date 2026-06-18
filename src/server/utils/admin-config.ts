@@ -425,6 +425,8 @@ export function isProviderDisabled(providerId: string, config?: AdminAppConfig):
 
 /** Provider environment for SDK subprocess (structural match with ProviderEnv in agent-session.ts) */
 export interface ResolvedProviderEnv {
+  /** Provider registry id. Metadata only: not forwarded as an SDK env var. */
+  providerId?: string;
   baseUrl?: string;
   apiKey?: string;
   authType?: 'auth_token' | 'api_key' | 'both' | 'auth_token_clear_api_key';
@@ -465,6 +467,7 @@ export function resolveProviderEnv(
   // Extract provider config fields (same shape as frontend Chat.tsx builds)
   const providerConfig = (provider.config ?? {}) as Record<string, unknown>;
   const result: ResolvedProviderEnv = {
+    providerId,
     baseUrl: providerConfig.baseUrl ? String(providerConfig.baseUrl) : undefined,
     apiKey,
     authType: (provider.authType as ResolvedProviderEnv['authType']) ?? 'both',

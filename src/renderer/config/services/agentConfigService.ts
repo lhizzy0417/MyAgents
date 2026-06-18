@@ -326,6 +326,7 @@ export async function patchAgentConfig(
         const latestConfig = await loadAppConfig();
         const aliases = getEffectiveModelAliases(provider, latestConfig.providerModelAliases);
         resolvedProviderEnvJson = JSON.stringify({
+          providerId: provider.id,
           baseUrl: provider.config.baseUrl,
           apiKey: apiKeys[provider.id],
           authType: provider.authType,

@@ -107,11 +107,22 @@ function getRuntimeDisplayLabel(runtime: RuntimeType | undefined): string {
   }
 }
 
-function toProviderHistoryEnv(provider: Pick<Provider, 'type' | 'config' | 'apiProtocol'> | undefined): ProviderHistoryEnv | undefined {
-  if (!provider || provider.type === 'subscription') return undefined;
+function toProviderHistoryEnv(
+  provider: Pick<Provider, 'id' | 'type' | 'config' | 'apiProtocol'> | undefined,
+  model?: string,
+): ProviderHistoryEnv | undefined {
+  if (!provider) return model ? { model } : undefined;
+  if (provider.type === 'subscription') {
+    return {
+      providerId: provider.id,
+      model,
+    };
+  }
   return {
+    providerId: provider.id,
     baseUrl: provider.config.baseUrl,
     apiProtocol: provider.apiProtocol,
+    model,
   };
 }
 
@@ -310,6 +321,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
     if (!provider || provider.type === 'subscription') return undefined;
     const aliases = getEffectiveModelAliases(provider, configRef.current.providerModelAliases);
     return {
+      providerId: provider.id,
       baseUrl: provider.config.baseUrl,
       apiKey: apiKeysRef.current[provider.id],
       authType: provider.authType,
@@ -2505,6 +2517,14 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
       // Provider unchanged but caller passed a specific model — treat as model change.
       // Same dual-write policy as handleModelChange (PRD §4.3 rule 2).
       if (targetModel) {
+        const canResumeProviderHistory = canResumeAcrossProviderBoundary(
+          toProviderHistoryEnv(currentProvider, selectedModel),
+          toProviderHistoryEnv(currentProvider, targetModel),
+        );
+        if (!canResumeProviderHistory && messagesRef.current.length > 0) {
+          setPendingProviderSwitch({ providerId, model: targetModel });
+          return;
+        }
         setSelectedModel(targetModel);
         void persistTabConfigChange({ model: targetModel });
       }
@@ -2517,12 +2537,13 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
     const newProvider = providers.find(p => p.id === providerId);
     const model = targetModel ?? newProvider?.primaryModel;
     const canResumeProviderHistory = canResumeAcrossProviderBoundary(
-      toProviderHistoryEnv(currentProvider),
-      toProviderHistoryEnv(newProvider),
+      toProviderHistoryEnv(currentProvider, selectedModel),
+      toProviderHistoryEnv(newProvider, model),
     );
 
     // Existing SDK transcripts only need a new tab when crossing provider-history
-    // families. Anthropic subscription/API key can still switch in place.
+    // families. Ordinary third-party providers share a portable protocol family;
+    // entries in providerHistory's isolated set intentionally do not.
     if (!canResumeProviderHistory && messagesRef.current.length > 0) {
       setPendingProviderSwitch({ providerId, model });
       return;  // Don't update state — dialog will handle it
@@ -2544,7 +2565,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
     // the user's latest preference (PRD v0.1.69 §4.3 rule 2 dual-write).
     void persistTabConfigChange({ providerId, model: model ?? null });
   // eslint-disable-next-line react-hooks/exhaustive-deps -- narrowed deps; messagesRef avoids dep on messages array
-  }, [selectedProviderId, providers, currentProvider?.id, currentProvider?.type, currentProvider?.config.baseUrl, currentProvider?.apiProtocol, persistTabConfigChange]);
+  }, [selectedProviderId, selectedModel, providers, currentProvider?.id, currentProvider?.type, currentProvider?.config.baseUrl, currentProvider?.apiProtocol, persistTabConfigChange]);
 
   // Handle model change with analytics tracking.
   // Dual-write per PRD v0.1.69 §4.3 rule 2 "写 Session + 向上写 Agent": owned sessions
@@ -2559,9 +2580,20 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
     // Track model_switch event
     track('model_switch', { model });
 
+    const canResumeProviderHistory = canResumeAcrossProviderBoundary(
+      toProviderHistoryEnv(currentProvider, selectedModel),
+      toProviderHistoryEnv(currentProvider, model),
+    );
+    const currentProviderId = selectedProviderId ?? currentProvider?.id;
+    if (!canResumeProviderHistory && messagesRef.current.length > 0 && currentProviderId) {
+      setPendingProviderSwitch({ providerId: currentProviderId, model });
+      return;
+    }
+
     setSelectedModel(model);
     void persistTabConfigChange({ model });
-  }, [selectedModel, persistTabConfigChange]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- narrowed deps; currentProvider fields cover toProviderHistoryEnv inputs
+  }, [selectedModel, currentProvider?.id, currentProvider?.type, currentProvider?.config.baseUrl, currentProvider?.apiProtocol, selectedProviderId, persistTabConfigChange]);
 
   // External-runtime model change. Same dual-write policy as builtin
   // `handleModelChange`, routed through `runtimeModel` so the helper writes
@@ -2920,8 +2952,9 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
     onForkSession(session.id, agentDir, `${runtimeLabel} Session`);
   }, [pendingRuntimeChange, currentAgent, onForkSession, agentDir]);
 
-  // Provider switch confirm: save new provider to project, create new session in new tab.
-  // Current tab stays unchanged with its original provider-bound SDK transcript.
+  // Provider/model history-boundary confirm: save the requested selection to
+  // project, create a new session in a new tab, and leave the current tab on
+  // its original SDK transcript.
   const confirmProviderSwitch = useCallback(async () => {
     const pending = pendingProviderSwitch;
     setPendingProviderSwitch(null);
@@ -4381,11 +4414,11 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
         );
       })()}
 
-      {/* Provider Switch Confirm Dialog */}
+      {/* Provider / Model History-Boundary Confirm Dialog */}
       {pendingProviderSwitch && (
         <ConfirmDialog
-          title="切换 Provider"
-          message="当前会话的历史记录绑定在原 Provider 下。切换后将保留当前会话，并在新 Tab 打开一个使用新 Provider 的会话。"
+          title="切换模型/Provider"
+          message="当前会话的历史记录不能安全切换到目标模型/Provider。切换后将保留当前会话，并在新 Tab 打开一个使用新模型/Provider 的会话。"
           confirmText="创建新会话"
           cancelText="取消"
           onConfirm={confirmProviderSwitch}

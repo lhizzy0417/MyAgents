@@ -34,6 +34,7 @@ export interface SendMessagePayload {
   backgroundAgentPermissionMode?: 'inherit' | 'fullAgency';
   /** Provider environment variables (baseUrl, apiKey, authType) for third-party providers */
   providerEnv?: {
+    providerId?: string;
     baseUrl?: string;
     apiKey?: string;
     authType?: 'auth_token' | 'api_key' | 'both' | 'auth_token_clear_api_key';

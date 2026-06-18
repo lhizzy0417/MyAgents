@@ -67,7 +67,7 @@ import { deriveSessionTitle } from '../shared/sessionTitle';
 import { workspacePathsEqual } from '../shared/workspacePath';
 import { normalizeReasoningEffort, isSdkEffortLevel } from '../shared/reasoningEffort';
 import { computeContextUsage } from '../shared/contextUsage';
-import { canResumeAcrossProviderBoundary } from '../shared/providerHistory';
+import { canResumeAcrossProviderBoundary, type ProviderHistoryEnv } from '../shared/providerHistory';
 import {
   chooseBuiltinContextUsageModel,
   inferContextWindowFromSdkModelTag,
@@ -634,6 +634,7 @@ type RestartReason =
   | 'oauth'        // MCP OAuth token acquired/refreshed
   | 'model-window'  // setSessionModel — contextLength crossed a boundary, need to reinject CLAUDE_CODE_AUTO_COMPACT_WINDOW
   | 'model-aliases' // setSessionModel — collapsed provider aliases now target a different active model
+  | 'provider-history' // setSessionModel — future isolated model/provider boundary requires fresh SDK transcript
   | 'plugins'      // PRD 0.2.17 — Claude plugin install / uninstall / toggle
   | 'reasoning-effort'; // #324 — Anthropic-protocol effort is a query()-spawn option, needs respawn
 
@@ -1246,6 +1247,8 @@ let currentModel: string | undefined = undefined;
 let currentReasoningEffort: string | undefined = undefined;
 // Provider environment config (baseUrl, apiKey, authType) for third-party providers
 export type ProviderEnv = {
+  /** Provider registry id. Metadata only: not forwarded as an SDK env var. */
+  providerId?: string;
   baseUrl?: string;
   apiKey?: string;
   authType?: 'auth_token' | 'api_key' | 'both' | 'auth_token_clear_api_key';
@@ -1258,6 +1261,16 @@ export type ProviderEnv = {
 };
 let currentProviderEnv: ProviderEnv | undefined = undefined;
 let pendingProviderHistoryBoundaryReset = false;
+
+function toProviderHistoryEnv(providerEnv: ProviderEnv | undefined, model?: string): ProviderHistoryEnv | undefined {
+  if (!providerEnv) return model ? { model } : undefined;
+  return {
+    providerId: providerEnv.providerId,
+    baseUrl: providerEnv.baseUrl,
+    apiProtocol: providerEnv.apiProtocol,
+    model,
+  };
+}
 
 // OpenAI Bridge: sidecar port for loopback. Per-token bridge state lives
 // in `./openai-bridge/bridge-registry`; this module owns its session's
@@ -2783,8 +2796,28 @@ export function setSessionModel(model: string, opts?: { imConfigSync?: boolean }
 
   const oldModel = currentModel;
   const aliasEnvChanged = modelAliasEnvChangesForModel(currentProviderEnv?.modelAliases, oldModel, model);
+  const crossesProviderHistoryBoundary = !canResumeAcrossProviderBoundary(
+    toProviderHistoryEnv(currentProviderEnv, oldModel),
+    toProviderHistoryEnv(currentProviderEnv, model),
+  );
   currentModel = model;
   console.log(`[agent] session model set: ${oldModel ?? 'undefined'} -> ${model}`);
+
+  if (crossesProviderHistoryBoundary) {
+    if (isProcessing && !isPreWarming) {
+      pendingProviderHistoryBoundaryReset = true;
+      console.log('[agent] model switch crosses provider-history boundary during active turn -> deferred fresh SDK session');
+      if (querySession) scheduleDeferredRestart('provider-history');
+    } else {
+      resetForProviderHistoryBoundary();
+      console.log('[agent] model switch crosses provider-history boundary -> created fresh SDK session id');
+      if (querySession) {
+        abortPersistentSession();
+        schedulePreWarm();
+      }
+    }
+    return;
+  }
 
   // Apply model change to SDK subprocess immediately (including during pre-warm).
   // Without this, changing model during pre-warm creates a desync:
@@ -2947,7 +2980,10 @@ export function setSessionProviderEnv(providerEnv: ProviderEnv | undefined): voi
   // Must check BEFORE updating currentProviderEnv.
   // Note: Desktop Chat also shows a ConfirmDialog for non-empty provider switches, but this
   // backend guard is defense-in-depth for non-frontend callers (IM Bot, Cron, Agent Channel).
-  const crossesProviderHistoryBoundary = !canResumeAcrossProviderBoundary(currentProviderEnv, providerEnv);
+  const crossesProviderHistoryBoundary = !canResumeAcrossProviderBoundary(
+    toProviderHistoryEnv(currentProviderEnv, currentModel),
+    toProviderHistoryEnv(providerEnv, currentModel),
+  );
   if (crossesProviderHistoryBoundary) {
     if (isProcessing && !isPreWarming) {
       pendingProviderHistoryBoundaryReset = true;
@@ -2999,7 +3035,8 @@ export function setSessionProviderEnv(providerEnv: ProviderEnv | undefined): voi
 function providerEnvEqual(a: ProviderEnv | undefined, b: ProviderEnv | undefined): boolean {
   if (!a && !b) return true;
   if (!a || !b) return false;
-  return a.baseUrl === b.baseUrl
+  return a.providerId === b.providerId
+    && a.baseUrl === b.baseUrl
     && a.apiKey === b.apiKey
     && a.authType === b.authType
     && a.apiProtocol === b.apiProtocol
@@ -7710,18 +7747,26 @@ export async function enqueueUserMessage(
       ? currentProviderEnv !== undefined
       : providerEnv !== undefined && !providerEnvEqual(currentProviderEnv, effectiveProviderEnv)
   );
-  const crossesProviderHistoryBoundary = providerChanged
-    && !canResumeAcrossProviderBoundary(currentProviderEnv, effectiveProviderEnv);
+  const nextModel = model ?? currentModel;
+  const modelChanged = !isSessionBusy && model !== undefined && model !== currentModel;
+  const crossesProviderHistoryBoundary = !isSessionBusy
+    && (providerChanged || modelChanged)
+    && !canResumeAcrossProviderBoundary(
+      toProviderHistoryEnv(currentProviderEnv, currentModel),
+      toProviderHistoryEnv(effectiveProviderEnv, nextModel),
+    );
 
-  if (providerChanged && querySession) {
+  if ((providerChanged || crossesProviderHistoryBoundary) && querySession) {
     const fromLabel = currentProviderEnv?.baseUrl ?? 'anthropic';
     const toLabel = effectiveProviderEnv?.baseUrl ?? 'anthropic';
-    if (isDebugMode) console.log(`[agent] provider changed from ${fromLabel} to ${toLabel}, restarting session`);
+    if (isDebugMode) console.log(`[agent] provider/history changed from ${fromLabel} to ${toLabel}, restarting session`);
 
-    // Update provider env BEFORE terminating so the new session picks it up
-    currentProviderEnv = effectiveProviderEnv; // undefined for subscription, object for API
-    // PRD #124: keep bridge registration in sync (handles all provider transitions).
-    ensureActiveSessionBridgeRegistered();
+    if (providerChanged) {
+      // Update provider env BEFORE terminating so the new session picks it up
+      currentProviderEnv = effectiveProviderEnv; // undefined for subscription, object for API
+      // PRD #124: keep bridge registration in sync (handles all provider transitions).
+      ensureActiveSessionBridgeRegistered();
+    }
     // Terminate current session - it will restart automatically when processing the message
     abortPersistentSession();
     // Wait for the current session to fully terminate before proceeding
@@ -7758,14 +7803,16 @@ export async function enqueueUserMessage(
     }
 
     if (isDebugMode) console.log(`[agent] session terminated for provider switch`);
-  } else if (providerChanged) {
+  } else if (providerChanged || crossesProviderHistoryBoundary) {
     if (crossesProviderHistoryBoundary) {
       resetForProviderHistoryBoundary();
       console.log('[agent] Fresh session: provider history boundary changed');
     }
-    currentProviderEnv = effectiveProviderEnv;
-    ensureActiveSessionBridgeRegistered();
-    if (isDebugMode) console.log(`[agent] provider env changed without active query: baseUrl=${effectiveProviderEnv?.baseUrl ?? 'anthropic'}`);
+    if (providerChanged) {
+      currentProviderEnv = effectiveProviderEnv;
+      ensureActiveSessionBridgeRegistered();
+      if (isDebugMode) console.log(`[agent] provider env changed without active query: baseUrl=${effectiveProviderEnv?.baseUrl ?? 'anthropic'}`);
+    }
   } else if (effectiveProviderEnv) {
     // Provider not changed (or first message with API provider), just update tracking
     currentProviderEnv = effectiveProviderEnv;

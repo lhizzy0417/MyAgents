@@ -83,7 +83,7 @@ export interface CronTask {
   model?: string;
   /** PRD 0.2.9 — Legacy snapshot (deprecated for new writes). Kept on the
    *  read shape so the renderer can detect / display still-frozen tasks. */
-  providerEnv?: { baseUrl?: string; apiKey?: string; authType?: 'auth_token' | 'api_key' | 'both' | 'auth_token_clear_api_key'; apiProtocol?: 'anthropic' | 'openai'; maxOutputTokens?: number; maxOutputTokensParamName?: 'max_tokens' | 'max_completion_tokens' | 'max_output_tokens'; upstreamFormat?: 'chat_completions' | 'responses' };
+  providerEnv?: CronTaskProviderEnv;
   /** PRD 0.2.9 — Per-task provider id (live-resolved by sidecar). */
   providerId?: string;
   /** PRD #119 / 0.2.9: routing intent. Defaults to `followAgent` (legacy)
@@ -115,6 +115,7 @@ export interface CronTask {
  * Provider environment for third-party API access
  */
 export interface CronTaskProviderEnv {
+  providerId?: string;
   baseUrl?: string;
   apiKey?: string;
   authType?: 'auth_token' | 'api_key' | 'both' | 'auth_token_clear_api_key';
