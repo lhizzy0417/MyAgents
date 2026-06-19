@@ -12,7 +12,7 @@ import { RENDERER_PERF_PHASE } from '../../shared/perfTrace';
 import { open } from '@tauri-apps/plugin-dialog';
 
 import { track } from '@/analytics';
-import type { EntryIntent, Surface } from '@/analytics';
+import type { EntryIntent, HistoryEntrySource, Surface } from '@/analytics';
 import { type ImageAttachment } from '@/components/SimpleChatInput';
 import { useToast } from '@/components/Toast';
 import { UnifiedLogsPanel } from '@/components/UnifiedLogsPanel';
@@ -51,7 +51,7 @@ interface LauncherProps {
         project: Project,
         sessionId?: string,
         initialMessage?: InitialMessage,
-        analyticsContext?: { surface: Surface; entryIntent: EntryIntent },
+        analyticsContext?: { surface?: Surface; entryIntent?: EntryIntent; historyEntrySource?: HistoryEntrySource },
     ) => void;
     isStarting?: boolean;
     startError?: string | null;
@@ -679,7 +679,7 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
     const [pendingFolderName, setPendingFolderName] = useState('');
     const [pendingDefaultPath, setPendingDefaultPath] = useState('');
 
-    const handleLaunch = useCallback((project: Project, sessionId?: string) => {
+    const handleLaunch = useCallback((project: Project, sessionId?: string, historyEntrySource?: HistoryEntrySource) => {
         // Mark the TRUE click moment (before any state set / handler latency) so
         // the unified log shows card_click → launch_start → launch_flip →
         // useCronTask(chat mount) → launch_ensured — i.e. the real click→chat-painted
@@ -695,12 +695,14 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
             project,
             sessionId,
             undefined,
-            sessionId ? undefined : { surface: 'agent_card', entryIntent: 'open_workspace' },
+            sessionId
+                ? { historyEntrySource: historyEntrySource ?? 'launcher_recent' }
+                : { surface: 'agent_card', entryIntent: 'open_workspace' },
         );
     }, [touchProject, onLaunchProject]);
 
-    const handleOpenTask = useCallback((session: SessionMetadata, project: Project) => {
-        handleLaunch(project, session.id);
+    const handleOpenTask = useCallback((session: SessionMetadata, project: Project, historyEntrySource: HistoryEntrySource = 'launcher_recent') => {
+        handleLaunch(project, session.id, historyEntrySource);
     }, [handleLaunch]);
 
     const [overlayMode, setOverlayMode] = useState<'default' | 'search'>('default');
@@ -709,7 +711,7 @@ export default function Launcher({ onLaunchProject, isStarting, startError: _sta
 
     // Stable callback for overlay session open (avoids inline function in render)
     const handleOverlayOpenTask = useCallback((session: SessionMetadata, project: Project) => {
-        handleOpenTask(session, project);
+        handleOpenTask(session, project, 'launcher_overlay');
         handleCloseOverlay();
     }, [handleOpenTask, handleCloseOverlay]);
 

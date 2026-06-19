@@ -341,7 +341,7 @@ export function ViewSessionButton({ task }: { task?: Task }) {
     if (!task.workspacePath) return;
     window.dispatchEvent(
       new CustomEvent(CUSTOM_EVENTS.OPEN_SESSION_IN_NEW_TAB, {
-        detail: { sessionId, workspacePath: task.workspacePath },
+        detail: { sessionId, workspacePath: task.workspacePath, historyEntrySource: 'task_run_history' },
       }),
     );
   };
@@ -376,4 +376,3 @@ function formatRecurring(task?: Task): string | null {
   }
   return null;
 }
-

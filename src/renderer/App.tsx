@@ -14,7 +14,7 @@ import {
   hashAgentName,
   hashAgentNameSync,
 } from '@/analytics';
-import type { AssistantEntry, EntryIntent, PendingSessionBirthContext, Surface } from '@/analytics';
+import type { AssistantEntry, EntryIntent, HistoryEntrySource, PendingSessionBirthContext, Surface } from '@/analytics';
 import { stopTabSidecar, startGlobalSidecar, initGlobalSidecarReadyPromise, markGlobalSidecarReady, getGlobalServerUrl, getSessionActivation, updateSessionTab, ensureSessionSidecar, releaseSessionSidecar, activateSession, deactivateSession, upgradeSessionId, getSessionPort, hasSessionSidecar, getSessionGeneration, stopSseProxy, startBackgroundCompletion, cancelBackgroundCompletion, updateGlobalServerUrl, canRestoreSession, setAppActiveCorrelation } from '@/api/tauriClient';
 import ConfirmDialog from '@/components/ConfirmDialog';
 import BugReportOverlay from '@/components/BugReportOverlay';
@@ -121,9 +121,10 @@ async function resolveSessionRuntimeForOpen(
 }
 
 export interface LaunchProjectAnalyticsContext {
-  surface: Surface;
-  entryIntent: EntryIntent;
+  surface?: Surface;
+  entryIntent?: EntryIntent;
   assistantEntry?: AssistantEntry;
+  historyEntrySource?: HistoryEntrySource;
 }
 
 // ============================================================
@@ -155,8 +156,8 @@ interface TabContentProps {
   onLaunchProject: (project: Project, sessionId?: string, initialMessage?: InitialMessage, analyticsContext?: LaunchProjectAnalyticsContext) => void;
   // Chat callbacks
   onBack: () => Promise<void>;
-  onSwitchSession: (tabId: string, sessionId: string) => Promise<void>;
-  onOpenSessionInNewTab: (tabId: string, sessionId: string, title: string) => Promise<void>;
+  onSwitchSession: (tabId: string, sessionId: string, historyEntrySource?: HistoryEntrySource) => Promise<void>;
+  onOpenSessionInNewTab: (tabId: string, sessionId: string, title: string, historyEntrySource?: HistoryEntrySource) => Promise<void>;
   onNewSession: (tabId: string) => Promise<boolean>;
   onUpdateGenerating: (tabId: string, isGenerating: boolean) => void;
   onUpdateTitle: (tabId: string, title: string) => void;
@@ -257,8 +258,8 @@ export const MemoizedTabContent = memo(function TabContent({
           <Suspense fallback={<ChatBootOverlay />}>
             <Chat
               onBack={onBack}
-              onSwitchSession={(sessionId) => onSwitchSession(tab.id, sessionId)}
-              onOpenSessionInNewTab={(sessionId, title) => onOpenSessionInNewTab(tab.id, sessionId, title)}
+              onSwitchSession={(sessionId, historyEntrySource) => onSwitchSession(tab.id, sessionId, historyEntrySource)}
+              onOpenSessionInNewTab={(sessionId, title) => onOpenSessionInNewTab(tab.id, sessionId, title, 'chat_dropdown_new_tab')}
               onNewSession={() => onNewSession(tab.id)}
               initialMessage={tab.initialMessage}
               onInitialMessageConsumed={() => onClearInitialMessage(tab.id)}
@@ -623,6 +624,46 @@ export default function App() {
   // handleSwitchSession useCallback deps (it's intentionally a stable empty-deps callback).
   const configRef = useRef(config);
   configRef.current = config;
+
+  const trackHistorySessionOpen = useCallback((
+    sessionId: string,
+    agentDir: string,
+    runtime: RuntimeType,
+    entrySource: HistoryEntrySource,
+  ) => {
+    const cfg = configRef.current;
+    const agent = getAgentByWorkspacePath(cfg, agentDir);
+    track('history_open', {
+      agent_hash: hashAgentNameSync(agent?.name ?? null),
+      runtime,
+      session_id: sessionId,
+      entry_source: entrySource,
+    });
+  }, []);
+
+  const trackHistorySessionOpenAsync = useCallback((
+    sessionId: string,
+    agentDir: string,
+    entrySource: HistoryEntrySource,
+  ) => {
+    void (async () => {
+      const cfg = configRef.current;
+      const agent = getAgentByWorkspacePath(cfg, agentDir);
+      const runtime = await resolveSessionRuntimeForOpen(
+        sessionId,
+        normalizeRuntime(agent?.runtime),
+        cfg?.multiAgentRuntime,
+      );
+      track('history_open', {
+        agent_hash: hashAgentNameSync(agent?.name ?? null),
+        runtime,
+        session_id: sessionId,
+        entry_source: entrySource,
+      });
+    })().catch((error) => {
+      console.warn(`[App] Failed to track history_open for session ${sessionId}:`, error);
+    });
+  }, []);
 
   // Toast (ref-stabilized per CLAUDE.md rules)
   const toast = useToast();
@@ -1299,11 +1340,14 @@ export default function App() {
       // into the launcher input bucket.
       const cfg = configRef.current;
       const agent = getAgentByWorkspacePath(cfg, project.path);
-      const launchContext = analyticsContext ?? (
-        initialMessage
-          ? { surface: 'launcher_input' as const, entryIntent: 'send_message' as const }
-          : { surface: 'agent_card' as const, entryIntent: 'open_workspace' as const }
-      );
+      const fallbackLaunchContext = initialMessage
+        ? { surface: 'launcher_input' as const, entryIntent: 'send_message' as const }
+        : { surface: 'agent_card' as const, entryIntent: 'open_workspace' as const };
+      const launchContext = {
+        surface: analyticsContext?.surface ?? fallbackLaunchContext.surface,
+        entryIntent: analyticsContext?.entryIntent ?? fallbackLaunchContext.entryIntent,
+        assistantEntry: analyticsContext?.assistantEntry,
+      };
       pendingSurfaceForLaunch = {
         surface: launchContext.surface,
         entryIntent: launchContext.entryIntent,
@@ -1361,11 +1405,12 @@ export default function App() {
         // runtime (targetRuntime, from session metadata) — matches the sidecar
         // spawn runtime and thus server-side ai_turn_complete.runtime — rather
         // than the agent's possibly-drifted current config.
-        track('history_open', {
-          agent_hash: hashAgentNameSync(getAgentByWorkspacePath(cfg, project.path)?.name ?? null),
-          runtime: targetRuntime,
-          session_id: sessionId,
-        });
+        trackHistorySessionOpen(
+          sessionId,
+          project.path,
+          targetRuntime,
+          analyticsContext?.historyEntrySource ?? 'launcher_recent',
+        );
         const currentRuntime = activeTab?.sessionId ? resolvedCurrentRuntime : targetRuntime;
         const plan = planSessionOpen({
           tabs: tabsRef.current,
@@ -1714,7 +1759,7 @@ export default function App() {
       launchingTabRef.current = null;
       setLoadingTabs((prev) => ({ ...prev, [activeTabId]: false, [targetTabId]: false }));
     }
-  }, [setActiveTabId]);
+  }, [setActiveTabId, trackHistorySessionOpen]);
 
   // Clear initialMessage from a tab after it has been consumed by Chat
   const clearInitialMessage = useCallback((tabId: string) => {
@@ -1887,10 +1932,23 @@ export default function App() {
    * The real activation is fetched (not hard-coded null) so a cron-owned
    * session routes through the activation-preserving attach path.
    */
-  const handleOpenSessionInNewTab = useCallback(async (tabId: string, sessionId: string, title: string) => {
+  const handleOpenSessionInNewTab = useCallback(async (
+    tabId: string,
+    sessionId: string,
+    title: string,
+    historyEntrySource: HistoryEntrySource = 'chat_dropdown_new_tab',
+  ) => {
     if (openingInNewTabRef.current.has(sessionId)) return;
     openingInNewTabRef.current.add(sessionId);
     try {
+      const sourceTab = tabsRef.current.find(t => t.id === tabId);
+      const sessionAgentDir = sourceTab?.agentDir;
+      if (!sessionAgentDir) {
+        console.error('[App] Cannot open session in new tab: source tab has no agentDir');
+        return;
+      }
+      trackHistorySessionOpenAsync(sessionId, sessionAgentDir, historyEntrySource);
+
       const activation = await getSessionActivation(sessionId);
       const plan = planSessionOpen({
         tabs: tabsRef.current,
@@ -1904,27 +1962,28 @@ export default function App() {
         setActiveTabId(plan.tabId);
         return;
       }
-      const sourceTab = tabsRef.current.find(t => t.id === tabId);
-      const sessionAgentDir = sourceTab?.agentDir;
-      if (!sessionAgentDir) {
-        console.error('[App] Cannot open session in new tab: source tab has no agentDir');
-        return;
-      }
       await spawnTabForExistingSession(sessionId, sessionAgentDir, title || getFolderName(sessionAgentDir), {
         preserveCronActivation: plan.type === 'attach-existing-sidecar',
       });
     } finally {
       openingInNewTabRef.current.delete(sessionId);
     }
-  }, [setActiveTabId, spawnTabForExistingSession]);
+  }, [setActiveTabId, spawnTabForExistingSession, trackHistorySessionOpenAsync]);
 
   /**
    * Handle session switch from within Chat (history dropdown)
    * Implements Session singleton with all 4 scenarios
    */
-  const handleSwitchSession = useCallback(async (tabId: string, sessionId: string) => {
+  const handleSwitchSession = useCallback(async (
+    tabId: string,
+    sessionId: string,
+    historyEntrySource: HistoryEntrySource = 'chat_dropdown',
+  ) => {
     const tabsSnapshot = tabsRef.current;
     const currentTab = tabsSnapshot.find(t => t.id === tabId);
+    if (currentTab?.agentDir) {
+      trackHistorySessionOpenAsync(sessionId, currentTab.agentDir, historyEntrySource);
+    }
 
     // Fast path: Session already open in a Tab → Jump to that Tab.
     // Skip the ~100ms of runtime/activation/cron IO below if we already know we're
@@ -2257,7 +2316,7 @@ export default function App() {
     // spawnTabForExistingSession has stable identity ([] deps), so listing it
     // keeps exhaustive-deps happy without changing handleSwitchSession's own
     // stability (callers rely on this being reference-stable).
-  }, [setActiveTabId, spawnTabForExistingSession]);
+  }, [setActiveTabId, spawnTabForExistingSession, trackHistorySessionOpenAsync]);
 
   const handleBackToLauncher = useCallback(async () => {
     const activeTabId = activeTabIdRef.current;
@@ -2921,8 +2980,9 @@ export default function App() {
         sessionId: string;
         workspacePath: string;
         preview?: { path?: string; initialLineNumber?: number };
+        historyEntrySource?: HistoryEntrySource;
       }>;
-      const { sessionId, workspacePath, preview } = event.detail ?? {};
+      const { sessionId, workspacePath, preview, historyEntrySource } = event.detail ?? {};
       if (!sessionId || !workspacePath) return;
       const pendingFilePreview: FilePreviewIntent | undefined = preview?.path
         ? {
@@ -2939,6 +2999,13 @@ export default function App() {
         console.warn(
           '[App] OPEN_SESSION_IN_NEW_TAB workspace not in projects; opening by path:',
           workspacePath,
+        );
+      }
+      if (historyEntrySource) {
+        trackHistorySessionOpenAsync(
+          sessionId,
+          workspace?.path ?? workspacePath,
+          historyEntrySource,
         );
       }
 
@@ -2985,7 +3052,7 @@ export default function App() {
         handler,
       );
     // eslint-disable-next-line react-hooks/exhaustive-deps -- stable via refs
-  }, []);
+  }, [trackHistorySessionOpenAsync]);
 
   // Listen for JUMP_TO_TAB custom event (Session singleton constraint)
   useEffect(() => {
@@ -3026,6 +3093,15 @@ export default function App() {
         if (resumeSessionId) {
           const existing = tabsRef.current.find(t => t.sessionId === resumeSessionId);
           if (existing) {
+            if (existing.agentDir) {
+              trackHistorySessionOpenAsync(
+                resumeSessionId,
+                existing.agentDir,
+                'settings_helper_history',
+              );
+            } else {
+              console.warn(`[App] Cannot track helper history resume ${resumeSessionId}: existing tab has no agentDir`);
+            }
             if (activeTabIdRef.current !== existing.id) {
               setActiveTabId(existing.id);
             }
@@ -3054,7 +3130,9 @@ export default function App() {
           const newTab = createNewTab();
           openLaunchTabNow(newTab);
           try {
-            await handleLaunchProject(project, resumeSessionId, undefined);
+            await handleLaunchProject(project, resumeSessionId, undefined, {
+              historyEntrySource: 'settings_helper_history',
+            });
           } finally {
             removeUnusedPrecreatedLaunchTab(newTab.id);
           }

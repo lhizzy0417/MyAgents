@@ -2,6 +2,7 @@ import { AlertTriangle, ArrowLeft, Globe, History, Loader2, Plus, PanelRightOpen
 import { forwardRef, lazy, Suspense, useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState } from 'react';
 
 import { track } from '@/analytics';
+import type { HistoryEntrySource } from '@/analytics';
 import { useCloseLayer } from '@/hooks/useCloseLayer';
 import ConfirmDialog from '@/components/ConfirmDialog';
 import WorkspaceIcon from '@/components/launcher/WorkspaceIcon';
@@ -212,7 +213,7 @@ interface ChatProps {
   /** Called when user starts a new session. Returns true if handled externally (background completion started). */
   onNewSession?: () => Promise<boolean>;
   /** Called when user selects a different session from history - uses Session singleton logic */
-  onSwitchSession?: (sessionId: string) => void;
+  onSwitchSession?: (sessionId: string, historyEntrySource?: HistoryEntrySource) => void;
   /** Called when user opens a history session in a NEW tab (vs. switching the current one) */
   onOpenSessionInNewTab?: (sessionId: string, title: string) => void;
   /** Initial message from Launcher for auto-send on workspace open */
@@ -3543,14 +3544,14 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
   }, [forkTarget, apiPost, onForkSession]);
 
   // Handler for selecting a session from history dropdown
-  const handleSelectSession = useCallback((id: string) => {
+  const handleSelectSession = useCallback((id: string, historyEntrySource: HistoryEntrySource = 'chat_dropdown') => {
     // PRD 0.2.19 cross-review fix (B3): explicitly stamp session_switch with the
     // TARGET session id, not the source. Without this, Active Context auto-inject
     // attaches the pre-switch session id (still the "source") because the switch
     // hasn't completed yet, making the event semantics "from→to" backwards.
-    track('session_switch', { session_id: id });
+    track('session_switch', { session_id: id, legacy_compat: true });
     if (onSwitchSession) {
-      onSwitchSession(id);
+      onSwitchSession(id, historyEntrySource);
     } else {
       if (cronStateRef.current.task?.status === 'running') {
         console.log('[Chat] Cannot switch session while cron task is running (no onSwitchSession handler)');
@@ -3781,7 +3782,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
             <SessionHistoryDropdown
               agentDir={agentDir}
               currentSessionId={sessionId}
-              onSelectSession={handleSelectSession}
+              onSelectSession={(id) => handleSelectSession(id, 'chat_dropdown')}
               onOpenInNewTab={onOpenSessionInNewTab}
               onDeleteCurrentSession={handleNewSession}
               isOpen={showHistory}
@@ -4596,7 +4597,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
             setCronDetailTask(updated);
             toastRef.current?.success('任务已停止');
           }}
-          onOpenSession={handleSelectSession}
+          onOpenSession={(id) => handleSelectSession(id, 'task_run_history')}
         />
       )}
     </div>

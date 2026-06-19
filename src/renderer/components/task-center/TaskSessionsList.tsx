@@ -111,7 +111,7 @@ export function TaskSessionsList({ task, onBeforeOpen }: Props) {
     onBeforeOpen?.();
     window.dispatchEvent(
       new CustomEvent(CUSTOM_EVENTS.OPEN_SESSION_IN_NEW_TAB, {
-        detail: { sessionId, workspacePath: task.workspacePath },
+        detail: { sessionId, workspacePath: task.workspacePath, historyEntrySource: 'task_run_history' },
       }),
     );
   };

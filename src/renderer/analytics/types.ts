@@ -51,7 +51,7 @@ export type Source = 'desktop' | 'floating_ball' | 'cli' | 'cli_agent' | 'cron' 
  * 取值约定：
  *   - `launcher_input`   启动页输入框直接发首条消息（New Tab 空状态 + 用户打字）
  *   - `agent_card`       右侧 Agent 工作区卡片点击
- *   - `history_click`    右上历史对话列表点击（仅出现在 `history_open` params 上；session_switch 不显式重复）
+ *   - `history_click`    历史会话入口（legacy surface；新细分见 `history_open.entry_source`）
  *   - `new_chat_button`  Chat 内"新对话"按钮（走 resetSession 或 handleNewSession 路径）
  *   - `cmd_k`            命令面板（v0.2.19 未实现，预留）
  *   - `external_link`    URL Scheme / 深链唤起（v0.2.19 未实现，预留）
@@ -111,6 +111,18 @@ export type AssistantEntry =
   | 'agent_error'
   | 'support_diagnostics'
   | 'other';
+
+/**
+ * 历史 session 打开入口。用于细分 `history_open`，同时保持事件名不变，
+ * 让旧报表继续按 `history_open` 聚合。
+ */
+export type HistoryEntrySource =
+  | 'launcher_recent'
+  | 'launcher_overlay'
+  | 'chat_dropdown'
+  | 'chat_dropdown_new_tab'
+  | 'settings_helper_history'
+  | 'task_run_history';
 
 /**
  * 事件名称枚举
@@ -253,14 +265,33 @@ export interface WorkspaceOpenParams {
 /**
  * history_open 事件参数
  *
- * 用户点击历史对话列表项时触发（带 sessionId）。语义上是 session_switch
- * 的前置（surface 入口），但物理上经过 handleLaunchProject 同一函数。
+ * 用户从历史相关入口打开已有 session 时触发（带 sessionId）。
+ * Chat 内切换路径会继续保留 `session_switch` 作为兼容事件。
  */
 export interface HistoryOpenParams {
   /** 用户点击的目标 session id。显式传值，不依赖 Active Context。 */
   session_id: string;
   agent_hash: string | null;
   runtime: AnalyticsRuntime;
+  /**
+   * 细分入口来源。旧版本没有该字段；查询时应把缺省值按 legacy launcher
+   * 历史入口处理，不影响历史兼容聚合。
+   */
+  entry_source?: HistoryEntrySource;
+}
+
+/**
+ * session_switch 事件参数
+ */
+export interface SessionSwitchParams {
+  /** 用户切换到的目标 session id。 */
+  session_id: string;
+  /**
+   * 新版本在 Chat 历史下拉切换时同时上报 `history_open`。这个标记让
+   * admin 兼容查询只把旧版未标记的 `session_switch` 当 history fallback，
+   * 避免新版本同一次点击被双计。
+   */
+  legacy_compat?: boolean;
 }
 
 /**
