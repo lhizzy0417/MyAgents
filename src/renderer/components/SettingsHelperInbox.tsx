@@ -171,6 +171,7 @@ export default function SettingsHelperInbox({
             model: picked.model,
             appVersion,
             images,
+            assistantEntry: 'settings',
         });
         // Local state reset; the LAUNCH_BUG_REPORT handler in App.tsx spins
         // up a helper Tab and consumes the payload. The user's view jumps

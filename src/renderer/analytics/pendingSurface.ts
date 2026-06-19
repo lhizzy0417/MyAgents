@@ -21,12 +21,13 @@
  *     不触发 session_new，会让 context 滞留）
  */
 
-import type { EntryIntent, Surface } from './types';
+import type { AssistantEntry, EntryIntent, Surface } from './types';
 
 export interface PendingSessionBirthContext {
   surface: Surface;
   entryIntent: EntryIntent;
   hasInitialMessage: boolean;
+  assistantEntry?: AssistantEntry;
 }
 
 const pendingByTab = new Map<string, PendingSessionBirthContext>();
@@ -44,7 +45,7 @@ export function birthContextForSurface(surface: Surface): PendingSessionBirthCon
     case 'task_center':
       return { surface, entryIntent: 'thought_alignment', hasInitialMessage: true };
     case 'bug_report':
-      return { surface, entryIntent: 'support_diagnostics', hasInitialMessage: true };
+      return { surface, entryIntent: 'support_diagnostics', hasInitialMessage: true, assistantEntry: 'support_diagnostics' };
     case 'agent_setup':
       return { surface, entryIntent: 'workspace_init', hasInitialMessage: true };
     default:

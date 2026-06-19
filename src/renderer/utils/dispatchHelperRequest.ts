@@ -14,6 +14,7 @@
 // avoid touching the App.tsx handler and its callers.
 
 import type { ImageAttachment } from '@/components/SimpleChatInput';
+import type { AssistantEntry } from '@/analytics';
 
 import { CUSTOM_EVENTS } from '../../shared/constants';
 
@@ -35,6 +36,8 @@ export interface HelperRequestInput {
      * Tab title is left to Chat.tsx's natural session-title flow.
      */
     resumeSessionId?: string;
+    /** Fine-grained helper launch location for session_new analytics. */
+    assistantEntry?: AssistantEntry;
 }
 
 export function dispatchHelperRequest(input: HelperRequestInput): void {
@@ -47,6 +50,7 @@ export function dispatchHelperRequest(input: HelperRequestInput): void {
                 appVersion: input.appVersion,
                 images: input.images,
                 resumeSessionId: input.resumeSessionId,
+                assistantEntry: input.assistantEntry,
             },
         }),
     );

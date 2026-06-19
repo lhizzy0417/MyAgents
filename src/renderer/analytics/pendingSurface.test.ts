@@ -34,6 +34,12 @@ describe('pending session birth context', () => {
       entryIntent: 'thought_alignment',
       hasInitialMessage: true,
     });
+    expect(birthContextForSurface('bug_report')).toEqual({
+      surface: 'bug_report',
+      entryIntent: 'support_diagnostics',
+      hasInitialMessage: true,
+      assistantEntry: 'support_diagnostics',
+    });
   });
 
   it('consumes each tab birth context exactly once', () => {
@@ -42,6 +48,7 @@ describe('pending session birth context', () => {
       surface: 'agent_setup',
       entryIntent: 'workspace_init',
       hasInitialMessage: true,
+      assistantEntry: 'settings',
     });
     setPendingSessionBirth(TAB_B, {
       surface: 'history_click',
@@ -53,6 +60,7 @@ describe('pending session birth context', () => {
       surface: 'agent_setup',
       entryIntent: 'workspace_init',
       hasInitialMessage: true,
+      assistantEntry: 'settings',
     });
     expect(consumePendingSessionBirth(TAB_A, fallback)).toBe(fallback);
     expect(consumePendingSessionBirth(TAB_B, fallback).surface).toBe('history_click');

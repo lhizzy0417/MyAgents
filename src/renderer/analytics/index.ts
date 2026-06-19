@@ -55,6 +55,7 @@ export type {
   Source,
   Surface,
   EntryIntent,
+  AssistantEntry,
   SessionNewParams,
   WorkspaceOpenParams,
   HistoryOpenParams,

@@ -4,6 +4,7 @@ import { X, Send, ImagePlus } from 'lucide-react';
 import { useCloseLayer } from '@/hooks/useCloseLayer';
 
 import { track } from '@/analytics';
+import type { AssistantEntry } from '@/analytics';
 import type { Provider, ProviderVerifyStatus } from '@/config/types';
 import { useImagePreview } from '@/context/ImagePreviewContext';
 import OverlayBackdrop from '@/components/OverlayBackdrop';
@@ -25,11 +26,13 @@ interface BugReportOverlayProps {
     initialModel?: string;
     /** Called when user picks a model so caller can persist to helper Agent. */
     onModelChange?: (providerId: string, model: string) => void;
+    /** Fine-grained helper launch location for session_new analytics. */
+    assistantEntry?: AssistantEntry;
 }
 
 export default function BugReportOverlay({
     onClose, onNavigateToProviders, appVersion, providers, apiKeys, providerVerifyStatus,
-    initialProviderId, initialModel, onModelChange,
+    initialProviderId, initialModel, onModelChange, assistantEntry,
 }: BugReportOverlayProps) {
     // Cmd+W dismissal: z-[250] matches the component's CSS z-index
     useCloseLayer(() => { onClose(); return true; }, 250);
@@ -96,9 +99,10 @@ export default function BugReportOverlay({
             model: selectedModel,
             appVersion,
             images,
+            assistantEntry,
         });
         onClose();
-    }, [canSubmit, description, selectedProviderId, selectedModel, appVersion, images, onClose]);
+    }, [canSubmit, description, selectedProviderId, selectedModel, appVersion, images, assistantEntry, onClose]);
 
     // Send-key behavior follows the user's chatSendShortcut preference (shared
     // with the main chat box). The hook also supplies the IME composition

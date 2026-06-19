@@ -801,6 +801,7 @@ export default function TabProvider({
             entry_intent: birth.entryIntent,
             runtime: runtimeOverride ?? meta.runtime,
             has_initial_message: birth.hasInitialMessage,
+            assistant_entry: birth.assistantEntry,
             agent_hash: meta.agentHash,
         });
     }, [tabId]);

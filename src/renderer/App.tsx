@@ -14,7 +14,7 @@ import {
   hashAgentName,
   hashAgentNameSync,
 } from '@/analytics';
-import type { EntryIntent, PendingSessionBirthContext, Surface } from '@/analytics';
+import type { AssistantEntry, EntryIntent, PendingSessionBirthContext, Surface } from '@/analytics';
 import { stopTabSidecar, startGlobalSidecar, initGlobalSidecarReadyPromise, markGlobalSidecarReady, getGlobalServerUrl, getSessionActivation, updateSessionTab, ensureSessionSidecar, releaseSessionSidecar, activateSession, deactivateSession, upgradeSessionId, getSessionPort, hasSessionSidecar, getSessionGeneration, stopSseProxy, startBackgroundCompletion, cancelBackgroundCompletion, updateGlobalServerUrl, canRestoreSession, setAppActiveCorrelation } from '@/api/tauriClient';
 import ConfirmDialog from '@/components/ConfirmDialog';
 import BugReportOverlay from '@/components/BugReportOverlay';
@@ -123,6 +123,7 @@ async function resolveSessionRuntimeForOpen(
 export interface LaunchProjectAnalyticsContext {
   surface: Surface;
   entryIntent: EntryIntent;
+  assistantEntry?: AssistantEntry;
 }
 
 // ============================================================
@@ -1307,6 +1308,7 @@ export default function App() {
         surface: launchContext.surface,
         entryIntent: launchContext.entryIntent,
         hasInitialMessage: !!initialMessage,
+        assistantEntry: launchContext.assistantEntry,
       };
       workspaceOpenAnalytics = {
         agent_hash: hashAgentNameSync(agent?.name ?? null),
@@ -3013,8 +3015,9 @@ export default function App() {
       appVersion: string;
       images?: ImageAttachment[];
       resumeSessionId?: string;
+      assistantEntry?: AssistantEntry;
     }>) => {
-      const { description, appVersion, providerId, model, resumeSessionId } = event.detail;
+      const { description, appVersion, providerId, model, resumeSessionId, assistantEntry } = event.detail;
       try {
         // Resume path runs FIRST and out-of-order with the MAX_TABS guard:
         // if the helper session is already owned by another Tab, we just
@@ -3128,7 +3131,7 @@ export default function App() {
             project,
             undefined,
             initialMessage,
-            { surface: 'bug_report', entryIntent: 'support_diagnostics' },
+            { surface: 'bug_report', entryIntent: 'support_diagnostics', assistantEntry: assistantEntry ?? 'other' },
           );
 
           // Override tab title
@@ -3362,6 +3365,7 @@ export default function App() {
           initialProviderId={helperAgentDefaults.initialProviderId}
           initialModel={helperAgentDefaults.initialModel}
           onModelChange={helperAgentDefaults.onModelChange}
+          assistantEntry="tab_top"
         />
       )}
     </div>

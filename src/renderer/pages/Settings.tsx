@@ -779,7 +779,7 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
         // the user's intent that "summon helper" always opens with the helper
         // Agent's workspace settings, not whatever provider this dialog could
         // find first.
-        dispatchHelperRequest({ description: prompt, appVersion });
+        dispatchHelperRequest({ description: prompt, appVersion, assistantEntry: 'settings' });
     }, [runtimeDialog, appVersion]);
 
     // Track which MCP servers need configuration (missing required fields)
@@ -6364,6 +6364,7 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                     initialProviderId={helperAgentDefaults.initialProviderId}
                     initialModel={helperAgentDefaults.initialModel}
                     onModelChange={helperAgentDefaults.onModelChange}
+                    assistantEntry="settings"
                 />
             )}
 

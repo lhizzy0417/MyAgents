@@ -98,6 +98,21 @@ export type EntryIntent =
   | 'unknown';
 
 /**
+ * 小助理发起位置 —— 仅在 `session_new.triggered_by='bug_report'` 这类
+ * Helper Agent 会话上作为细分维度使用。
+ *
+ * `triggered_by` 继续回答“这是小助理/诊断入口”，`assistant_entry` 回答
+ * “小助理具体从哪个位置发起”，避免把 settings / titlebar / agent-error
+ * 都混进同一个 support diagnostics 桶里。
+ */
+export type AssistantEntry =
+  | 'settings'
+  | 'tab_top'
+  | 'agent_error'
+  | 'support_diagnostics'
+  | 'other';
+
+/**
  * 事件名称枚举
  *
  * 注意：每个事件都必须有对应的 track() 调用实现
@@ -206,6 +221,8 @@ export interface SessionNewParams {
   runtime: AnalyticsRuntime;
   /** session 创建时是否真的带了首条消息 */
   has_initial_message: boolean;
+  /** 小助理发起位置；仅小助理/诊断类 session_new 使用 */
+  assistant_entry?: AssistantEntry;
   /** SHA-256(local_pepper + ':' + agent_name) 前 16 字节 hex；pepper 永不上传，
    *  无绑定 agent 填 null。详见 `analytics/hash.ts`。 */
   agent_hash: string | null;
