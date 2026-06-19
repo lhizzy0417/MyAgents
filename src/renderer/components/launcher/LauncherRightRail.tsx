@@ -36,17 +36,8 @@ import { sortLauncherProjects } from './workspaceSort';
 const COLLAPSED_WORKSPACE_COUNT = 4;
 const HISTORY_PAGE_SIZE = 30;
 const WORKSPACE_ROW_MAX_HEIGHT = 94;
-const WORKSPACE_COLLAPSE_MS = 260;
 
 type WorkspaceFilterValue = 'all' | string;
-type HistoryBucket = 'today' | 'yesterday' | 'last7' | 'older';
-
-const HISTORY_BUCKETS: Array<{ key: HistoryBucket; label: string }> = [
-    { key: 'today', label: '今天' },
-    { key: 'yesterday', label: '昨天' },
-    { key: 'last7', label: '近 7 天' },
-    { key: 'older', label: '更早' },
-];
 
 type AgentLookup = Map<string, { agent: AgentConfig; status?: AgentStatusData | undefined }>;
 
@@ -72,23 +63,6 @@ interface LauncherRightRailProps {
 const getProjectDisplayName = (project: Project): string =>
     project.displayName || getFolderName(project.path);
 
-const startOfLocalDay = (date: Date): number =>
-    new Date(date.getFullYear(), date.getMonth(), date.getDate()).getTime();
-
-const getHistoryBucket = (lastActiveAt: string, now = new Date()): HistoryBucket => {
-    const timestamp = Date.parse(lastActiveAt);
-    if (!Number.isFinite(timestamp)) return 'older';
-
-    const todayStart = startOfLocalDay(now);
-    const yesterdayStart = todayStart - 24 * 60 * 60 * 1000;
-    const last7Start = todayStart - 7 * 24 * 60 * 60 * 1000;
-
-    if (timestamp >= todayStart) return 'today';
-    if (timestamp >= yesterdayStart) return 'yesterday';
-    if (timestamp >= last7Start) return 'last7';
-    return 'older';
-};
-
 export default memo(function LauncherRightRail({
     projects,
     agentLookup,
@@ -110,11 +84,9 @@ export default memo(function LauncherRightRail({
     const toast = useToast();
     const scrollRootRef = useRef<HTMLDivElement | null>(null);
     const loadMoreRef = useRef<HTMLDivElement | null>(null);
-    const collapseTimerRef = useRef<number | null>(null);
     const { sessions, cronTasks, sessionTagsMap, isLoading: isHistoryLoading, error, refresh, actions } = taskCenterData;
 
     const [workspacesExpanded, setWorkspacesExpanded] = useState(false);
-    const [renderAllWorkspaces, setRenderAllWorkspaces] = useState(false);
     const [workspaceFilter, setWorkspaceFilter] = useState<WorkspaceFilterValue>('all');
     const [historyPage, setHistoryPage] = useState<{ scopeKey: string; count: number }>({
         scopeKey: 'all',
@@ -137,35 +109,21 @@ export default memo(function LauncherRightRail({
             ? workspaceFilter
             : 'all';
 
-    const clearCollapseTimer = useCallback(() => {
-        if (collapseTimerRef.current !== null) {
-            window.clearTimeout(collapseTimerRef.current);
-            collapseTimerRef.current = null;
-        }
-    }, []);
-
-    useEffect(() => clearCollapseTimer, [clearCollapseTimer]);
-
     const handleToggleWorkspaces = useCallback(() => {
-        clearCollapseTimer();
         if (workspacesExpanded) {
             setWorkspacesExpanded(false);
-            collapseTimerRef.current = window.setTimeout(() => {
-                setRenderAllWorkspaces(false);
-                collapseTimerRef.current = null;
-            }, WORKSPACE_COLLAPSE_MS);
+            scrollRootRef.current?.scrollTo({ top: 0, behavior: 'auto' });
             return;
         }
-        setRenderAllWorkspaces(true);
         setWorkspacesExpanded(true);
-    }, [clearCollapseTimer, workspacesExpanded]);
+    }, [workspacesExpanded]);
 
-    const renderedWorkspaceProjects = renderAllWorkspaces
+    const renderedWorkspaceProjects = workspacesExpanded
         ? sortedProjects
         : sortedProjects.slice(0, COLLAPSED_WORKSPACE_COUNT);
     const hiddenWorkspaceCount = Math.max(0, sortedProjects.length - COLLAPSED_WORKSPACE_COUNT);
     const workspaceRowCount = Math.max(1, Math.ceil(
-        (workspacesExpanded || renderAllWorkspaces
+        (workspacesExpanded
             ? sortedProjects.length
             : Math.min(sortedProjects.length, COLLAPSED_WORKSPACE_COUNT)) / 2,
     ));
@@ -189,19 +147,6 @@ export default memo(function LauncherRightRail({
         () => filteredSessions.slice(0, visibleHistoryCount),
         [filteredSessions, visibleHistoryCount],
     );
-
-    const groupedSessions = useMemo(() => {
-        const groups = new Map<HistoryBucket, SessionMetadata[]>();
-        for (const session of pagedSessions) {
-            const bucket = getHistoryBucket(session.lastActiveAt);
-            const bucketSessions = groups.get(bucket) ?? [];
-            bucketSessions.push(session);
-            groups.set(bucket, bucketSessions);
-        }
-        return HISTORY_BUCKETS
-            .map(({ key, label }) => ({ key, label, sessions: groups.get(key) ?? [] }))
-            .filter(group => group.sessions.length > 0);
-    }, [pagedSessions]);
 
     const cronProtectedSessionIds = useMemo(
         () => new Set(cronTasks.filter(task => task.status === 'running').map(task => task.sessionId)),
@@ -424,39 +369,28 @@ export default memo(function LauncherRightRail({
                                         </button>
                                     </div>
                                 </div>
-                            ) : groupedSessions.length === 0 ? (
+                            ) : pagedSessions.length === 0 ? (
                                 <div className="flex items-center py-10 text-sm text-[var(--ink-muted)]/70">
                                     {effectiveWorkspaceFilter === 'all' ? '暂无历史对话' : '该工作区暂无历史对话'}
                                 </div>
                             ) : (
-                                <div className="space-y-5">
-                                    {groupedSessions.map(group => (
-                                        <div key={group.key}>
-                                            <div className="mb-2">
-                                                <span className="text-xs font-semibold text-[var(--ink-muted)]/70">
-                                                    {group.label}
-                                                </span>
-                                            </div>
-                                            <div className="space-y-0.5">
-                                                {group.sessions.map(session => {
-                                                    const project = projectByPathKey.get(normalizeWorkspacePathIdentity(session.agentDir));
-                                                    if (!project) return null;
-                                                    return (
-                                                        <LauncherHistoryRow
-                                                            key={session.id}
-                                                            session={session}
-                                                            project={project}
-                                                            tags={sessionTagsMap.get(session.id) ?? []}
-                                                            isCronProtected={cronProtectedSessionIds.has(session.id)}
-                                                            onOpen={onOpenTask}
-                                                            onShowStats={handleShowStatsSession}
-                                                            onRequestDelete={handleRequestDeleteSession}
-                                                        />
-                                                    );
-                                                })}
-                                            </div>
-                                        </div>
-                                    ))}
+                                <div className="space-y-0.5">
+                                    {pagedSessions.map(session => {
+                                        const project = projectByPathKey.get(normalizeWorkspacePathIdentity(session.agentDir));
+                                        if (!project) return null;
+                                        return (
+                                            <LauncherHistoryRow
+                                                key={session.id}
+                                                session={session}
+                                                project={project}
+                                                tags={sessionTagsMap.get(session.id) ?? []}
+                                                isCronProtected={cronProtectedSessionIds.has(session.id)}
+                                                onOpen={onOpenTask}
+                                                onShowStats={handleShowStatsSession}
+                                                onRequestDelete={handleRequestDeleteSession}
+                                            />
+                                        );
+                                    })}
                                     <div ref={loadMoreRef} className="h-8">
                                         {hasMoreHistory && (
                                             <div className="py-2 text-center text-xs text-[var(--ink-muted)]/50">
@@ -579,7 +513,12 @@ const LauncherHistoryRow = memo(function LauncherHistoryRow({
     const msgCount = formatMessageCount(session);
 
     const handleOpen = useCallback(() => onOpen(session, project), [onOpen, project, session]);
+    const handleClick = useCallback((event: React.MouseEvent<HTMLDivElement>) => {
+        if (!event.currentTarget.contains(event.target as Node)) return;
+        handleOpen();
+    }, [handleOpen]);
     const handleKeyDown = useCallback((event: React.KeyboardEvent<HTMLDivElement>) => {
+        if (event.target !== event.currentTarget) return;
         if (event.key !== 'Enter' && event.key !== ' ') return;
         event.preventDefault();
         handleOpen();
@@ -589,7 +528,7 @@ const LauncherHistoryRow = memo(function LauncherHistoryRow({
         <div
             role="button"
             tabIndex={0}
-            onClick={handleOpen}
+            onClick={handleClick}
             onKeyDown={handleKeyDown}
             className="group relative flex w-full cursor-pointer items-center gap-2 rounded-lg px-3 py-2 text-left transition-all hover:bg-[var(--hover-bg)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]"
         >
@@ -597,7 +536,7 @@ const LauncherHistoryRow = memo(function LauncherHistoryRow({
                 <Clock className="h-2.5 w-2.5" />
                 <span>{formatTime(session.lastActiveAt)}</span>
             </div>
-            <div className="flex w-24 shrink-0 items-center text-xs text-[var(--ink-muted)]/55">
+            <div className="flex w-16 shrink-0 items-center text-xs text-[var(--ink-muted)]/55">
                 <span className="min-w-0 truncate">{getProjectDisplayName(project)}</span>
             </div>
             {tags.map((tag, index) => (

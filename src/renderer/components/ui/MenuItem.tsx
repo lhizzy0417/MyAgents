@@ -20,6 +20,7 @@
 // DropdownMenu; reach for this only when you own the trigger.
 
 import { forwardRef } from 'react';
+import type { KeyboardEvent, MouseEvent } from 'react';
 
 export interface MenuItemProps {
     icon: React.ReactNode;
@@ -45,7 +46,18 @@ export const MenuItem = forwardRef<HTMLButtonElement, MenuItemProps>(function Me
             ref={ref}
             type="button"
             disabled={disabled}
-            onClick={onClick}
+            onMouseDown={(event: MouseEvent<HTMLButtonElement>) => {
+                event.stopPropagation();
+            }}
+            onClick={(event: MouseEvent<HTMLButtonElement>) => {
+                event.stopPropagation();
+                onClick?.();
+            }}
+            onKeyDown={(event: KeyboardEvent<HTMLButtonElement>) => {
+                if (event.key === 'Enter' || event.key === ' ') {
+                    event.stopPropagation();
+                }
+            }}
             title={title}
             className={`flex w-full items-center gap-2 px-3 py-2 text-left text-sm transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${toneClass} ${
                 active ? 'bg-[var(--paper-inset)]' : ''
