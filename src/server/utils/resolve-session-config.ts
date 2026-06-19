@@ -2,7 +2,7 @@ import type { AgentConfig, ChannelConfig } from '../../shared/types/agent';
 import { resolveEffectiveConfig } from '../../shared/types/agent';
 import type { SessionMetadata } from '../types/session';
 import type { RuntimeType } from '../../shared/types/runtime';
-import { modelLooksLikeRuntime } from '../migrations/scrub-stale-runtime-config';
+import { coerceModelForRuntime, coercePermissionModeForRuntime } from '../../shared/types/runtime';
 
 /**
  * Effective runtime config for a single query (v0.1.69).
@@ -96,18 +96,32 @@ export function resolveSessionConfig(
   // agent-config migration — only drops values we're confident don't
   // belong, keeps unknown values intact.
   let model = rawModel;
+  const coercedModel = coerceModelForRuntime(model, runtime);
   if (runtime !== 'builtin'
-      && typeof model === 'string' && model.length > 0
-      && !modelLooksLikeRuntime(model, runtime)) {
+      && typeof model === 'string' && model.trim().length > 0
+      && coercedModel === undefined) {
     console.warn(
       `[runtime-coerce] dropping stale session model='${model}' on runtime='${runtime}' (issue #224); falling back to runtime default. sessionId=${meta?.id ?? '<none>'} agentDir=${meta?.agentDir ?? agent.workspacePath ?? '<unknown>'}`,
     );
-    model = undefined;
+    model = coercedModel;
+  } else if (typeof model === 'string') {
+    model = coercedModel;
   }
+
+  const rawPermissionMode = meta?.permissionMode ?? (runtime === 'builtin' ? agent.permissionMode : agent.runtimeConfig?.permissionMode);
+  const permissionMode = coercePermissionModeForRuntime(rawPermissionMode, runtime);
+  if (typeof rawPermissionMode === 'string'
+      && rawPermissionMode.trim().length > 0
+      && permissionMode === undefined) {
+    console.warn(
+      `[runtime-coerce] dropping stale session permissionMode='${rawPermissionMode}' on runtime='${runtime}'; falling back to runtime default. sessionId=${meta?.id ?? '<none>'} agentDir=${meta?.agentDir ?? agent.workspacePath ?? '<unknown>'}`,
+    );
+  }
+
   return {
     runtime,
     model,
-    permissionMode: meta?.permissionMode ?? (runtime === 'builtin' ? agent.permissionMode : agent.runtimeConfig?.permissionMode),
+    permissionMode,
     mcpEnabledServers: meta?.mcpEnabledServers ?? agent.mcpEnabledServers,
     providerId: meta?.providerId ?? agent.providerId,
     providerEnvJson: meta?.providerEnvJson ?? agent.providerEnvJson,

@@ -188,4 +188,30 @@ describe('resolveSessionConfig — runtime-aware coercion (issue #224)', () => {
     }), makeAgent({ runtime: 'claude-code' }), undefined, 'owned');
     expect(r.model).toBeUndefined();
   });
+
+  it('owned/external: stale builtin permissionMode in snapshot is coerced to undefined', () => {
+    const r = resolveSessionConfig(meta({
+      runtime: 'codex',
+      permissionMode: 'fullAgency',
+    }), makeAgent({
+      runtime: 'codex',
+      runtimeConfig: { permissionMode: 'full-auto' },
+    }), undefined, 'owned');
+    expect(r.permissionMode).toBeUndefined();
+    expect(console.warn).toHaveBeenCalledWith(
+      expect.stringContaining('permissionMode'),
+    );
+  });
+
+  it('owned/external: agent fallback reads runtimeConfig.permissionMode when snapshot is empty', () => {
+    const r = resolveSessionConfig(meta({
+      runtime: 'codex',
+      permissionMode: undefined,
+    }), makeAgent({
+      runtime: 'codex',
+      permissionMode: 'fullAgency',
+      runtimeConfig: { permissionMode: 'no-restrictions' },
+    }), undefined, 'owned');
+    expect(r.permissionMode).toBe('no-restrictions');
+  });
 });

@@ -4512,6 +4512,7 @@ function createMetadataForSessionId(
     sessionId: targetSessionId,
     scenario,
     agent,
+    runtimeOverride: getCurrentRuntimeType(),
     fallbackRuntime: getCurrentRuntimeType(),
     title,
   });

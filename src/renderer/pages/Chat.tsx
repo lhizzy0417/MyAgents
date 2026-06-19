@@ -60,10 +60,19 @@ import { BrowserPanelContext } from '@/context/BrowserPanelContext';
 import { BROWSER_BLANK_URL } from '@/components/browserConstants';
 import { CUSTOM_EVENTS, isPendingSessionId } from '../../shared/constants';
 import { workspacePathsEqual } from '../../shared/workspacePath';
-import { reasoningEffortChoices } from '../../shared/reasoningEffort';
+import { coerceReasoningEffortForRuntime, reasoningEffortChoices } from '../../shared/reasoningEffort';
 import { canResumeAcrossProviderBoundary, type ProviderHistoryEnv } from '../../shared/providerHistory';
 import type { CapabilityInitialSelect } from '../../shared/skillsTypes';
-import { CC_MODELS, CC_PERMISSION_MODES, CODEX_PERMISSION_MODES, GEMINI_PERMISSION_MODES, getDefaultRuntimePermissionMode, getRuntimePermissionModes, buildRuntimeChangePatch } from '../../shared/types/runtime';
+import {
+  buildRuntimeChangePatch,
+  CC_MODELS,
+  CC_PERMISSION_MODES,
+  CODEX_PERMISSION_MODES,
+  coerceModelForRuntime,
+  coercePermissionModeForRuntime,
+  GEMINI_PERMISSION_MODES,
+  getDefaultRuntimePermissionMode,
+} from '../../shared/types/runtime';
 import type { RuntimeType, RuntimeDetections, RuntimeConfig } from '../../shared/types/runtime';
 import type { FilePreviewIntent, InitialMessage, SidecarConfigDisposition } from '@/types/tab';
 import type { FilePreviewFocusTarget } from '@/types/filePreview';
@@ -107,6 +116,18 @@ function getRuntimeDisplayLabel(runtime: RuntimeType | undefined): string {
     default:
       return 'MyAgents';
   }
+}
+
+function coerceExternalRuntimeModelForUi(model: string | undefined, runtime: RuntimeType): string | undefined {
+  return runtime === 'builtin' ? model : coerceModelForRuntime(model, runtime);
+}
+
+function coerceExternalRuntimePermissionForUi(mode: string | undefined, runtime: RuntimeType): string | undefined {
+  return runtime === 'builtin' ? mode : coercePermissionModeForRuntime(mode, runtime);
+}
+
+function coerceReasoningEffortForUi(effort: string | undefined, runtime: RuntimeType): string | undefined {
+  return coerceReasoningEffortForRuntime(effort, runtime);
 }
 
 function toProviderHistoryEnv(
@@ -957,7 +978,10 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
     (currentAgent?.runtimeConfig as { model?: string } | undefined)?.model
   );
   const [runtimePermissionMode, setRuntimePermissionMode] = useState<string>(
-    (currentAgent?.runtimeConfig as { permissionMode?: string } | undefined)?.permissionMode
+    coerceExternalRuntimePermissionForUi(
+      (currentAgent?.runtimeConfig as { permissionMode?: string } | undefined)?.permissionMode,
+      currentRuntime,
+    )
     || getDefaultRuntimePermissionMode(currentRuntime) || 'default'
   );
 
@@ -979,17 +1003,15 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
   useEffect(() => {
     if (!isExternalRuntime) return;
     const cfg = currentAgent?.runtimeConfig as { permissionMode?: string; model?: string } | undefined;
-    const validModes = new Set(getRuntimePermissionModes(currentRuntime).map((m) => m.value));
     const saved = cfg?.permissionMode;
-    const effective = saved && validModes.has(saved)
-      ? saved
-      : (getDefaultRuntimePermissionMode(currentRuntime) || 'default');
+    const effective = coerceExternalRuntimePermissionForUi(saved, currentRuntime)
+      ?? (getDefaultRuntimePermissionMode(currentRuntime) || 'default');
     setRuntimePermissionMode(effective);
-    setRuntimeModel(cfg?.model);
+    setRuntimeModel(coerceExternalRuntimeModelForUi(cfg?.model, currentRuntime));
     // #324 — re-seed effort on runtime transition. RUNTIME_CONFIG_PER_RUNTIME_FIELDS
     // scrubs reasoningEffort on agent runtime change, so a leftover value from a
     // different runtime can't be read here; absent = 'default'.
-    setReasoningEffort((cfg as { reasoningEffort?: string } | undefined)?.reasoningEffort ?? 'default');
+    setReasoningEffort(coerceReasoningEffortForUi((cfg as { reasoningEffort?: string } | undefined)?.reasoningEffort, currentRuntime) ?? 'default');
     // eslint-disable-next-line react-hooks/exhaustive-deps -- intentional: only re-sync on runtime transitions, not on every currentAgent.runtimeConfig edit
   }, [currentRuntime, isExternalRuntime]);
 
@@ -1123,9 +1145,17 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
   // Effective model/permission based on runtime.
   // For external runtimes: if user hasn't explicitly selected a model (runtimeModel=undefined),
   // use the default model from the runtime's model list — this matches what the UI displays.
+  const effectiveRuntimeModel = isExternalRuntime
+    ? coerceExternalRuntimeModelForUi(runtimeModel, currentRuntime)
+    : undefined;
   const effectiveModel = isExternalRuntime
-    ? (runtimeModel ?? runtimeModels?.find(m => m.isDefault)?.value)
+    ? (effectiveRuntimeModel ?? runtimeModels?.find(m => m.isDefault)?.value)
     : selectedModel;
+  const effectiveRuntimePermissionMode = isExternalRuntime
+    ? (coerceExternalRuntimePermissionForUi(runtimePermissionMode, currentRuntime)
+      ?? getDefaultRuntimePermissionMode(currentRuntime)
+      ?? 'default')
+    : undefined;
   // #244: the `permissionMode` useState initializer runs while useConfig() is
   // still loading, and the one-time project-sync effect that corrects it fires
   // AFTER first paint — so a fresh-tab first send could ship the stale 'auto'.
@@ -1140,7 +1170,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
   // choice instead of overriding it with the agent default).
   const permissionStateAuthoritative = projectSyncedRef.current || hadInitialMessage.current;
   const effectivePermissionMode = isExternalRuntime
-    ? runtimePermissionMode as PermissionMode
+    ? effectiveRuntimePermissionMode as PermissionMode
     : resolveBuiltinPermissionMode({
         projectSynced: permissionStateAuthoritative,
         statePermissionMode: permissionMode,
@@ -1152,15 +1182,28 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
   const buildCronRuntimeConfig = useCallback((): RuntimeConfig | undefined => {
     if (!isExternalRuntime) return undefined;
     const base = { ...((currentAgent?.runtimeConfig as RuntimeConfig | undefined) ?? {}) };
-    if (runtimeModel !== undefined) {
-      base.model = runtimeModel;
+    const persistedModel = coerceExternalRuntimeModelForUi(base.model, currentRuntime);
+    if (persistedModel) {
+      base.model = persistedModel;
+    } else {
+      delete base.model;
     }
-    const hasPersistedPermission = typeof (currentAgent?.runtimeConfig as RuntimeConfig | undefined)?.permissionMode === 'string';
-    if (hasPersistedPermission || runtimePermissionMode !== getDefaultRuntimePermissionMode(currentRuntime)) {
-      base.permissionMode = runtimePermissionMode;
+    const selectedRuntimeModel = coerceExternalRuntimeModelForUi(runtimeModel, currentRuntime);
+    if (selectedRuntimeModel !== undefined) {
+      base.model = selectedRuntimeModel;
+    }
+    const persistedPermission = coerceExternalRuntimePermissionForUi(base.permissionMode, currentRuntime);
+    if (persistedPermission) {
+      base.permissionMode = persistedPermission;
+    } else {
+      delete base.permissionMode;
+    }
+    const selectedPermission = effectiveRuntimePermissionMode ?? getDefaultRuntimePermissionMode(currentRuntime);
+    if (persistedPermission !== undefined || selectedPermission !== getDefaultRuntimePermissionMode(currentRuntime)) {
+      base.permissionMode = selectedPermission;
     }
     return Object.keys(base).length > 0 ? base : undefined;
-  }, [isExternalRuntime, currentAgent?.runtimeConfig, runtimeModel, runtimePermissionMode, currentRuntime]);
+  }, [isExternalRuntime, currentAgent?.runtimeConfig, runtimeModel, effectiveRuntimePermissionMode, currentRuntime]);
 
   // Callback to refresh workspace (exposed to SimpleChatInput)
   const triggerWorkspaceRefresh = useCallback(() => {
@@ -1215,9 +1258,12 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
     // 'auto' default if useConfig() hasn't resolved yet. projectSynced:false
     // forces the agent→project→global fallback (there's no explicit choice to
     // honor on this auto-send).
-    const effectivePermission = (launchMessage.permissionMode ?? (isExternalRuntime
-      ? runtimePermissionMode
-      : resolveBuiltinPermissionMode({
+    const effectivePermission = (isExternalRuntime
+      ? (coerceExternalRuntimePermissionForUi(launchMessage.permissionMode, currentRuntime)
+        ?? effectiveRuntimePermissionMode
+        ?? getDefaultRuntimePermissionMode(currentRuntime)
+        ?? 'default')
+      : (launchMessage.permissionMode ?? resolveBuiltinPermissionMode({
           projectSynced: false,
           statePermissionMode: permissionMode,
           agentPermissionMode: currentAgent?.permissionMode as string | undefined,
@@ -1225,7 +1271,9 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
           defaultPermissionMode: config.defaultPermissionMode,
         }))) as PermissionMode;
     const effectiveModel = isExternalRuntime
-      ? (launchMessage.runtimeModel ?? runtimeModel)
+      ? (coerceExternalRuntimeModelForUi(launchMessage.runtimeModel, currentRuntime)
+        ?? effectiveRuntimeModel
+        ?? runtimeModels?.find(m => m.isDefault)?.value)
       : (builtinSel?.model ?? selectedModel);
     const provider = builtinSel
       ? providers.find(p => p.id === builtinSel.providerId) ?? currentProvider
@@ -1271,7 +1319,11 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
           // External runtime has its own permission mode state (runtimePermissionMode),
           // while builtin uses permissionMode. Set the correct one based on runtime.
           if (isExternalRuntime) {
-            setRuntimePermissionMode(launchMessage.permissionMode);
+            setRuntimePermissionMode(
+              coerceExternalRuntimePermissionForUi(launchMessage.permissionMode, currentRuntime)
+              ?? getDefaultRuntimePermissionMode(currentRuntime)
+              ?? 'default',
+            );
           } else {
             setPermissionMode(launchMessage.permissionMode);
             // #244: the launcher choice is now the authoritative builtin mode —
@@ -1282,7 +1334,9 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
           }
         }
         if (isExternalRuntime) {
-          if (launchMessage.runtimeModel) setRuntimeModel(launchMessage.runtimeModel);
+          if (launchMessage.runtimeModel) {
+            setRuntimeModel(coerceExternalRuntimeModelForUi(launchMessage.runtimeModel, currentRuntime));
+          }
         } else if (builtinSel) {
           // Apply the paired (provider, model) atomically — type system guarantees both present.
           setSelectedProviderId(builtinSel.providerId);
@@ -1294,11 +1348,14 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
         // Set BEFORE the sends below so the builtin send payload carries it;
         // for external runtimes push it explicitly (no payload channel).
         if (launchMessage.reasoningEffort) {
-          setReasoningEffort(launchMessage.reasoningEffort);
+          const launchReasoningEffort = isExternalRuntime
+            ? (coerceReasoningEffortForUi(launchMessage.reasoningEffort, currentRuntime) ?? 'default')
+            : launchMessage.reasoningEffort;
+          setReasoningEffort(launchReasoningEffort);
           if (configDispositionRef.current === 'pending') {
-            deferredEffortPushRef.current = launchMessage.reasoningEffort;
+            deferredEffortPushRef.current = launchReasoningEffort;
           } else {
-            pushReasoningEffort(launchMessage.reasoningEffort);
+            pushReasoningEffort(launchReasoningEffort);
           }
         }
 
@@ -2134,12 +2191,18 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
     // re-derive from the agent — this is the write-read symmetry of IM live-follow.
     const snapshotRuntime = (sessionMeta.runtime as RuntimeType | undefined) ?? agentRuntime;
     const snapshotIsExternal = snapshotRuntime !== 'builtin';
-    const model = sessionMeta.model ?? (snapshotIsExternal
+    const rawModel = sessionMeta.model ?? (snapshotIsExternal
       ? (currentAgent?.runtimeConfig as RuntimeConfig | undefined)?.model
       : currentAgent?.model);
-    const mode = sessionMeta.permissionMode ?? (snapshotIsExternal
+    const model = snapshotIsExternal
+      ? coerceExternalRuntimeModelForUi(rawModel, snapshotRuntime)
+      : rawModel;
+    const rawMode = sessionMeta.permissionMode ?? (snapshotIsExternal
       ? (currentAgent?.runtimeConfig as RuntimeConfig | undefined)?.permissionMode
       : (currentAgent?.permissionMode as string | undefined));
+    const mode = snapshotIsExternal
+      ? coerceExternalRuntimePermissionForUi(rawMode, snapshotRuntime)
+      : rawMode;
     const providerId = sessionMeta.providerId ?? currentAgent?.providerId;
     const mcp = sessionMeta.mcpEnabledServers ?? currentAgent?.mcpEnabledServers;
     // #324 — snapshot effort wins over agent default; a persisted 'default'
@@ -2151,20 +2214,21 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
     const snapEffort = sessionMeta.reasoningEffort ?? (snapshotIsExternal
       ? (currentAgent?.runtimeConfig as RuntimeConfig | undefined)?.reasoningEffort
       : currentAgent?.reasoningEffort);
-    if (model) {
-      if (snapshotIsExternal) {
-        setRuntimeModel(model);
-      } else {
+    if (snapshotIsExternal) {
+      setRuntimeModel(model);
+    } else if (model) {
         setSelectedModel(model);
-      }
     }
-    setReasoningEffort(snapEffort ?? 'default');
-    if (mode) {
-      if (snapshotIsExternal) {
-        setRuntimePermissionMode(mode);
-      } else {
-        setPermissionMode(mode as PermissionMode);
-      }
+    setReasoningEffort(
+      (snapshotIsExternal
+        ? coerceReasoningEffortForUi(snapEffort, snapshotRuntime)
+        : snapEffort)
+      ?? 'default',
+    );
+    if (snapshotIsExternal) {
+      setRuntimePermissionMode(mode ?? getDefaultRuntimePermissionMode(snapshotRuntime) ?? 'default');
+    } else if (mode) {
+      setPermissionMode(mode as PermissionMode);
     }
     if (providerId) setSelectedProviderId(providerId);
     if (mcp) setWorkspaceMcpEnabled(mcp);

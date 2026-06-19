@@ -1,7 +1,7 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { SessionMetadata } from '../types/session';
 
 let scratch: string;
@@ -34,6 +34,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.restoreAllMocks();
   process.env.HOME = prevHome;
   process.env.USERPROFILE = prevUserProfile;
   rmSync(scratch, { recursive: true, force: true });
@@ -120,5 +121,103 @@ describe('resolveWorkspaceConfig permissionMode (#295)', () => {
     const resolved = resolveWorkspaceConfig(workspacePath, null, { includeMcp: false });
 
     expect(resolved.permissionMode).toBe('auto');
+  });
+});
+
+describe('resolveWorkspaceConfig runtime-aware model snapshots', () => {
+  it('drops obviously foreign external-runtime session models', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const workspacePath = join(scratch, 'workspace');
+    writeConfig({
+      defaultPermissionMode: 'auto',
+      agents: [{
+        id: 'agent-1',
+        name: 'Codex Agent',
+        enabled: true,
+        workspacePath,
+        runtime: 'codex',
+        model: 'claude-opus-4-7',
+        permissionMode: 'fullAgency',
+      }],
+    });
+    writeProjects([]);
+
+    const { resolveWorkspaceConfig } = await import('../utils/admin-config');
+    const resolved = resolveWorkspaceConfig(workspacePath, {
+      id: 'session-1',
+      agentDir: workspacePath,
+      title: 'New Chat',
+      createdAt: '2026-06-19T00:00:00.000Z',
+      lastActiveAt: '2026-06-19T00:00:00.000Z',
+      runtime: 'codex',
+      model: 'claude-opus-4-7',
+      configSnapshotAt: '2026-06-19T00:00:00.000Z',
+    } as SessionMetadata, { includeMcp: false });
+
+    expect(resolved.model).toBeUndefined();
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('[runtime-coerce]'));
+  });
+
+  it('drops obviously foreign external-runtime permission modes', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const workspacePath = join(scratch, 'workspace');
+    writeConfig({
+      defaultPermissionMode: 'fullAgency',
+      agents: [{
+        id: 'agent-1',
+        name: 'Codex Agent',
+        enabled: true,
+        workspacePath,
+        runtime: 'codex',
+        permissionMode: 'fullAgency',
+        runtimeConfig: { permissionMode: 'full-auto' },
+      }],
+    });
+    writeProjects([]);
+
+    const { resolveWorkspaceConfig } = await import('../utils/admin-config');
+    const resolved = resolveWorkspaceConfig(workspacePath, {
+      id: 'session-1',
+      agentDir: workspacePath,
+      title: 'New Chat',
+      createdAt: '2026-06-19T00:00:00.000Z',
+      lastActiveAt: '2026-06-19T00:00:00.000Z',
+      runtime: 'codex',
+      permissionMode: 'fullAgency',
+      configSnapshotAt: '2026-06-19T00:00:00.000Z',
+    } as SessionMetadata, { includeMcp: false });
+
+    expect(resolved.permissionMode).toBe('full-auto');
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('permissionMode'));
+  });
+
+  it("preserves external-runtime snapshot reasoningEffort='default' over agent non-default", async () => {
+    const workspacePath = join(scratch, 'workspace');
+    writeConfig({
+      defaultPermissionMode: 'auto',
+      agents: [{
+        id: 'agent-1',
+        name: 'Codex Agent',
+        enabled: true,
+        workspacePath,
+        runtime: 'codex',
+        runtimeConfig: { reasoningEffort: 'xhigh' },
+      }],
+    });
+    writeProjects([]);
+
+    const { resolveWorkspaceConfig } = await import('../utils/admin-config');
+    const resolved = resolveWorkspaceConfig(workspacePath, {
+      id: 'session-1',
+      agentDir: workspacePath,
+      title: 'New Chat',
+      createdAt: '2026-06-19T00:00:00.000Z',
+      lastActiveAt: '2026-06-19T00:00:00.000Z',
+      runtime: 'codex',
+      reasoningEffort: 'default',
+      configSnapshotAt: '2026-06-19T00:00:00.000Z',
+    } as SessionMetadata, { includeMcp: false });
+
+    expect(resolved.reasoningEffort).toBe('default');
   });
 });

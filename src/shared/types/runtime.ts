@@ -67,6 +67,51 @@ export function normalizeRuntime(value: string | null | undefined): RuntimeType 
 }
 
 /**
+ * Conservative "does this model id belong to this runtime?" family matcher.
+ *
+ * Returns `true` for ambiguous / unknown values. Callers use this only to drop
+ * values that are obviously from another runtime family, e.g. `claude-*` on
+ * Codex or `gemini-*` on Claude Code. Unknown future model ids are allowed
+ * through so a new runtime release does not require a MyAgents release first.
+ */
+function modelHasFamily(model: string, families: readonly string[]): boolean {
+  return families.some((family) => {
+    const escaped = family.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    return new RegExp(`(^|[./:_-])${escaped}([./:_-]|$)`).test(model);
+  });
+}
+
+export function modelLooksLikeRuntime(model: string, runtime: RuntimeType): boolean {
+  const m = model.trim().toLowerCase();
+  if (m.length === 0) return true;
+  if (runtime === 'codex') {
+    if (modelHasFamily(m, ['gpt', 'o1', 'o3', 'o4', 'codex', 'chatgpt'])) return true;
+    if (modelHasFamily(m, ['gemini', 'claude', 'sonnet', 'opus', 'haiku'])) return false;
+    return true;
+  }
+  if (runtime === 'gemini') {
+    if (modelHasFamily(m, ['gemini'])) return true;
+    if (modelHasFamily(m, ['gpt', 'o1', 'o3', 'o4', 'codex', 'chatgpt', 'claude', 'sonnet', 'opus', 'haiku'])) return false;
+    return true;
+  }
+  if (runtime === 'claude-code') {
+    if (modelHasFamily(m, ['sonnet', 'opus', 'haiku', 'claude'])) return true;
+    if (modelHasFamily(m, ['gpt', 'o1', 'o3', 'o4', 'codex', 'chatgpt', 'gemini'])) return false;
+    return true;
+  }
+  return true;
+}
+
+export function coerceModelForRuntime(
+  model: string | null | undefined,
+  runtime: RuntimeType,
+): string | undefined {
+  const trimmed = typeof model === 'string' ? model.trim() : '';
+  if (!trimmed) return undefined;
+  return modelLooksLikeRuntime(trimmed, runtime) ? trimmed : undefined;
+}
+
+/**
  * Resolve the **agent-config** effective runtime, gated by the `multiAgentRuntime`
  * developer flag: when it is OFF, everything collapses to `builtin` regardless of
  * the agent's configured runtime.
@@ -423,6 +468,40 @@ export function getRuntimePermissionModes(runtime: RuntimeType): RuntimePermissi
   }
 }
 
+/**
+ * Conservative runtime-family matcher for permission modes.
+ *
+ * Permission vocabularies are runtime-specific. We keep unknown future values
+ * (same rationale as `modelLooksLikeRuntime`) but drop values that are known to
+ * belong to another runtime. This prevents stale `fullAgency`/`auto` values
+ * from downgrading Codex/Gemini/Claude Code into their adapter fallback modes.
+ */
+export function permissionModeLooksLikeRuntime(mode: string, runtime: RuntimeType): boolean {
+  const trimmed = mode.trim();
+  if (!trimmed) return true;
+
+  const ownModes = new Set(getRuntimePermissionModes(runtime).map((m) => m.value));
+  if (ownModes.has(trimmed)) return true;
+
+  for (const rt of VALID_RUNTIMES) {
+    if (rt === runtime) continue;
+    const otherModes = getRuntimePermissionModes(rt);
+    if (otherModes.some((m) => m.value === trimmed)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+export function coercePermissionModeForRuntime(
+  mode: string | null | undefined,
+  runtime: RuntimeType,
+): string | undefined {
+  const trimmed = typeof mode === 'string' ? mode.trim() : '';
+  if (!trimmed) return undefined;
+  return permissionModeLooksLikeRuntime(trimmed, runtime) ? trimmed : undefined;
+}
+
 // ─── Claude Code model list (canonical, shared) ───
 
 export const CC_MODELS: RuntimeModelInfo[] = [
@@ -638,12 +717,15 @@ export interface RuntimeDiagnostics {
  *
  * Semantics:
  *   - undefined / '' (sentinel "user didn't pick") → runtime max permission
- *   - any other literal value → respected as user's explicit choice
+ *   - runtime-appropriate literal value → respected as user's explicit choice
+ *   - obvious foreign-runtime stale value → ignored; try the next source, then
+ *     runtime max permission
  *
  * Crucially, 'auto' / 'default' / 'autoEdit' / 'full-auto' are NOT treated as
- * "user didn't pick" — they're the runtime's interactive defaults but if a
- * user has them in their cron config, that's a literal value we honor. The
- * only sentinel for "use max" is empty/undefined.
+ * "user didn't pick" when they belong to the selected runtime — they're the
+ * runtime's interactive defaults but if a user has them in their cron config,
+ * that's a literal value we honor. Empty/undefined and obvious cross-runtime
+ * leftovers use max.
  *
  * (Historical note: pre-v0.2.5, cron config persisted 'auto' as a silent
  * default even when the user never picked anything. The v0.2.5 migration in
@@ -655,7 +737,10 @@ export function resolveCronPermissionMode(
   snapshotMode: string | null | undefined,
   runtime: RuntimeType,
 ): string {
-  const userMode = (payloadMode || snapshotMode || '').trim();
-  if (!userMode) return getMaxPermissionForRuntime(runtime);
-  return userMode;
+  const candidates = [payloadMode, snapshotMode];
+  for (const candidate of candidates) {
+    const coerced = coercePermissionModeForRuntime(candidate, runtime);
+    if (coerced) return coerced;
+  }
+  return getMaxPermissionForRuntime(runtime);
 }

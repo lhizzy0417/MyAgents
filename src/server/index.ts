@@ -623,7 +623,14 @@ import {
 } from './runtimes/external-session';
 import { installAutoTitleHook } from './session-title-service';
 import type { ImagePayload } from './runtimes/types';
-import { VALID_RUNTIMES, resolveCronPermissionMode, getMaxPermissionForRuntime } from '../shared/types/runtime';
+import {
+  VALID_RUNTIMES,
+  coerceModelForRuntime,
+  coercePermissionModeForRuntime,
+  resolveCronPermissionMode,
+  getMaxPermissionForRuntime,
+} from '../shared/types/runtime';
+import { coerceReasoningEffortForRuntime } from '../shared/reasoningEffort';
 import type { RuntimeConfig, RuntimeType } from '../shared/types/runtime';
 import type { InteractionScenario } from './system-prompt';
 // PRD 0.2.18 Session Inbox — sanitize helper for cron envelope wrapping
@@ -703,9 +710,12 @@ function parseDesktopInteractionScenario(value: unknown): Extract<InteractionSce
   return null;
 }
 
-function getRuntimeConfigModel(runtimeConfig?: RuntimeConfig | null): string | undefined {
+function getRuntimeConfigModel(
+  runtimeConfig?: RuntimeConfig | null,
+  runtime: RuntimeType = getActiveRuntimeType(),
+): string | undefined {
   const model = runtimeConfig?.model?.trim();
-  return model ? model : undefined;
+  return model ? coerceModelForRuntime(model, runtime) : undefined;
 }
 
 /** #324 — RAW effort setting from runtimeConfig for ExternalSendContext.
@@ -715,13 +725,20 @@ function getRuntimeConfigModel(runtimeConfig?: RuntimeConfig | null): string | u
  *  undefined here would make external-session fall back to stale module
  *  state (a session bumped to xhigh would keep xhigh forever after the
  *  agent reverted to default; cross-review Critical). */
-function getRuntimeConfigReasoningEffort(runtimeConfig?: RuntimeConfig | null): string {
-  return runtimeConfig?.reasoningEffort?.trim() || 'default';
+function getRuntimeConfigReasoningEffort(
+  runtimeConfig?: RuntimeConfig | null,
+  runtime: RuntimeType = getActiveRuntimeType(),
+): string {
+  const reasoningEffort = runtimeConfig?.reasoningEffort?.trim() || 'default';
+  return coerceReasoningEffortForRuntime(reasoningEffort, runtime) ?? 'default';
 }
 
-function getRuntimeConfigPermissionMode(runtimeConfig?: RuntimeConfig | null): string | undefined {
+function getRuntimeConfigPermissionMode(
+  runtimeConfig?: RuntimeConfig | null,
+  runtime: RuntimeType = getActiveRuntimeType(),
+): string | undefined {
   const permissionMode = runtimeConfig?.permissionMode?.trim();
-  return permissionMode ? permissionMode : undefined;
+  return permissionMode ? coercePermissionModeForRuntime(permissionMode, runtime) : undefined;
 }
 
 /**
@@ -3035,7 +3052,7 @@ async function main() {
                 scenario: { type: 'cron', taskId, intervalMinutes: intervalMinutes ?? 15, aiCanExit: aiCanExit ?? false },
                 permissionMode: effectivePermissionMode,
                 model: getRuntimeConfigModel(effectiveRuntimeConfig ?? null),
-                reasoningEffort: getRuntimeConfigReasoningEffort(effectiveRuntimeConfig ?? null),
+                reasoningEffort: getRuntimeConfigReasoningEffort(effectiveRuntimeConfig ?? null, cronRuntimeType),
               },
             );
             if (!runtimeResult.queued) {
@@ -3105,7 +3122,10 @@ async function main() {
           // freshness keeps "live-follow" semantics for cron without inventing a third
           // owner kind in resolveSessionConfig (PRD D4 footnote).
           const cronAgent = findAgentByWorkspacePath(agentDir) as AgentConfig | undefined;
-          const cronSnapshot: Partial<SessionMetadata> = cronAgent ? snapshotForOwnedSession(cronAgent) : {};
+          const overrideRuntime = payload.runtime ?? getActiveRuntimeType();
+          const cronSnapshot: Partial<SessionMetadata> = cronAgent
+            ? snapshotForOwnedSession(cronAgent, { runtimeOverride: overrideRuntime })
+            : { runtime: overrideRuntime };
           // PRD #119: stamp the cron's explicit routing intent into the
           // freshly-built snapshot. For Subscription / Explicit intents,
           // the snapshot reflects the cron's own provider — NOT the agent's
@@ -3137,8 +3157,6 @@ async function main() {
             }
             // FollowAgent (legacy): cronSnapshot keeps the agent's values verbatim.
           }
-          const overrideRuntime = payload.runtime ?? getActiveRuntimeType();
-          if (overrideRuntime) cronSnapshot.runtime = overrideRuntime;
           // PRD 0.2.4 §需求 4 — stamp per-task MCP override into the new
           // session's metadata BEFORE creation, so the session is born with
           // the right MCP set. The setMcpServers() call further down still
@@ -3444,7 +3462,7 @@ async function main() {
                 scenario: { type: 'cron', taskId: taskId ?? 'unknown', intervalMinutes: intervalMinutes ?? 0, aiCanExit: aiCanExit ?? false },
                 permissionMode: effectivePermissionMode,
                 model: getRuntimeConfigModel(effectiveRuntimeConfig ?? null),
-                reasoningEffort: getRuntimeConfigReasoningEffort(effectiveRuntimeConfig ?? null),
+                reasoningEffort: getRuntimeConfigReasoningEffort(effectiveRuntimeConfig ?? null, cronRuntimeType),
               },
             );
             if (!ccResult.queued) {
@@ -3815,8 +3833,9 @@ async function main() {
         // The frontend's runtime override (payload.runtime) wins over agent.runtime — Tab UI
         // can pin a session to a specific runtime independent of the Agent's default.
         const agent = findAgentByWorkspacePath(agentDirValue) as AgentConfig | undefined;
-        const baseSnapshot = agent ? snapshotForOwnedSession(agent) : {};
-        if (runtimeValue) baseSnapshot.runtime = runtimeValue;
+        const baseSnapshot: Partial<SessionMetadata> = agent
+          ? snapshotForOwnedSession(agent, { runtimeOverride: runtimeValue })
+          : (runtimeValue ? { runtime: runtimeValue } : {});
         // PRD 0.2.34 §14 D14/D15 — 桌面渠道（悬浮球）创建 owned session 时把权限
         // 种成该 runtime 的「最宽松」档（发完就走渠道默认无脑执行）。原子地在快照
         // 构造期种入（复用既有 getMaxPermissionForRuntime），而非"创建后再 PATCH"
@@ -8573,7 +8592,7 @@ async function main() {
             const payloadRuntimeConfig = payload.runtimeConfig ?? null;
             const imCronModel = payloadRuntime === 'builtin'
               ? (payload.model ?? getSessionModel())
-              : getRuntimeConfigModel(payloadRuntimeConfig);
+              : getRuntimeConfigModel(payloadRuntimeConfig, payloadRuntime);
             // PRD 0.2.9 — Resolve providerId from the workspace agent so
             // the IM cron tool can create live-resolve crons. Only meaningful
             // for builtin runtime (external runtimes manage their own provider).
@@ -8589,7 +8608,7 @@ async function main() {
               model: imCronModel,
               permissionMode: payloadRuntime === 'builtin'
                 ? payload.permissionMode
-                : getRuntimeConfigPermissionMode(payloadRuntimeConfig),
+                : getRuntimeConfigPermissionMode(payloadRuntimeConfig, payloadRuntime),
               // Legacy frozen env (kept for back-compat); sidecar prefers
               // `providerId` when both are present.
               providerEnv: payloadRuntime === 'builtin' && payload.providerEnv ? {
@@ -8746,9 +8765,9 @@ async function main() {
                 sessionId: getSessionId(),
                 workspacePath: agentDir,
                 scenario: { type: 'agent-channel' as const, platform: imSource, sourceType: imSourceType, botName: payload.botName },
-                permissionMode: getRuntimeConfigPermissionMode(runtimeConfig),
-                model: getRuntimeConfigModel(runtimeConfig),
-                reasoningEffort: getRuntimeConfigReasoningEffort(runtimeConfig),
+                permissionMode: getRuntimeConfigPermissionMode(runtimeConfig, payloadRuntime),
+                model: getRuntimeConfigModel(runtimeConfig, payloadRuntime),
+                reasoningEffort: getRuntimeConfigReasoningEffort(runtimeConfig, payloadRuntime),
                 requestId: payload.requestId,
               },
             );
@@ -9236,9 +9255,9 @@ description: >
                 sessionId: getSessionId(),
                 workspacePath: agentDir,
                 scenario: { type: 'agent-channel', platform: payload.source?.split('_')[0] ?? 'unknown', sourceType: 'private' },
-                permissionMode: getRuntimeConfigPermissionMode(runtimeConfig),
-                model: getRuntimeConfigModel(runtimeConfig),
-                reasoningEffort: getRuntimeConfigReasoningEffort(runtimeConfig),
+                permissionMode: getRuntimeConfigPermissionMode(runtimeConfig, getActiveRuntimeType()),
+                model: getRuntimeConfigModel(runtimeConfig, getActiveRuntimeType()),
+                reasoningEffort: getRuntimeConfigReasoningEffort(runtimeConfig, getActiveRuntimeType()),
               },
             );
             if (!ccResult.queued) {

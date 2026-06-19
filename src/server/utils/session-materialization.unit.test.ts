@@ -19,7 +19,7 @@ function makeAgent(overrides: Partial<AgentConfig> = {}): AgentConfig {
     runtime: 'codex',
     runtimeConfig: {
       model: 'gpt-5.1-codex',
-      permissionMode: 'fullAgency',
+      permissionMode: 'full-auto',
     },
     ...overrides,
   };
@@ -55,7 +55,30 @@ describe('createMaterializedSessionMetadata', () => {
     expect(meta.title).toBe('First prompt');
     expect(meta.runtime).toBe('codex');
     expect(meta.model).toBe('gpt-5.1-codex');
-    expect(meta.permissionMode).toBe('fullAgency');
+    expect(meta.permissionMode).toBe('full-auto');
+    expect(meta.configSnapshotAt).toBeTruthy();
+  });
+
+  it('materializes a runtime switch using the target runtime snapshot view', () => {
+    const meta = createMaterializedSessionMetadata({
+      agentDir: '/tmp/workspace',
+      sessionId: 'runtime-switch-session-id',
+      scenario: 'desktop',
+      agent: makeAgent({
+        runtime: 'builtin',
+        model: 'claude-opus-4-7',
+        permissionMode: 'fullAgency',
+        runtimeConfig: {
+          model: 'gemini-3.1-pro-preview',
+          permissionMode: 'yolo',
+        },
+      }),
+      runtimeOverride: 'codex',
+    });
+
+    expect(meta.runtime).toBe('codex');
+    expect(meta.model).toBeUndefined();
+    expect(meta.permissionMode).toBeUndefined();
     expect(meta.configSnapshotAt).toBeTruthy();
   });
 

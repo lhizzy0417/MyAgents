@@ -1,4 +1,11 @@
 import type { AgentConfig } from '../../shared/types/agent';
+import {
+  buildRuntimeChangePatch,
+  coerceModelForRuntime,
+  coercePermissionModeForRuntime,
+  type RuntimeType,
+} from '../../shared/types/runtime';
+import { coerceReasoningEffortSettingForRuntime } from '../../shared/reasoningEffort';
 import type { SessionMetadata } from '../types/session';
 
 /**
@@ -62,9 +69,37 @@ export type OwnedSessionSnapshot = Pick<
  * `runtimeSessionId` is left absent — it is filled in by the runtime on first
  * `session/new` / thread creation.
  */
-export function snapshotForImSession(agent: AgentConfig): Partial<SessionMetadata> {
+interface SessionSnapshotRuntimeOptions {
+  /**
+   * Runtime the session is being materialized for. Used when a caller creates a
+   * session as part of a runtime switch before the AgentConfig patch is written.
+   */
+  runtimeOverride?: RuntimeType;
+}
+
+function agentForSnapshotRuntime(
+  agent: AgentConfig,
+  options?: SessionSnapshotRuntimeOptions,
+): AgentConfig {
+  const currentRuntime = agent.runtime ?? 'builtin';
+  const targetRuntime = options?.runtimeOverride ?? currentRuntime;
+  if (targetRuntime === currentRuntime) return agent;
+
+  const runtimePatch = buildRuntimeChangePatch(agent.runtimeConfig, targetRuntime);
   return {
-    runtime: agent.runtime ?? 'builtin',
+    ...agent,
+    runtime: runtimePatch.runtime,
+    runtimeConfig: runtimePatch.runtimeConfig,
+  };
+}
+
+export function snapshotForImSession(
+  agent: AgentConfig,
+  options?: SessionSnapshotRuntimeOptions,
+): Partial<SessionMetadata> {
+  const snapshotAgent = agentForSnapshotRuntime(agent, options);
+  return {
+    runtime: snapshotAgent.runtime ?? 'builtin',
   };
 }
 
@@ -97,18 +132,26 @@ export function snapshotForImSession(agent: AgentConfig): Partial<SessionMetadat
  */
 export function snapshotForOwnedSession(
   agent: AgentConfig,
+  options?: SessionSnapshotRuntimeOptions,
 ): OwnedSessionSnapshot & Pick<SessionMetadata, 'configSnapshotAt'> {
-  const runtime = agent.runtime ?? 'builtin';
+  const snapshotAgent = agentForSnapshotRuntime(agent, options);
+  const runtime = snapshotAgent.runtime ?? 'builtin';
   const isExternal = runtime !== 'builtin';
   return {
     runtime,
-    model: isExternal ? agent.runtimeConfig?.model : agent.model,
+    model: isExternal
+      ? coerceModelForRuntime(snapshotAgent.runtimeConfig?.model, runtime)
+      : snapshotAgent.model,
     // #324 — same runtime-aware dispatch as model (issue #224 rationale).
-    reasoningEffort: isExternal ? agent.runtimeConfig?.reasoningEffort : agent.reasoningEffort,
-    permissionMode: isExternal ? agent.runtimeConfig?.permissionMode : agent.permissionMode,
-    mcpEnabledServers: agent.mcpEnabledServers ? [...agent.mcpEnabledServers] : undefined,
-    providerId: agent.providerId,
-    providerEnvJson: agent.providerEnvJson,
+    reasoningEffort: isExternal
+      ? coerceReasoningEffortSettingForRuntime(snapshotAgent.runtimeConfig?.reasoningEffort, runtime)
+      : snapshotAgent.reasoningEffort,
+    permissionMode: isExternal
+      ? coercePermissionModeForRuntime(snapshotAgent.runtimeConfig?.permissionMode, runtime)
+      : snapshotAgent.permissionMode,
+    mcpEnabledServers: snapshotAgent.mcpEnabledServers ? [...snapshotAgent.mcpEnabledServers] : undefined,
+    providerId: snapshotAgent.providerId,
+    providerEnvJson: snapshotAgent.providerEnvJson,
     configSnapshotAt: new Date().toISOString(),
   };
 }

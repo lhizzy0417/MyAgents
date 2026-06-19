@@ -388,8 +388,8 @@ SDK subprocess → ANTHROPIC_BASE_URL=127.0.0.1:${sidecarPort}
 
 | Owner 类型 | Snapshot helper | 策略 |
 |-----------|----------------|------|
-| Tab / Cron / Background | `snapshotForOwnedSession(agent)` | 冻结 model / permission / MCP / provider / runtime |
-| IM / Agent Channel | `snapshotForImSession(agent)` | 只记 runtime；其它每次消息 live resolve |
+| Tab / Cron / Background | `snapshotForOwnedSession(agent, { runtimeOverride? })` | 冻结 model / permission / MCP / provider / runtime；runtime 切换出生路径用 override 生成目标 runtime view |
+| IM / Agent Channel | `snapshotForImSession(agent, { runtimeOverride? })` | 只记 runtime；其它每次消息 live resolve |
 
 读侧通过 `resolveSessionConfig(sessionMeta, ownerKind)` 统一消费。详见 `tech_docs/pit_of_success.md` 的「Snapshot Helpers」节。
 

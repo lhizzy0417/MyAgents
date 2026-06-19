@@ -1,6 +1,8 @@
 import { describe, it, expect } from 'vitest';
 
 import {
+  coerceReasoningEffortForRuntime,
+  coerceReasoningEffortSettingForRuntime,
   normalizeReasoningEffort,
   isSdkEffortLevel,
   reasoningEffortChoices,
@@ -55,5 +57,17 @@ describe('reasoningEffortChoices — per-surface vocabularies', () => {
   it('gemini / unknown → null (UI hides the row entirely)', () => {
     expect(reasoningEffortChoices('gemini')).toBeNull();
     expect(reasoningEffortChoices('some-future-runtime')).toBeNull();
+  });
+});
+
+describe('reasoning effort coercion', () => {
+  it('wire coercion collapses default so runtimes receive no effort override', () => {
+    expect(coerceReasoningEffortForRuntime(REASONING_EFFORT_DEFAULT, 'codex')).toBeUndefined();
+  });
+
+  it('setting coercion preserves default so snapshots can override inherited values', () => {
+    expect(coerceReasoningEffortSettingForRuntime(REASONING_EFFORT_DEFAULT, 'codex')).toBe(REASONING_EFFORT_DEFAULT);
+    expect(coerceReasoningEffortSettingForRuntime('xhigh', 'codex')).toBe('xhigh');
+    expect(coerceReasoningEffortSettingForRuntime('max', 'codex')).toBeUndefined();
   });
 });

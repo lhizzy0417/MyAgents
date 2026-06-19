@@ -74,6 +74,37 @@ export function reasoningEffortChoices(
   }
 }
 
+export function coerceReasoningEffortForRuntime(
+  value: string | null | undefined,
+  runtime: string,
+  apiProtocol?: 'anthropic' | 'openai',
+): string | undefined {
+  const normalized = normalizeReasoningEffort(value);
+  if (!normalized) return undefined;
+  const choices = reasoningEffortChoices(runtime, apiProtocol);
+  if (!choices) return undefined;
+  return choices.includes(normalized) ? normalized : undefined;
+}
+
+/**
+ * Coerce a persisted/user-facing effort setting while preserving the literal
+ * `default` sentinel. Storage needs the sentinel to override an inherited
+ * non-default value; wire/runtime callers should use
+ * `coerceReasoningEffortForRuntime()` instead.
+ */
+export function coerceReasoningEffortSettingForRuntime(
+  value: string | null | undefined,
+  runtime: string,
+  apiProtocol?: 'anthropic' | 'openai',
+): string | undefined {
+  const trimmed = value?.trim();
+  if (!trimmed) return undefined;
+  if (trimmed === REASONING_EFFORT_DEFAULT) return REASONING_EFFORT_DEFAULT;
+  const choices = reasoningEffortChoices(runtime, apiProtocol);
+  if (!choices) return undefined;
+  return choices.includes(trimmed) ? trimmed : undefined;
+}
+
 /** Short UI annotation per level (uniform typography; see DESIGN.md 6.5). */
 export const REASONING_EFFORT_DESCRIPTIONS: Record<string, string> = {
   [REASONING_EFFORT_DEFAULT]: '跟随服务商',

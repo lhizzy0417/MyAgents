@@ -36,6 +36,48 @@ describe('snapshotForOwnedSession — reasoning effort capture (#324)', () => {
     expect(snap.model).toBe('gpt-5.2-codex');
   });
 
+  it("external: preserves literal 'default' to pin a session back to runtime defaults", () => {
+    const snap = snapshotForOwnedSession(makeAgent({
+      runtime: 'codex',
+      reasoningEffort: 'max',
+      runtimeConfig: { model: 'gpt-5.2-codex', reasoningEffort: 'default' },
+    }));
+
+    expect(snap.reasoningEffort).toBe('default');
+  });
+
+  it('runtime override snapshots the target runtime view instead of post-hoc mutating runtime', () => {
+    const snap = snapshotForOwnedSession(makeAgent({
+      runtime: 'builtin',
+      model: 'claude-opus-4-7',
+      reasoningEffort: 'max',
+      permissionMode: 'fullAgency',
+      runtimeConfig: { model: 'gemini-3.1-pro-preview', reasoningEffort: 'xhigh', permissionMode: 'yolo' },
+    }), { runtimeOverride: 'codex' });
+
+    expect(snap.runtime).toBe('codex');
+    expect(snap.model).toBeUndefined();
+    expect(snap.reasoningEffort).toBeUndefined();
+    expect(snap.permissionMode).toBeUndefined();
+    expect(snap.configSnapshotAt).toBeTruthy();
+  });
+
+  it('external: drops obviously foreign runtimeConfig fields before writing a snapshot', () => {
+    const snap = snapshotForOwnedSession(makeAgent({
+      runtime: 'codex',
+      runtimeConfig: {
+        model: 'claude-opus-4-7',
+        reasoningEffort: 'max',
+        permissionMode: 'fullAgency',
+      },
+    }));
+
+    expect(snap.runtime).toBe('codex');
+    expect(snap.model).toBeUndefined();
+    expect(snap.reasoningEffort).toBeUndefined();
+    expect(snap.permissionMode).toBeUndefined();
+  });
+
   it('absent on both → undefined (resolver falls back to agent at read time)', () => {
     expect(snapshotForOwnedSession(makeAgent({})).reasoningEffort).toBeUndefined();
   });

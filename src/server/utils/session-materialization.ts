@@ -12,10 +12,11 @@ export function isLiveFollowScenario(scenario: SessionMaterializationScenario): 
 export function snapshotForMaterializedSession(
   agent: AgentConfig,
   scenario: SessionMaterializationScenario,
+  options?: { runtimeOverride?: RuntimeType },
 ): Partial<SessionMetadata> {
   return isLiveFollowScenario(scenario)
-    ? snapshotForImSession(agent)
-    : snapshotForOwnedSession(agent);
+    ? snapshotForImSession(agent, options)
+    : snapshotForOwnedSession(agent, options);
 }
 
 export function createMaterializedSessionMetadata(params: {
@@ -23,15 +24,19 @@ export function createMaterializedSessionMetadata(params: {
   sessionId: string;
   scenario: SessionMaterializationScenario;
   agent?: AgentConfig;
+  runtimeOverride?: RuntimeType;
   fallbackRuntime?: RuntimeType;
   title?: string;
 }): SessionMetadata {
   const snapshot = params.agent
-    ? snapshotForMaterializedSession(params.agent, params.scenario)
+    ? snapshotForMaterializedSession(params.agent, params.scenario, {
+        runtimeOverride: params.runtimeOverride,
+      })
     : undefined;
   const meta = createSessionMetadata(params.agentDir, snapshot);
-  if (!params.agent && params.fallbackRuntime) {
-    meta.runtime = params.fallbackRuntime;
+  const fallbackRuntime = params.runtimeOverride ?? params.fallbackRuntime;
+  if (!params.agent && fallbackRuntime) {
+    meta.runtime = fallbackRuntime;
   }
   meta.id = params.sessionId;
   meta.title = params.title ?? 'New Chat';

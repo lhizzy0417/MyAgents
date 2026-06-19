@@ -1,6 +1,18 @@
 import { describe, expect, test } from 'vitest';
 
-import { normalizeRuntime, resolveEffectiveRuntime, getMaxPermissionForRuntime, VALID_RUNTIMES, type RuntimeType } from './runtime';
+import {
+  coerceModelForRuntime,
+  coercePermissionModeForRuntime,
+  getMaxPermissionForRuntime,
+  modelLooksLikeRuntime,
+  permissionModeLooksLikeRuntime,
+  normalizeRuntime,
+  resolveCronPermissionMode,
+  resolveEffectiveRuntime,
+  VALID_RUNTIMES,
+  type RuntimeType,
+} from './runtime';
+import { coerceReasoningEffortForRuntime } from '../reasoningEffort';
 
 describe('normalizeRuntime', () => {
   test('passes through valid runtimes', () => {
@@ -61,6 +73,67 @@ describe('resolveEffectiveRuntime', () => {
   });
 });
 
+describe('model runtime family coercion', () => {
+  test('drops obvious Claude models for Codex and returns runtime default', () => {
+    expect(modelLooksLikeRuntime('claude-opus-4-7', 'codex')).toBe(false);
+    expect(coerceModelForRuntime('claude-opus-4-7', 'codex')).toBeUndefined();
+    expect(coerceModelForRuntime('anthropic/claude-sonnet-4.6', 'codex')).toBeUndefined();
+    expect(coerceModelForRuntime('us.anthropic.claude-opus-4-7', 'codex')).toBeUndefined();
+  });
+
+  test('keeps native and unknown model ids', () => {
+    expect(coerceModelForRuntime('gpt-5.5', 'codex')).toBe('gpt-5.5');
+    expect(coerceModelForRuntime('openai/gpt-5.5', 'codex')).toBe('openai/gpt-5.5');
+    expect(coerceModelForRuntime('future-lab-model', 'codex')).toBe('future-lab-model');
+    expect(coerceModelForRuntime('gemini-3.1-pro-preview', 'gemini')).toBe('gemini-3.1-pro-preview');
+  });
+
+  test('drops namespaced foreign model families', () => {
+    expect(coerceModelForRuntime('google/gemini-2.5-pro', 'claude-code')).toBeUndefined();
+    expect(coerceModelForRuntime('anthropic/claude-sonnet-4.6', 'gemini')).toBeUndefined();
+    expect(coerceModelForRuntime('openai/gpt-5.5', 'gemini')).toBeUndefined();
+  });
+
+  test('trims blank values to undefined', () => {
+    expect(coerceModelForRuntime('  ', 'codex')).toBeUndefined();
+    expect(coerceModelForRuntime(undefined, 'codex')).toBeUndefined();
+  });
+});
+
+describe('permission mode runtime family coercion', () => {
+  test('drops obvious builtin permission modes for Codex', () => {
+    expect(permissionModeLooksLikeRuntime('fullAgency', 'codex')).toBe(false);
+    expect(coercePermissionModeForRuntime('fullAgency', 'codex')).toBeUndefined();
+  });
+
+  test('keeps native and unknown permission modes', () => {
+    expect(coercePermissionModeForRuntime('no-restrictions', 'codex')).toBe('no-restrictions');
+    expect(coercePermissionModeForRuntime('future-mode', 'codex')).toBe('future-mode');
+    expect(coercePermissionModeForRuntime('autoEdit', 'gemini')).toBe('autoEdit');
+  });
+
+  test('shared labels stay valid for runtimes that own them', () => {
+    expect(coercePermissionModeForRuntime('plan', 'builtin')).toBe('plan');
+    expect(coercePermissionModeForRuntime('plan', 'gemini')).toBe('plan');
+    expect(coercePermissionModeForRuntime('default', 'claude-code')).toBe('default');
+    expect(coercePermissionModeForRuntime('default', 'gemini')).toBe('default');
+  });
+});
+
+describe('reasoning effort runtime coercion', () => {
+  test('drops levels that the target runtime does not expose', () => {
+    expect(coerceReasoningEffortForRuntime('max', 'codex')).toBeUndefined();
+    expect(coerceReasoningEffortForRuntime('minimal', 'claude-code')).toBeUndefined();
+    expect(coerceReasoningEffortForRuntime('xhigh', 'gemini')).toBeUndefined();
+  });
+
+  test('keeps target-runtime levels and default sentinel', () => {
+    expect(coerceReasoningEffortForRuntime('xhigh', 'codex')).toBe('xhigh');
+    expect(coerceReasoningEffortForRuntime('max', 'claude-code')).toBe('max');
+    expect(coerceReasoningEffortForRuntime('default', 'codex')).toBeUndefined();
+  });
+});
+
 describe('getMaxPermissionForRuntime — unattended max-agency mode per runtime', () => {
   // The unattended memory-update / heartbeat turns inject system work (git commit,
   // file writes) and MUST run at each runtime's maximum agency so tool use never
@@ -84,5 +157,27 @@ describe('getMaxPermissionForRuntime — unattended max-agency mode per runtime'
 
   test('falls back to builtin fullAgency for an unknown runtime', () => {
     expect(getMaxPermissionForRuntime('something-else' as RuntimeType)).toBe('fullAgency');
+  });
+});
+
+describe('resolveCronPermissionMode', () => {
+  test('uses runtime max when no mode is pinned', () => {
+    expect(resolveCronPermissionMode(undefined, undefined, 'codex')).toBe('no-restrictions');
+    expect(resolveCronPermissionMode('', '', 'gemini')).toBe('yolo');
+  });
+
+  test('respects runtime-appropriate pinned modes', () => {
+    expect(resolveCronPermissionMode('full-auto', undefined, 'codex')).toBe('full-auto');
+    expect(resolveCronPermissionMode(undefined, 'autoEdit', 'gemini')).toBe('autoEdit');
+  });
+
+  test('treats obvious foreign stale modes as missing for unattended runs', () => {
+    expect(resolveCronPermissionMode('fullAgency', undefined, 'codex')).toBe('no-restrictions');
+    expect(resolveCronPermissionMode(undefined, 'no-restrictions', 'gemini')).toBe('yolo');
+  });
+
+  test('skips stale payload mode before falling back to runtimeConfig mode', () => {
+    expect(resolveCronPermissionMode('auto', 'full-auto', 'codex')).toBe('full-auto');
+    expect(resolveCronPermissionMode('fullAgency', 'autoEdit', 'gemini')).toBe('autoEdit');
   });
 });

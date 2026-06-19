@@ -413,8 +413,10 @@ v0.2.0 Windows 版的 IM Bot 全部启动失败就是这个 trap：`find_tsx_run
 **Problem.** Tab/Cron/Background 与 IM/Agent Channel 对 config 变更的感知策略不同——前者要冻结快照（Agent 配置变更不影响已开 session），后者要 live follow（每条消息都按当前配置 resolve）。如果用一个 snapshot helper + 布尔参数，调用方容易忘记某个分支。
 
 **Surface.** 两个**独立命名函数**：
-- `snapshotForOwnedSession(agent)` —— 冻结 `model / permissionMode / mcpEnabledServers / providerId / providerEnvJson / runtime`
-- `snapshotForImSession(agent)` —— 只记录 `runtime`（runtime drift 触发 session fork）
+- `snapshotForOwnedSession(agent, { runtimeOverride? })` —— 冻结 `model / permissionMode / mcpEnabledServers / providerId / providerEnvJson / runtime`
+- `snapshotForImSession(agent, { runtimeOverride? })` —— 只记录 `runtime`（runtime drift 触发 session fork）
+
+`runtimeOverride` 只用于“会话出生时目标 runtime 已由 sidecar/用户动作决定，但 AgentConfig 还没落盘”的 materialization 路径。它必须在 helper 内构造目标 runtime 下的 agent view，并复用 `buildRuntimeChangePatch` 清掉非 portable `runtimeConfig` 字段；禁止先按旧 agent snapshot 再在 route 层 post-hoc 覆盖 `snapshot.runtime`。
 
 **Invariants enforced.** 任何新增字段都必须在两处显式处理，无法"忘记"。读侧用 `resolveSessionConfig(sessionMeta, ownerKind)` (`src/server/utils/resolve-session-config.ts`) 统一消费——owned session 走 meta 冻结值，IM session 走 live agent；meta 缺失时 fallback 到 agent config，向后兼容老 session。
 
