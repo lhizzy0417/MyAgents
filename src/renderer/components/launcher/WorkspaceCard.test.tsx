@@ -117,7 +117,7 @@ describe('WorkspaceCard', () => {
         const moreButton = screen.getByLabelText('更多');
         expect(moreButton.closest('button')).toHaveClass('hover:z-20');
         expect(moreButton.parentElement).toHaveClass('workspace-card-action-overlay', 'z-20');
-        expect(screen.getByText('更多')).toHaveClass('z-30');
+        expect(screen.queryByText('更多')).not.toBeInTheDocument();
     });
 
     it('opens the context menu from the hover more action without launching the workspace', () => {

@@ -536,21 +536,27 @@ const LauncherHistoryRow = memo(function LauncherHistoryRow({
         onMenuOpenChange(false);
     }, [onMenuOpenChange]);
 
+    const openMenuAt = useCallback((x: number, y: number) => {
+        setMenuAnchor({ x, y, placement: 'bottom-start' });
+        onMenuOpenChange(true);
+    }, [onMenuOpenChange]);
+
     const handleOpen = useCallback(() => onOpen(session, project), [onOpen, project, session]);
     const handleClick = useCallback((event: React.MouseEvent<HTMLDivElement>) => {
         if (!event.currentTarget.contains(event.target as Node)) return;
         handleOpen();
     }, [handleOpen]);
+    const handleMouseDownCapture = useCallback((event: React.MouseEvent<HTMLDivElement>) => {
+        if (event.button !== 2) return;
+        event.preventDefault();
+        event.stopPropagation();
+        openMenuAt(event.clientX, event.clientY);
+    }, [openMenuAt]);
     const handleContextMenu = useCallback((event: React.MouseEvent<HTMLDivElement>) => {
         event.preventDefault();
         event.stopPropagation();
-        setMenuAnchor({
-            x: event.clientX,
-            y: event.clientY,
-            placement: 'bottom-start',
-        });
-        onMenuOpenChange(true);
-    }, [onMenuOpenChange]);
+        openMenuAt(event.clientX, event.clientY);
+    }, [openMenuAt]);
     const handleKeyDown = useCallback((event: React.KeyboardEvent<HTMLDivElement>) => {
         if (event.target !== event.currentTarget) return;
         if (event.key !== 'Enter' && event.key !== ' ') return;
@@ -563,9 +569,10 @@ const LauncherHistoryRow = memo(function LauncherHistoryRow({
             role="button"
             tabIndex={0}
             onClick={handleClick}
+            onMouseDownCapture={handleMouseDownCapture}
             onContextMenu={handleContextMenu}
             onKeyDown={handleKeyDown}
-            className="group relative flex w-full cursor-pointer items-center gap-2 overflow-hidden rounded-lg px-3 py-2 text-left transition-all hover:bg-[var(--hover-bg)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]"
+            className="group relative flex w-full cursor-pointer select-none items-center gap-2 overflow-hidden rounded-lg px-3 py-2 text-left transition-all hover:bg-[var(--hover-bg)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]"
         >
             <div className="flex w-16 shrink-0 items-center text-xs tabular-nums text-[var(--ink-muted)]/50">
                 <span className="min-w-0 truncate">{formatTime(session.lastActiveAt)}</span>

@@ -212,6 +212,7 @@ describe('LauncherRightRail', () => {
         renderRail({ onOpenTask, sessions: [session({ id: 'stats-session', title: 'Session A' })] });
 
         const row = screen.getByRole('button', { name: /Session A/ });
+        expect(row).toHaveClass('select-none');
         fireEvent.contextMenu(row, { clientX: 120, clientY: 240 });
 
         expect(screen.getByRole('button', { name: '查看统计' })).toBeInTheDocument();
@@ -221,6 +222,17 @@ describe('LauncherRightRail', () => {
 
         expect(onOpenTask).not.toHaveBeenCalled();
         expect(screen.getByRole('dialog', { name: 'session stats' })).toHaveTextContent('stats:stats-session');
+    });
+
+    it('opens the history menu on right mouse down before browser text selection can start', () => {
+        const onOpenTask = vi.fn();
+        renderRail({ onOpenTask, sessions: [session({ id: 'stats-session', title: 'Session A' })] });
+
+        const row = screen.getByRole('button', { name: /Session A/ });
+        fireEvent.mouseDown(row, { button: 2, buttons: 2, clientX: 120, clientY: 240 });
+
+        expect(screen.getByRole('button', { name: '查看统计' })).toBeInTheDocument();
+        expect(onOpenTask).not.toHaveBeenCalled();
     });
 
     it('opens delete confirmation without opening the history session', () => {

@@ -178,9 +178,6 @@ export default memo(function WorkspaceCard({
                             onClick={handleMoreClick}
                         >
                             <MoreHorizontal className="h-4 w-4" strokeWidth={2.2} />
-                            <span className="pointer-events-none absolute right-full top-1/2 z-30 mr-2 -translate-y-1/2 whitespace-nowrap rounded-md bg-[var(--button-dark-bg)] px-2 py-0.5 text-xs text-[var(--button-primary-text)] opacity-0 shadow-lg transition-opacity group-hover/btn:opacity-100">
-                                更多
-                            </span>
                         </span>
                     </div>
                 )}
