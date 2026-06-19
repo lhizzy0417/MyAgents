@@ -3,10 +3,14 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const mocks = vi.hoisted(() => ({
   checkPaths: vi.fn(),
+  checkLocalPaths: vi.fn(),
   openImagePreview: vi.fn(),
   openWithDefault: vi.fn(),
+  openPathWithDefault: vi.fn(),
+  openPathExternal: vi.fn(),
   openInFinder: vi.fn(),
   readPreview: vi.fn(),
+  readLocalPreview: vi.fn(),
   onInsertReference: vi.fn(),
 }));
 
@@ -18,10 +22,15 @@ vi.mock('@/hooks/useWorkspaceFileService', () => ({
   useWorkspaceFileService: () => ({
     isAvailable: true,
     checkPaths: mocks.checkPaths,
+    checkLocalPaths: mocks.checkLocalPaths,
     openWithDefault: mocks.openWithDefault,
+    openPathWithDefault: mocks.openPathWithDefault,
+    openPathExternal: mocks.openPathExternal,
     openInFinder: mocks.openInFinder,
     readPreview: mocks.readPreview,
+    readLocalPreview: mocks.readLocalPreview,
     readFileAsBlobUrl: vi.fn(),
+    readLocalFileAsBlobUrl: vi.fn(),
   }),
 }));
 
@@ -52,7 +61,11 @@ function renderFilePath(path: string) {
 describe('FilePath tool chip — clickable file paths', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mocks.checkPaths.mockResolvedValue({ results: {} });
+    mocks.checkLocalPaths.mockResolvedValue({ results: {} });
     mocks.openWithDefault.mockResolvedValue(undefined);
+    mocks.openPathWithDefault.mockResolvedValue(undefined);
+    mocks.openPathExternal.mockResolvedValue(undefined);
     mocks.openInFinder.mockResolvedValue(undefined);
   });
 
@@ -123,13 +136,12 @@ describe('FilePath tool chip — clickable file paths', () => {
 
   it('leaves an absolute path OUTSIDE the workspace as a plain chip', async () => {
     const OUTSIDE = '/etc/passwd';
-    mocks.checkPaths.mockResolvedValue({ results: {} });
+    mocks.checkLocalPaths.mockResolvedValue({ results: { [OUTSIDE]: { exists: false, type: 'file' } } });
     renderFilePath(OUTSIDE);
 
-    await waitFor(() => expect(mocks.checkPaths).toHaveBeenCalled());
-    // Can't be made workspace-relative → passed through as-is → backend reports
-    // not-found → stays a plain chip with no menu.
-    expect(mocks.checkPaths).toHaveBeenCalledWith({ paths: [OUTSIDE] });
+    await waitFor(() => expect(mocks.checkLocalPaths).toHaveBeenCalled());
+    // Can't be made workspace-relative → local checker rejects it → stays plain.
+    expect(mocks.checkLocalPaths).toHaveBeenCalledWith({ paths: [OUTSIDE], workspace: WORKSPACE });
     const chip = screen.getByText(OUTSIDE);
     expect(chip).not.toHaveClass('cursor-pointer');
     fireEvent.click(chip);

@@ -3,7 +3,7 @@ import type { ReactNode } from 'react';
 
 import { useFileAction } from '@/context/FileActionContext';
 import type { ToolUseSimple } from '@/types/chat';
-import { resolveActionPath } from '@/utils/workspaceFileLinks';
+import { resolveFileActionTarget } from '@/utils/workspaceFileLinks';
 
 import {
   getThinkingBadgeConfig,
@@ -122,16 +122,18 @@ export function FilePath({ path }: { path?: string | null }) {
   // paths already use, so the existence check resolves and the menu actions
   // (预览/引用/打开/打开所在文件夹) work. Falls back to the raw path — which stays
   // a plain chip — when it's outside the workspace or no workspace is known.
-  const actionPath = resolveActionPath(path, fileAction?.workspacePath);
+  const actionTarget = fileAction ? resolveFileActionTarget(path, fileAction.workspacePath) : null;
   // Triggers a batched existence check; returns cached result or null (pending).
-  const pathInfo = fileAction?.checkPath(actionPath) ?? null;
+  const pathInfo = actionTarget ? fileAction?.checkFileTarget(actionTarget) ?? null : null;
 
-  if (!fileAction || !pathInfo?.exists) {
+  if (!fileAction || !actionTarget || !pathInfo?.exists) {
     return <MonoText className={FILE_PATH_BOX_CLASS}>{path}</MonoText>;
   }
 
   const openMenu = (x: number, y: number) =>
-    fileAction.openFileMenu(x, y, actionPath, pathInfo.type, path);
+    fileAction.openFileMenu(x, y, actionTarget.path, pathInfo.type, path, {
+      scope: actionTarget.scope,
+    });
 
   return (
     <code

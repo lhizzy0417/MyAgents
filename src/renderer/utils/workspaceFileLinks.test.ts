@@ -1,6 +1,13 @@
 import { describe, expect, it } from 'vitest';
 
-import { resolveActionPath, resolveWorkspaceFileLinkTarget, resolveAgainstWorkspace, toWorkspaceRelativePath } from './workspaceFileLinks';
+import {
+  resolveActionPath,
+  resolveAgainstWorkspace,
+  resolveFileActionTarget,
+  resolveFileLinkTarget,
+  resolveWorkspaceFileLinkTarget,
+  toWorkspaceRelativePath,
+} from './workspaceFileLinks';
 
 const WORKSPACE = '/Users/zhihu/Documents/project/MyAgents';
 
@@ -76,6 +83,37 @@ describe('resolveWorkspaceFileLinkTarget', () => {
   });
 });
 
+describe('resolveFileLinkTarget', () => {
+  it('keeps workspace links on the workspace action path', () => {
+    expect(resolveFileLinkTarget(`${WORKSPACE}/src/App.tsx#L9`, WORKSPACE)).toEqual({
+      scope: 'workspace',
+      path: 'src/App.tsx',
+      initialLineNumber: 9,
+    });
+  });
+
+  it('returns absolute local links outside the workspace as local targets', () => {
+    expect(resolveFileLinkTarget('/Users/zhihu/Other/file.ts:12', WORKSPACE)).toEqual({
+      scope: 'local',
+      path: '/Users/zhihu/Other/file.ts',
+      initialLineNumber: 12,
+    });
+  });
+
+  it('supports file URLs outside the workspace', () => {
+    expect(resolveFileLinkTarget('file:///Users/zhihu/Other/My%20Note.md#L3', WORKSPACE)).toEqual({
+      scope: 'local',
+      path: '/Users/zhihu/Other/My Note.md',
+      initialLineNumber: 3,
+    });
+  });
+
+  it('rejects non-file schemes', () => {
+    expect(resolveFileLinkTarget('https://example.com/file.ts', WORKSPACE)).toBeNull();
+    expect(resolveFileLinkTarget('mailto:a@example.com', WORKSPACE)).toBeNull();
+  });
+});
+
 describe('resolveAgainstWorkspace', () => {
   it('joins a workspace-relative path to an absolute path', () => {
     expect(resolveAgainstWorkspace('myagents_files/generated_audio/tts_x.mp3', WORKSPACE))
@@ -140,5 +178,25 @@ describe('resolveActionPath', () => {
   it('passes a non-file-reference token through unchanged', () => {
     // toWorkspaceRelativePath can\'t classify it → fall back to the raw input.
     expect(resolveActionPath('foo', WORKSPACE)).toBe('foo');
+  });
+});
+
+describe('resolveFileActionTarget', () => {
+  it('normalizes an in-workspace absolute path to a workspace target', () => {
+    expect(resolveFileActionTarget(`${WORKSPACE}/CLAUDE.md`, WORKSPACE)).toEqual({
+      scope: 'workspace',
+      path: 'CLAUDE.md',
+    });
+  });
+
+  it('keeps an outside absolute path as a local target', () => {
+    expect(resolveFileActionTarget('/Users/zhihu/Other/file.ts', WORKSPACE)).toEqual({
+      scope: 'local',
+      path: '/Users/zhihu/Other/file.ts',
+    });
+  });
+
+  it('returns null for relative paths when no workspace is known', () => {
+    expect(resolveFileActionTarget('src/App.tsx', null)).toBeNull();
   });
 });

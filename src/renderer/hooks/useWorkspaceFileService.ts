@@ -190,8 +190,10 @@ interface GitignoreResult {
  * `watchStart`, `checkPaths`.
  *
  * # Methods that DO NOT require a workspace (callable with `useWorkspaceFileService(null)`):
- * `openPathExternal` (takes absolute path), `readPathsAsBase64` (takes
- * absolute paths from drag-drop), `watchStop` (takes opaque token).
+ * `openPathExternal`, `openPathWithDefault`, `checkLocalPaths`,
+ * `readLocalPreview`, `downloadLocalFile`, `downloadLocalFileBytes`,
+ * `readLocalFileAsBlobUrl` (all take absolute paths), `readPathsAsBase64`
+ * (takes absolute image paths from drag-drop), `watchStop` (takes opaque token).
  *
  * Cross-review round 2 (Codex HIGH-3): consumers like SkillDetailPanel /
  * CommandDetailPanel pass `null` because they only need workspace-free
@@ -270,6 +272,14 @@ export interface WorkspaceFileService {
    *  `open <path>`). Same safety surface as `openPathExternal` (home/tmp prefix +
    *  credential blacklist). Used by the audio attachment "more" menu (PRD 0.2.30). */
   openPathWithDefault(args: { fullPath: string; workspace?: string | null }): Promise<void>;
+  /** [workspace-free] Batch existence check for absolute local paths. */
+  checkLocalPaths(args: { paths: string[]; workspace?: string | null }): Promise<CheckPathsResult>;
+  /** [workspace-free] Read an absolute local text file for preview. */
+  readLocalPreview(args: { fullPath: string; workspace?: string | null }): Promise<PreviewResult>;
+  /** [workspace-free] Read an absolute local file as base64 for image preview. */
+  downloadLocalFile(args: { fullPath: string; workspace?: string | null }): Promise<DownloadResult>;
+  /** [workspace-free] Read an absolute local file as raw bytes for rich-doc preview. */
+  downloadLocalFileBytes(args: { fullPath: string; workspace?: string | null }): Promise<ArrayBuffer>;
   /** [requires workspace] Batch existence check — input order is preserved in the returned map. */
   checkPaths(args: { paths: string[] }): Promise<CheckPathsResult>;
   /** [requires workspace] Read a workspace file as a Blob URL (for `<img src=...>`
@@ -277,8 +287,10 @@ export interface WorkspaceFileService {
    *  name, revoke }`. Caller MUST call `revoke()` on cleanup to free the
    *  object URL. */
   readFileAsBlobUrl(args: { path: string }): Promise<BlobUrlHandle>;
+  /** [workspace-free] Read an absolute local file as a Blob URL (for image preview). */
+  readLocalFileAsBlobUrl(args: { fullPath: string; workspace?: string | null }): Promise<BlobUrlHandle>;
   /** [requires workspace] Save edited content back to a workspace file.
-   *  The file MUST already exist (no create-on-save). 512KB content cap.
+   *  The file MUST already exist (no create-on-save). 2MB content cap.
    *  Atomic via tmp + rename. Resolves on success; rejects on failure. */
   saveFile(args: { path: string; content: string; expectedContent?: string }): Promise<void>;
   /** [requires workspace] Read `<workspace>/CLAUDE.md`. `exists:false` is
@@ -567,6 +579,46 @@ export function useWorkspaceFileService(workspacePath: string | null): Workspace
     [invokeIfTauri],
   );
 
+  const checkLocalPaths: WorkspaceFileService['checkLocalPaths'] = useCallback(
+    async ({ paths, workspace }) => {
+      return invokeIfTauri<CheckPathsResult>('cmd_check_local_paths', {
+        paths,
+        workspace: workspace?.trim() || null,
+      });
+    },
+    [invokeIfTauri],
+  );
+
+  const readLocalPreview: WorkspaceFileService['readLocalPreview'] = useCallback(
+    async ({ fullPath, workspace }) => {
+      return invokeIfTauri<PreviewResult>('cmd_read_local_preview', {
+        fullPath,
+        workspace: workspace?.trim() || null,
+      });
+    },
+    [invokeIfTauri],
+  );
+
+  const downloadLocalFile: WorkspaceFileService['downloadLocalFile'] = useCallback(
+    async ({ fullPath, workspace }) => {
+      return invokeIfTauri<DownloadResult>('cmd_download_local_file', {
+        fullPath,
+        workspace: workspace?.trim() || null,
+      });
+    },
+    [invokeIfTauri],
+  );
+
+  const downloadLocalFileBytes: WorkspaceFileService['downloadLocalFileBytes'] = useCallback(
+    async ({ fullPath, workspace }) => {
+      return invokeIfTauri<ArrayBuffer>('cmd_download_local_bytes', {
+        fullPath,
+        workspace: workspace?.trim() || null,
+      });
+    },
+    [invokeIfTauri],
+  );
+
   const checkPaths: WorkspaceFileService['checkPaths'] = useCallback(
     async ({ paths }) => {
       const ws = requireWorkspace();
@@ -602,6 +654,25 @@ export function useWorkspaceFileService(workspacePath: string | null): Workspace
       return { blobUrl, mimeType: result.mimeType, name: result.name, revoke };
     },
     [requireWorkspace, invokeIfTauri],
+  );
+
+  const readLocalFileAsBlobUrl: WorkspaceFileService['readLocalFileAsBlobUrl'] = useCallback(
+    async ({ fullPath, workspace }) => {
+      const result = await downloadLocalFile({ fullPath, workspace });
+      const binary = atob(result.data);
+      const bytes = new Uint8Array(binary.length);
+      for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+      const blob = new Blob([bytes], { type: result.mimeType || 'application/octet-stream' });
+      const blobUrl = URL.createObjectURL(blob);
+      let revoked = false;
+      const revoke = () => {
+        if (revoked) return;
+        revoked = true;
+        URL.revokeObjectURL(blobUrl);
+      };
+      return { blobUrl, mimeType: result.mimeType, name: result.name, revoke };
+    },
+    [downloadLocalFile],
   );
 
   const saveFile: WorkspaceFileService['saveFile'] = useCallback(
@@ -686,8 +757,13 @@ export function useWorkspaceFileService(workspacePath: string | null): Workspace
       openWithDefault,
       openPathExternal,
       openPathWithDefault,
+      checkLocalPaths,
+      readLocalPreview,
+      downloadLocalFile,
+      downloadLocalFileBytes,
       checkPaths,
       readFileAsBlobUrl,
+      readLocalFileAsBlobUrl,
       saveFile,
       readClaudeMd,
       writeClaudeMd,
@@ -719,8 +795,13 @@ export function useWorkspaceFileService(workspacePath: string | null): Workspace
       openWithDefault,
       openPathExternal,
       openPathWithDefault,
+      checkLocalPaths,
+      readLocalPreview,
+      downloadLocalFile,
+      downloadLocalFileBytes,
       checkPaths,
       readFileAsBlobUrl,
+      readLocalFileAsBlobUrl,
       saveFile,
       readClaudeMd,
       writeClaudeMd,

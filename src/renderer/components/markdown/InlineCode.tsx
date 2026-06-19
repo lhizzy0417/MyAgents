@@ -9,7 +9,7 @@ import { useFileAction } from '@/context/FileActionContext';
 import { isAudioPath } from '@/utils/audioPlayer';
 import { useAudioPlayer } from '@/hooks/useAudioPlayer';
 import { looksLikeFilePath } from '@/utils/pathDetection';
-import { resolveActionPath, resolveAgainstWorkspace } from '@/utils/workspaceFileLinks';
+import { resolveAgainstWorkspace, resolveFileActionTarget } from '@/utils/workspaceFileLinks';
 import { Play, Pause } from 'lucide-react';
 
 interface InlineCodeProps {
@@ -64,10 +64,13 @@ export default function InlineCode({ children }: InlineCodeProps) {
     // (e.g. `/Users/me/ws/CLAUDE.md`) silently stayed a plain <code>. Mirrors
     // the file-tool chip (tools/FilePath) so both surfaces resolve identically.
     // The chip still DISPLAYS the original text (`children`).
-    const actionPath = resolveActionPath(text, fileAction.workspacePath);
+    const actionTarget = resolveFileActionTarget(text, fileAction.workspacePath);
+    if (!actionTarget) {
+        return <code className={BASE_CLASS}>{children}</code>;
+    }
 
     // Ask context for cached result (may trigger a batched backend request)
-    const pathInfo = fileAction.checkPath(actionPath);
+    const pathInfo = fileAction.checkFileTarget(actionTarget);
 
     if (!pathInfo?.exists) {
         // Not yet resolved or does not exist → plain code
@@ -82,13 +85,17 @@ export default function InlineCode({ children }: InlineCodeProps) {
         e.preventDefault();
         e.stopPropagation();
         const rect = (e.target as HTMLElement).getBoundingClientRect();
-        fileAction.openFileMenu(rect.left, rect.bottom + 4, actionPath, pathInfo.type, text);
+        fileAction.openFileMenu(rect.left, rect.bottom + 4, actionTarget.path, pathInfo.type, text, {
+            scope: actionTarget.scope,
+        });
     };
 
     const handleContextMenu = (e: React.MouseEvent) => {
         e.preventDefault();
         e.stopPropagation();
-        fileAction.openFileMenu(e.clientX, e.clientY, actionPath, pathInfo.type, text);
+        fileAction.openFileMenu(e.clientX, e.clientY, actionTarget.path, pathInfo.type, text, {
+            scope: actionTarget.scope,
+        });
     };
 
     const codeEl = (

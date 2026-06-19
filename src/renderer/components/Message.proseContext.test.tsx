@@ -24,10 +24,15 @@ vi.mock('@/hooks/useWorkspaceFileService', () => ({
     useWorkspaceFileService: () => ({
         isAvailable: false,
         checkPaths: vi.fn(),
+        checkLocalPaths: vi.fn(),
         openWithDefault: vi.fn(),
+        openPathWithDefault: vi.fn(),
+        openPathExternal: vi.fn(),
         openInFinder: vi.fn(),
         readPreview: vi.fn(),
+        readLocalPreview: vi.fn(),
         readFileAsBlobUrl: vi.fn(),
+        readLocalFileAsBlobUrl: vi.fn(),
     }),
 }));
 

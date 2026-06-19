@@ -45,10 +45,12 @@ type FetchState =
 
 interface RichDocViewerProps {
   kind: RichDocKind;
-  /** Workspace-relative path of the file. */
+  /** Workspace-relative path of the file, or display path for local previews. */
   path: string;
-  /** Absolute workspace root; required to reach the Rust file service. */
+  /** Absolute workspace root; required for workspace-relative files. */
   workspacePath: string | null;
+  /** Absolute local path for read-only previews outside the active workspace. */
+  localPath?: string | null;
 }
 
 const Spinner = (
@@ -57,7 +59,7 @@ const Spinner = (
   </div>
 );
 
-export default function RichDocViewer({ kind, path, workspacePath }: RichDocViewerProps) {
+export default function RichDocViewer({ kind, path, workspacePath, localPath = null }: RichDocViewerProps) {
   // `useWorkspaceFileService` returns a useMemo-stable object (per its own docs),
   // so it's safe to depend on directly in effects/callbacks without a ref mirror.
   const fileService = useWorkspaceFileService(workspacePath);
@@ -79,7 +81,9 @@ export default function RichDocViewer({ kind, path, workspacePath }: RichDocView
       try {
         // Raw bytes (tauri::ipc::Response → ArrayBuffer): no base64 inflation, no
         // main-thread atob — matters at the 50MB cap.
-        const buf = await fileService.downloadFileBytes({ path });
+        const buf = localPath
+          ? await fileService.downloadLocalFileBytes({ fullPath: localPath, workspace: workspacePath })
+          : await fileService.downloadFileBytes({ path });
         if (cancelled) return;
         setState({ phase: 'ready', bytes: buf });
       } catch (e) {
@@ -91,7 +95,7 @@ export default function RichDocViewer({ kind, path, workspacePath }: RichDocView
     return () => {
       cancelled = true;
     };
-  }, [path, kind, fileService]);
+  }, [path, kind, fileService, localPath, workspacePath]);
 
   // External-resource guard: install once the host is mounted in the ready phase,
   // before sub-viewers inject their (async) DOM.
@@ -101,8 +105,12 @@ export default function RichDocViewer({ kind, path, workspacePath }: RichDocView
   }, [state.phase, renderError, isEmpty]);
 
   const openExternal = useCallback(() => {
+    if (localPath) {
+      fileService.openPathWithDefault({ fullPath: localPath, workspace: workspacePath }).catch(() => {});
+      return;
+    }
     fileService.openWithDefault({ path }).catch(() => {});
-  }, [path, fileService]);
+  }, [path, fileService, localPath, workspacePath]);
 
   // Stable so it can sit in sub-viewers' effect deps without re-triggering renders
   // (setRenderError from useState is already stable; this mirrors that).

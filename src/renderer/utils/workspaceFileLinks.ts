@@ -3,6 +3,10 @@ export interface WorkspaceFileLinkTarget {
   initialLineNumber?: number;
 }
 
+export type FileActionTarget =
+  | { scope: 'workspace'; path: string; initialLineNumber?: number }
+  | { scope: 'local'; path: string; initialLineNumber?: number };
+
 const EXTENSIONLESS_FILE_NAMES = new Set([
   'makefile',
   'dockerfile',
@@ -16,9 +20,20 @@ export function resolveWorkspaceFileLinkTarget(
   href: string,
   workspacePath: string | null | undefined,
 ): WorkspaceFileLinkTarget | null {
+  const target = resolveFileLinkTarget(href, workspacePath);
+  if (target?.scope !== 'workspace') return null;
+  return target.initialLineNumber
+    ? { path: target.path, initialLineNumber: target.initialLineNumber }
+    : { path: target.path };
+}
+
+export function resolveFileLinkTarget(
+  href: string,
+  workspacePath: string | null | undefined,
+): FileActionTarget | null {
   const workspace = workspacePath?.trim();
   const raw = href?.trim();
-  if (!workspace || !raw) return null;
+  if (!raw) return null;
 
   const { base, line: hashLine } = stripHashLine(raw);
   const decodedBase = decodeUriLoose(base);
@@ -27,12 +42,32 @@ export function resolveWorkspaceFileLinkTarget(
 
   const { path: pathWithoutLine, line: suffixLine } = stripLineSuffix(localPath);
   const initialLineNumber = suffixLine ?? hashLine;
-  const relativePath = toWorkspaceRelativePath(pathWithoutLine, workspace);
-  if (!relativePath) return null;
+  const relativePath = workspace ? toWorkspaceRelativePath(pathWithoutLine, workspace) : null;
+  if (relativePath) {
+    return initialLineNumber
+      ? { scope: 'workspace', path: relativePath, initialLineNumber }
+      : { scope: 'workspace', path: relativePath };
+  }
 
-  return initialLineNumber
-    ? { path: relativePath, initialLineNumber }
-    : { path: relativePath };
+  if (isAbsolutePath(pathWithoutLine)) {
+    return initialLineNumber
+      ? { scope: 'local', path: pathWithoutLine, initialLineNumber }
+      : { scope: 'local', path: pathWithoutLine };
+  }
+
+  return null;
+}
+
+export function resolveFileActionTarget(
+  rawPath: string,
+  workspacePath: string | null | undefined,
+): FileActionTarget | null {
+  const path = rawPath?.trim();
+  if (!path) return null;
+  const workspaceRelative = workspacePath ? toWorkspaceRelativePath(path, workspacePath) : null;
+  if (workspaceRelative) return { scope: 'workspace', path: workspaceRelative };
+  if (isAbsolutePath(path)) return { scope: 'local', path };
+  return null;
 }
 
 /**

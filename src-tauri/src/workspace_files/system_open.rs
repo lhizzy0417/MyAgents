@@ -191,7 +191,7 @@ pub async fn cmd_open_path_with_default(
 /// blacklist used by templates / sidecar) closes that gap. The sidecar
 /// `/agent/open-path` did NOT have this guard; this is a deliberate
 /// hardening over the original behavior.
-fn validate_external_open_path(
+pub(super) fn validate_external_open_path(
     full_path: &str,
     workspace: Option<&str>,
 ) -> Result<PathBuf, String> {

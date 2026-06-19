@@ -78,6 +78,8 @@ type SplitPreviewFile = {
   content: string;
   size: number;
   path: string;
+  sourceScope?: 'workspace' | 'local';
+  localPath?: string;
   richDocKind?: RichDocKind;
   initialEditMode?: boolean;
   initialLineNumber?: number;
@@ -493,13 +495,15 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
 
   const handleSplitFilePreview = useCallback((file: SplitPreviewFile, options?: { initialEditMode?: boolean }) => {
     const ext = file.name.toLowerCase().split('.').pop();
+    const isLocalFile = file.sourceScope === 'local';
     if ((ext === 'html' || ext === 'htm') && isSplitViewEnabled && !file.focusTarget) {
       // HTML files → open in embedded browser for live preview
       // Store file metadata so browser toolbar can offer "Edit Source" toggle
-      setBrowserSourceFile(file);
-      // file.path is relative to agentDir — construct absolute path for Rust
+      setBrowserSourceFile(isLocalFile ? null : file);
+      // Workspace files are relative to agentDir; local file links already carry
+      // an absolute path.
       const sep = agentDir?.includes('\\') ? '\\' : '/';
-      const absPath = agentDir ? `${agentDir}${sep}${file.path}` : file.path;
+      const absPath = isLocalFile ? (file.localPath ?? file.path) : (agentDir ? `${agentDir}${sep}${file.path}` : file.path);
       startBrowserSplitTransitionIfNeeded();
       setBrowserUrl(absPath);
       setSplitActiveView('browser');
@@ -4217,8 +4221,9 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
                     content={splitFile.content}
                     size={splitFile.size}
                     path={splitFile.path}
+                    localPath={splitFile.localPath}
                     richDocKind={splitFile.richDocKind}
-                    workspacePath={agentDir}
+                    workspacePath={splitFile.sourceScope === 'local' ? null : agentDir}
                     initialEditMode={splitFile.initialEditMode}
                     initialLineNumber={splitFile.initialLineNumber}
                     focusTarget={splitFile.focusTarget}
@@ -4341,8 +4346,9 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
             content={fullscreenPreviewFile.content}
             size={fullscreenPreviewFile.size}
             path={fullscreenPreviewFile.path}
+            localPath={fullscreenPreviewFile.localPath}
             richDocKind={fullscreenPreviewFile.richDocKind}
-            workspacePath={agentDir}
+            workspacePath={fullscreenPreviewFile.sourceScope === 'local' ? null : agentDir}
             initialEditMode={fullscreenPreviewFile.initialEditMode}
             initialLineNumber={fullscreenPreviewFile.initialLineNumber}
             focusTarget={fullscreenPreviewFile.focusTarget}

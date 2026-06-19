@@ -12,6 +12,7 @@ const mocks = vi.hoisted(() => ({
   saveFile: vi.fn(),
   rename: vi.fn(),
   openInFinder: vi.fn(),
+  openPathExternal: vi.fn(),
   toastWarning: vi.fn(),
 }));
 
@@ -22,6 +23,7 @@ vi.mock('@/hooks/useWorkspaceFileService', () => ({
     saveFile: mocks.saveFile,
     rename: mocks.rename,
     openInFinder: mocks.openInFinder,
+    openPathExternal: mocks.openPathExternal,
   }),
 }));
 

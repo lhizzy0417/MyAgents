@@ -14,6 +14,7 @@ use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use serde::Serialize;
 
 use super::path_safety::{resolve_existing_inside_workspace, validate_workspace_root};
+use super::system_open::validate_external_open_path;
 
 // Cap for binary download → rich-document preview (pdf/docx/xlsx/pptx) and the
 // image-preview modal. Raised 25MB → 50MB so larger decks / books / scanned PDFs
@@ -45,49 +46,22 @@ pub async fn cmd_workspace_download_file(
     // a malicious repo could exfiltrate arbitrary files via the preview UI.
     let resolved = resolve_existing_inside_workspace(&workspace_root, &path)?;
 
-    let metadata = fs::metadata(&resolved).map_err(|_| "File not found".to_string())?;
-    if !metadata.is_file() {
-        return Err("Not a regular file".to_string());
-    }
-    if metadata.len() > MAX_DOWNLOAD_BYTES {
-        return Err(format!(
-            "File too large to preview (max {} MB)",
-            MAX_DOWNLOAD_BYTES / 1024 / 1024
-        ));
-    }
+    download_file_resolved(&resolved, &path)
+}
 
-    // Bounded read — TOCTOU between metadata.len() above and the read here:
-    // file may grow under us. Cap the read at MAX+1 bytes; if we hit MAX+1
-    // we know the size check raced and we reject. Avoids the
-    // unbounded-Vec<u8> growth path the cross-review flagged.
-    let mut file = fs::File::open(&resolved).map_err(|e| format!("Open failed: {}", e))?;
-    let mut bytes = Vec::with_capacity(metadata.len() as usize);
-    let read_cap = MAX_DOWNLOAD_BYTES + 1;
-    file.by_ref()
-        .take(read_cap)
-        .read_to_end(&mut bytes)
-        .map_err(|e| format!("Read failed: {}", e))?;
-    if bytes.len() as u64 > MAX_DOWNLOAD_BYTES {
-        return Err(format!(
-            "File too large to preview (max {} MB)",
-            MAX_DOWNLOAD_BYTES / 1024 / 1024
-        ));
+/// Download an absolute local file as base64 for preview surfaces. Same cap as
+/// workspace downloads; path validation follows `cmd_open_path_with_default`.
+#[tauri::command]
+pub async fn cmd_download_local_file(
+    full_path: String,
+    workspace: Option<String>,
+) -> Result<DownloadResult, String> {
+    let trimmed = full_path.trim();
+    if trimmed.is_empty() {
+        return Err("Missing path".to_string());
     }
-    let name = std::path::Path::new(&path)
-        .file_name()
-        .map(|s| s.to_string_lossy().to_string())
-        .unwrap_or_else(|| path.clone());
-    let ext = std::path::Path::new(&path)
-        .extension()
-        .and_then(|e| e.to_str())
-        .map(|e| e.to_ascii_lowercase())
-        .unwrap_or_default();
-
-    Ok(DownloadResult {
-        name,
-        mime_type: sniff_mime(&ext),
-        data: BASE64.encode(&bytes),
-    })
+    let resolved = validate_external_open_path(trimmed, workspace.as_deref())?;
+    download_file_resolved(&resolved, trimmed)
 }
 
 /// Like `cmd_workspace_download_file` but returns RAW BYTES via
@@ -108,7 +82,52 @@ pub async fn cmd_workspace_download_bytes(
     }
     let workspace_root = validate_workspace_root(&workspace)?;
     let resolved = resolve_existing_inside_workspace(&workspace_root, &path)?;
-    let metadata = fs::metadata(&resolved).map_err(|_| "File not found".to_string())?;
+    download_bytes_resolved(&resolved)
+}
+
+/// Download an absolute local file as raw bytes for rich-document preview.
+#[tauri::command]
+pub async fn cmd_download_local_bytes(
+    full_path: String,
+    workspace: Option<String>,
+) -> Result<tauri::ipc::Response, String> {
+    let trimmed = full_path.trim();
+    if trimmed.is_empty() {
+        return Err("Missing path".to_string());
+    }
+    let resolved = validate_external_open_path(trimmed, workspace.as_deref())?;
+    download_bytes_resolved(&resolved)
+}
+
+fn download_file_resolved(
+    resolved: &std::path::Path,
+    display_path: &str,
+) -> Result<DownloadResult, String> {
+    let bytes = read_bounded_bytes(resolved)?;
+    let name = std::path::Path::new(display_path)
+        .file_name()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| display_path.to_string());
+    let ext = std::path::Path::new(display_path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_ascii_lowercase())
+        .unwrap_or_default();
+
+    Ok(DownloadResult {
+        name,
+        mime_type: sniff_mime(&ext),
+        data: BASE64.encode(&bytes),
+    })
+}
+
+fn download_bytes_resolved(resolved: &std::path::Path) -> Result<tauri::ipc::Response, String> {
+    let bytes = read_bounded_bytes(resolved)?;
+    Ok(tauri::ipc::Response::new(bytes))
+}
+
+fn read_bounded_bytes(resolved: &std::path::Path) -> Result<Vec<u8>, String> {
+    let metadata = fs::metadata(resolved).map_err(|_| "File not found".to_string())?;
     if !metadata.is_file() {
         return Err("Not a regular file".to_string());
     }
@@ -119,7 +138,7 @@ pub async fn cmd_workspace_download_bytes(
         ));
     }
     // Bounded read (TOCTOU): cap at MAX+1; if we hit it the size check raced.
-    let mut file = fs::File::open(&resolved).map_err(|e| format!("Open failed: {}", e))?;
+    let mut file = fs::File::open(resolved).map_err(|e| format!("Open failed: {}", e))?;
     let mut bytes = Vec::with_capacity(metadata.len() as usize);
     file.by_ref()
         .take(MAX_DOWNLOAD_BYTES + 1)
@@ -131,7 +150,7 @@ pub async fn cmd_workspace_download_bytes(
             MAX_DOWNLOAD_BYTES / 1024 / 1024
         ));
     }
-    Ok(tauri::ipc::Response::new(bytes))
+    Ok(bytes)
 }
 
 /// Tiny MIME sniffer covering image / common preview cases. Sidecar's
@@ -172,6 +191,23 @@ mod tests {
         assert_eq!(res.name, "pic.png");
         assert_eq!(res.mime_type, "image/png");
         assert!(!res.data.is_empty());
+        let decoded = BASE64.decode(&res.data).unwrap();
+        assert_eq!(decoded, b"\x89PNG\r\n");
+        let _ = fs::remove_dir_all(&ws);
+    }
+
+    #[tokio::test]
+    async fn downloads_local_file_as_b64() {
+        let ws = make_test_workspace("download_local_ok");
+        let p = ws.join("pic.png");
+        fs::write(&p, b"\x89PNG\r\n").unwrap();
+
+        let res = cmd_download_local_file(p.to_string_lossy().to_string(), None)
+            .await
+            .unwrap();
+
+        assert_eq!(res.name, "pic.png");
+        assert_eq!(res.mime_type, "image/png");
         let decoded = BASE64.decode(&res.data).unwrap();
         assert_eq!(decoded, b"\x89PNG\r\n");
         let _ = fs::remove_dir_all(&ws);

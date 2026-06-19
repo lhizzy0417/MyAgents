@@ -3,10 +3,14 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const mocks = vi.hoisted(() => ({
   checkPaths: vi.fn(),
+  checkLocalPaths: vi.fn(),
   openImagePreview: vi.fn(),
   openWithDefault: vi.fn(),
+  openPathWithDefault: vi.fn(),
+  openPathExternal: vi.fn(),
   openInFinder: vi.fn(),
   readPreview: vi.fn(),
+  readLocalPreview: vi.fn(),
   onInsertReference: vi.fn(),
   onOpenMyAgentsPreview: vi.fn(),
   writeText: vi.fn(),
@@ -20,10 +24,15 @@ vi.mock('@/hooks/useWorkspaceFileService', () => ({
   useWorkspaceFileService: () => ({
     isAvailable: true,
     checkPaths: mocks.checkPaths,
+    checkLocalPaths: mocks.checkLocalPaths,
     openWithDefault: mocks.openWithDefault,
+    openPathWithDefault: mocks.openPathWithDefault,
+    openPathExternal: mocks.openPathExternal,
     openInFinder: mocks.openInFinder,
     readPreview: mocks.readPreview,
+    readLocalPreview: mocks.readLocalPreview,
     readFileAsBlobUrl: vi.fn(),
+    readLocalFileAsBlobUrl: vi.fn(),
   }),
 }));
 
@@ -60,6 +69,8 @@ describe('Markdown inline-code file paths', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mocks.writeText.mockResolvedValue(undefined);
+    mocks.checkPaths.mockResolvedValue({ results: {} });
+    mocks.checkLocalPaths.mockResolvedValue({ results: {} });
     Object.defineProperty(navigator, 'clipboard', {
       value: { writeText: mocks.writeText },
       configurable: true,
@@ -108,11 +119,11 @@ describe('Markdown inline-code file paths', () => {
 
   it('leaves an absolute path OUTSIDE the workspace as plain code', async () => {
     const OUTSIDE = '/etc/hosts';
-    mocks.checkPaths.mockResolvedValue({ results: {} });
+    mocks.checkLocalPaths.mockResolvedValue({ results: { [OUTSIDE]: { exists: false, type: 'file' } } });
     renderMarkdown(`见 \`${OUTSIDE}\` 。`);
 
-    await waitFor(() => expect(mocks.checkPaths).toHaveBeenCalled());
-    expect(mocks.checkPaths).toHaveBeenCalledWith({ paths: [OUTSIDE] });
+    await waitFor(() => expect(mocks.checkLocalPaths).toHaveBeenCalled());
+    expect(mocks.checkLocalPaths).toHaveBeenCalledWith({ paths: [OUTSIDE], workspace: WORKSPACE });
     const chip = screen.getByText(OUTSIDE);
     expect(chip).not.toHaveClass('cursor-pointer');
   });

@@ -27,7 +27,10 @@ import { useImagePreview } from '@/context/ImagePreviewContext';
 import { useWorkspaceFileService } from '@/hooks/useWorkspaceFileService';
 import { getRichDocKind, isImageFile, isPreviewable, type RichDocKind } from '../../shared/fileTypes';
 import type { FilePreviewFocusTarget } from '@/types/filePreview';
-import { resolveWorkspaceFileLinkTarget } from '@/utils/workspaceFileLinks';
+import {
+  resolveFileLinkTarget,
+  type FileActionTarget,
+} from '@/utils/workspaceFileLinks';
 
 // Lazy load FilePreviewModal (heavy: includes SyntaxHighlighter + Monaco)
 const FilePreviewModal = lazy(() => import('@/components/FilePreviewModal'));
@@ -39,15 +42,26 @@ interface PathInfo {
   type: 'file' | 'dir';
 }
 
+type FileActionScope = FileActionTarget['scope'];
+
 export interface FileActionContextValue {
   /** Synchronous cache lookup. Returns cached result or null (pending / not yet requested). */
   checkPath: (path: string) => PathInfo | null;
+  /** Synchronous cache lookup for a resolved workspace/local target. */
+  checkFileTarget: (target: FileActionTarget) => PathInfo | null;
   /** Incremented each time the cache is updated, so consumers can re-render. */
   cacheVersion: number;
   /** Open the context menu for a resolved path. `path` is the normalized form
    *  used for backend actions; `displayPath` is the verbatim text shown to the
    *  user (what 「复制」 copies) — defaults to `path` when omitted. */
-  openFileMenu: (x: number, y: number, path: string, pathType: 'file' | 'dir', displayPath?: string) => void;
+  openFileMenu: (
+    x: number,
+    y: number,
+    path: string,
+    pathType: 'file' | 'dir',
+    displayPath?: string,
+    options?: { scope?: FileActionScope; initialLineNumber?: number },
+  ) => void;
   /** Workspace root, for resolving workspace-relative paths to absolute (e.g. the
    *  inline audio play button, whose player needs an absolute path). May be null
    *  outside a workspace. */
@@ -55,8 +69,10 @@ export interface FileActionContextValue {
 }
 
 export interface FileLinkActionContextValue {
-  /** Claims and previews a Markdown link when it targets a file in the active workspace. */
+  /** Claims and previews/opens a Markdown link when it targets a local file. */
   openFileLink: (href: string) => boolean;
+  /** Claims and opens the shared file context menu for a Markdown local-file link. */
+  openFileLinkMenu: (x: number, y: number, href: string) => boolean;
 }
 
 interface FileActionProviderProps {
@@ -75,6 +91,8 @@ interface FileActionProviderProps {
     content: string;
     size: number;
     path: string;
+    sourceScope?: FileActionScope;
+    localPath?: string;
     richDocKind?: RichDocKind;
     initialLineNumber?: number;
     focusTarget?: FilePreviewFocusTarget;
@@ -118,6 +136,14 @@ export function useFileLinkAction(): FileLinkActionContextValue | null {
 
 const BATCH_DELAY_MS = 50;
 
+function targetCacheKey(target: FileActionTarget): string {
+  return `${target.scope}:${target.path}`;
+}
+
+function targetFileName(path: string): string {
+  return path.split(/[/\\]/).pop() ?? path;
+}
+
 export function FileActionProvider({ children, workspacePath, onInsertReference, refreshTrigger, onFilePreviewExternal, onQuoteFile, onQuoteSelection, onRevealInTree, menuProfile = 'default', onOpenMyAgentsPreview }: FileActionProviderProps) {
   const fileService = useWorkspaceFileService(workspacePath);
   const { openPreview: openImagePreview } = useImagePreview();
@@ -154,20 +180,20 @@ export function FileActionProvider({ children, workspacePath, onInsertReference,
 
   // ---------- Path cache ----------
   const pathCacheRef = useRef<Map<string, PathInfo>>(new Map());
-  const pendingPathsRef = useRef<Set<string>>(new Set());
+  const pendingTargetsRef = useRef<Map<string, FileActionTarget>>(new Map());
   const batchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [cacheVersion, setCacheVersion] = useState(0);
 
   // Clear cache when refreshTrigger changes
   useEffect(() => {
     pathCacheRef.current.clear();
-    pendingPathsRef.current.clear();
+    pendingTargetsRef.current.clear();
     if (batchTimerRef.current) {
       clearTimeout(batchTimerRef.current);
       batchTimerRef.current = null;
     }
     setCacheVersion(v => v + 1);
-  }, [refreshTrigger]);
+  }, [refreshTrigger, workspacePath]);
 
   // Clean up batch timer on unmount
   useEffect(() => {
@@ -182,20 +208,40 @@ export function FileActionProvider({ children, workspacePath, onInsertReference,
   // Flush pending paths to the backend (Rust workspace_files::check_paths
   // since Phase D.5 — used to be sidecar `/agent/check-paths`).
   const flushPendingPaths = useCallback(() => {
-    const paths = Array.from(pendingPathsRef.current);
-    pendingPathsRef.current.clear();
+    const targets = Array.from(pendingTargetsRef.current.values());
+    pendingTargetsRef.current.clear();
     batchTimerRef.current = null;
 
-    if (paths.length === 0) return;
-    if (!fileServiceRef.current.isAvailable) return;
+    if (targets.length === 0) return;
 
     void (async () => {
       try {
-        const resp = await fileServiceRef.current.checkPaths({ paths });
+        const workspacePaths = targets
+          .filter((target) => target.scope === 'workspace')
+          .map((target) => target.path);
+        const localPaths = targets
+          .filter((target) => target.scope === 'local')
+          .map((target) => target.path);
+
+        const responses: Array<{ scope: FileActionScope; results: Record<string, PathInfo> }> = [];
+        if (workspacePaths.length > 0 && fileServiceRef.current.isAvailable) {
+          const resp = await fileServiceRef.current.checkPaths({ paths: workspacePaths });
+          responses.push({ scope: 'workspace', results: resp.results ?? {} });
+        }
+        if (localPaths.length > 0) {
+          const resp = await fileServiceRef.current.checkLocalPaths({
+            paths: localPaths,
+            workspace: workspacePath,
+          });
+          responses.push({ scope: 'local', results: resp.results ?? {} });
+        }
+
         if (!isMountedRef.current) return;
-        if (resp?.results) {
-          for (const [p, info] of Object.entries(resp.results)) {
-            pathCacheRef.current.set(p, info);
+        if (responses.length > 0) {
+          for (const response of responses) {
+            for (const [p, info] of Object.entries(response.results)) {
+              pathCacheRef.current.set(targetCacheKey({ scope: response.scope, path: p }), info);
+            }
           }
           setCacheVersion(v => v + 1);
         }
@@ -203,34 +249,56 @@ export function FileActionProvider({ children, workspacePath, onInsertReference,
         // Silently ignore — paths will stay un-cached and remain as plain <code>
       }
     })();
-  }, []);
+  }, [workspacePath]);
 
-  const checkPath = useCallback((path: string): PathInfo | null => {
-    const cached = pathCacheRef.current.get(path);
+  const checkFileTarget = useCallback((target: FileActionTarget): PathInfo | null => {
+    const key = targetCacheKey(target);
+    const cached = pathCacheRef.current.get(key);
     if (cached) return cached;
 
     // Already queued
-    if (pendingPathsRef.current.has(path)) return null;
+    if (pendingTargetsRef.current.has(key)) return null;
 
     // Enqueue
-    pendingPathsRef.current.add(path);
+    pendingTargetsRef.current.set(key, target);
     if (!batchTimerRef.current) {
       batchTimerRef.current = setTimeout(flushPendingPaths, BATCH_DELAY_MS);
     }
     return null;
   }, [flushPendingPaths]);
 
+  const checkPath = useCallback((path: string): PathInfo | null => {
+    return checkFileTarget({ scope: 'workspace', path });
+  }, [checkFileTarget]);
+
   // ---------- Context menu ----------
   const [menuState, setMenuState] = useState<{
     x: number;
     y: number;
     path: string;
+    scope: FileActionScope;
     pathType: 'file' | 'dir';
     displayPath: string;
+    initialLineNumber?: number;
   } | null>(null);
 
-  const openFileMenu = useCallback((x: number, y: number, path: string, pathType: 'file' | 'dir', displayPath?: string) => {
-    setMenuState({ x, y, path, pathType, displayPath: displayPath ?? path });
+  const openFileMenu = useCallback((
+    x: number,
+    y: number,
+    path: string,
+    pathType: 'file' | 'dir',
+    displayPath?: string,
+    options?: { scope?: FileActionScope; initialLineNumber?: number },
+  ) => {
+    setMenuState({
+      x,
+      y,
+      path,
+      scope: options?.scope ?? 'workspace',
+      pathType,
+      displayPath: displayPath ?? path,
+      initialLineNumber: options?.initialLineNumber,
+    });
   }, []);
 
   const closeMenu = useCallback(() => setMenuState(null), []);
@@ -241,6 +309,8 @@ export function FileActionProvider({ children, workspacePath, onInsertReference,
     content: string;
     size: number;
     path: string;
+    sourceScope: FileActionScope;
+    localPath?: string;
     richDocKind?: RichDocKind;
     initialLineNumber?: number;
     focusTarget?: FilePreviewFocusTarget;
@@ -258,11 +328,14 @@ export function FileActionProvider({ children, workspacePath, onInsertReference,
     } satisfies FilePreviewFocusTarget;
   }, []);
 
-  const handlePreview = useCallback((path: string, options?: { initialLineNumber?: number }): boolean => {
-    const fileName = path.split(/[/\\]/).pop() ?? path;
+  const handlePreview = useCallback((path: string, options?: { initialLineNumber?: number; scope?: FileActionScope }): boolean => {
+    const scope = options?.scope ?? 'workspace';
+    const fileName = targetFileName(path);
     const svc = fileServiceRef.current;
-    if (!svc.isAvailable) return false;
+    if (scope === 'workspace' && !svc.isAvailable) return false;
     const focusTarget = createFocusTarget(options?.initialLineNumber);
+    const localPath = scope === 'local' ? path : undefined;
+    const workspaceForLocal = workspacePath;
 
     const richDocKind = getRichDocKind(fileName);
     if (richDocKind) {
@@ -271,6 +344,8 @@ export function FileActionProvider({ children, workspacePath, onInsertReference,
         content: '',
         size: 0,
         path,
+        sourceScope: scope,
+        localPath,
         richDocKind,
         initialLineNumber: options?.initialLineNumber,
         focusTarget,
@@ -287,7 +362,9 @@ export function FileActionProvider({ children, workspacePath, onInsertReference,
       void (async () => {
         let handle: { blobUrl: string; revoke: () => void } | null = null;
         try {
-          handle = await svc.readFileAsBlobUrl({ path });
+          handle = scope === 'local'
+            ? await svc.readLocalFileAsBlobUrl({ fullPath: path, workspace: workspaceForLocal })
+            : await svc.readFileAsBlobUrl({ path });
           if (!isMountedRef.current) {
             handle.revoke();
             return;
@@ -320,13 +397,17 @@ export function FileActionProvider({ children, workspacePath, onInsertReference,
     if (onFilePreviewExternalRef.current) {
       void (async () => {
         try {
-          const resp = await svc.readPreview({ path });
+          const resp = scope === 'local'
+            ? await svc.readLocalPreview({ fullPath: path, workspace: workspaceForLocal })
+            : await svc.readPreview({ path });
           if (!isMountedRef.current) return;
           onFilePreviewExternalRef.current?.({
             name: resp.name,
             content: resp.content,
             size: resp.size,
             path,
+            sourceScope: scope,
+            localPath,
             initialLineNumber: options?.initialLineNumber,
             focusTarget,
           });
@@ -338,6 +419,8 @@ export function FileActionProvider({ children, workspacePath, onInsertReference,
             content: '',
             size: 0,
             path,
+            sourceScope: scope,
+            localPath,
             initialLineNumber: options?.initialLineNumber,
             focusTarget,
             isLoading: false,
@@ -354,6 +437,8 @@ export function FileActionProvider({ children, workspacePath, onInsertReference,
       content: '',
       size: 0,
       path,
+      sourceScope: scope,
+      localPath,
       initialLineNumber: options?.initialLineNumber,
       focusTarget,
       isLoading: true,
@@ -362,7 +447,9 @@ export function FileActionProvider({ children, workspacePath, onInsertReference,
 
     void (async () => {
       try {
-        const resp = await svc.readPreview({ path });
+        const resp = scope === 'local'
+          ? await svc.readLocalPreview({ fullPath: path, workspace: workspaceForLocal })
+          : await svc.readPreview({ path });
         if (!isMountedRef.current) return;
         setPreviewFile(prev => prev ? { ...prev, content: resp.content, size: resp.size, name: resp.name, isLoading: false } : null);
       } catch (err) {
@@ -371,30 +458,90 @@ export function FileActionProvider({ children, workspacePath, onInsertReference,
       }
     })();
     return true;
-  }, [createFocusTarget, openImagePreview]);
+  }, [createFocusTarget, openImagePreview, workspacePath]);
 
-  const openFileLink = useCallback((href: string): boolean => {
-    if (!fileServiceRef.current.isAvailable) return false;
-    const target = resolveWorkspaceFileLinkTarget(href, workspacePath);
-    if (!target) return false;
-    if (menuProfile === 'floatingBall' && onOpenMyAgentsPreviewRef.current) {
-      const fileName = target.path.split(/[/\\]/).pop() ?? target.path;
-      if (isPreviewable(fileName) || !!getRichDocKind(fileName)) {
-        onOpenMyAgentsPreviewRef.current(target.path, {
-          displayPath: href,
-          initialLineNumber: target.initialLineNumber,
-        });
-        return true;
+  const getTargetPathInfo = useCallback(async (target: FileActionTarget): Promise<PathInfo | null> => {
+    try {
+      if (target.scope === 'workspace') {
+        if (!fileServiceRef.current.isAvailable) return null;
+        const resp = await fileServiceRef.current.checkPaths({ paths: [target.path] });
+        return resp.results[target.path] ?? null;
       }
+      const resp = await fileServiceRef.current.checkLocalPaths({
+        paths: [target.path],
+        workspace: workspacePath,
+      });
+      return resp.results[target.path] ?? null;
+    } catch {
+      return null;
     }
-    if (handlePreview(target.path, { initialLineNumber: target.initialLineNumber })) {
-      return true;
+  }, [workspacePath]);
+
+  const openTargetWithDefault = useCallback((target: FileActionTarget) => {
+    if (target.scope === 'local') {
+      void fileServiceRef.current.openPathWithDefault({
+        fullPath: target.path,
+        workspace: workspacePath,
+      }).catch((err) => {
+        console.error('[FileAction] Failed to open local target with default app:', err);
+      });
+      return;
     }
     void fileServiceRef.current.openWithDefault({ path: target.path }).catch((err) => {
-      console.error('[FileAction] Failed to open file link with default app:', err);
+      console.error('[FileAction] Failed to open workspace target with default app:', err);
     });
+  }, [workspacePath]);
+
+  const openFileLink = useCallback((href: string): boolean => {
+    const target = resolveFileLinkTarget(href, workspacePath);
+    if (!target) return false;
+
+    void (async () => {
+      const pathInfo = await getTargetPathInfo(target);
+      if (!pathInfo?.exists) return;
+
+      if (menuProfile === 'floatingBall' && target.scope === 'workspace' && onOpenMyAgentsPreviewRef.current) {
+        const fileName = targetFileName(target.path);
+        if (pathInfo.type === 'file' && (isPreviewable(fileName) || !!getRichDocKind(fileName))) {
+          onOpenMyAgentsPreviewRef.current(target.path, {
+            displayPath: href,
+            initialLineNumber: target.initialLineNumber,
+          });
+          return;
+        }
+      }
+
+      if (
+        pathInfo.type === 'file' &&
+        handlePreview(target.path, {
+          initialLineNumber: target.initialLineNumber,
+          scope: target.scope,
+        })
+      ) {
+        return;
+      }
+      openTargetWithDefault(target);
+    })();
+
     return true;
-  }, [handlePreview, menuProfile, workspacePath]);
+  }, [getTargetPathInfo, handlePreview, menuProfile, openTargetWithDefault, workspacePath]);
+
+  const openFileLinkMenu = useCallback((x: number, y: number, href: string): boolean => {
+    const target = resolveFileLinkTarget(href, workspacePath);
+    if (!target) return false;
+
+    void (async () => {
+      const pathInfo = await getTargetPathInfo(target);
+      if (!pathInfo?.exists) return;
+      if (!isMountedRef.current) return;
+      openFileMenu(x, y, target.path, pathInfo.type, href, {
+        scope: target.scope,
+        initialLineNumber: target.initialLineNumber,
+      });
+    })();
+
+    return true;
+  }, [getTargetPathInfo, openFileMenu, workspacePath]);
 
   const handleReference = useCallback((path: string) => {
     onInsertReferenceRef.current?.([path]);
@@ -410,31 +557,42 @@ export function FileActionProvider({ children, workspacePath, onInsertReference,
     );
   }, []);
 
-  const handleOpenWithDefault = useCallback((path: string) => {
+  const handleOpenWithDefault = useCallback((path: string, scope: FileActionScope) => {
+    if (scope === 'local') {
+      void fileServiceRef.current.openPathWithDefault({ fullPath: path, workspace: workspacePath }).catch(() => {});
+      return;
+    }
     void fileServiceRef.current.openWithDefault({ path }).catch(() => {});
-  }, []);
+  }, [workspacePath]);
 
-  const handleOpenInFinder = useCallback((path: string) => {
+  const handleOpenInFinder = useCallback((path: string, scope: FileActionScope) => {
+    if (scope === 'local') {
+      void fileServiceRef.current.openPathExternal({ fullPath: path, workspace: workspacePath }).catch(() => {});
+      return;
+    }
     void fileServiceRef.current.openInFinder({ path }).catch(() => {});
-  }, []);
+  }, [workspacePath]);
 
   const handleRevealInTree = useCallback((path: string) => {
     onRevealInTreeRef.current?.(path);
   }, []);
 
-  const handleOpenMyAgentsPreview = useCallback((path: string, displayPath?: string): void => {
-    onOpenMyAgentsPreviewRef.current?.(path, { displayPath });
+  const handleOpenMyAgentsPreview = useCallback((path: string, displayPath?: string, initialLineNumber?: number): void => {
+    onOpenMyAgentsPreviewRef.current?.(path, initialLineNumber
+      ? { displayPath, initialLineNumber }
+      : { displayPath });
   }, []);
 
   // Build menu items
   const menuItems = useMemo((): ContextMenuItem[] => {
     if (!menuState) return [];
-    const { path, pathType, displayPath } = menuState;
-    const fileName = path.split('/').pop() ?? path;
+    const { path, scope, pathType, displayPath, initialLineNumber } = menuState;
+    const fileName = targetFileName(path);
     const items: ContextMenuItem[] = [];
 
     if (menuProfile === 'floatingBall') {
       const canOpenMyAgentsPreview =
+        scope === 'workspace' &&
         pathType === 'file' &&
         !!onOpenMyAgentsPreviewRef.current &&
         (isPreviewable(fileName) || !!getRichDocKind(fileName));
@@ -453,13 +611,13 @@ export function FileActionProvider({ children, workspacePath, onInsertReference,
         {
           label: '打开所在文件夹',
           icon: <FolderOpen className="h-4 w-4" />,
-          onClick: () => handleOpenInFinder(path),
+          onClick: () => handleOpenInFinder(path, scope),
         },
         {
           label: '打开 MyAgents 预览',
           icon: <PanelRightOpen className="h-4 w-4" />,
           disabled: !canOpenMyAgentsPreview,
-          onClick: () => handleOpenMyAgentsPreview(path, displayPath),
+          onClick: () => handleOpenMyAgentsPreview(path, displayPath, initialLineNumber),
         },
       ];
     }
@@ -470,7 +628,7 @@ export function FileActionProvider({ children, workspacePath, onInsertReference,
         label: '预览',
         icon: <Eye className="h-4 w-4" />,
         disabled: !canPreview,
-        onClick: () => handlePreview(path),
+        onClick: () => handlePreview(path, { scope, initialLineNumber }),
       });
     }
 
@@ -489,18 +647,18 @@ export function FileActionProvider({ children, workspacePath, onInsertReference,
     items.push({
       label: '打开',
       icon: <ExternalLink className="h-4 w-4" />,
-      onClick: () => handleOpenWithDefault(path),
+      onClick: () => handleOpenWithDefault(path, scope),
     });
 
     items.push({
       label: '打开所在文件夹',
       icon: <FolderOpen className="h-4 w-4" />,
-      onClick: () => handleOpenInFinder(path),
+      onClick: () => handleOpenInFinder(path, scope),
     });
 
     // Reveal in the right-side directory tree — only when the host wired it up
     // (i.e. a workspace tree exists to reveal into). Works for files and dirs.
-    if (onRevealInTreeRef.current) {
+    if (scope === 'workspace' && onRevealInTreeRef.current) {
       items.push({
         label: '在文件目录中展示',
         icon: <LocateFixed className="h-4 w-4" />,
@@ -514,14 +672,16 @@ export function FileActionProvider({ children, workspacePath, onInsertReference,
   // ---------- Context value ----------
   const contextValue = useMemo<FileActionContextValue>(() => ({
     checkPath,
+    checkFileTarget,
     cacheVersion,
     openFileMenu,
     workspacePath,
-  }), [checkPath, cacheVersion, openFileMenu, workspacePath]);
+  }), [checkPath, checkFileTarget, cacheVersion, openFileMenu, workspacePath]);
 
   const linkActionValue = useMemo<FileLinkActionContextValue>(() => ({
     openFileLink,
-  }), [openFileLink]);
+    openFileLinkMenu,
+  }), [openFileLink, openFileLinkMenu]);
 
   return (
     <FileActionContext.Provider value={contextValue}>
@@ -546,6 +706,7 @@ export function FileActionProvider({ children, workspacePath, onInsertReference,
               content={previewFile.content}
               size={previewFile.size}
               path={previewFile.path}
+              localPath={previewFile.localPath}
               richDocKind={previewFile.richDocKind}
               isLoading={previewFile.isLoading}
               error={previewFile.error}
@@ -553,7 +714,7 @@ export function FileActionProvider({ children, workspacePath, onInsertReference,
               // markdown can load relative-path images via fileService.
               // Without this, MarkdownImage's hook gets `null` and silently
               // skips the fetch (preview text/code still works).
-              workspacePath={workspacePath}
+              workspacePath={previewFile.sourceScope === 'local' ? null : workspacePath}
               initialLineNumber={previewFile.initialLineNumber}
               focusTarget={previewFile.focusTarget}
               onClose={() => setPreviewFile(null)}
@@ -568,7 +729,11 @@ export function FileActionProvider({ children, workspacePath, onInsertReference,
               // than letting the modal fall back to sidecar `/agent/open-in-finder`.
               onRevealFile={async () => {
                 const p = previewFile.path;
-                await fileServiceRef.current.openInFinder({ path: p });
+                if (previewFile.sourceScope === 'local') {
+                  await fileServiceRef.current.openPathExternal({ fullPath: p, workspace: workspacePath });
+                } else {
+                  await fileServiceRef.current.openInFinder({ path: p });
+                }
               }}
               onQuoteFile={onQuoteFile}
               onQuoteSelection={onQuoteSelection}

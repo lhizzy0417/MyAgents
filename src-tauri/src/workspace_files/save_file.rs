@@ -4,7 +4,7 @@
 //! - File MUST already exist (this command does NOT create — that's
 //!   `cmd_workspace_new_file`'s job; `FilePreviewModal` only opens
 //!   existing files for edit, so this distinction matches the UX path).
-//! - 512KB content cap (matches `read_preview` cap so a roundtrip
+//! - 2MB content cap (matches `read_preview` cap so a roundtrip
 //!   read → edit → save is symmetric).
 //! - Atomic write via `path_safety::atomic_write_file` (tmp + rename in
 //!   the same parent dir).
@@ -21,7 +21,7 @@ use super::path_safety::{
     validate_workspace_root,
 };
 
-const MAX_CONTENT_BYTES: usize = 512 * 1024;
+const MAX_CONTENT_BYTES: usize = 2 * 1024 * 1024;
 
 /// Returns `Ok(())` on success — no body needed (`Result` is the only
 /// signal `FilePreviewModal` consumes).
@@ -109,6 +109,26 @@ mod tests {
         assert!(res.is_err());
         // File unchanged.
         assert_eq!(fs::read_to_string(ws.join("f.md")).unwrap(), "old");
+        let _ = fs::remove_dir_all(&ws);
+    }
+
+    #[tokio::test]
+    async fn writes_at_max_content_bytes() {
+        let ws = make_test_workspace("save_at_max_size");
+        fs::write(ws.join("f.md"), "old").unwrap();
+        let content = "a".repeat(MAX_CONTENT_BYTES);
+        cmd_workspace_save_file(
+            ws.to_string_lossy().to_string(),
+            "f.md".to_string(),
+            content,
+            Some("old".to_string()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            fs::metadata(ws.join("f.md")).unwrap().len(),
+            MAX_CONTENT_BYTES as u64
+        );
         let _ = fs::remove_dir_all(&ws);
     }
 

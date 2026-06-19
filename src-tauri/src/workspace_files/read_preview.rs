@@ -5,7 +5,7 @@
 //!   * Reject if file doesn't exist.
 //!   * Reject non-previewable types (binary / unknown — UI shows the modal
 //!     only when content can be displayed as text).
-//!   * Cap response at 512KB so a forgotten 50MB JSON doesn't pin the IPC
+//!   * Cap response at 2MB so a forgotten 50MB JSON doesn't pin the IPC
 //!     channel.
 //! Returns the same `{ content, name, size }` shape so DirectoryPanel's
 //! `FilePreviewModal` consumer doesn't need a parallel branch.
@@ -16,6 +16,7 @@ use std::io::Read;
 use serde::Serialize;
 
 use super::path_safety::{resolve_existing_inside_workspace, validate_workspace_root};
+use super::system_open::validate_external_open_path;
 
 // Text preview cap. 512KB was too tight for everyday text artifacts — `.jsonl`
 // datasets, agent transcripts, logs and large JSON routinely exceed it, and the
@@ -47,21 +48,45 @@ pub async fn cmd_workspace_read_preview(
     // verifies the result stays inside workspace_root — blocks the
     // `evil_link → /etc/passwd` escape (Phase D.5).
     let resolved = resolve_existing_inside_workspace(&workspace_root, &path)?;
-    let metadata = fs::metadata(&resolved).map_err(|_| "File not found".to_string())?;
+    read_preview_resolved(&resolved, &path)
+}
+
+/// Read an absolute local file as text for preview. Same cap and type gate as
+/// workspace previews, but path validation follows the external-open surface:
+/// existing absolute file under home/tmp/optional workspace, excluding
+/// credential and system directories.
+#[tauri::command]
+pub async fn cmd_read_local_preview(
+    full_path: String,
+    workspace: Option<String>,
+) -> Result<PreviewResult, String> {
+    let trimmed = full_path.trim();
+    if trimmed.is_empty() {
+        return Err("Missing path".to_string());
+    }
+    let resolved = validate_external_open_path(trimmed, workspace.as_deref())?;
+    read_preview_resolved(&resolved, trimmed)
+}
+
+fn read_preview_resolved(
+    resolved: &std::path::Path,
+    display_path: &str,
+) -> Result<PreviewResult, String> {
+    let metadata = fs::metadata(resolved).map_err(|_| "File not found".to_string())?;
     if !metadata.is_file() {
         return Err("Not a regular file".to_string());
     }
 
-    let name = std::path::Path::new(&path)
+    let name = std::path::Path::new(display_path)
         .file_name()
         .map(|s| s.to_string_lossy().to_string())
-        .unwrap_or_else(|| path.clone());
+        .unwrap_or_else(|| display_path.to_string());
 
     if !is_previewable(&name) {
         return Err("File type not supported".to_string());
     }
 
-    let size = fs::metadata(&resolved).map(|m| m.len()).unwrap_or(0);
+    let size = metadata.len();
     if size > MAX_PREVIEW_BYTES {
         return Err(format!(
             "File too large to preview (max {} MB)",
@@ -74,13 +99,13 @@ pub async fn cmd_workspace_read_preview(
     // bytes; if we hit MAX+1 the size check raced and we reject. Mirrors
     // `download.rs::cmd_workspace_download_file` which got this defense
     // earlier in the cross-review.
-    let mut file = fs::File::open(&resolved).map_err(|e| format!("Open failed: {}", e))?;
+    let mut file = fs::File::open(resolved).map_err(|e| format!("Open failed: {}", e))?;
     let mut bytes = Vec::with_capacity(size as usize);
     let read_cap = MAX_PREVIEW_BYTES + 1;
     file.by_ref()
         .take(read_cap)
         .read_to_end(&mut bytes)
-        .map_err(|e| format!("Failed to read {}: {}", path, e))?;
+        .map_err(|e| format!("Failed to read {}: {}", display_path, e))?;
     if bytes.len() as u64 > MAX_PREVIEW_BYTES {
         return Err(format!(
             "File too large to preview (max {} MB)",
@@ -156,6 +181,21 @@ mod tests {
         assert_eq!(res.content, "hi there");
         assert_eq!(res.name, "hello.md");
         assert_eq!(res.size, 8);
+        let _ = fs::remove_dir_all(&ws);
+    }
+
+    #[tokio::test]
+    async fn reads_local_text_file() {
+        let ws = make_test_workspace("preview_local_text");
+        let p = ws.join("outside.md");
+        fs::write(&p, "local text").unwrap();
+
+        let res = cmd_read_local_preview(p.to_string_lossy().to_string(), None)
+            .await
+            .unwrap();
+
+        assert_eq!(res.content, "local text");
+        assert_eq!(res.name, "outside.md");
         let _ = fs::remove_dir_all(&ws);
     }
 

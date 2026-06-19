@@ -150,10 +150,19 @@ const MarkdownLink = memo(function MarkdownLink({
     }
   };
 
+  const handleContextMenu = (e: React.MouseEvent<HTMLAnchorElement>) => {
+    if (!href) return;
+    if (fileLinkAction?.openFileLinkMenu(e.clientX, e.clientY, href)) {
+      e.preventDefault();
+      e.stopPropagation();
+    }
+  };
+
   return (
     <a
       href={href}
       onClick={handleClick}
+      onContextMenu={handleContextMenu}
       className="text-[var(--accent-warm)] underline decoration-[var(--accent-warm)]/40 underline-offset-2 transition-colors hover:text-[var(--accent-warm-hover)] hover:decoration-[var(--accent-warm)]/60"
       style={{ userSelect: 'text' }}
       {...props}

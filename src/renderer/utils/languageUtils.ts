@@ -17,6 +17,15 @@ interface LanguageConfig {
     showLineNumbers: boolean;
 }
 
+/** Monaco syntax/tokenization budget. Text files can still preview/save above
+ *  this size; this only decides whether we ask Monaco to colorize them. */
+export const MONACO_TOKENIZATION_BYTE_BUDGET = 1024 * 1024;
+
+/** Long single-line content (minified JSON/JS, JSONL, logs) dominates Monaco's
+ *  wrap/tokenization cost. Treat it as plain text even when the extension is
+ *  otherwise known. */
+export const PATHOLOGICAL_LINE_LENGTH = 20_000;
+
 /**
  * Default configuration for unknown file types
  */
@@ -108,6 +117,12 @@ const EXTENSION_MAP: Record<string, LanguageConfig> = {
     log: { prism: 'text', monaco: 'plaintext', showLineNumbers: false },
 };
 
+const TOKENIZABLE_MONACO_LANGUAGES = new Set(
+    Object.values({ ...DOTFILE_MAP, ...EXTENSION_MAP })
+        .map((config) => config.monaco)
+        .filter((language) => language !== 'plaintext'),
+);
+
 /**
  * Get language configuration for a file
  */
@@ -137,6 +152,41 @@ export function getPrismLanguage(filename: string): string {
  */
 export function getMonacoLanguage(filename: string): string {
     return getLanguageConfig(filename).monaco;
+}
+
+/**
+ * Detect long single-line content without regex backtracking or allocating line arrays.
+ */
+export function hasPathologicallyLongLine(
+    content: string,
+    limit = PATHOLOGICAL_LINE_LENGTH,
+): boolean {
+    let runLength = 0;
+    for (let i = 0; i < content.length; i++) {
+        if (content.charCodeAt(i) === 10) {
+            runLength = 0;
+            continue;
+        }
+        runLength++;
+        if (runLength > limit) return true;
+    }
+    return false;
+}
+
+/**
+ * Resolve the Monaco language for editable/previewed files.
+ *
+ * Preview/save budgets are larger than syntax highlighting budgets. Known source
+ * files can be colorized up to 1MB, while unknown/plaintext files and pathological
+ * long-line content stay in plaintext mode.
+ */
+export function getEditorMonacoLanguage(filename: string, content: string, sizeBytes: number): string {
+    const language = getMonacoLanguage(filename);
+    if (language === 'plaintext') return 'plaintext';
+    if (!TOKENIZABLE_MONACO_LANGUAGES.has(language)) return 'plaintext';
+    if (Math.max(sizeBytes, content.length) > MONACO_TOKENIZATION_BYTE_BUDGET) return 'plaintext';
+    if (hasPathologicallyLongLine(content)) return 'plaintext';
+    return language;
 }
 
 /**

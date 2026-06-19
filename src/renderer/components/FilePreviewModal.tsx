@@ -23,7 +23,7 @@ import { useWorkspaceChangeSignal } from '@/hooks/useWorkspaceChangeSignal';
 import { useWorkspaceFileService } from '@/hooks/useWorkspaceFileService';
 import type { RichDocKind } from '../../shared/fileTypes';
 import type { FilePreviewFocusTarget } from '@/types/filePreview';
-import { getMonacoLanguage, isMarkdownFile } from '@/utils/languageUtils';
+import { getEditorMonacoLanguage, hasPathologicallyLongLine, isMarkdownFile } from '@/utils/languageUtils';
 import { shortenPathForDisplay } from '@/utils/pathDetection';
 import { retainFocusOnMouseDown } from '@/utils/focusRetention';
 
@@ -62,6 +62,8 @@ interface FilePreviewModalProps {
     size: number;
     /** Relative path from agent directory (for saving) */
     path: string;
+    /** Absolute local path for read-only previews outside the active workspace. */
+    localPath?: string | null;
     /** When set, render the read-only rich-document viewer (pdf / docx / sheet /
      *  pptx) instead of the text/markdown editor. The byte payload is fetched
      *  inside RichDocViewer via the workspace file service, so `content` is
@@ -121,9 +123,6 @@ interface FilePreviewModalProps {
      *  NOT surface this — line-mapping back to source is unreliable. */
     onQuoteSelection?: (path: string, startLine: number, endLine: number, text: string) => void;
 }
-
-// Files above this threshold use plaintext mode (skip tokenization) to prevent UI freeze
-const LARGE_FILE_TOKENIZATION_THRESHOLD = 100 * 1024; // 100KB
 
 /** Auto-save status indicator — same treatment as the existing code-file editor.
  *  Silent on idle; surfaces saving/saved/error only when relevant. */
@@ -347,6 +346,7 @@ export default function FilePreviewModal({
     content,
     size,
     path,
+    localPath = null,
     richDocKind,
     isLoading = false,
     error = null,
@@ -405,11 +405,9 @@ export default function FilePreviewModal({
     // workspace_files, never sidecar HTTP. Either path is acceptable, so
     // Chat.tsx's split-view / fullscreen mounts don't need to wire
     // onRevealFile manually — passing `workspacePath` is enough.
-    const canReveal = !!(onRevealFile || workspacePath);
+    const canReveal = !!(onRevealFile || workspacePath || localPath);
 
     const isMarkdown = useMemo(() => isMarkdownFile(name), [name]);
-    const monacoLanguage = useMemo(() => getMonacoLanguage(name), [name]);
-
     // Auto-save mode covers any editable file (markdown or code) — Typora/Obsidian-style.
     const isDirectEdit = canEdit;
 
@@ -472,17 +470,18 @@ export default function FilePreviewModal({
         }
     }, [canEdit, focusTarget, isMarkdown]);
 
-    // Large files: force plaintext to skip tokenization
+    // Syntax highlighting has its own budget, separate from the 2MB preview/save
+    // cap. Normal source can highlight up to 1MB; unknown or long-line data stays
+    // plaintext to preserve scroll/edit responsiveness.
     const effectiveMonacoLanguage = useMemo(() => {
-        if (size > LARGE_FILE_TOKENIZATION_THRESHOLD) return 'plaintext';
-        return monacoLanguage;
-    }, [size, monacoLanguage]);
+        return getEditorMonacoLanguage(name, editContent, size);
+    }, [editContent, name, size]);
 
     // Disable Monaco soft-wrap for files with a pathologically long line (data /
     // minified JSON): the advanced word-wrap layout of a 30k+ char line is the
     // dominant load cost and such lines are unreadable wrapped anyway.
     const monacoWordWrap = useMemo<'on' | 'off'>(
-        () => (/[^\n]{20000,}/.test(editContent) ? 'off' : 'on'),
+        () => (hasPathologicallyLongLine(editContent) ? 'off' : 'on'),
         [editContent],
     );
 
@@ -989,11 +988,13 @@ export default function FilePreviewModal({
                 // file service. `pathRef.current` reflects the latest path
                 // (rename keeps it fresh).
                 await fileServiceRef.current.openInFinder({ path: pathRef.current });
+            } else if (localPath) {
+                await fileServiceRef.current.openPathExternal({ fullPath: localPath, workspace: null });
             }
         } catch {
             toastRef.current.error('无法打开目录');
         }
-    }, [canReveal, onRevealFile, workspacePath]);
+    }, [canReveal, localPath, onRevealFile, workspacePath]);
 
     // ─── Render content ───────────────────────────────────────────────────────
     const renderPreviewContent = () => {
@@ -1018,7 +1019,7 @@ export default function FilePreviewModal({
                 <Suspense fallback={monacoLoading}>
                     {/* key={path}: a split-view file switch reuses this modal — keying
                         forces RichDocViewer to remount (clean state + viewer cleanup). */}
-                    <RichDocViewer key={path} kind={richDocKind} path={path} workspacePath={workspacePath} />
+                    <RichDocViewer key={localPath ?? path} kind={richDocKind} path={path} workspacePath={workspacePath} localPath={localPath} />
                 </Suspense>
             );
         }
@@ -1219,7 +1220,7 @@ export default function FilePreviewModal({
                                     "bar.md". Title attribute carries the full unshortened path. */}
                                 {(() => {
                                     const sep = workspacePath?.includes('\\') ? '\\' : '/';
-                                    const absolute = workspacePath ? `${workspacePath}${sep}${path}` : path;
+                                    const absolute = localPath ?? (workspacePath ? `${workspacePath}${sep}${path}` : path);
                                     return (
                                         <span className="max-w-[400px] truncate text-xs text-[var(--ink-muted)]" title={absolute}>
                                             {shortenPathForDisplay(absolute)}

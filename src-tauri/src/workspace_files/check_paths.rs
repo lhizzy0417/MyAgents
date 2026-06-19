@@ -35,6 +35,7 @@ use std::collections::HashMap;
 use serde::Serialize;
 
 use super::path_safety::{resolve_existing_inside_workspace, validate_workspace_root};
+use super::system_open::validate_external_open_path;
 
 /// Hard cap on inputs — matches sidecar `/agent/check-paths` (200) so a typo
 /// in renderer code can't fan out an unbounded `stat()` storm.
@@ -76,6 +77,31 @@ pub async fn cmd_workspace_check_paths(
     Ok(CheckPathsResult { results })
 }
 
+/// Batch existence check for absolute local paths.
+///
+/// This is the workspace-free sibling of `cmd_workspace_check_paths`, used by
+/// chat-rendered file affordances when a Markdown link or inline path points to
+/// a real local file outside the active workspace. It deliberately reuses the
+/// same safety surface as `cmd_open_path_external` / `cmd_open_path_with_default`:
+/// existing absolute path, canonicalized, under home/tmp/optional workspace, and
+/// outside credential/system blacklists.
+#[tauri::command]
+pub async fn cmd_check_local_paths(
+    paths: Vec<String>,
+    workspace: Option<String>,
+) -> Result<CheckPathsResult, String> {
+    if paths.len() > MAX_BATCH_SIZE {
+        return Err(format!("Too many paths (max {}).", MAX_BATCH_SIZE));
+    }
+
+    let mut results: HashMap<String, PathInfo> = HashMap::with_capacity(paths.len());
+    for raw in paths {
+        let info = check_one_local(&raw, workspace.as_deref());
+        results.insert(raw, info);
+    }
+    Ok(CheckPathsResult { results })
+}
+
 fn check_one(workspace_root: &std::path::Path, raw: &str) -> PathInfo {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
@@ -100,6 +126,41 @@ fn check_one(workspace_root: &std::path::Path, raw: &str) -> PathInfo {
     // `resolved` is canonicalized, so this metadata call follows no further
     // links. We use `metadata` (not `symlink_metadata`) on purpose: the
     // canonical path is already the real file/dir.
+    match std::fs::metadata(&resolved) {
+        Ok(m) if m.is_dir() => PathInfo {
+            exists: true,
+            kind: "dir".to_string(),
+        },
+        Ok(_) => PathInfo {
+            exists: true,
+            kind: "file".to_string(),
+        },
+        Err(_) => PathInfo {
+            exists: false,
+            kind: "file".to_string(),
+        },
+    }
+}
+
+fn check_one_local(raw: &str, workspace: Option<&str>) -> PathInfo {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return PathInfo {
+            exists: false,
+            kind: "file".to_string(),
+        };
+    }
+
+    let resolved = match validate_external_open_path(trimmed, workspace) {
+        Ok(p) => p,
+        Err(_) => {
+            return PathInfo {
+                exists: false,
+                kind: "file".to_string(),
+            }
+        }
+    };
+
     match std::fs::metadata(&resolved) {
         Ok(m) if m.is_dir() => PathInfo {
             exists: true,
@@ -233,5 +294,43 @@ mod tests {
                 .unwrap();
         assert!(res.results.contains_key("a.txt"));
         let _ = fs::remove_dir_all(&ws);
+    }
+
+    #[tokio::test]
+    async fn local_check_accepts_existing_home_or_tmp_file() {
+        let ws = make_test_workspace("check_local_ok");
+        let file = ws.join("outside_workspace_shape.txt");
+        fs::write(&file, "x").unwrap();
+        let raw = file.to_string_lossy().to_string();
+
+        let res = cmd_check_local_paths(vec![raw.clone()], None)
+            .await
+            .unwrap();
+
+        assert_eq!(res.results.get(&raw).unwrap().exists, true);
+        assert_eq!(res.results.get(&raw).unwrap().kind, "file");
+        let _ = fs::remove_dir_all(&ws);
+    }
+
+    #[tokio::test]
+    async fn local_check_rejects_missing_or_relative() {
+        let res = cmd_check_local_paths(
+            vec![
+                "relative.txt".to_string(),
+                "/definitely/missing/file.txt".to_string(),
+            ],
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(res.results.get("relative.txt").unwrap().exists, false);
+        assert_eq!(
+            res.results
+                .get("/definitely/missing/file.txt")
+                .unwrap()
+                .exists,
+            false,
+        );
     }
 }
