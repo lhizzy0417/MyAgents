@@ -37,6 +37,8 @@ const mocks = vi.hoisted(() => {
     activateSession: vi.fn(async () => undefined),
     getSessionPort: vi.fn(async () => null),
     startBackgroundCompletion: vi.fn(async () => ({ started: false })),
+    setAppActiveCorrelation: vi.fn(),
+    setAppActiveTabId: vi.fn(),
   };
 });
 
@@ -53,6 +55,7 @@ vi.mock('@/analytics', () => ({
 
 vi.mock('@/api/tauriClient', () => ({
   stopTabSidecar: vi.fn(async () => undefined),
+  setAppActiveCorrelation: mocks.setAppActiveCorrelation,
   startGlobalSidecar: mocks.startGlobalSidecar,
   initGlobalSidecarReadyPromise: mocks.initGlobalSidecarReadyPromise,
   markGlobalSidecarReady: mocks.markGlobalSidecarReady,
@@ -225,6 +228,7 @@ vi.mock('@/utils/frontendLogger', () => ({
   forceFlushLogs: vi.fn(async () => undefined),
   setLogServerUrl: vi.fn(),
   clearLogServerUrl: vi.fn(),
+  setAppActiveTabId: mocks.setAppActiveTabId,
 }));
 
 vi.mock('@/utils/lastExitMarker', () => ({
@@ -286,6 +290,13 @@ describe('App helper launch', () => {
 
       expect(launchStart).toContain('view=launcher');
       expect(launchStart).not.toContain('view=undefined');
+      expect(mocks.setAppActiveTabId).toHaveBeenCalledWith(
+        expect.stringMatching(/^tab-/),
+        expect.arrayContaining([expect.stringMatching(/^tab-/)]),
+      );
+      expect(mocks.setAppActiveCorrelation).toHaveBeenCalledWith(expect.objectContaining({
+        tabId: expect.stringMatching(/^tab-/),
+      }));
     } finally {
       logSpy.mockRestore();
     }

@@ -833,11 +833,10 @@ export default function TabProvider({
         return () => { unsubscribe(); };
     }, [appendUnifiedLog, tabId]);
 
-    // Pattern 6 (FIXED): focus-aware tab registry. The previous "last mounted
-    // wins" model mis-tagged logs and `X-MyAgents-Tab-Id` headers in multi-tab
-    // sessions. Now each TabProvider mounts its tabId into the registry on
-    // mount and removes it on unmount; document-visibility transitions move
-    // the "focused" pointer so the active tab claims correlation.
+    // Pattern 6 (FIXED): Chat tab registry for renderer correlation. App.tsx
+    // owns the active tab across Launcher / Settings / TaskCenter / Chat; each
+    // TabProvider only contributes mounted Chat tab context and the fallback
+    // focused pointer used when App has not synced yet.
     useEffect(() => {
         setCurrentTabId(tabId, true);
         setActiveCorrelation({ tabId, mounted: true });
@@ -845,8 +844,8 @@ export default function TabProvider({
         const handleVisibility = (): void => {
             if (typeof document !== 'undefined' && document.visibilityState === 'visible') {
                 // The browser/Tauri webview only has one "visible" state per
-                // window; the active tab is whichever TabProvider is currently
-                // mounted with focus. Promote ourselves on each visibility-on.
+                // window. Promote this mounted Chat tab as the fallback focused
+                // pointer; App-level active-tab sync remains authoritative.
                 import('@/utils/frontendLogger').then(({ setFocusedTabId }) => {
                     setFocusedTabId(tabId);
                 }).catch(() => { /* ignore */ });

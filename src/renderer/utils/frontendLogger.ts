@@ -7,8 +7,9 @@
  *
  * `console.*` interception is unchanged (statutory entry pattern from
  * `unified_logging.md` §最佳实践 #1). Each captured entry stamps
- * `tabId` from the active tab (set by TabProvider via setCurrentTabId)
- * before being persisted to disk and pushed to the store.
+ * `tabId` from App's active tab registry before being persisted to disk and
+ * pushed to the store; TabProvider supplements that registry for mounted Chat
+ * tabs.
  *
  * Bounded:
  *  - Global ring buffer: 5000 entries (drops oldest)
@@ -35,27 +36,57 @@ let rendererLogLabel: string | null = null;
 // forward).
 export const REACT_LOG_EVENT = 'myagents:react-log';
 
-// ── Pattern 6: active tab tracking (FIXED — focus-aware registry) ─────
+// ── Pattern 6: active tab tracking (FIXED — App-owned active registry) ─────
 // Previously this was a single `currentTabId` overwritten by whichever tab
 // mounted last. With multiple tabs mounted concurrently, captured console.*
-// logs were stamped with the wrong tabId. We now keep a registry of mounted
-// tabs + a "focused" pointer; capture reads from the focused entry. Each
-// tab mounts via setCurrentTabId(tabId) which adds it to the registry, and
-// unmounts via setCurrentTabId(undefined) (called from the same tab's
-// cleanup) which removes the matching entry.
+// logs were stamped with the wrong tabId. App.tsx now owns the active tab
+// across every surface, while TabProvider keeps a mounted-Chat registry as a
+// fallback and session-scoped supplement.
 const mountedTabIds = new Set<string>();
+const appTabIds = new Set<string>();
 let focusedTabId: string | undefined;
+let activeAppTabId: string | undefined;
 // Last-resort fallback for legacy callers — preserves old "last mounted
 // wins" behavior when no focus event has fired yet (cold start before any
 // focus listener attaches).
 let lastMountedTabId: string | undefined;
 
+function isKnownTabId(tabId: string | undefined): boolean {
+    return !!tabId && (mountedTabIds.has(tabId) || appTabIds.has(tabId));
+}
+
+function resolveFallbackTabId(): string | undefined {
+    if (activeAppTabId && appTabIds.has(activeAppTabId)) return activeAppTabId;
+    if (lastMountedTabId && mountedTabIds.has(lastMountedTabId)) return lastMountedTabId;
+    return (appTabIds.values().next().value as string | undefined)
+        ?? (mountedTabIds.values().next().value as string | undefined);
+}
+
+/**
+ * App.tsx is the only owner that knows the active tab across all surfaces.
+ * Launcher / Settings / TaskCenter do not mount TabProvider, so without this
+ * they inherit the previously-focused Chat tab in persisted React logs.
+ */
+export function setAppActiveTabId(tabId: string | null | undefined, allTabIds: readonly string[] = []): void {
+    appTabIds.clear();
+    for (const id of allTabIds) {
+        appTabIds.add(id);
+    }
+    activeAppTabId = tabId ?? undefined;
+    if (activeAppTabId) {
+        appTabIds.add(activeAppTabId);
+        focusedTabId = activeAppTabId;
+    } else if (!isKnownTabId(focusedTabId)) {
+        focusedTabId = undefined;
+    }
+}
+
 /**
  * Mount or unmount a tab in the active-tab registry. Pass `undefined` to
  * unmount the most recently mounted tab (legacy 1-arg shape; rarely needed —
  * the focus-aware variant `setCurrentTabId(tabId, mounted=true|false)` is
- * preferred). The "currently active tab" is the one with focus, or the
- * last-mounted as fallback.
+ * preferred). App's active tab remains authoritative; mounted Chat tabs are
+ * only the fallback when App has not synced yet.
  */
 export function setCurrentTabId(tabId: string | undefined, mounted: boolean = true): void {
     if (tabId === undefined) {
@@ -67,15 +98,13 @@ export function setCurrentTabId(tabId: string | undefined, mounted: boolean = tr
         mountedTabIds.add(tabId);
         lastMountedTabId = tabId;
         // First mount → claim focus until something else explicitly does.
-        if (!focusedTabId || !mountedTabIds.has(focusedTabId)) {
+        if (!isKnownTabId(focusedTabId)) {
             focusedTabId = tabId;
         }
     } else {
         mountedTabIds.delete(tabId);
         if (focusedTabId === tabId) {
-            focusedTabId = lastMountedTabId && mountedTabIds.has(lastMountedTabId)
-                ? lastMountedTabId
-                : (mountedTabIds.values().next().value as string | undefined);
+            focusedTabId = resolveFallbackTabId();
         }
         if (lastMountedTabId === tabId) {
             // Pick any remaining mounted tab as the new "last".
@@ -101,11 +130,13 @@ export function setFocusedTabId(tabId: string | undefined): void {
 }
 
 function resolveActiveTabId(): string | undefined {
-    if (focusedTabId && mountedTabIds.has(focusedTabId)) return focusedTabId;
-    if (lastMountedTabId && mountedTabIds.has(lastMountedTabId)) return lastMountedTabId;
-    // Last resort — any mounted tab. Avoids "no tab id at all" when something
-    // logs before any focus/mount sequence stabilises.
-    return mountedTabIds.values().next().value as string | undefined;
+    if (activeAppTabId && appTabIds.has(activeAppTabId)) return activeAppTabId;
+    if (isKnownTabId(focusedTabId)) return focusedTabId;
+    return resolveFallbackTabId();
+}
+
+export function getActiveFrontendLogTabIdForTest(): string | undefined {
+    return resolveActiveTabId();
 }
 
 // ── Pattern 6: global log store (bounded ring buffer + listeners) ─────

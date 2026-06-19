@@ -54,3 +54,49 @@ describe('tauriClient global sidecar readiness', () => {
         );
     });
 });
+
+describe('tauriClient renderer correlation', () => {
+    beforeEach(() => {
+        mocks.invoke.mockReset();
+    });
+
+    it('uses the App active launcher tab instead of the previously mounted chat tab', async () => {
+        mocks.invoke.mockResolvedValue({
+            status: 200,
+            body: '{}',
+            headers: { 'content-type': 'application/json' },
+            is_base64: false,
+        });
+        const {
+            getActiveTabId,
+            proxyFetch,
+            setActiveCorrelation,
+            setAppActiveCorrelation,
+            setFocusedCorrelationTabId,
+        } = await loadClient();
+
+        setActiveCorrelation({ tabId: 'old-chat-tab', sessionId: 'old-session', mounted: true });
+        setFocusedCorrelationTabId('old-chat-tab');
+        setAppActiveCorrelation({
+            tabId: 'new-launcher-tab',
+            tabs: [
+                { id: 'old-chat-tab', sessionId: 'old-session' },
+                { id: 'new-launcher-tab', sessionId: null },
+            ],
+        });
+
+        await proxyFetch('http://127.0.0.1:31415/api/test');
+
+        expect(getActiveTabId()).toBe('new-launcher-tab');
+        expect(mocks.invoke).toHaveBeenCalledWith('proxy_http_request', {
+            request: {
+                url: 'http://127.0.0.1:31415/api/test',
+                method: 'GET',
+                body: undefined,
+                headers: {
+                    'X-MyAgents-Tab-Id': 'new-launcher-tab',
+                },
+            },
+        });
+    });
+});

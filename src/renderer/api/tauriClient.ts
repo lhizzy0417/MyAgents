@@ -251,16 +251,55 @@ interface ProxyHttpResponse {
 // `X-MyAgents-Tab-Id` whenever B mounted later — breaking PRD §6.4
 // "any error log can be filtered by tabId".
 //
-// New model: a registry of mounted tabs + a "focused" pointer + a callback
-// resolver. `proxyFetch` calls `resolveCorrelation()`, which prefers the
-// caller-supplied context (set per-request via the optional argument), then
-// the focused tab, then the last-mounted as a last resort. Multiple
-// TabProviders coexist without clobbering.
+// New model: App.tsx owns the active tab across every surface, and
+// TabProvider supplies mounted Chat tab/session context as a fallback.
+// `proxyFetch` calls `resolveCorrelation()`, which prefers App's active tab,
+// then focused/mounted Chat context as a last resort. Multiple TabProviders
+// coexist without clobbering Launcher/Settings/TaskCenter correlation.
 const mountedTabs = new Map<string, { sessionId?: string }>();
+const appTabs = new Map<string, { sessionId?: string }>();
 let focusedTabId: string | undefined;
+let activeAppTabId: string | undefined;
 let lastMountedTabId: string | undefined;
 
 interface CorrelationContext { tabId?: string; sessionId?: string }
+
+function isKnownCorrelationTab(tabId: string | undefined): boolean {
+    return !!tabId && (mountedTabs.has(tabId) || appTabs.has(tabId));
+}
+
+function resolveFallbackCorrelationTabId(): string | undefined {
+    if (activeAppTabId && appTabs.has(activeAppTabId)) return activeAppTabId;
+    if (lastMountedTabId && mountedTabs.has(lastMountedTabId)) return lastMountedTabId;
+    return (appTabs.keys().next().value as string | undefined)
+        ?? (mountedTabs.keys().next().value as string | undefined);
+}
+
+/**
+ * App.tsx owns the actual active tab across Launcher / Settings / TaskCenter /
+ * Chat. TabProvider only exists for Chat tabs, so it cannot be the sole source
+ * for renderer correlation.
+ */
+export function setAppActiveCorrelation(opts: {
+    tabId?: string | null;
+    sessionId?: string | null;
+    tabs?: readonly { id: string; sessionId?: string | null }[];
+}): void {
+    appTabs.clear();
+    for (const tab of opts.tabs ?? []) {
+        appTabs.set(tab.id, { sessionId: tab.sessionId ?? undefined });
+    }
+    activeAppTabId = opts.tabId ?? undefined;
+    if (activeAppTabId) {
+        const existing = appTabs.get(activeAppTabId) ?? {};
+        appTabs.set(activeAppTabId, {
+            sessionId: opts.sessionId ?? existing.sessionId,
+        });
+        focusedTabId = activeAppTabId;
+    } else if (!isKnownCorrelationTab(focusedTabId)) {
+        focusedTabId = undefined;
+    }
+}
 
 /**
  * TabProvider calls this on mount with `mounted: true` and on unmount with
@@ -285,15 +324,13 @@ export function setActiveCorrelation(opts: { tabId?: string; sessionId?: string;
         if (opts.sessionId !== undefined) slot.sessionId = opts.sessionId;
         mountedTabs.set(opts.tabId, slot);
         lastMountedTabId = opts.tabId;
-        if (!focusedTabId || !mountedTabs.has(focusedTabId)) {
+        if (!isKnownCorrelationTab(focusedTabId)) {
             focusedTabId = opts.tabId;
         }
     } else {
         mountedTabs.delete(opts.tabId);
         if (focusedTabId === opts.tabId) {
-            focusedTabId = lastMountedTabId && mountedTabs.has(lastMountedTabId)
-                ? lastMountedTabId
-                : (mountedTabs.keys().next().value as string | undefined);
+            focusedTabId = resolveFallbackCorrelationTabId();
         }
         if (lastMountedTabId === opts.tabId) {
             lastMountedTabId = mountedTabs.keys().next().value as string | undefined;
@@ -313,11 +350,11 @@ export function setFocusedCorrelationTabId(tabId: string | undefined): void {
 
 function resolveCorrelation(): CorrelationContext {
     let tabId: string | undefined;
-    if (focusedTabId && mountedTabs.has(focusedTabId)) tabId = focusedTabId;
-    else if (lastMountedTabId && mountedTabs.has(lastMountedTabId)) tabId = lastMountedTabId;
-    else tabId = mountedTabs.keys().next().value as string | undefined;
+    if (activeAppTabId && appTabs.has(activeAppTabId)) tabId = activeAppTabId;
+    else if (isKnownCorrelationTab(focusedTabId)) tabId = focusedTabId;
+    else tabId = resolveFallbackCorrelationTabId();
 
-    const sessionId = tabId ? mountedTabs.get(tabId)?.sessionId : undefined;
+    const sessionId = tabId ? (mountedTabs.get(tabId)?.sessionId ?? appTabs.get(tabId)?.sessionId) : undefined;
     return { tabId, sessionId };
 }
 
@@ -389,7 +426,7 @@ export async function proxyFetch(
 
     // Pattern 6: stamp correlation headers (renderer → sidecar). Don't
     // overwrite explicit ones the caller already set. Resolver prefers
-    // focused-tab > last-mounted-tab > any-mounted-tab.
+    // App-active tab > focused Chat tab > mounted fallback.
     const correlation = resolveCorrelation();
     if (correlation.tabId && !headers['X-MyAgents-Tab-Id'] && !headers['x-myagents-tab-id']) {
         headers['X-MyAgents-Tab-Id'] = correlation.tabId;

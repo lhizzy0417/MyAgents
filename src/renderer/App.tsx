@@ -14,7 +14,7 @@ import {
   hashAgentNameSync,
 } from '@/analytics';
 import type { Surface } from '@/analytics';
-import { stopTabSidecar, startGlobalSidecar, initGlobalSidecarReadyPromise, markGlobalSidecarReady, getGlobalServerUrl, getSessionActivation, updateSessionTab, ensureSessionSidecar, releaseSessionSidecar, activateSession, deactivateSession, upgradeSessionId, getSessionPort, hasSessionSidecar, getSessionGeneration, stopSseProxy, startBackgroundCompletion, cancelBackgroundCompletion, updateGlobalServerUrl, canRestoreSession } from '@/api/tauriClient';
+import { stopTabSidecar, startGlobalSidecar, initGlobalSidecarReadyPromise, markGlobalSidecarReady, getGlobalServerUrl, getSessionActivation, updateSessionTab, ensureSessionSidecar, releaseSessionSidecar, activateSession, deactivateSession, upgradeSessionId, getSessionPort, hasSessionSidecar, getSessionGeneration, stopSseProxy, startBackgroundCompletion, cancelBackgroundCompletion, updateGlobalServerUrl, canRestoreSession, setAppActiveCorrelation } from '@/api/tauriClient';
 import ConfirmDialog from '@/components/ConfirmDialog';
 import BugReportOverlay from '@/components/BugReportOverlay';
 import CustomTitleBar from '@/components/CustomTitleBar';
@@ -70,7 +70,7 @@ import { updateSession } from '@/api/sessionClient';
 import { dismissTopmost } from '@/utils/closeLayer';
 import { dispatchAppShortcut } from '@/utils/appShortcuts';
 import { handleSelectAllKeydown } from '@/utils/selectAllRouter';
-import { forceFlushLogs, setLogServerUrl, clearLogServerUrl } from '@/utils/frontendLogger';
+import { forceFlushLogs, setLogServerUrl, clearLogServerUrl, setAppActiveTabId } from '@/utils/frontendLogger';
 import { normalizeRuntime, resolveEffectiveRuntime, planSessionOpen } from '@/utils/sessionOpenPlan';
 import { resolveNotificationClickRoute } from '@/utils/notificationClickRoute';
 import { applyTerminalSessionToTabs } from '@/utils/sessionTermination';
@@ -352,7 +352,7 @@ export default function App() {
   // TabProvider / sidecar until first activation — see MemoizedTabContent).
   const [restoreCandidate] = useState(() => buildRestoredTabs());
   const [tabs, setTabs] = useState<Tab[]>(() => [createNewTab()]);
-  const [activeTabId, setActiveTabId] = useState<string | null>(() => tabs[0]?.id ?? null);
+  const [activeTabId, setActiveTabIdState] = useState<string | null>(() => tabs[0]?.id ?? null);
 
   // "恢复对话" pill (Issue #309). `restorePillCount > 0` shows it; the resolved
   // candidate is held in a ref (NOT localStorage — the persist effect clears
@@ -366,6 +366,34 @@ export default function App() {
 
   const activeTabIdRef = useRef(activeTabId);
   activeTabIdRef.current = activeTabId;
+
+  const syncRendererCorrelationForTab = useCallback((tabId: string | null | undefined, nextTabs: readonly Tab[] = tabsRef.current) => {
+    const activeTab = tabId ? nextTabs.find((t) => t.id === tabId) : undefined;
+    setAppActiveTabId(tabId, nextTabs.map((t) => t.id));
+    setAppActiveCorrelation({
+      tabId,
+      sessionId: activeTab?.sessionId ?? undefined,
+      tabs: nextTabs.map((t) => ({ id: t.id, sessionId: t.sessionId })),
+    });
+  }, []);
+
+  const setActiveTabId = useCallback((
+    next: string | null | ((current: string | null) => string | null),
+    nextTabs: readonly Tab[] = tabsRef.current,
+  ) => {
+    if (typeof next === 'function') {
+      setActiveTabIdState((current) => {
+        const resolved = next(current);
+        activeTabIdRef.current = resolved;
+        syncRendererCorrelationForTab(resolved, nextTabs);
+        return resolved;
+      });
+      return;
+    }
+    activeTabIdRef.current = next;
+    syncRendererCorrelationForTab(next, nextTabs);
+    setActiveTabIdState(next);
+  }, [syncRendererCorrelationForTab]);
 
   // Persist open chat tabs after every structural change (Issue #232). This is
   // a POST-COMMIT effect — it flushes shortly after each tabs/activeTabId change
@@ -452,7 +480,7 @@ export default function App() {
     track('restore_last_session', { count: candidate.tabs.length });
     setTabs(plan.tabs);
     setActiveTabId(plan.activeTabId);
-  }, []);
+  }, [setActiveTabId]);
 
   // ✕ on the pill — dismiss without restoring (don't nag again this session).
   const handleDismissRestore = useCallback(() => {
@@ -493,6 +521,7 @@ export default function App() {
   // cannot be hidden behind a placeholder — they intentionally do not use this.
   const openNewTabDeferred = useCallback((newTab: Tab) => {
     perfMark(RENDERER_PERF_PHASE.newTabReveal, { tabId: newTab.id }); // P0: new-tab timeline anchor
+    const nextTabs = [...tabsRef.current, newTab];
     setDeferredMountTabIds((prev) => {
       if (prev.has(newTab.id)) return prev;
       const next = new Set(prev);
@@ -500,7 +529,7 @@ export default function App() {
       return next;
     });
     setTabs((prev) => [...prev, newTab]);
-    setActiveTabId(newTab.id);
+    setActiveTabId(newTab.id, nextTabs);
     runAfterNextPaint(() => {
       setDeferredMountTabIds((prev) => {
         if (!prev.has(newTab.id)) return prev;
@@ -509,18 +538,18 @@ export default function App() {
         return next;
       });
     });
-  }, []);
+  }, [setActiveTabId]);
 
   // Helper-overlay launches must hand `handleLaunchProject` a real, committed
   // active launcher tab. Mutating activeTabIdRef before React has committed the
   // tab produces `view=undefined` and can let the new Chat auto-send while hidden.
   const openLaunchTabNow = useCallback((newTab: Tab) => {
+    const nextTabs = [...tabsRef.current, newTab];
     flushSync(() => {
       setTabs((prev) => [...prev, newTab]);
-      setActiveTabId(newTab.id);
+      setActiveTabId(newTab.id, nextTabs);
     });
-    activeTabIdRef.current = newTab.id;
-  }, []);
+  }, [setActiveTabId]);
 
   const removeUnusedPrecreatedLaunchTab = useCallback((tabId: string) => {
     setTabs((prev) => {
@@ -549,6 +578,14 @@ export default function App() {
       sessionId: sid && !isPendingSessionId(sid) ? sid : null,
     });
   }, [activeTabId, tabs]);
+
+  // Renderer correlation must follow the App-level active tab, not only mounted
+  // Chat TabProviders. Launcher / Settings / TaskCenter do not mount a
+  // TabProvider, but logs and proxy headers still need their tab id instead of
+  // inheriting the previously-focused chat tab.
+  useEffect(() => {
+    syncRendererCorrelationForTab(activeTabId, tabs);
+  }, [activeTabId, tabs, syncRendererCorrelationForTab]);
 
   // PRD 0.2.19 cross-review fix: prewarm agent_hash cache when config.agents
   // loads/changes, so the first `workspace_open` / `session_new` for each agent
@@ -1131,7 +1168,7 @@ export default function App() {
     cleanupResources().catch(err =>
       console.error(`[App] Unhandled cleanup error for tab ${tabId}:`, err)
     );
-  }, []);
+  }, [setActiveTabId]);
 
   // Close tab — if AI is generating, close immediately and let it finish in background.
   // No confirmation dialog: background completion keeps the Sidecar alive.
@@ -1146,7 +1183,7 @@ export default function App() {
 
     void performCloseTab(tabId);
   // eslint-disable-next-line react-hooks/exhaustive-deps -- callbacks stabilized via tabsRef
-  }, []);
+  }, [setActiveTabId]);
 
   // Close current active tab (for Cmd+W)
   const closeCurrentTab = useCallback(() => {
@@ -1164,7 +1201,7 @@ export default function App() {
     // Multiple tabs OR last tab is chat/settings: use the unified confirmation logic
     void closeTabWithConfirmation(currentActiveTabId);
   // eslint-disable-next-line react-hooks/exhaustive-deps -- callbacks stabilized via tabsRef
-  }, []);
+  }, [setActiveTabId]);
 
   // Application-level keyboard shortcuts (new/close/switch tab, task-center,
   // settings, reload-block). The bindings + matching live in the declarative
@@ -1202,7 +1239,7 @@ export default function App() {
     window.addEventListener('keydown', handleKeyDown, { capture: true });
     return () => window.removeEventListener('keydown', handleKeyDown, { capture: true });
   // eslint-disable-next-line react-hooks/exhaustive-deps -- callbacks stabilized via tabsRef
-  }, []);
+  }, [setActiveTabId]);
 
   /**
    * Launch a project with Session Singleton Architecture
@@ -1636,7 +1673,7 @@ export default function App() {
       launchingTabRef.current = null;
       setLoadingTabs((prev) => ({ ...prev, [activeTabId]: false, [targetTabId]: false }));
     }
-  }, []);
+  }, [setActiveTabId]);
 
   // Clear initialMessage from a tab after it has been consumed by Chat
   const clearInitialMessage = useCallback((tabId: string) => {
@@ -1711,7 +1748,7 @@ export default function App() {
     } finally {
       setLoadingTabs(prev => ({ ...prev, [newTab.id]: false }));
     }
-  }, []);
+  }, [setActiveTabId]);
 
   /**
    * Spawn a fresh Tab bound to an EXISTING session, ensure its sidecar, and
@@ -1793,7 +1830,7 @@ export default function App() {
     } finally {
       setLoadingTabs(prev => ({ ...prev, [newTab.id]: false }));
     }
-  }, []);
+  }, [setActiveTabId]);
 
   // Per-session in-flight guard for open-in-new-tab. Without it, a rapid
   // double-click both observe a `tabsRef.current` that doesn't yet reflect the
@@ -1838,7 +1875,7 @@ export default function App() {
     } finally {
       openingInNewTabRef.current.delete(sessionId);
     }
-  }, [spawnTabForExistingSession]);
+  }, [setActiveTabId, spawnTabForExistingSession]);
 
   /**
    * Handle session switch from within Chat (history dropdown)
@@ -2179,7 +2216,7 @@ export default function App() {
     // spawnTabForExistingSession has stable identity ([] deps), so listing it
     // keeps exhaustive-deps happy without changing handleSwitchSession's own
     // stability (callers rely on this being reference-stable).
-  }, [spawnTabForExistingSession]);
+  }, [setActiveTabId, spawnTabForExistingSession]);
 
   const handleBackToLauncher = useCallback(async () => {
     const activeTabId = activeTabIdRef.current;
@@ -2324,7 +2361,7 @@ export default function App() {
     }
     setTabs((prev) => prev.filter((t) => t.id !== tabId));
     setActiveTabId((curr) => (curr === tabId ? remaining[remaining.length - 1].id : curr));
-  }, []);
+  }, [setActiveTabId]);
 
   // Attach an already-on-disk session to a tab WITHOUT going through
   // planSessionOpen — the planner would see the tab already holds this
@@ -2416,7 +2453,7 @@ export default function App() {
 
   const handleSelectTab = useCallback((tabId: string) => {
     setActiveTabId(tabId);
-  }, []);
+  }, [setActiveTabId]);
 
   // Activate a restored cold tab whenever it becomes active — via ANY path
   // (click, Cmd+Tab/Cmd+1-9, swipe, session jump, or the initial active tab on
@@ -2532,7 +2569,7 @@ export default function App() {
     openNewTabDeferred(newTab);
 
     // Global Sidecar is now started on App mount, no need to start here
-  }, [openNewTabDeferred]);
+  }, [openNewTabDeferred, setActiveTabId]);
 
   // Listen for OPEN_SETTINGS custom event from child components
   useEffect(() => {
@@ -2548,7 +2585,7 @@ export default function App() {
       window.removeEventListener(CUSTOM_EVENTS.OPEN_SETTINGS, handleOpenSettingsEvent as EventListener);
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps -- callback stabilized via tabsRef
-  }, []);
+  }, [setActiveTabId]);
 
   // Open TaskCenter as a singleton tab (mirrors handleOpenSettings)
   const handleOpenTaskCenter = useCallback(() => {
@@ -2571,7 +2608,7 @@ export default function App() {
       sidecarConfigDisposition: 'push',
     };
     openNewTabDeferred(newTab);
-  }, [openNewTabDeferred]);
+  }, [openNewTabDeferred, setActiveTabId]);
 
   // Intent carried across `OPEN_TASK_CENTER` — the event dispatcher
   // (Launcher "我的任务" tab's search icon) wants more than just "open
@@ -2801,7 +2838,6 @@ export default function App() {
         };
         setTabs((prev) => [...prev, seeded]);
         setActiveTabId(newTab.id);
-        activeTabIdRef.current = newTab.id;
 
         await handleLaunchProject(
           workspace,
@@ -2826,7 +2862,7 @@ export default function App() {
     return () =>
       window.removeEventListener(CUSTOM_EVENTS.OPEN_AI_DISCUSSION, handler);
     // eslint-disable-next-line react-hooks/exhaustive-deps -- stable via refs
-  }, []);
+  }, [setActiveTabId]);
 
   // Listen for OPEN_SESSION_IN_NEW_TAB — task center's 任务执行 session list
   // dispatches this to open a historical execution in a fresh chat tab.
@@ -2926,7 +2962,7 @@ export default function App() {
     return () => {
       window.removeEventListener(CUSTOM_EVENTS.JUMP_TO_TAB, handleJumpToTab as EventListener);
     };
-  }, []);
+  }, [setActiveTabId]);
 
   // Listen for LAUNCH_BUG_REPORT custom event (AI-powered bug reporting)
   useEffect(() => {
@@ -2949,7 +2985,6 @@ export default function App() {
           if (existing) {
             if (activeTabIdRef.current !== existing.id) {
               setActiveTabId(existing.id);
-              activeTabIdRef.current = existing.id;
             }
             return;
           }
