@@ -1268,6 +1268,11 @@ type MessageQueueItem = {
   // and replyBack=true, turn-end pushes a send.result session event back to
   // caller session.
   inboxMeta?: import('./inbox/types').InboxTurnMeta;
+  // Internal trace id for synchronous injected turns (cron / heartbeat /
+  // memory update). Bound at generator yield and consumed by SessionEngine
+  // after the turn finishes, so result text/error are turn-local instead of
+  // inferred from global message history.
+  injectedTurnId?: string;
 };
 const messageQueue: MessageQueueItem[] = [];
 type TurnBoundaryQueueItem = {
@@ -1955,6 +1960,7 @@ function abortPersistentSession(): void {
     );
   }
   currentTurnTextBlocks.length = 0;
+  currentTurnInjectedTurnId = undefined;
   void import('./inbox/watch-deliver').then(({ deliverSessionWatchEvents }) =>
     deliverSessionWatchEvents(sessionId, {
       text: abortedReplyText,
@@ -2042,6 +2048,7 @@ let currentTurnAnalyticsSource: TurnAnalyticsSource | null = null;
 let currentTurnProviderAnalytics: TurnProviderAnalytics | null = null;
 let currentTurnCompactResult: 'success' | 'failed' | null = null;
 let currentTurnSawCompactBoundary = false;
+let currentTurnAssistantMessagePresent = false;
 // Whether the current turn observed any non-init SDK frame (assistant /
 // user / tool_result / stream_event / result / rate_limit_event etc.).
 // Cheaper signal than currentTurnHasOutput — flips on the FIRST substantive
@@ -2076,6 +2083,34 @@ let currentTurnInboxMeta: import('./inbox/types').InboxTurnMeta | undefined = un
 // only reads it when an inbox binding exists, while session watch reads it for
 // ordinary user/cron/IM turns too. Reset at turn start.
 const currentTurnTextBlocks: string[] = [];
+
+export type BuiltinInjectedTurnOutcome = {
+  status: 'complete' | 'stopped' | 'error';
+  text: string;
+  assistantMessagePresent: boolean;
+  error?: string;
+};
+const injectedTurnOutcomes = new Map<string, BuiltinInjectedTurnOutcome>();
+const discardedInjectedTurnIds = new Set<string>();
+let currentTurnInjectedTurnId: string | undefined = undefined;
+
+function recordInjectedTurnOutcome(
+  status: BuiltinInjectedTurnOutcome['status'],
+  error?: string,
+): void {
+  if (!currentTurnInjectedTurnId) return;
+  if (discardedInjectedTurnIds.delete(currentTurnInjectedTurnId)) {
+    currentTurnInjectedTurnId = undefined;
+    return;
+  }
+  injectedTurnOutcomes.set(currentTurnInjectedTurnId, {
+    status,
+    text: currentTurnTextBlocks.join('').trim(),
+    assistantMessagePresent: currentTurnAssistantMessagePresent,
+    ...(error ? { error } : {}),
+  });
+  currentTurnInjectedTurnId = undefined;
+}
 
 // ─── Watchdog Auto Resume (watchdog-driven session resume) ────────────────
 //
@@ -2148,6 +2183,7 @@ function resetTurnUsage(): void {
   currentTurnProviderAnalytics = null;
   currentTurnCompactResult = null;
   currentTurnSawCompactBoundary = false;
+  currentTurnAssistantMessagePresent = false;
   turnHadSubstantiveActivity = false;
   currentTurnTextBlocks.length = 0;
   // Note: currentTurnInboxMeta is NOT reset here — it's bound on dequeue
@@ -5562,6 +5598,7 @@ function ensureAssistantMessage(): MessageWire {
   // next reliable boundary signal. Surface the user bubble before creating
   // that assistant so UI ordering stays honest.
   maybeSurfaceInFlightAtAssistantTurnStart('assistant turn started after SDK boundary drain');
+  currentTurnAssistantMessagePresent = true;
   const lastMessage = messages[messages.length - 1];
   if (lastMessage && lastMessage.role === 'assistant' && isStreamingMessage) {
     return lastMessage;
@@ -6023,6 +6060,7 @@ let lastTurnEndPersist: Promise<unknown> = Promise.resolve();
 
 function handleMessageComplete(): void {
   isStreamingMessage = false;
+  recordInjectedTurnOutcome('complete');
   // Capture before a confirmed force-send handoff potentially re-arms it, so
   // the post-teardown re-arm at the end of this function knows whether to do so.
   let confirmedQueueTurnKeepStreaming = false;
@@ -6245,6 +6283,7 @@ function handleMessageComplete(): void {
 
 function handleMessageStopped(): void {
   isStreamingMessage = false;
+  recordInjectedTurnOutcome('stopped', 'Execution stopped');
   const stoppedTrace = snapshotBuiltinTurnTrace();
   emitBuiltinTurnTrace('final', {
     status: 'error',
@@ -6318,6 +6357,7 @@ function handleMessageStopped(): void {
 
 function handleMessageError(error: string, localizedError?: string): void {
   isStreamingMessage = false;
+  recordInjectedTurnOutcome('error', localizedError ?? error);
   const errorTrace = snapshotBuiltinTurnTrace();
   emitBuiltinTurnTrace('final', {
     status: 'error',
@@ -6735,6 +6775,18 @@ export function getLastBuiltinAssistantText(): string {
   return '';
 }
 
+export function consumeInjectedTurnOutcome(injectedTurnId: string): BuiltinInjectedTurnOutcome | undefined {
+  discardedInjectedTurnIds.delete(injectedTurnId);
+  const outcome = injectedTurnOutcomes.get(injectedTurnId);
+  injectedTurnOutcomes.delete(injectedTurnId);
+  return outcome;
+}
+
+export function discardInjectedTurnOutcome(injectedTurnId: string): void {
+  injectedTurnOutcomes.delete(injectedTurnId);
+  discardedInjectedTurnIds.add(injectedTurnId);
+}
+
 export function getSystemInitInfo(): SystemInitInfo | null {
   return systemInitInfo;
 }
@@ -6798,6 +6850,10 @@ function clearMessageState(): void {
   imTextBlockIndices.clear();
 
   strippedToolResultIds.clear();
+  injectedTurnOutcomes.clear();
+  discardedInjectedTurnIds.clear();
+  currentTurnInjectedTurnId = undefined;
+  currentTurnAssistantMessagePresent = false;
   currentSessionUuids.clear();
   liveSessionUuids.clear();
   isStreamingMessage = false;
@@ -7850,7 +7906,7 @@ export async function enqueueUserMessage(
   // bound per-turn at generator yield, read at result handler for reply pushback.
   inboxMeta?: import('./inbox/types').InboxTurnMeta,
   analyticsSource?: TurnAnalyticsSource,
-  options?: { fromDesktopChatSend?: boolean },
+  options?: { fromDesktopChatSend?: boolean; injectedTurnId?: string },
 ): Promise<EnqueueResult> {
   // 等待进行中的 resetSession/switchToSession 完成，防止消息投递到已死的 generator
   // 这些函数是异步的（await sessionTerminationPromise 需要数秒），
@@ -8451,6 +8507,7 @@ export async function enqueueUserMessage(
       analyticsSource: analyticsSource ?? currentScenario.type,
       providerAnalytics: turnProviderAnalytics,
       inboxMeta,
+      injectedTurnId: options?.injectedTurnId,
     };
 
     // (v0.2.12 mid-turn injection) Lockstep yield. Only one queued message
@@ -8589,6 +8646,7 @@ export async function enqueueUserMessage(
     analyticsSource: analyticsSource ?? currentScenario.type,
     providerAnalytics: turnProviderAnalytics,
     inboxMeta,
+    injectedTurnId: options?.injectedTurnId,
   };
 
   if (!isSessionActive()) {
@@ -12873,6 +12931,8 @@ async function* messageGenerator(): AsyncGenerator<SDKUserMessage> {
     beginBuiltinTurnTrace(traceSource, traceTurnId, item.requestId);
     currentTurnAnalyticsSource = item.analyticsSource ?? currentScenario.type;
     currentTurnProviderAnalytics = item.providerAnalytics ?? buildTurnProviderAnalytics(currentProviderEnv);
+    currentTurnAssistantMessagePresent = false;
+    currentTurnInjectedTurnId = item.injectedTurnId;
 
     isStreamingMessage = true;
     // Pattern B+G: push this user message's requestId onto the FIFO queue.

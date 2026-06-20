@@ -493,10 +493,6 @@ crashLog('STARTUP', 'Server starting...');
 // ============= END CRASH DIAGNOSTICS =============
 
 import {
-  enqueueUserMessage,
-  cancelQueueItem,
-  forceExecuteQueueItem,
-  getQueueStatus,
   getAgentState,
   getLogLines,
   getMessages,
@@ -504,7 +500,6 @@ import {
   getSystemInitInfo,
   getLastBuiltinAssistantText,
   initializeAgent,
-  interruptCurrentResponse,
   getStreamingAssistantId,
   switchToSession,
   setMcpServers,
@@ -513,12 +508,8 @@ import {
   applyMcpOverrideAndAwaitReady,
   withCronDispatchLock,
   setAgents,
-  setSessionModel,
-  setSessionReasoningEffort,
   resetSession,
   materializeCurrentSessionMetadataForPublishedReset,
-  waitForSessionIdle,
-  cancelImRequest,
   setGroupToolsDeny,
   setInteractionScenario,
   resetInteractionScenario,
@@ -529,6 +520,7 @@ import {
   setSidecarPort,
   hasActiveBridge,
   getSessionModel,
+  getSessionProviderEnv,
   syncProjectUserConfig,
   setProxyConfig,
   initSocksBridgeFromEnv,
@@ -574,7 +566,6 @@ import { runLogRetentionSweep, startPeriodicSweep } from './log-retention';
 import { broadcast, createSseClient, getClients } from './sse';
 import { imEventBus } from './utils/im-event-bus';
 import { imRequestRegistry } from './utils/im-request-registry';
-import type { CancelReason } from './utils/cancellation';
 import { checkAnthropicSubscription, verifyProviderViaSdk, verifySubscription } from './provider-verify';
 // openai-bridge is lazy-loaded via ensureBridgeHandler() below — only users on
 // OpenAI-protocol providers (DeepSeek/Moonshot/etc.) ever hit /v1/messages, so
@@ -590,28 +581,13 @@ import { registerBridgeSeedFn } from './bridge-cache';
 // dynamic-import there is free.
 import {
   shouldUseExternalRuntime,
-  sendExternalMessage,
-  enqueueExternalSendForDesktop,
-  forceExecuteExternalQueueItem,
-  cancelExternalQueueItem,
-  getExternalQueueStatus,
-  respondExternalPermission,
-  respondExternalAskUserQuestion,
-  hasPendingExternalAskUserQuestion,
   stopExternalSession,
   isExternalSessionActive,
   queryRuntimeModels,
   getRuntimePermissionModes,
   getActiveRuntimeType,
   restoreExternalSessionState,
-  cancelExternalImRequest,
-  waitForExternalSessionIdle,
   getLastExternalAssistantText,
-  updateExternalRuntimeConfig,
-  setExternalModel,
-  setExternalPermissionMode,
-  setExternalReasoningEffort,
-  didLastTurnSucceed,
   getExternalSessionState,
   getExternalSystemInitPayload,
   getExternalPendingInteractiveRequests,
@@ -620,11 +596,18 @@ import {
   getExternalSessionModel,
   getExternalSessionPermissionMode,
   getExternalSessionReasoningEffort,
-  prewarmExternalSession,
   awaitExternalSessionStarting,
   getCurrentBoundSessionId,
   popLastUserMessageForRetry,
 } from './runtimes/external-session';
+import {
+  getAskUserQuestionResponseEngine,
+  getPermissionResponseEngine,
+  getSessionEngine,
+  stopActiveTurn,
+} from './session-engine';
+import { handleSessionEngineQueueRoute } from './routes/session-engine-queue';
+import { handleSessionEngineRuntimeRoute } from './routes/session-engine-runtime';
 import { installAutoTitleHook } from './session-title-service';
 import type { ImagePayload } from './runtimes/types';
 import { rehomeImagePayloadsForSession } from './runtimes/image-payload';
@@ -728,7 +711,9 @@ type SendMessagePayload = {
   } | 'subscription';
 };
 
-function desktopScenarioForAnalyticsSource(source: TurnAnalyticsSource | undefined): InteractionScenario {
+function desktopScenarioForAnalyticsSource(
+  source: TurnAnalyticsSource | undefined,
+): Extract<InteractionScenario, { type: 'desktop' }> {
   return source === 'floating_ball'
     ? { type: 'desktop', surface: 'floating-ball' }
     : { type: 'desktop' };
@@ -2440,102 +2425,33 @@ async function main() {
           return jsonResponse({ success: false, error: message }, 400);
         }
 
-        // ─── External Runtime branch (v0.1.59) ───
-        if (shouldUseExternalRuntime()) {
-          const runtimeType = getActiveRuntimeType();
-          console.log(`[chat] send via ${runtimeType}: text="${text.slice(0, 200)}"`);
-
-          // Issue #188 — Fire-and-forget dispatch via enqueueExternalSendForDesktop.
-          //
-          // sendExternalMessage internally serializes against in-flight turns
-          // by awaiting waitForExternalSessionIdle(5 * 60 * 1000). That wait
-          // exceeds the Rust SSE proxy's HTTP_PROXY_TIMEOUT_SECS=120s cap, so
-          // if a long Codex/Gemini turn is mid-flight the HTTP request dies
-          // at 120s and the renderer surfaces it as "AI 调用失败：网络错误"
-          // even though the sidecar is healthy.
-          //
-          // enqueueExternalSendForDesktop synchronously broadcasts the user
-          // bubble so the renderer shows it immediately, then chains the
-          // wait+dispatch onto a module-level tail so concurrent desktop
-          // sends serialize cleanly (otherwise they'd all wake from the same
-          // turnCompleted gate and race to write to the persistent runtime).
-          // Errors that previously came back over HTTP now broadcast via
-          // chat:agent-error — the renderer already routes that event to the
-          // same agentError state the HTTP .then(response.error) branch used.
-          //
-          // Note: cron/IM internal callers still `await` sendExternalMessage
-          // directly (they're inside the sidecar event loop, no 120s ceiling,
-          // and already single-flighted at the caller level).
-          const sendCtx = {
+        try {
+          const engine = getSessionEngine();
+          const providerLabel = typeof providerEnv === 'object' ? providerEnv?.baseUrl ?? 'anthropic' : (providerEnv ?? 'anthropic');
+          const runtimeLabel = engine.kind === 'external' ? getActiveRuntimeType() : 'builtin';
+          console.log(`[chat] send via ${runtimeLabel}: text="${text.slice(0, 200)}" images=${images.length} mode=${permissionMode} model=${model ?? 'default'} baseUrl=${providerLabel}`);
+          const result = await engine.sendDesktopMessage({
+            text,
+            images,
+            permissionMode,
+            backgroundAgentPermissionMode: payload?.backgroundAgentPermissionMode,
+            model: model ?? undefined,
+            providerEnv,
+            reasoningEffort,
             sessionId: runtimeSessionId,
             workspacePath: agentDir,
             scenario: interactionScenario,
             analyticsSource,
-            permissionMode,
-            model: model ?? undefined,
-            reasoningEffort,
-          };
-          // Synchronous decide: a mid-turn send is QUEUED (returns a queueId now); an idle send
-          // dispatches fire-and-forget (no queueId → becomes a bubble). Hand the queueId back so
-          // the renderer reconciles its optimistic pill, then fire-and-forget the dispatch for
-          // error surfacing (the dispatch may block up to 5min on a long turn — must not await).
-          const sent = enqueueExternalSendForDesktop(text, images, permissionMode, model ?? undefined, sendCtx);
-          sent.dispatch
-            .then((result) => {
-              if (!result.queued && result.error) {
-                console.error(`[chat] external send failed: ${result.error}`);
-                broadcast('chat:agent-error', { message: result.error });
-              }
-            })
-            .catch((err) => {
-              const msg = err instanceof Error ? err.message : String(err);
-              console.error(`[chat] external send threw: ${msg}`);
-              broadcast('chat:agent-error', { message: msg });
-            });
-          return jsonResponse({
-            success: true,
-            queued: sent.queued,
-            ...(sent.queueId ? { queueId: sent.queueId } : {}),
           });
-        }
-
-        // ─── Builtin Runtime (existing path) ───
-        try {
-          setInteractionScenario(interactionScenario);
-          // #264 — apply the background-agent permission policy before enqueue so
-          // the PermissionRequest hook sees the current value. Idempotent; the
-          // renderer echoes the global AppConfig value on every send.
-          if (payload?.backgroundAgentPermissionMode) {
-            setBackgroundAgentPermissionMode(payload.backgroundAgentPermissionMode);
-          }
-          const providerLabel = typeof providerEnv === 'object' ? providerEnv?.baseUrl ?? 'anthropic' : (providerEnv ?? 'anthropic');
-          console.log(`[chat] send text="${text.slice(0, 200)}" images=${images.length} mode=${permissionMode} model=${model ?? 'default'} baseUrl=${providerLabel}`);
-          // PRD 0.2.14 — tag desktop-origin messages so the desktop→IM mirror
-          // (im-mirror.ts) can opt this turn into channel fan-out. Without
-          // this, agent-session.ts sees `metadata?.source === undefined` and
-          // skips the mirror call.
-          const result = await enqueueUserMessage(
-            text,
-            images,
-            permissionMode,
-            model,
-            providerEnv,
-            reasoningEffort,
-            { source: 'desktop' as SessionSource },
-            undefined,
-            undefined,
-            analyticsSource,
-            { fromDesktopChatSend: true },
-          );
           if (result.error) {
-            return jsonResponse({ success: false, error: result.error }, 429);
+            return jsonResponse({ success: false, error: result.error }, result.status ?? 500);
           }
           return jsonResponse({
             success: true,
             queued: result.queued,
-            queueId: result.queueId,
-            isInFlight: result.isInFlight,
-            deliveryMode: result.deliveryMode,
+            ...(result.queueId ? { queueId: result.queueId } : {}),
+            ...(result.isInFlight !== undefined ? { isInFlight: result.isInFlight } : {}),
+            ...(result.deliveryMode ? { deliveryMode: result.deliveryMode } : {}),
           });
         } catch (error) {
           return jsonResponse(
@@ -2548,19 +2464,7 @@ async function main() {
       if (pathname === '/chat/stop' && request.method === 'POST') {
         try {
           console.log('[chat] stop');
-
-          // External Runtime: stop the subprocess
-          if (shouldUseExternalRuntime() && isExternalSessionActive()) {
-            const stopped = await stopExternalSession();
-            return jsonResponse({ success: true, alreadyStopped: !stopped });
-          }
-
-          // Builtin Runtime: existing path
-          const stopped = await interruptCurrentResponse();
-          if (!stopped) {
-            return jsonResponse({ success: true, alreadyStopped: true });
-          }
-          return jsonResponse({ success: true });
+          return jsonResponse(await stopActiveTurn());
         } catch (error) {
           return jsonResponse(
             { success: false, error: error instanceof Error ? error.message : 'Unknown error' },
@@ -2593,91 +2497,12 @@ async function main() {
         return jsonResponse({ modes });
       }
 
-      if (pathname === '/api/runtime/config' && request.method === 'POST') {
-        const body = (await request.json().catch(() => ({}))) as {
-          runtime?: string;
-          runtimeConfig?: {
-            model?: string | null;
-            permissionMode?: string | null;
-            reasoningEffort?: string | null;
-          } | null;
-        };
-        const activeRuntime = getActiveRuntimeType();
-        if (activeRuntime === 'builtin') {
-          return jsonResponse({ success: false, error: 'Runtime config endpoint is only for external runtimes' }, 400);
-        }
-        if (body.runtime && body.runtime !== activeRuntime) {
-          return jsonResponse({ success: false, error: `Runtime mismatch: sidecar=${activeRuntime}, payload=${body.runtime}` }, 400);
-        }
-
-        const runtimeConfig = body.runtimeConfig ?? {};
-        const result = await updateExternalRuntimeConfig({
-          ...('model' in runtimeConfig ? { model: runtimeConfig.model ?? '' } : {}),
-          ...('permissionMode' in runtimeConfig ? { permissionMode: runtimeConfig.permissionMode ?? '' } : {}),
-          ...('reasoningEffort' in runtimeConfig ? { reasoningEffort: runtimeConfig.reasoningEffort ?? '' } : {}),
-        }, { source: 'runtime-config' });
-
-        return jsonResponse(result, result.success ? 200 : 500);
-      }
-
-      // Pre-warm the external runtime process (v0.1.68)
-      //
-      // Called by the frontend when a Chat tab opens a Gemini/Codex session.
-      // Spawns the CLI, completes the JSON-RPC handshake, and opens a session
-      // so the user's first message can hit sendExternalMessage Case 3 (write
-      // to stdin of an already-warm process) instead of paying the ~11s cold
-      // boot — which on Gemini includes base-prompt extraction + session/new
-      // round-trips over the ACP channel.
-      //
-      // Idempotent + fire-safe: the endpoint short-circuits if a session is
-      // already active/starting, and relies on prewarmExternalSession to skip
-      // non-persistent runtimes (CC -p mode) with a reason string.
-      if (pathname === '/api/runtime/prewarm' && request.method === 'POST') {
-        if (!shouldUseExternalRuntime()) {
-          return jsonResponse({ success: false, error: 'Pre-warm is only for external runtimes' }, 400);
-        }
-        const body = (await request.json().catch(() => ({}))) as {
-          sessionId?: string;
-          model?: string;
-          permissionMode?: string;
-        };
-        const sessionId = resolveExternalPrewarmSessionId(body.sessionId);
-        if (!sessionId) {
-          return jsonResponse({ success: false, error: 'No sessionId available' }, 400);
-        }
-        try {
-          const result = await prewarmExternalSession({
-            sessionId,
-            workspacePath: currentAgentDir,
-            scenario: { type: 'desktop' },
-            model: body.model,
-            permissionMode: body.permissionMode,
-          });
-          return jsonResponse({ success: true, ...result });
-        } catch (error) {
-          return jsonResponse(
-            { success: false, error: error instanceof Error ? error.message : 'Unknown error' },
-            500,
-          );
-        }
-      }
-
-      if (pathname === '/api/runtime/permission-response' && request.method === 'POST') {
-        const body = (await request.json().catch(() => ({}))) as Record<string, unknown>;
-        const requestId = body.requestId as string;
-        // Accept both legacy { approved: boolean } and new { decision: enum } format
-        const decision: 'deny' | 'allow_once' | 'always_allow' = (body.decision as string) === 'deny' ? 'deny'
-          : (body.decision as string) === 'always_allow' ? 'always_allow'
-          : (body.decision as string) === 'allow_once' ? 'allow_once'
-          : (body.approved === true) ? 'allow_once' : 'deny';
-        const reason = body.reason as string | undefined;
-        if (!requestId) return jsonResponse({ error: 'Missing requestId' }, 400);
-        try {
-          await respondExternalPermission(requestId, decision, reason);
-          return jsonResponse({ success: true });
-        } catch (error) {
-          return jsonResponse({ error: error instanceof Error ? error.message : 'Unknown error' }, 500);
-        }
+      const runtimeRouteResponse = await handleSessionEngineRuntimeRoute(pathname, request, {
+        workspacePath: currentAgentDir,
+        resolvePrewarmSessionId: resolveExternalPrewarmSessionId,
+      });
+      if (runtimeRouteResponse) {
+        return runtimeRouteResponse;
       }
 
       // CC SessionStart hook receiver (v0.1.59)
@@ -2746,62 +2571,9 @@ async function main() {
         return jsonResponse(result);
       }
 
-      // Cancel a queued message
-      if (pathname === '/chat/queue/cancel' && request.method === 'POST') {
-        const body = (await request.json().catch(() => ({}))) as Record<string, unknown>;
-        const queueId = body?.queueId as string;
-        if (!queueId) {
-          return jsonResponse({ success: false, error: 'queueId is required' }, 400);
-        }
-        const cancelResult = shouldUseExternalRuntime()
-          ? (() => {
-              const cancelledText = cancelExternalQueueItem(queueId);
-              return cancelledText === null
-                ? { status: 'not_found' as const }
-                : { status: 'cancelled' as const, cancelledText };
-            })()
-          : await cancelQueueItem(queueId);
-        if (cancelResult.status !== 'cancelled') {
-          if (cancelResult.status === 'not_cancelled') {
-            return jsonResponse({ success: false, error: 'Queue item was already accepted by SDK' }, 409);
-          }
-          if (cancelResult.status === 'unavailable') {
-            return jsonResponse({ success: false, error: 'Queue cancellation is unavailable for this session' }, 503);
-          }
-          if (cancelResult.status === 'error') {
-            return jsonResponse({ success: false, error: 'Queue cancellation failed' }, 500);
-          }
-          return jsonResponse({ success: false, error: 'Queue item not found' }, 404);
-        }
-        return jsonResponse({ success: true, cancelledText: cancelResult.cancelledText });
-      }
-
-      // Force-execute a queued message (interrupt current + run queued)
-      if (pathname === '/chat/queue/force' && request.method === 'POST') {
-        const body = (await request.json().catch(() => ({}))) as Record<string, unknown>;
-        const queueId = body?.queueId as string;
-        if (!queueId) {
-          return jsonResponse({ success: false, error: 'queueId is required' }, 400);
-        }
-        try {
-          const result = shouldUseExternalRuntime()
-            ? await forceExecuteExternalQueueItem(queueId)
-            : await forceExecuteQueueItem(queueId);
-          if (!result) {
-            return jsonResponse({ success: false, error: 'Queue item not found' }, 404);
-          }
-          return jsonResponse({ success: true });
-        } catch (error) {
-          return jsonResponse(
-            { success: false, error: error instanceof Error ? error.message : 'Unknown error' },
-            500
-          );
-        }
-      }
-
-      // Get queue status
-      if (pathname === '/chat/queue/status' && request.method === 'GET') {
-        return jsonResponse({ success: true, queue: shouldUseExternalRuntime() ? getExternalQueueStatus() : getQueueStatus() });
+      const sessionEngineQueueRoute = await handleSessionEngineQueueRoute(pathname, request);
+      if (sessionEngineQueueRoute) {
+        return sessionEngineQueueRoute;
       }
 
       // Poll background task output file for live stats
@@ -3172,31 +2944,35 @@ async function main() {
           // WebSearch / Bash / mcp__* sit in the approval queue until the
           // 10-minute deadline kills the run. Sentinels for "didn't pick" are
           // undefined and empty string. PRD 0.2.5 R2 / regression of 07bc560d.
-          const cronRuntimeType: RuntimeType = shouldUseExternalRuntime() ? getActiveRuntimeType() : 'builtin';
+          const engine = getSessionEngine();
+          const cronRuntimeType: RuntimeType = engine.kind === 'external' ? getActiveRuntimeType() : 'builtin';
           const effectivePermissionMode = resolveCronPermissionMode(
             payload.permissionMode,
             effectiveRuntimeConfig?.permissionMode,
             cronRuntimeType,
           );
 
-          if (shouldUseExternalRuntime()) {
-            const runtimeResult = await sendExternalMessage(
-              wrappedPrompt, undefined, undefined, undefined,
-              {
-                sessionId: getRuntimeSessionIdForRequest(),
-                workspacePath: agentDir,
-                scenario: { type: 'cron', taskId, intervalMinutes: intervalMinutes ?? 15, aiCanExit: aiCanExit ?? false },
-                permissionMode: effectivePermissionMode,
-                model: getRuntimeConfigModel(effectiveRuntimeConfig ?? null),
-                reasoningEffort: getRuntimeConfigReasoningEffort(effectiveRuntimeConfig ?? null, cronRuntimeType),
-              },
-            );
-            if (!runtimeResult.queued) {
-              return jsonResponse({ success: false, error: runtimeResult.error ?? 'Failed to start cron via external runtime' }, 503);
-            }
-          } else {
+          if (engine.kind === 'builtin') {
             applyBackgroundAgentPermissionModeFromDisk(); // #264 — IM/Cron self-resolve
-            await enqueueUserMessage(wrappedPrompt, [], effectivePermissionMode as PermissionMode, effectiveModel, effectiveProviderEnv);
+          }
+          const result = await engine.enqueueBackgroundMessage({
+            text: wrappedPrompt,
+            images: [],
+            sessionId: getRuntimeSessionIdForRequest(),
+            workspacePath: agentDir,
+            scenario: { type: 'cron', taskId, intervalMinutes: intervalMinutes ?? 15, aiCanExit: aiCanExit ?? false },
+            permissionMode: effectivePermissionMode,
+            model: engine.kind === 'external'
+              ? getRuntimeConfigModel(effectiveRuntimeConfig ?? null)
+              : effectiveModel,
+            providerEnv: engine.kind === 'builtin' ? effectiveProviderEnv : undefined,
+            reasoningEffort: engine.kind === 'external'
+              ? getRuntimeConfigReasoningEffort(effectiveRuntimeConfig ?? null, cronRuntimeType)
+              : undefined,
+          });
+          if (!result.success) {
+            resetInteractionScenario();
+            return jsonResponse({ success: false, error: result.error ?? 'Failed to start cron' }, result.status ?? 503);
           }
           // Reset scenario after enqueue — already consumed by startStreamingSession()
           resetInteractionScenario();
@@ -3580,52 +3356,15 @@ async function main() {
           // Sentinels for "didn't pick" are undefined and empty string.
           // Concrete values (auto/plan/fullAgency/default/etc.) are respected
           // literally. See src/shared/types/runtime.ts::resolveCronPermissionMode.
-          const cronRuntimeType: RuntimeType = shouldUseExternalRuntime() ? getActiveRuntimeType() : 'builtin';
+          const engine = getSessionEngine();
+          const cronRuntimeType: RuntimeType = engine.kind === 'external' ? getActiveRuntimeType() : 'builtin';
           const effectivePermissionMode = resolveCronPermissionMode(
             payload.permissionMode,
             effectiveRuntimeConfig?.permissionMode,
             cronRuntimeType,
           );
 
-          if (shouldUseExternalRuntime()) {
-            // ─── External Runtime (CC/Codex): cron task ───
-            // T15: effectiveRuntimeConfig carries snapshot-resolved model/permissionMode
-            const ccResult = await sendExternalMessage(
-              wrappedPrompt, undefined, undefined, undefined,
-              {
-                sessionId: getRuntimeSessionIdForRequest(),
-                workspacePath: agentDir,
-                scenario: { type: 'cron', taskId: taskId ?? 'unknown', intervalMinutes: intervalMinutes ?? 0, aiCanExit: aiCanExit ?? false },
-                permissionMode: effectivePermissionMode,
-                model: getRuntimeConfigModel(effectiveRuntimeConfig ?? null),
-                reasoningEffort: getRuntimeConfigReasoningEffort(effectiveRuntimeConfig ?? null, cronRuntimeType),
-              },
-            );
-            if (!ccResult.queued) {
-              clearCronTaskContext(effectiveSessionId);
-              resetInteractionScenario();
-              return jsonResponse({ success: false, error: ccResult.error ?? 'Failed to start cron via external runtime' }, 503);
-            }
-
-            const completed = await waitForExternalSessionIdle(3600000, 1000);
-            if (!completed) {
-              console.warn(`[cron] execute-sync taskId=${taskId} timed out (external runtime)`);
-              clearCronTaskContext(effectiveSessionId);
-              resetInteractionScenario();
-              return jsonResponse({ success: false, error: 'Execution timed out' }, 408);
-            }
-
-            if (!didLastTurnSucceed()) {
-              console.warn(`[cron] execute-sync taskId=${taskId} external runtime turn failed`);
-              clearCronTaskContext(effectiveSessionId);
-              resetInteractionScenario();
-              return jsonResponse({ success: false, error: 'External runtime turn failed' }, 503);
-            }
-
-            textContent = getLastExternalAssistantText();
-          } else {
-            // ─── Builtin Runtime: existing path ───
-
+          if (engine.kind === 'builtin') {
             // PRD 0.2.4 §需求 4 — reconcile MCP set + run the turn under
             // a single locked critical section so two concurrent cron
             // ticks never interleave their abort/restart with each
@@ -3679,42 +3418,41 @@ async function main() {
             // the outer `withCronDispatchLock` keeps two concurrent ticks
             // from interleaving across the abort/restart window).
             await applyMcpOverrideAndAwaitReady(target);
-
-            // PRD 0.2.5 R2: effectivePermissionMode resolved above via
-            // resolveCronPermissionMode (shared with external runtime branch).
-            // T15: effectiveModel / effectiveProviderEnv come from the session snapshot
-            //      (single_session) or payload defaults (new_session / fallback).
-            const enqueueResult = await enqueueUserMessage(wrappedPrompt, [], effectivePermissionMode as PermissionMode, effectiveModel, effectiveProviderEnv);
-            console.log('[cron] execute-sync: user message enqueued, queued:', enqueueResult.queued, 'queueId:', enqueueResult.queueId);
-
-            // Wait for session to become idle (execution complete)
-            // Timeout: 60 minutes max execution time (matches Rust cron_task timeout)
-            const completed = await waitForSessionIdle(3600000, 1000);
-
-            if (!completed) {
-              console.warn(`[cron] execute-sync taskId=${taskId} timed out`);
-              if (enqueueResult.queued && enqueueResult.queueId) {
-                await cancelQueueItem(enqueueResult.queueId);
-              }
-              clearCronTaskContext(effectiveSessionId);
-              resetInteractionScenario();
-              return jsonResponse({ success: false, error: 'Execution timed out' }, 408);
-            }
-
-            // Extract response text from builtin session messages
-            const messages = getMessages();
-            const lastAssistantMessage = [...messages].reverse().find(m => m.role === 'assistant');
-            if (lastAssistantMessage) {
-              if (typeof lastAssistantMessage.content === 'string') {
-                textContent = lastAssistantMessage.content;
-              } else if (Array.isArray(lastAssistantMessage.content)) {
-                textContent = lastAssistantMessage.content
-                  .filter((block): block is { type: 'text'; text: string } => block.type === 'text')
-                  .map(block => block.text)
-                  .join('\n');
-              }
-            }
           }
+
+          // PRD 0.2.5 R2: effectivePermissionMode resolved above via
+          // resolveCronPermissionMode. `runInjectedTurn` owns the runtime
+          // dispatch, finalization wait, and success gate for builtin/external.
+          const turnResult = await engine.runInjectedTurn({
+            prompt: wrappedPrompt,
+            sessionId: getRuntimeSessionIdForRequest(),
+            workspacePath: agentDir,
+            scenario: {
+              type: 'cron',
+              taskId: taskId ?? 'unknown',
+              intervalMinutes: intervalMinutes ?? 0,
+              aiCanExit: aiCanExit ?? false,
+            },
+            permissionMode: effectivePermissionMode,
+            model: engine.kind === 'external'
+              ? getRuntimeConfigModel(effectiveRuntimeConfig ?? null)
+              : effectiveModel,
+            providerEnv: engine.kind === 'builtin' ? effectiveProviderEnv : undefined,
+            runtimeConfig: effectiveRuntimeConfig ?? null,
+            timeoutMs: 3600000,
+            pollMs: 1000,
+          });
+          if (!turnResult.success) {
+            console.warn(`[cron] execute-sync taskId=${taskId} failed via ${engine.kind}: ${turnResult.error ?? 'Unknown error'}`);
+            clearCronTaskContext(effectiveSessionId);
+            resetInteractionScenario();
+            return jsonResponse(
+              { success: false, error: turnResult.error ?? 'Execution failed' },
+              turnResult.status ?? 503,
+            );
+          }
+
+          textContent = turnResult.text ?? '';
 
           // Check if AI requested exit (works for both runtimes — checks text patterns)
           let aiRequestedExit = false;
@@ -5722,14 +5460,7 @@ async function main() {
             decision: 'deny' | 'allow_once' | 'always_allow';
           };
 
-          if (shouldUseExternalRuntime() && isExternalSessionActive()) {
-            // External runtime: pass full decision so CC can persist "always_allow" rules
-            await respondExternalPermission(payload.requestId, payload.decision);
-            return jsonResponse({ success: true });
-          }
-
-          const { handlePermissionResponse } = await import('./agent-session');
-          const success = handlePermissionResponse(payload.requestId, payload.decision);
+          const success = await getPermissionResponseEngine().respondPermission(payload.requestId, payload.decision);
 
           return jsonResponse({ success });
         } catch (error) {
@@ -5754,13 +5485,8 @@ async function main() {
           // the builtin handler would return "unknown request" and silently
           // lose the user's input. External handler returns false + logs on
           // process-gone, surfacing the failure to the UI.
-          if (shouldUseExternalRuntime() && hasPendingExternalAskUserQuestion(payload.requestId)) {
-            const success = await respondExternalAskUserQuestion(payload.requestId, payload.answers);
-            return jsonResponse({ success });
-          }
-
-          const { handleAskUserQuestionResponse } = await import('./agent-session');
-          const success = handleAskUserQuestionResponse(payload.requestId, payload.answers);
+          const success = await getAskUserQuestionResponseEngine(payload.requestId)
+            .respondAskUserQuestion(payload.requestId, payload.answers);
 
           return jsonResponse({ success });
         } catch (error) {
@@ -8280,12 +8006,8 @@ async function main() {
           if (!payload?.model) {
             return jsonResponse({ success: false, error: 'model is required' }, 400);
           }
-          if (shouldUseExternalRuntime()) {
-            const result = await setExternalModel(payload.model);
-            return jsonResponse(result, result.success ? 200 : 500);
-          }
-          setSessionModel(payload.model, { imConfigSync: payload.imConfigSync === true });
-          return jsonResponse({ success: true });
+          const result = await getSessionEngine().updateModel(payload.model, { imConfigSync: payload.imConfigSync === true });
+          return jsonResponse(result, result.success ? 200 : 500);
         } catch (error) {
           console.error('[api/model/set] Error:', error);
           return jsonResponse({ success: false, error: error instanceof Error ? error.message : 'Failed to set model' }, 500);
@@ -8304,12 +8026,8 @@ async function main() {
           if (typeof payload?.effort !== 'string' || !payload.effort.trim()) {
             return jsonResponse({ success: false, error: 'effort is required' }, 400);
           }
-          if (shouldUseExternalRuntime()) {
-            const result = await setExternalReasoningEffort(payload.effort);
-            return jsonResponse(result, result.success ? 200 : 500);
-          }
-          setSessionReasoningEffort(payload.effort);
-          return jsonResponse({ success: true });
+          const result = await getSessionEngine().updateReasoningEffort(payload.effort);
+          return jsonResponse(result, result.success ? 200 : 500);
         } catch (error) {
           console.error('[api/reasoning-effort/set] Error:', error);
           return jsonResponse({ success: false, error: error instanceof Error ? error.message : 'Failed to set reasoning effort' }, 500);
@@ -8337,13 +8055,8 @@ async function main() {
           if (!payload?.permissionMode) {
             return jsonResponse({ success: false, error: 'permissionMode is required' }, 400);
           }
-          if (shouldUseExternalRuntime()) {
-            const result = await setExternalPermissionMode(payload.permissionMode);
-            return jsonResponse(result, result.success ? 200 : 500);
-          }
-          const { setSessionPermissionMode } = await import('./agent-session');
-          setSessionPermissionMode(payload.permissionMode as import('./agent-session').PermissionMode);
-          return jsonResponse({ success: true });
+          const result = await getSessionEngine().updatePermissionMode(payload.permissionMode);
+          return jsonResponse(result, result.success ? 200 : 500);
         } catch (error) {
           console.error('[api/session/permission-mode] Error:', error);
           return jsonResponse({ success: false, error: error instanceof Error ? error.message : 'Failed to set permission mode' }, 500);
@@ -8718,6 +8431,7 @@ async function main() {
           // doesn't race ahead and unregister the entry before we set 'running'.
           imRequestRegistry.register(payload.requestId, getSessionId() || null, payload.source);
           imRequestRegistry.setStatus(payload.requestId, 'running');
+          const engine = getSessionEngine();
 
           try {
 
@@ -8800,21 +8514,20 @@ async function main() {
             // is about to need; scenario alignment is a separate concern.
             //
             // Builtin runtime only — external runtimes (CC/Codex) manage their own MCP set.
-            if (!shouldUseExternalRuntime()) {
+            if (engine.kind === 'builtin') {
               await ensureSdkMcpInSync();
             }
           }
 
           // Set IM interaction scenario (after MCP sync, see note above)
-          {
-            const [imPlatform, imSourceType] = payload.source.split('_') as ['telegram' | 'feishu', 'private' | 'group'];
-            setInteractionScenario({
-              type: 'im',
-              platform: imPlatform,
-              sourceType: imSourceType,
-              botName: payload.botName,
-            });
-          }
+          const [imPlatform, imSourceType] = payload.source.split('_') as ['telegram' | 'feishu', 'private' | 'group'];
+          const imScenario: Extract<InteractionScenario, { type: 'im' }> = {
+            type: 'im',
+            platform: imPlatform,
+            sourceType: imSourceType,
+            botName: payload.botName,
+          };
+          setInteractionScenario(imScenario);
 
           // Build final message with group context (identical to /api/im/chat)
           let finalMessage = payload.message || '';
@@ -8886,10 +8599,9 @@ async function main() {
             senderName: payload.senderName,
           };
 
-          // Dispatch to runtime (External vs Builtin)
-          if (shouldUseExternalRuntime()) {
-            const imSource = payload.source.split('_')[0];
-            const imSourceType = payload.source.includes('group') ? 'group' as const : 'private' as const;
+          // Dispatch to runtime through SessionEngine. The route keeps IM
+          // payload shaping; the engine owns builtin/external admission.
+          if (engine.kind === 'external') {
             const payloadRuntime = payload.runtime ?? getActiveRuntimeType();
             const runtimeConfig = payload.runtimeConfig ?? null;
             if (payloadRuntime !== getActiveRuntimeType()) {
@@ -8897,21 +8609,30 @@ async function main() {
                 `[im/enqueue] Runtime mismatch (Rust drift detection failed to catch): sidecar=${getActiveRuntimeType()} payload=${payloadRuntime}.`,
               );
             }
-            const ccResult = await sendExternalMessage(
-              finalMessage, payload.images ?? undefined, undefined, undefined,
-              {
-                sessionId: getRuntimeSessionIdForRequest(),
-                workspacePath: agentDir,
-                scenario: { type: 'agent-channel' as const, platform: imSource, sourceType: imSourceType, botName: payload.botName },
-                permissionMode: getRuntimeConfigPermissionMode(runtimeConfig, payloadRuntime),
-                model: getRuntimeConfigModel(runtimeConfig, payloadRuntime),
-                reasoningEffort: getRuntimeConfigReasoningEffort(runtimeConfig, payloadRuntime),
-                requestId: payload.requestId,
+            const result = await engine.enqueueImMessage({
+              message: finalMessage,
+              images: payload.images ?? undefined,
+              requestId: payload.requestId,
+              sessionId: getRuntimeSessionIdForRequest(),
+              workspacePath: agentDir,
+              scenario: {
+                type: 'agent-channel',
+                platform: imPlatform,
+                sourceType: imSourceType,
+                botName: payload.botName,
               },
-            );
-            if (!ccResult.queued) {
+              permissionMode: getRuntimeConfigPermissionMode(runtimeConfig, payloadRuntime),
+              model: getRuntimeConfigModel(runtimeConfig, payloadRuntime),
+              reasoningEffort: getRuntimeConfigReasoningEffort(runtimeConfig, payloadRuntime),
+              runtimeConfig,
+              metadata,
+            });
+            if (!result.success) {
               imRequestRegistry.unregister(payload.requestId);
-              return jsonResponse({ success: false, error: ccResult.error ?? 'Failed to send via external runtime' }, 503);
+              return jsonResponse(
+                { success: false, error: result.error ?? 'Failed to send via external runtime' },
+                result.status ?? 503,
+              );
             }
           } else {
             // PRD 0.2.14 Q4·A — handover-aware permission mode resolution.
@@ -8963,19 +8684,22 @@ async function main() {
             }
 
             applyBackgroundAgentPermissionModeFromDisk(); // #264 — IM/Cron self-resolve
-            const result = await enqueueUserMessage(
-              finalMessage,
-              payload.images,
-              resolvedPermissionMode,
-              resolvedModel,
-              resolvedProviderEnv,
-              undefined, // reasoningEffort — IM turns keep the session's current value
+            const result = await engine.enqueueImMessage({
+              message: finalMessage,
+              images: payload.images,
+              requestId: payload.requestId,
+              sessionId: getRuntimeSessionIdForRequest(),
+              workspacePath: agentDir,
+              scenario: imScenario,
+              permissionMode: resolvedPermissionMode,
+              model: resolvedModel,
+              providerEnv: resolvedProviderEnv,
+              // reasoningEffort — IM turns keep the session's current value
               metadata,
-              payload.requestId,
-            );
-            if (result.error) {
+            });
+            if (!result.success) {
               imRequestRegistry.unregister(payload.requestId);
-              return jsonResponse({ success: false, error: result.error }, 503);
+              return jsonResponse({ success: false, error: result.error }, result.status ?? 503);
             }
           }
 
@@ -9106,15 +8830,7 @@ async function main() {
           imRequestRegistry.abort(body.requestId, reason);
 
           // Step 2: actual SDK / queue cancel.
-          let cancelResult;
-          if (shouldUseExternalRuntime()) {
-            cancelResult = await cancelExternalImRequest(body.requestId, reason);
-          } else {
-            cancelResult = await cancelImRequest(
-              body.requestId,
-              reason as CancelReason,
-            );
-          }
+          const cancelResult = await getSessionEngine().cancelImRequest(body.requestId, reason);
 
           // (v0.2.11 cross-bugfix #142 review-fix-3 medium #2)
           // mode === 'unknown' means the requestId wasn't in any cancellable
@@ -9371,12 +9087,6 @@ description: >
           // Wrap the entire heartbeat message in <system-reminder><HEARTBEAT> tags
           enrichedPrompt = `<system-reminder>\n<HEARTBEAT>\n${enrichedPrompt}\n</HEARTBEAT>\n</system-reminder>`;
 
-          const {
-            enqueueUserMessage, waitForSessionIdle, getMessages,
-            getSessionModel, getSessionProviderEnv,
-            getAndClearLastAgentError,
-          } = await import('./agent-session');
-
           // Inject heartbeat prompt as user message (wrapped in <system-reminder><HEARTBEAT> tags)
           // System prompt is already permanently injected at IM session creation (/api/im/chat)
           // Heartbeat is unattended — bypass all permissions so tool use doesn't block.
@@ -9384,78 +9094,54 @@ description: >
           // enqueueUserMessage treats it as "keep current provider" via pit-of-success semantics).
           let text = '';
 
-          if (shouldUseExternalRuntime()) {
-            // ─── External Runtime (CC/Codex): heartbeat ───
-            const runtimeConfig = payload.runtimeConfig ?? null;
-            const ccResult = await sendExternalMessage(
-              enrichedPrompt, undefined, undefined, undefined,
-              {
-                sessionId: getRuntimeSessionIdForRequest(),
-                workspacePath: agentDir,
-                scenario: { type: 'agent-channel', platform: payload.source?.split('_')[0] ?? 'unknown', sourceType: 'private' },
-                permissionMode: getRuntimeConfigPermissionMode(runtimeConfig, getActiveRuntimeType()),
-                model: getRuntimeConfigModel(runtimeConfig, getActiveRuntimeType()),
-                reasoningEffort: getRuntimeConfigReasoningEffort(runtimeConfig, getActiveRuntimeType()),
-              },
-            );
-            if (!ccResult.queued) {
-              return respondAfterDrain({ status: 'error', text: ccResult.error ?? 'External runtime failed' });
-            }
-            messageEnqueued = true;
-
-            const completed = await waitForExternalSessionIdle(300000, 500);
-            if (!completed) {
-              return respondAfterDrain({ status: 'error', text: 'Heartbeat timeout' });
-            }
-
-            if (!didLastTurnSucceed()) {
-              return respondAfterDrain({ status: 'error', text: 'External runtime turn failed' });
-            }
-
-            text = getLastExternalAssistantText();
-          } else {
-            // ─── Builtin Runtime: existing path ───
-            getAndClearLastAgentError();
-            await enqueueUserMessage(
-              enrichedPrompt,
-              [],
-              'fullAgency',
-              getSessionModel(),
-              getSessionProviderEnv(),
-              undefined, // reasoningEffort — heartbeat keeps the session's current value
-              {
-                source: payload.source as SessionSource,
-                sourceId: payload.sourceId,
-              },
-            );
-            messageEnqueued = true;
-
-            const completed = await waitForSessionIdle(300000, 500);
-            if (!completed) {
-              return respondAfterDrain({ status: 'error', text: 'Heartbeat timeout' });
-            }
-
-            const messages = getMessages();
-            const lastMsg = [...messages].reverse().find(m => m.role === 'assistant');
-            if (!lastMsg) {
-              return respondAfterDrain({ status: 'silent', reason: 'no_response' });
-            }
-
-            if (typeof lastMsg.content === 'string') {
-              text = lastMsg.content;
-            } else if (Array.isArray(lastMsg.content)) {
-              text = lastMsg.content
-                .filter((b: { type: string }) => b.type === 'text')
-                .map((b: { type: string; text?: string }) => b.text || '')
-                .join('\n');
-            }
+          const engine = getSessionEngine();
+          const runtimeConfig = payload.runtimeConfig ?? null;
+          const activeRuntime = getActiveRuntimeType();
+          const turnResult = await engine.runInjectedTurn({
+            prompt: enrichedPrompt,
+            sessionId: getRuntimeSessionIdForRequest(),
+            workspacePath: agentDir,
+            scenario: {
+              type: 'agent-channel',
+              platform: payload.source?.split('_')[0] ?? 'unknown',
+              sourceType: payload.source?.includes('group') ? 'group' : 'private',
+            },
+            permissionMode: engine.kind === 'external'
+              ? getRuntimeConfigPermissionMode(runtimeConfig, activeRuntime)
+              : 'fullAgency',
+            model: engine.kind === 'external'
+              ? getRuntimeConfigModel(runtimeConfig, activeRuntime)
+              : getSessionModel() ?? undefined,
+            providerEnv: engine.kind === 'builtin' ? getSessionProviderEnv() : undefined,
+            reasoningEffort: engine.kind === 'external'
+              ? getRuntimeConfigReasoningEffort(runtimeConfig, activeRuntime)
+              : undefined,
+            runtimeConfig,
+            metadata: {
+              source: payload.source as SessionSource,
+              sourceId: payload.sourceId,
+            },
+            timeoutMs: 300000,
+            pollMs: 500,
+          });
+          messageEnqueued = turnResult.enqueued === true;
+          if (!turnResult.success) {
+            return respondAfterDrain({
+              status: 'error',
+              text: turnResult.status === 408
+                ? 'Heartbeat timeout'
+                : (turnResult.error ?? 'Heartbeat failed'),
+            });
           }
+          if (engine.kind === 'builtin' && turnResult.assistantMessagePresent === false) {
+            return respondAfterDrain({ status: 'silent', reason: 'no_response' });
+          }
+          text = turnResult.text ?? '';
 
           // Guard: message was enqueued but assistant response is empty → AI failed to respond
           // (SDK wraps API errors as synthetic assistant messages with empty content in messages[])
           if (!text.trim()) {
-            const agentErr = getAndClearLastAgentError();
-            return respondAfterDrain({ status: 'error', text: agentErr || 'AI did not respond' });
+            return respondAfterDrain({ status: 'error', text: 'AI did not respond' });
           }
 
           // Check HEARTBEAT_OK
@@ -9510,9 +9196,8 @@ description: >
           // intent is allowed to queue behind the active turn as expected.
           // Busy gate is runtime-aware: external (Codex/CC/Gemini) sessions track
           // in-flight work via isExternalSessionActive(); builtin via isSessionBusy().
-          const useExternal = shouldUseExternalRuntime();
-          const { isSessionBusy, enqueueUserMessage, waitForSessionIdle, getSessionModel, getSessionProviderEnv, getAndClearLastAgentError } = await import('./agent-session');
-          if (isAuto && (useExternal ? isExternalSessionActive() : isSessionBusy())) {
+          const engine = getSessionEngine();
+          if (isAuto && engine.isBusy()) {
             console.log('[memory-update] Skipped: session busy (auto)');
             return jsonResponse({ status: 'skipped', reason: 'session_busy' });
           }
@@ -9557,53 +9242,36 @@ description: >
           // 60 min timeout — memory update is slow for large sessions (loading 100K+
           // token context, reading log/topic files, writing updates, git commit+push).
           const MEMORY_UPDATE_TIMEOUT_MS = 3600000;
-          let turnOk: boolean;
-          if (useExternal) {
-            const runtimeType = getActiveRuntimeType();
-            const ext = await sendExternalMessage(prompt, undefined, undefined, undefined, {
-              sessionId: getRuntimeSessionIdForRequest(),
-              workspacePath: currentAgentDir,
-              scenario: { type: 'desktop' },
-              permissionMode: getMaxPermissionForRuntime(runtimeType),
-            });
-            if (!ext.queued) {
-              console.warn(`[memory-update] External enqueue failed (${runtimeType}): ${ext.error}`);
-              return jsonResponse({ status: 'error', reason: ext.error ?? 'external_enqueue_failed' }, 500);
-            }
-            if (!(await waitForExternalSessionIdle(MEMORY_UPDATE_TIMEOUT_MS, 1000))) {
-              console.warn('[memory-update] AI memory update timed out (60 min)');
-              return jsonResponse({ status: 'timeout' });
-            }
-            turnOk = didLastTurnSucceed();
-          } else {
-            // Clear any stale agent error first so the post-turn check reflects THIS turn.
-            getAndClearLastAgentError();
-            const enq = await enqueueUserMessage(prompt, [], 'fullAgency', getSessionModel(), getSessionProviderEnv());
-            // Cross-review (#0.2.29) — the external branch above gates on `!ext.queued`;
-            // this builtin branch previously discarded the enqueue result, so a rejected
-            // enqueue (e.g. `{ queued:false, error:'Queue full (max 10)' }` — which does
-            // NOT set lastAgentError) fell through to `turnOk = !getAndClearLastAgentError()`
-            // = true and falsely reported `completed` though the prompt never ran. Reachable
-            // for MANUAL updates (the busy gate only skips `isAuto`). Discriminate on `.error`,
-            // NOT `!queued`: a successful direct-send into an idle session also returns
-            // `{ queued:false }` (no error), which is the common memory-update case.
-            if (enq.error) {
-              console.warn(`[memory-update] Builtin enqueue rejected: ${enq.error}`);
-              return jsonResponse({ status: 'error', reason: enq.error }, 500);
-            }
-            if (!(await waitForSessionIdle(MEMORY_UPDATE_TIMEOUT_MS, 1000))) {
-              console.warn('[memory-update] AI memory update timed out (60 min)');
-              return jsonResponse({ status: 'timeout' });
-            }
-            turnOk = !getAndClearLastAgentError();
+          const runtimeType = engine.kind === 'external' ? getActiveRuntimeType() : 'builtin';
+          const turnResult = await engine.runInjectedTurn({
+            prompt,
+            sessionId: getRuntimeSessionIdForRequest(),
+            workspacePath: currentAgentDir,
+            scenario: { type: 'desktop' },
+            permissionMode: engine.kind === 'external'
+              ? getMaxPermissionForRuntime(runtimeType)
+              : 'fullAgency',
+            model: engine.kind === 'builtin' ? getSessionModel() ?? undefined : undefined,
+            providerEnv: engine.kind === 'builtin' ? getSessionProviderEnv() : undefined,
+            timeoutMs: MEMORY_UPDATE_TIMEOUT_MS,
+            pollMs: 1000,
+          });
+          if (!turnResult.success && turnResult.status === 408) {
+            console.warn('[memory-update] AI memory update timed out (60 min)');
+            return jsonResponse({ status: 'timeout' });
           }
+          if (!turnResult.success && !turnResult.enqueued) {
+            console.warn(`[memory-update] ${engine.kind} enqueue rejected: ${turnResult.error}`);
+            return jsonResponse({ status: 'error', reason: turnResult.error ?? `${engine.kind}_enqueue_failed` }, 500);
+          }
+          const turnOk = turnResult.success;
 
           // Gate `completed` on the turn actually succeeding. Previously this reported
           // success purely from waitForSessionIdle returning, so a turn that errored out
           // (the cross-runtime resume failure above, or any SDK/API error) still logged
           // false success — and Rust recorded "Session … updated successfully".
           if (turnOk) {
-            console.log(`[memory-update] AI completed memory update (source=${payload.source}, runtime=${useExternal ? getActiveRuntimeType() : 'builtin'})`);
+            console.log(`[memory-update] AI completed memory update (source=${payload.source}, runtime=${runtimeType})`);
             return jsonResponse({ status: 'completed' });
           }
           console.warn('[memory-update] AI memory update turn failed (no assistant output / agent error)');
@@ -9643,13 +9311,7 @@ description: >
             decision: 'deny' | 'allow_once' | 'always_allow';
           };
 
-          if (shouldUseExternalRuntime() && isExternalSessionActive()) {
-            await respondExternalPermission(payload.requestId, payload.decision);
-            return jsonResponse({ success: true });
-          }
-
-          const { handlePermissionResponse } = await import('./agent-session');
-          const success = handlePermissionResponse(payload.requestId, payload.decision);
+          const success = await getPermissionResponseEngine().respondPermission(payload.requestId, payload.decision);
 
           return jsonResponse({ success });
         } catch (error) {
@@ -9755,36 +9417,20 @@ description: >
             return jsonResponse({ accepted: false, reason: 'invalid body' }, 400);
           }
           const { handleInboxDrain } = await import('./inbox/drain-handler');
-          // Build the injector — picks builtin vs external based on current runtime
-          const { shouldUseExternalRuntime } = await import('./runtimes/external-session');
-          const useExternal = shouldUseExternalRuntime();
-          const injector: import('./inbox/drain-handler').InboxInjector = useExternal
-            ? async (text, inboxMeta) => {
-                const { sendExternalMessage } = await import('./runtimes/external-session');
-                // PRD 0.2.18 cross-review fix (CC):
-                //   Read workspacePath from THIS sidecar's session metadata —
-                //   process.cwd() is wrong (sidecar cwd is app bundle / `/`),
-                //   and MYAGENTS_AGENT_DIR env var isn't reliably set. The
-                //   sidecar always serves a single session; getSessionMetadata
-                //   gives us its agentDir.
-                //   For scenario: 'desktop' is the safe baseline for Case 3 (existing
-                //   process accepts via stdin — scenario doesn't matter there).
-                //   IM sessions never end up here for normal IM dispatch (they
-                //   have their own routes); inbox to an IM Bot session is
-                //   typically Case 3 too. If we ever hit Case 1/2 with an IM
-                //   Bot, the desktop scenario would mis-prompt — that's a known
-                //   gap (would need scenario plumbing through inboxMeta).
-                const sessionMeta = getSessionMetadata(getRuntimeSessionIdForRequest());
-                const workspacePath = sessionMeta?.agentDir ?? process.cwd();
-                return sendExternalMessage(text, undefined, undefined, undefined, {
-                  sessionId: getRuntimeSessionIdForRequest(),
-                  workspacePath,
-                  scenario: { type: 'desktop' },
-                  inboxMeta,
-                });
-              }
-            : async (text, inboxMeta) =>
-                enqueueUserMessage(text, undefined, undefined, undefined, undefined, undefined, { source: 'desktop' }, undefined, inboxMeta);
+          // PRD 0.2.18 cross-review fix (CC): workspacePath comes from THIS
+          // sidecar's session metadata. process.cwd() is app bundle / `/`, and
+          // MYAGENTS_AGENT_DIR env is not reliable for sidecar-to-sidecar inbox.
+          const engine = getSessionEngine();
+          const injector: import('./inbox/drain-handler').InboxInjector = async (text, inboxMeta) => {
+            const sessionId = getRuntimeSessionIdForRequest();
+            const sessionMeta = getSessionMetadata(sessionId);
+            return engine.enqueueInboxMessage({
+              text,
+              sessionId,
+              workspacePath: sessionMeta?.agentDir ?? process.cwd(),
+              inboxMeta,
+            });
+          };
           const result = await handleInboxDrain(
             body.messages as import('./inbox/types').PendingInboxMessage[],
             injector,
