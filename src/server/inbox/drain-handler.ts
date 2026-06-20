@@ -2,45 +2,86 @@
 //
 // 由 Rust 端 `cmd_inbox_deliver` 在 push pending_inbox_messages 后调用,把同样
 // 的 message payload 直接 POST 过来。Drain handler 取出 messages → 包裹
-// `<inbox-message>` (kind=Request) 或 `<inbox-reply>` (kind=Reply) 前缀
-// → 调用 enqueueUserMessage / sendExternalMessage 注入。
+// MyAgents Session Event Protocol v1 prompt → 调用 enqueueUserMessage /
+// sendExternalMessage 注入。
 //
 // 关键设计:
 //   - Request 类型携带 replyBack 标记;target turn-end 时根据这个标记决定是否
 //     反向推 reply(逻辑在 agent-session.ts result handler / external-session.ts
 //     persistTurnResult hook 中)。
 //   - Reply 类型的 replyBack 恒为 false——避免 reply 的 reply 形成无限往返。
-//   - 注入时 sanitize fromLabel(集中点),避免 prompt injection
-//     (`</inbox-message>` 闭合标签注入等)。
+//   - 注入时统一走 session-event renderer,避免 prompt injection
+//     (`</myagents-session-event>` 闭合标签注入等)。
 
-import { neutralizeInboxStructuralTags, sanitizeInboxLabel } from './sanitize-label';
+import { renderSessionEventPrompt } from './session-event';
 import { buildInReplyToSnippet } from './types';
 import type { PendingInboxMessage, DrainResponse, InboxTurnMeta } from './types';
+import type { SessionEvent } from './session-event';
 
-/// 构造 <inbox-message> 包裹 (Request 模式)
-function buildInboxMessagePrompt(msg: PendingInboxMessage): string {
-  const label = sanitizeInboxLabel(msg.fromLabel);
-  const replyBackAttr = msg.replyBack ? 'true' : 'false';
-  const safeBody = neutralizeInboxStructuralTags(msg.text);
-  return `<inbox-message from="${label}" reply_back="${replyBackAttr}">\n${safeBody}\n</inbox-message>`;
+function nowIsoFromMessage(msg: PendingInboxMessage): string {
+  return new Date(msg.timestampMs || Date.now()).toISOString();
 }
 
-/// 构造 <inbox-reply> 包裹 (Reply 模式)
-function buildInboxReplyPrompt(msg: PendingInboxMessage): string {
-  const label = sanitizeInboxLabel(msg.fromLabel);
-  const inReplyTo = msg.inReplyTo
-    ? ` in_reply_to="${sanitizeInboxLabel(buildInReplyToSnippet(msg.inReplyTo))}"`
-    : '';
-  // Future: if msg carries an error flag (currently embedded in text by reply-deliver),
-  // wrap with error="true" — for now, reply-deliver embeds [ERROR] prefix in text.
-  const safeBody = neutralizeInboxStructuralTags(msg.text);
-  return `<inbox-reply from="${label}"${inReplyTo}>\n${safeBody}\n</inbox-reply>`;
+function legacySendRequestEvent(msg: PendingInboxMessage): SessionEvent {
+  return {
+    version: 1,
+    type: 'send.request',
+    eventId: msg.messageId,
+    sourceSessionId: msg.fromSessionId,
+    sourceLabel: msg.fromLabel,
+    targetSessionId: msg.toSessionId,
+    sourceNotification: msg.replyBack ? 'auto' : 'none',
+    createdAt: nowIsoFromMessage(msg),
+    payload: msg.text,
+  };
+}
+
+function legacySendResultEvent(msg: PendingInboxMessage): SessionEvent {
+  return {
+    version: 1,
+    type: 'send.result',
+    eventId: msg.messageId,
+    sourceSessionId: msg.fromSessionId,
+    sourceLabel: msg.fromLabel,
+    targetSessionId: msg.toSessionId,
+    status: msg.text.startsWith('[ERROR ') ? 'error' : 'ok',
+    terminalReason: msg.text.startsWith('[ERROR ') ? 'error' : 'completed',
+    createdAt: nowIsoFromMessage(msg),
+    payload: msg.text,
+  };
+}
+
+function buildSessionEventPrompt(msg: PendingInboxMessage): string {
+  if (msg.sessionEvent) {
+    return renderSessionEventPrompt(msg.sessionEvent);
+  }
+  if (msg.kind === 'reply') {
+    return renderSessionEventPrompt(legacySendResultEvent(msg));
+  }
+  if (msg.kind === 'event') {
+    return renderSessionEventPrompt({
+      version: 1,
+      type: 'watch.error',
+      eventId: msg.messageId,
+      watchId: msg.messageId,
+      sourceSessionId: msg.fromSessionId,
+      sourceLabel: msg.fromLabel,
+      targetSessionId: msg.toSessionId,
+      targetStateAtRegistration: 'unknown',
+      finalState: 'error',
+      terminalReason: 'missing_session_event',
+      createdAt: nowIsoFromMessage(msg),
+      latestResult: msg.text || 'Missing structured session event payload.',
+    });
+  }
+  return renderSessionEventPrompt(legacySendRequestEvent(msg));
 }
 
 /// Build per-turn InboxTurnMeta to bind on the dequeued message. Only present
 /// for Request kind with replyBack=true — Reply kind never triggers further reply.
 function buildTurnMeta(msg: PendingInboxMessage): InboxTurnMeta | undefined {
   if (msg.kind === 'reply') return undefined;
+  if (msg.kind === 'event') return undefined;
   if (!msg.replyBack) return undefined;
   return {
     fromSessionId: msg.fromSessionId,
@@ -76,8 +117,7 @@ export async function handleInboxDrain(
   const rejectReasons: string[] = [];
 
   for (const msg of messages) {
-    const isReply = msg.kind === 'reply';
-    const prompt = isReply ? buildInboxReplyPrompt(msg) : buildInboxMessagePrompt(msg);
+    const prompt = buildSessionEventPrompt(msg);
     const meta = buildTurnMeta(msg);
 
     try {

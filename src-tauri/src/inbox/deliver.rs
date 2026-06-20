@@ -178,7 +178,9 @@ pub async fn deliver_with_resume(
 
     // Quick alive check first — if Healthy, skip resume + owner machinery.
     if lookup_target_port(manager, &to_sid).is_some() {
-        return deliver_inbox_message(manager, message).await;
+        let outcome = deliver_inbox_message(manager, message).await;
+        start_headless_completion_if_delivered(app_handle, manager, &to_sid, &outcome);
+        return outcome;
     }
 
     // Target not alive — need to resume. Require workspace_path.
@@ -254,8 +256,36 @@ pub async fn deliver_with_resume(
     // that arrive during the resume window keep the sidecar alive — release_owner
     // is idempotent per-owner-id.
     let outcome = deliver_inbox_message(manager, message).await;
+    start_headless_completion_if_delivered(app_handle, manager, &to_sid, &outcome);
     release_transient_owner(manager, &to_sid, &transient_owner);
     outcome
+}
+
+fn start_headless_completion_if_delivered(
+    app_handle: &AppHandle,
+    manager: &ManagedSidecarManager,
+    session_id: &str,
+    outcome: &DeliverOutcome,
+) {
+    if !matches!(outcome, DeliverOutcome::Delivered { .. }) {
+        return;
+    }
+    match crate::sidecar::start_headless_background_completion(app_handle, manager, session_id) {
+        Ok(result) => {
+            ulog_info!(
+                "[inbox] headless BackgroundCompletion for {} started={}",
+                session_id,
+                result.started
+            );
+        }
+        Err(e) => {
+            ulog_error!(
+                "[inbox] failed to start headless BackgroundCompletion for {}: {}",
+                session_id,
+                e
+            );
+        }
+    }
 }
 
 /// Release the transient inbox-delivery owner. Idempotent — no-op if the
@@ -265,29 +295,20 @@ fn release_transient_owner(
     session_id: &str,
     owner: &SidecarOwner,
 ) {
-    let Ok(mut guard) = manager.lock() else {
-        ulog_warn!("[inbox] cannot release transient owner: manager lock poisoned");
-        return;
-    };
-    if let Some(sidecar) = guard.get_session_sidecar_mut(session_id) {
-        let was_last = sidecar.remove_owner(owner);
-        if was_last {
-            // No real owners attached during our window — the sidecar is now
-            // unowned. Cross-review Codex Warning #3 — earlier comment
-            // referenced an "idle collector" that does not exist; we only
-            // reap on app shutdown / explicit stop / process-health failure.
-            // Killing inline would race with any in-flight work for our
-            // just-sent turn, so the resumed sidecar stays alive until the
-            // next process-level lifecycle event. This is the intended
-            // trade-off — small RSS overhead for safety. If unowned-idle
-            // reaping becomes desirable, wire it into the sidecar lifecycle
-            // (cleanup_stale_sidecars currently only runs at startup).
+    match crate::sidecar::release_session_sidecar(manager, session_id, owner) {
+        Ok(stopped) => {
             ulog_info!(
-                "[inbox] released transient owner for {}; sidecar now has no owners (stays alive until process exit / explicit stop)",
-                session_id
+                "[inbox] released transient owner for {}; sidecar_stopped={}",
+                session_id,
+                stopped
             );
-        } else {
-            ulog_info!("[inbox] released transient owner for {}", session_id);
+        }
+        Err(e) => {
+            ulog_warn!(
+                "[inbox] cannot release transient owner for {}: {}",
+                session_id,
+                e
+            );
         }
     }
 }

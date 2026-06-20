@@ -84,6 +84,7 @@ import type { SlashCommand as UiSlashCommand } from '../shared/slashCommands';
 import { saveSessionMetadata, updateSessionTitleFromMessage, saveSessionMessages, saveAttachment, updateSessionMetadata, getSessionMetadata, getSessionData } from './SessionStore';
 import { firePostTurnTitleHook } from './turn-hooks';
 import { createSessionMetadata, type SessionMessage, type MessageAttachment, type MessageUsage, type SessionSource, type TurnAnalyticsSource } from './types/session';
+import { extractAssistantTextFromStoredContent } from './inbox/latest-result';
 import {
   createMaterializedSessionMetadata,
   isLiveFollowScenario,
@@ -1233,7 +1234,8 @@ type MessageQueueItem = {
   analyticsSource?: TurnAnalyticsSource;
   // PRD 0.2.18 Session Inbox — per-turn binding for reply pushback.
   // Bound on dequeue (generator yield), read at result handler. When present
-  // and replyBack=true, turn-end pushes <inbox-reply> back to caller session.
+  // and replyBack=true, turn-end pushes a send.result session event back to
+  // caller session.
   inboxMeta?: import('./inbox/types').InboxTurnMeta;
 };
 const messageQueue: MessageQueueItem[] = [];
@@ -1757,15 +1759,14 @@ function abortPersistentSession(): void {
   // in flight, push a session_aborted reply back to the caller so it doesn't
   // wait forever. Fire-and-forget. Read + clear immediately to avoid the
   // recovery session inheriting this binding.
+  const abortedReplyText = currentTurnTextBlocks.join('').trim();
   if (currentTurnInboxMeta) {
     const replyMeta = currentTurnInboxMeta;
     currentTurnInboxMeta = undefined;
-    const replyText = currentTurnTextBlocks.join('').trim();
-    currentTurnTextBlocks.length = 0;
     const abortedSessionId = sessionId;
     void import('./inbox/reply-deliver').then(({ deliverInboxReply }) =>
       deliverInboxReply(abortedSessionId, replyMeta, {
-        text: replyText,
+        text: abortedReplyText,
         error: {
           code: 'session_aborted',
           message: 'target session was aborted before the turn completed',
@@ -1775,6 +1776,18 @@ function abortPersistentSession(): void {
       console.error('[inbox] abort-path reply pushback failed:', err),
     );
   }
+  currentTurnTextBlocks.length = 0;
+  void import('./inbox/watch-deliver').then(({ deliverSessionWatchEvents }) =>
+    deliverSessionWatchEvents(sessionId, {
+      text: abortedReplyText,
+      error: {
+        code: 'session_aborted',
+        message: 'target session was aborted before the turn completed',
+      },
+    }),
+  ).catch((err) =>
+    console.error('[session-watch] abort-path watch push failed:', err),
+  );
   // 唤醒被阻塞的 generator（waitForMessage）
   if (messageResolver) {
     const resolve = messageResolver;
@@ -1880,8 +1893,9 @@ let sessionStorageStateSaved = false;
 //     SDK persistent session is single-threaded turn execution)
 let currentTurnInboxMeta: import('./inbox/types').InboxTurnMeta | undefined = undefined;
 
-// Accumulator for assistant text blocks within the current turn — used by
-// inbox reply pushback to assemble the reply body. Reset at turn start.
+// Accumulator for assistant text blocks within the current turn. Session send
+// only reads it when an inbox binding exists, while session watch reads it for
+// ordinary user/cron/IM turns too. Reset at turn start.
 const currentTurnTextBlocks: string[] = [];
 
 // ─── Watchdog Auto Resume (watchdog-driven session resume) ────────────────
@@ -5524,12 +5538,9 @@ function appendTextChunk(chunk: string): boolean {
     return false;
   }
 
-  // PRD 0.2.18 Session Inbox — accumulate text for reply pushback if this turn
-  // has an inbox binding. Capture before the message-append so we get the same
-  // post-filter text that the model emitted.
-  if (currentTurnInboxMeta) {
-    currentTurnTextBlocks.push(chunk);
-  }
+  // PRD 0.2.37 Session Events — accumulate text for the current turn before
+  // message append, using the same post-filter text that the model emitted.
+  currentTurnTextBlocks.push(chunk);
 
   const message = ensureAssistantMessage();
   if (typeof message.content === 'string') {
@@ -6525,6 +6536,23 @@ export function getAgentState(): {
   hasInitialPrompt: boolean;
 } {
   return { agentDir, sessionState, hasInitialPrompt };
+}
+
+export function getLastBuiltinAssistantText(): string {
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const msg = messages[i];
+    if (msg?.role !== 'assistant') continue;
+    const content = msg.content;
+    const text = typeof content === 'string'
+      ? extractAssistantTextFromStoredContent(content).trim()
+      : content
+          .filter((block) => block.type === 'text' && typeof block.text === 'string')
+          .map((block) => block.text)
+          .join('')
+          .trim();
+    if (text) return text;
+  }
+  return '';
 }
 
 export function getSystemInitInfo(): SystemInitInfo | null {
@@ -11772,11 +11800,10 @@ async function startStreamingSession(preWarm = false): Promise<void> {
           lastAgentError = emptyResultError;
           broadcast('chat:message-error', emptyResultError);
           handleMessageError(emptyResultError);
+          const replyText = currentTurnTextBlocks.join('').trim();
           if (currentTurnInboxMeta) {
             const replyMeta = currentTurnInboxMeta;
             currentTurnInboxMeta = undefined;
-            const replyText = currentTurnTextBlocks.join('').trim();
-            currentTurnTextBlocks.length = 0;
             void import('./inbox/reply-deliver').then(({ deliverInboxReply }) =>
               deliverInboxReply(sessionId, replyMeta, {
                 text: replyText,
@@ -11789,6 +11816,18 @@ async function startStreamingSession(preWarm = false): Promise<void> {
               console.error('[inbox] empty-result reply pushback failed:', err),
             );
           }
+          currentTurnTextBlocks.length = 0;
+          void import('./inbox/watch-deliver').then(({ deliverSessionWatchEvents }) =>
+            deliverSessionWatchEvents(sessionId, {
+              text: replyText,
+              error: {
+                code: 'turn_failed',
+                message: emptyResultError,
+              },
+            }),
+          ).catch((err) =>
+            console.error('[session-watch] empty-result watch push failed:', err),
+          );
         } else {
           console.log('[agent][sdk] Broadcasting chat:message-complete');
           // Include usage data for frontend analytics tracking + assistant sdkUuid for fork button
@@ -11866,30 +11905,38 @@ async function startStreamingSession(preWarm = false): Promise<void> {
           // If this turn was triggered by an inbox message with replyBack=true,
           // collect the turn's text + error and push back to caller session.
           // Fire-and-forget: don't await (network errors logged but not surfaced).
+          const sessionEventText = currentTurnTextBlocks.join('').trim();
+          const sessionEventError = resultMessage.is_error
+            ? {
+                code: 'turn_failed',
+                message:
+                  resultMessage.result ||
+                  (resultMessage.errors?.join('; ') ?? 'turn ended with error'),
+              }
+            : undefined;
           if (currentTurnInboxMeta) {
             const replyMeta = currentTurnInboxMeta;
             // Clear immediately to prevent the next turn from inheriting (per-turn
             // semantics — multiple inbox messages each get their own binding).
             currentTurnInboxMeta = undefined;
-            const replyText = currentTurnTextBlocks.join('').trim();
-            currentTurnTextBlocks.length = 0;
-            const replyError = resultMessage.is_error
-              ? {
-                  code: 'turn_failed',
-                  message:
-                    resultMessage.result ||
-                    (resultMessage.errors?.join('; ') ?? 'turn ended with error'),
-                }
-              : undefined;
             void import('./inbox/reply-deliver').then(({ deliverInboxReply }) =>
               deliverInboxReply(sessionId, replyMeta, {
-                text: replyText,
-                error: replyError,
+                text: sessionEventText,
+                error: sessionEventError,
               }),
             ).catch((err) =>
               console.error('[inbox] result-handler reply pushback failed:', err),
             );
           }
+          currentTurnTextBlocks.length = 0;
+          void import('./inbox/watch-deliver').then(({ deliverSessionWatchEvents }) =>
+            deliverSessionWatchEvents(sessionId, {
+              text: sessionEventText,
+              error: sessionEventError,
+            }),
+          ).catch((err) =>
+            console.error('[session-watch] result-handler watch push failed:', err),
+          );
         }
 
         // PRD #134 — clear `forkFrom` only once we've VERIFIED the SDK has

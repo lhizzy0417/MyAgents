@@ -4792,6 +4792,77 @@ pub fn start_background_completion<R: Runtime>(
     })
 }
 
+/// Start a BackgroundCompletion owner for a headless message/event delivery.
+///
+/// Unlike `start_background_completion`, this intentionally does not require
+/// `/api/session-state` to already report `running`/`starting`: the caller has
+/// just delivered a user/event message and needs an owner to cover the small
+/// window before the sidecar flips from idle to running. The shared poller will
+/// release the owner on the first idle/error check if no turn actually starts.
+pub fn start_headless_background_completion<R: Runtime>(
+    app_handle: &AppHandle<R>,
+    manager: &ManagedSidecarManager,
+    session_id: &str,
+) -> Result<BackgroundCompletionResult, String> {
+    let result_id = session_id.to_string();
+    let port = {
+        let mut manager_guard = manager.lock().map_err(|e| e.to_string())?;
+        let Some(sidecar) = manager_guard.sidecars.get_mut(session_id) else {
+            ulog_debug!(
+                "[bg-completion] No running sidecar for headless session {}",
+                session_id
+            );
+            return Ok(BackgroundCompletionResult {
+                started: false,
+                session_id: result_id,
+            });
+        };
+        if !sidecar.is_reusable() {
+            ulog_debug!(
+                "[bg-completion] Sidecar for headless session {} is not reusable",
+                session_id
+            );
+            return Ok(BackgroundCompletionResult {
+                started: false,
+                session_id: result_id,
+            });
+        }
+
+        let port = sidecar.port;
+        let bg_owner = SidecarOwner::BackgroundCompletion(session_id.to_string());
+        if sidecar.owners.contains(&bg_owner) {
+            ulog_info!(
+                "[bg-completion] Session {} already has a BackgroundCompletion owner",
+                session_id
+            );
+            return Ok(BackgroundCompletionResult {
+                started: true,
+                session_id: result_id,
+            });
+        }
+        sidecar.add_owner(bg_owner);
+        ulog_info!(
+            "[bg-completion] Added headless BackgroundCompletion owner to session {} (port {})",
+            session_id,
+            port
+        );
+        port
+    };
+
+    let manager_clone = Arc::clone(manager);
+    let session_id_clone = session_id.to_string();
+    let app_handle_clone = app_handle.clone();
+
+    thread::spawn(move || {
+        poll_background_completion(&app_handle_clone, &manager_clone, &session_id_clone, port);
+    });
+
+    Ok(BackgroundCompletionResult {
+        started: true,
+        session_id: result_id,
+    })
+}
+
 /// Polling loop that runs in a background thread.
 /// Checks session state every BG_POLL_INTERVAL_SECS until AI finishes,
 /// then removes the BackgroundCompletion owner (which may stop the Sidecar).

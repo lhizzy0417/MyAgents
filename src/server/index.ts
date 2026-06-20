@@ -501,6 +501,7 @@ import {
   getMessages,
   getSessionId,
   getSystemInitInfo,
+  getLastBuiltinAssistantText,
   initializeAgent,
   interruptCurrentResponse,
   getStreamingAssistantId,
@@ -551,6 +552,8 @@ import { decodeProviderEnvSnapshot, findAgentByWorkspacePath, findProvider, getA
 import { snapshotForOwnedSession } from './utils/session-snapshot';
 import { resolveSessionConfig } from './utils/resolve-session-config';
 import { resolveLastRealUserMessagePreview, shrinkSessionMessageForClient, shrinkSessionMessagesForClient, shrinkReplayContentForClient } from './utils/session-message-preview';
+import { getLatestAssistantResultFromMessages, NO_TEXT_RESPONSE } from './inbox/latest-result';
+import { pendingSessionWatchCount, registerPendingSessionWatch } from './inbox/watch-registry';
 import type { AgentConfig } from '../shared/types/agent';
 import type { SessionMetadata } from './types/session';
 import { initLogger, getLoggerDiagnostics, withLogContext, setStdioBrokenProbe } from './logger';
@@ -637,6 +640,19 @@ import type { InteractionScenario } from './system-prompt';
 import { neutralizeInboxStructuralTags, sanitizeInboxLabel } from './inbox/sanitize-label';
 
 type PermissionMode = 'auto' | 'plan' | 'fullAgency' | 'custom';
+
+function latestAssistantResultForCurrentSession(): string {
+  let latestResult = shouldUseExternalRuntime()
+    ? getLastExternalAssistantText()
+    : getLastBuiltinAssistantText();
+  if (!latestResult.trim()) {
+    const data = getSessionData(getSessionId());
+    latestResult = data
+      ? getLatestAssistantResultFromMessages(data.messages)
+      : NO_TEXT_RESPONSE;
+  }
+  return latestResult.trim() || NO_TEXT_RESPONSE;
+}
 
 /**
  * Runtime download URLs for common MCP commands
@@ -1520,6 +1536,20 @@ async function routeAdminApi(pathname: string, payload: Record<string, unknown>)
           code: result.response.error?.code,
         };
   }
+  if (route === 'session/watch') {
+    const { handleAdminSessionWatch } = await import('./inbox/watch-handler');
+    const result = await handleAdminSessionWatch(getSessionId(), {
+      targetSessionId: typeof payload.targetSessionId === 'string' ? payload.targetSessionId : '',
+    });
+    return result.status >= 200 && result.status < 300
+      ? { success: true, ...(result.response as unknown as Record<string, unknown>) }
+      : {
+          ...(result.response as unknown as Record<string, unknown>),
+          success: false,
+          error: result.response.error?.message ?? 'watch failed',
+          code: result.response.error?.code,
+        };
+  }
 
   // System commands
   if (route === 'status') return api.handleStatus();
@@ -2192,6 +2222,76 @@ async function main() {
           ? getExternalSessionState()
           : getAgentState().sessionState;
         return jsonResponse({ sessionState });
+      }
+
+      // Latest assistant result endpoint. Prefer live runtime memory over disk
+      // so callers do not read the previous turn during finalization windows.
+      if (pathname === '/api/session-latest-result' && request.method === 'GET') {
+        return jsonResponse({
+          sessionId: getSessionId(),
+          latestResult: latestAssistantResultForCurrentSession(),
+        });
+      }
+
+      // Internal endpoint: Rust management API registers a one-shot watcher
+      // on the target sidecar. The target turn-end hook drains these watches
+      // and pushes watch.completed/error back through /api/inbox/deliver.
+      if (pathname === '/api/session-watch/register' && request.method === 'POST') {
+        const body = (await request.json().catch(() => null)) as {
+          watchId?: string;
+          watcherSessionId?: string;
+          watcherResumeWorkspacePath?: string;
+          targetSessionId?: string;
+          targetLabel?: string;
+          observedSidecarState?: string;
+        } | null;
+        if (!body?.watchId || !body.watcherSessionId || !body.targetSessionId) {
+          return jsonResponse({ accepted: false, reason: 'invalid body' }, 400);
+        }
+        if (body.targetSessionId !== getSessionId()) {
+          return jsonResponse({ accepted: false, reason: 'target session mismatch' }, 409);
+        }
+        const targetSessionState = shouldUseExternalRuntime()
+          ? getExternalSessionState()
+          : getAgentState().sessionState;
+        const latestResult = latestAssistantResultForCurrentSession();
+        if (targetSessionState === 'error') {
+          return jsonResponse({
+            accepted: false,
+            delivery: 'error',
+            reason: 'target_error',
+            targetStateAtRegistration: targetSessionState,
+            finalState: 'error',
+            terminalReason: 'target_error',
+            latestResult,
+          });
+        }
+        if (targetSessionState !== 'running' && targetSessionState !== 'starting') {
+          return jsonResponse({
+            accepted: false,
+            delivery: 'already_idle',
+            reason: 'already_idle',
+            targetStateAtRegistration: targetSessionState,
+            finalState: 'idle',
+            terminalReason: 'already_idle',
+            latestResult,
+          });
+        }
+        registerPendingSessionWatch({
+          watchId: body.watchId,
+          watcherSessionId: body.watcherSessionId,
+          watcherResumeWorkspacePath: body.watcherResumeWorkspacePath,
+          targetSessionId: body.targetSessionId,
+          targetLabel: body.targetLabel || 'a session',
+          targetStateAtRegistration: targetSessionState,
+          registeredAt: new Date().toISOString(),
+        });
+        return jsonResponse({
+          accepted: true,
+          delivery: 'registered',
+          targetStateAtRegistration: targetSessionState,
+          pending: pendingSessionWatchCount(),
+        });
       }
 
       // Read historical session messages from SDK's persisted session files (v0.2.59+)

@@ -34,6 +34,8 @@ export interface AdminInboxResponse {
   fromLabel?: string;
   /** UUID of the dispatched message — used by debug logs / reply correlation */
   messageId?: string;
+  /** Whether MyAgents will push the target turn result back to the caller. */
+  replyBack?: boolean;
   /** Error code when delivered=false:
    *  'session_not_found' | 'delivery_failed' | 'invalid_args' | 'rejected' */
   error?: { code: string; message: string };
@@ -73,8 +75,11 @@ function buildRequestMessage(
   // sanitize at construction; recipients will receive only sanitized form
   const fromLabel = sanitizeInboxLabel(rawLabel);
 
+  const messageId = randomUUID();
+  const createdAt = new Date().toISOString();
+
   return {
-    messageId: randomUUID(),
+    messageId,
     fromSessionId: callerSessionId,
     fromLabel,
     toSessionId,
@@ -83,6 +88,17 @@ function buildRequestMessage(
     timestampMs: Date.now(),
     kind: 'request',
     inReplyTo: null,
+    sessionEvent: {
+      version: 1,
+      type: 'send.request',
+      eventId: messageId,
+      sourceSessionId: callerSessionId,
+      sourceLabel: fromLabel,
+      targetSessionId: toSessionId,
+      sourceNotification: replyBack ? 'auto' : 'none',
+      createdAt,
+      payload: prompt,
+    },
   };
 }
 
@@ -257,6 +273,7 @@ export async function handleAdminInbox(
           delivered: true,
           fromLabel: message.fromLabel,
           messageId: outcome.message_id,
+          replyBack: message.replyBack,
         },
       };
     case 'session_not_found':

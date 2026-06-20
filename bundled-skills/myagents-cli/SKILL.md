@@ -341,29 +341,36 @@ myagents im readme                                      # 拉 IM 工具完整文
 - `--file` 必须是绝对路径，且路径白名单：必须落在 workspace / `/tmp` / MyAgents scratch 目录之一——这是为了防 prompt injection 把 `~/.ssh/id_rsa` 之类发给聊天对方
 - 不在 IM session 内调用会返回 "No IM context"，正常——这命令本来就是 session-scoped
 
-### Session 间通信（session, PRD 0.2.18）
+### Session 间通信（session, PRD 0.2.37）
 
 ```bash
-# 默认: 投出去 + 期待对方回应推回来(会作为 <inbox-reply> 出现在你的下一个 turn)
+# 让另一个 session 做新工作或接收通知；从 shell/Bash 工具调用
 myagents session send <sessionId> -p "<prompt>"
 myagents session send <sessionId> --prompt-file <abs-path>   # 多行/长文本(>4KB)必用,跨平台稳定
 
-# 仅通知:对方处理后输出走它自己的呈现路径,不推回给你
+# 默认: 目标 turn 结束后,MyAgents 会把结果推回当前 session
+# 仅通知:不需要结果回流时加 --no-reply
 myagents session send <sessionId> -p "<prompt>" --no-reply
-myagents session send --help                                 # 完整用法 / EXIT CODES / 示例
+
+# 监听另一个 session 当前正在进行的工作；不创建新工作
+myagents session watch <sessionId>
+myagents session --help                                      # 完整用法 / EXIT CODES / 示例
 ```
 
 **何时用:**
-- 你收到了来自其它 session 的消息(`<inbox-message from="...">`)或 cron 推送(`<cron-task ...>` 含 sessionId),用户希望你向那个 session **反馈、追问、澄清或下指令**
-- 用户在对话里直接给了你一个 sessionId,让你与其交互
+- 使用 `send`: 另一个 session 需要做新工作、接收通知、澄清或后续指令
+- 使用 `watch`: 当前任务依赖另一个 session 的工作,或用户明确希望你监听另一个 session 的当前/最新结果
+- 用户在对话里直接给了你一个 sessionId,让你与其交互或监听
 - **不要用**于答复当前用户(直接回复就行);不要用于给 IM peer 发消息(用 `im send-media`)
 - AI 身份(from label)系统会自动从你所在 session 元数据推导——你不需要也不应该手动指定
 
 **异步语义(关键):**
-- CLI 立即返回投递结果,**不等待**对方处理
-- 默认期待 reply 推回:对方处理完后,你将在新 turn 收到 `<inbox-reply from="..." in_reply_to="...">` 前缀消息
+- `send` CLI 立即返回投递结果,**不等待**对方处理
+- 默认期待结果推回:对方处理完后,你将在新 turn 收到 `<myagents-session-event type="send.result">`
 - `--no-reply`:仅通知,reply 不回流(对方按自己呈现路径输出)
 - target session idle/dead 不影响投递——系统会自动唤起
+- `watch` 只观察目标 session 当前工作；目标已经 idle 时,CLI 会直接返回 `<myagents-session-event type="watch.already_idle">` 和最近结果
+- `watch` 不会向目标 session 注入新 prompt；需要新工作时用 `send`
 
 **Windows 安全:**
 - `-p` 内容含 `\n` 或 > 4KB → CLI 立即 fail-fast(exit 3),提示切到 `--prompt-file`

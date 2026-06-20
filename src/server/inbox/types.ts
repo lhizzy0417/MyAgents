@@ -4,8 +4,11 @@
 // `rename_all = "camelCase"` exposes camelCase on the wire — see
 // `src-tauri/src/inbox/types.rs`).
 
-/// Inbox message kind — request (initial dispatch) or reply (turn-end pushback)
-export type InboxMessageKind = 'request' | 'reply';
+import type { SessionEvent } from './session-event';
+
+/// Inbox message kind — request (initial dispatch), reply (turn-end pushback),
+/// or event (system-delivered watch/status event).
+export type InboxMessageKind = 'request' | 'reply' | 'event';
 
 /// Pending inbox message — body shape for POST /api/inbox/deliver +
 /// POST /api/inbox/drain. Stays in sync with Rust `PendingInboxMessage`.
@@ -20,6 +23,8 @@ export interface PendingInboxMessage {
   timestampMs?: number;
   kind?: InboxMessageKind;
   inReplyTo?: string | null;
+  /** Structured Session Event Protocol v1 prompt payload. */
+  sessionEvent?: SessionEvent | null;
 }
 
 /// Per-turn inbox metadata carried alongside a session message. Bound at the
@@ -31,7 +36,7 @@ export interface PendingInboxMessage {
 export interface InboxTurnMeta {
   /** Caller session id (used as target for reply) */
   fromSessionId: string;
-  /** Caller label (forwarded to AI in `<inbox-reply from="...">` ) */
+  /** Caller label (forwarded to AI in `send.result` session event) */
   fromLabel: string;
   /** Whether caller expects a reply pushback */
   replyBack: boolean;

@@ -10,8 +10,9 @@
 //   2. 构造 PendingInboxMessage(kind=Reply, replyBack=false)
 //   3. POST 到 Rust /api/inbox/deliver(同一个跨 sidecar 通道)
 //   4. Rust 把 reply 推回 caller sidecar 的 /api/inbox/drain
-//   5. Caller sidecar drain handler 用 <inbox-reply> 前缀注入 enqueueUserMessage
-//   6. Caller AI 在下一个 turn 看到 reply
+//   5. Caller sidecar drain handler 用 MyAgents Session Event Protocol v1
+//      的 send.result 注入 enqueueUserMessage
+//   6. Caller AI 在下一个 turn 看到系统推送结果
 
 import { randomUUID } from 'crypto';
 import { cancellableFetch } from '../utils/cancellation';
@@ -31,9 +32,9 @@ export interface ReplyPayload {
   attachmentHints?: string[];
 }
 
-/// Build the textual body of a reply, embedding error + attachment hints inline.
-/// This format is what the caller AI sees inside <inbox-reply>...</inbox-reply>.
-function buildReplyBody(payload: ReplyPayload): string {
+/// Build the textual body of a result, embedding error + attachment hints inline.
+/// This text becomes the payload inside a send.result session event.
+export function buildReplyBody(payload: ReplyPayload): string {
   const lines: string[] = [];
   if (payload.error) {
     lines.push(`[ERROR ${payload.error.code}] ${payload.error.message}`);
@@ -87,16 +88,33 @@ export async function deliverInboxReply(
   );
   const fromLabel = sanitizeInboxLabel(rawLabel);
 
+  const messageId = randomUUID();
+  const text = buildReplyBody(payload);
+  const createdAt = new Date().toISOString();
   const message: PendingInboxMessage = {
-    messageId: randomUUID(),
+    messageId,
     fromSessionId: currentSessionId,
     fromLabel,
     toSessionId: inboxMeta.fromSessionId,
-    text: buildReplyBody(payload),
+    text,
     replyBack: false, // 重要:reply 的 replyBack 恒为 false,避免无限往返
     timestampMs: Date.now(),
     kind: 'reply',
     inReplyTo: inboxMeta.originalSnippet,
+    sessionEvent: {
+      version: 1,
+      type: 'send.result',
+      eventId: messageId,
+      requestEventId: inboxMeta.originalMessageId,
+      sourceSessionId: currentSessionId,
+      sourceLabel: fromLabel,
+      targetSessionId: inboxMeta.fromSessionId,
+      status: payload.error ? 'error' : 'ok',
+      terminalReason: payload.error ? 'error' : 'completed',
+      errorCode: payload.error?.code,
+      createdAt,
+      payload: text,
+    },
   };
 
   // Resolve caller workspace path for resume (caller may have gone idle)

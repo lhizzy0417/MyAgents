@@ -129,6 +129,8 @@ pub async fn start_management_api() -> Result<u16, String> {
         .route("/api/thought/create", post(thought_create_handler))
         // Session Inbox cross-sidecar delivery (PRD 0.2.18)
         .route("/api/inbox/deliver", post(inbox_deliver_handler))
+        // Session Event watch registration (PRD 0.2.37)
+        .route("/api/session/watch", post(session_watch_handler))
         // Bridge messages carry base64-encoded media attachments (images/files).
         // Default axum 2MB limit is too small — raise to 50MB for this API.
         .layer(DefaultBodyLimit::max(50 * 1024 * 1024));
@@ -2336,5 +2338,39 @@ async fn inbox_deliver_handler(Json(req): Json<InboxDeliverRequest>) -> Json<ser
     Json(serde_json::json!({
         "ok": true,
         "outcome": outcome,
+    }))
+}
+
+/// `POST /api/session/watch` — register a one-shot cross-session watch.
+///
+/// The caller sidecar validates session metadata and passes watcher resume
+/// information. Rust owns the live state observation because the SidecarManager
+/// is the source of truth for running/starting/idle process state.
+async fn session_watch_handler(
+    Json(req): Json<crate::inbox::watch::SessionWatchRequest>,
+) -> Json<serde_json::Value> {
+    let Some(manager) = get_sidecar_state() else {
+        return Json(serde_json::json!({
+            "ok": false,
+            "error": "sidecar manager not initialized"
+        }));
+    };
+    let Some(app_handle) = crate::logger::get_app_handle() else {
+        return Json(serde_json::json!({
+            "ok": false,
+            "error": "global AppHandle not initialized — cannot register session watch"
+        }));
+    };
+
+    let result = crate::inbox::watch::register_session_watch(
+        app_handle.clone(),
+        manager.clone(),
+        req,
+    )
+    .await;
+
+    Json(serde_json::json!({
+        "ok": true,
+        "result": result,
     }))
 }

@@ -1271,7 +1271,7 @@ let activeRequestId: string | null = null;
 
 // PRD 0.2.18 Session Inbox — per-turn binding for reply pushback. Set on
 // sendExternalMessage accept (after context.inboxMeta arrives via /api/inbox/drain),
-// read at persistTurnResult to push <inbox-reply> back to caller. Cleared at
+// read at persistTurnResult to push a send.result session event back to caller. Cleared at
 // the end of persistTurnResult regardless of success/error.
 // Same per-turn semantics as agent-session.ts::currentTurnInboxMeta.
 let currentTurnInboxMeta: import('../inbox/types').InboxTurnMeta | null = null;
@@ -1280,6 +1280,33 @@ let currentTurnInboxMeta: import('../inbox/types').InboxTurnMeta | null = null;
 // reply pushback. Reset at turn start, populated as `chat:tool-result-complete`
 // events fire, drained at persistTurnResult.
 const currentTurnAttachmentHints: string[] = [];
+
+function currentExternalTurnTextSnapshot(): string {
+  const blockText = currentContentBlocks
+    .filter((b) => b.type === 'text' && typeof b.text === 'string')
+    .map((b) => b.text ?? '')
+    .join('\n\n')
+    .trim();
+  return blockText || currentAssistantText.trim();
+}
+
+function deliverExternalWatchError(errorCode: string, errorMessage: string): void {
+  if (!lastSessionId) return;
+  const sid = lastSessionId;
+  const text = currentExternalTurnTextSnapshot();
+  const attachmentHints = currentTurnAttachmentHints.length > 0
+    ? [...currentTurnAttachmentHints]
+    : undefined;
+  void import('../inbox/watch-deliver').then(({ deliverSessionWatchEvents }) =>
+    deliverSessionWatchEvents(sid, {
+      text,
+      error: { code: errorCode, message: errorMessage },
+      attachmentHints,
+    }),
+  ).catch((err) =>
+    console.error('[session-watch] external failure watch push failed:', err),
+  );
+}
 
 /**
  * PRD 0.2.18 — clear inbox meta + push error reply if needed when
@@ -3157,6 +3184,7 @@ export async function stopExternalSession(): Promise<boolean> {
     activeRequestId = null;
     // PRD 0.2.18 — clear inbox meta on hard stop (user clicked stop / runtime
     // killed mid-turn). Push session_aborted reply so caller doesn't hang.
+    deliverExternalWatchError('session_aborted', 'external runtime session was stopped before turn completed');
     clearInboxMetaOnRejection('session_aborted', 'external runtime session was stopped before turn completed');
     // Drop queued desktop messages on a hard stop (user clicked Stop) — otherwise the pills
     // orphan and, with state now 'idle' + queueLength>0, the next send queues behind stale
@@ -3501,18 +3529,17 @@ async function persistTurnResult(): Promise<void> {
     // turnContextUsage was snapshotted at the synchronous function entry (above) to
     // survive a concurrent turn's resetTurnAccumulators() during the await window.
 
-    // PRD 0.2.18 — capture reply text into local var BEFORE resetTurnAccumulators
-    // clears the source. The finally block reads this for inbox reply pushback.
-    if (turnInboxMeta) {
-      if (turnContentBlocks.length > 0) {
-        capturedReplyText = turnContentBlocks
-          .filter((b) => b.type === 'text' && typeof b.text === 'string')
-          .map((b) => b.text ?? '')
-          .join('\n\n')
-          .trim();
-      }
-      if (!capturedReplyText) capturedReplyText = turnAssistantText.trim();
+    // PRD 0.2.18 / 0.2.37 — capture turn text BEFORE resetTurnAccumulators
+    // clears the source. Inbox send.result and session watch.completed both
+    // read this in finally.
+    if (turnContentBlocks.length > 0) {
+      capturedReplyText = turnContentBlocks
+        .filter((b) => b.type === 'text' && typeof b.text === 'string')
+        .map((b) => b.text ?? '')
+        .join('\n\n')
+        .trim();
     }
+    if (!capturedReplyText) capturedReplyText = turnAssistantText.trim();
 
     // Reset only what we still own: if a degraded concurrent send already ran
     // resetTurnAccumulators(), the module global points at the NEW turn's
@@ -3657,6 +3684,24 @@ async function persistTurnResult(): Promise<void> {
         }),
       ).catch((err) =>
         console.error('[inbox] external turn-end reply pushback failed:', err),
+      );
+    }
+    if (lastSessionId) {
+      const watchText = capturedReplyText || currentAssistantText.trim();
+      const watchError = lastTurnSucceeded
+        ? undefined
+        : {
+            code: 'turn_failed',
+            message: persistFailureReason ?? 'external runtime turn did not complete successfully',
+          };
+      void import('../inbox/watch-deliver').then(({ deliverSessionWatchEvents }) =>
+        deliverSessionWatchEvents(lastSessionId, {
+          text: watchText,
+          error: watchError,
+          attachmentHints: turnAttachmentHints.length > 0 ? turnAttachmentHints : undefined,
+        }),
+      ).catch((err) =>
+        console.error('[session-watch] external turn-end watch push failed:', err),
       );
     }
 
@@ -4275,6 +4320,7 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
           imRequestRegistry.unregister(activeRequestId);
         }
         activeRequestId = null;
+        deliverExternalWatchError(cleanup === 'stopped' ? 'session_aborted' : 'turn_failed', message);
         clearInboxMetaOnRejection('turn_failed', message);
         resetTurnAccumulators();
         pendingPermissionSuggestions.clear();
@@ -4395,6 +4441,7 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
             detail: { source: 'user_stop', error: errorMessage },
           });
           console.log(`[external-session] Suppressing error banner for user-initiated stop (was: "${errorMessage}")`);
+          deliverExternalWatchError('session_aborted', 'external runtime session was stopped before turn completed');
           // Cross-review 0.2.32: when persistTurnResult is in flight it OWNS the
           // accumulators (it still has to read the content blocks; its push
           // branches reset them). Resetting here would race it and drop the
@@ -4408,6 +4455,7 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
           broadcast('chat:agent-error', { message: errorMessage });
           broadcast('chat:message-error', errorMessage);
           fireImCallback('error', errorMessage);
+          deliverExternalWatchError('turn_failed', errorMessage);
           // Same finalization-ownership rule as the suppress branch above.
           if (!turnFinalization.inFlight) resetTurnAccumulators(); // Prevent stale content leaking into next turn
         }

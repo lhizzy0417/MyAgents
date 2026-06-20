@@ -202,7 +202,7 @@ Commands:
   task      Manage Task Center tasks (list/get/update-status/run/rerun ...)
   thought   Manage Task Center thoughts (list/create)
   im        IM runtime actions for current chat (send-media)
-  session   Session-to-session messaging (send a prompt to another session, reply auto-pushed back)
+  session   Session-to-session messaging (send prompts, watch completion/result events)
   widget    Generative UI widget design guidelines (readme)
   plugin    Manage OpenClaw channel plugins (IM npm-packaged adapters)
   cc-plugin Manage Claude plugins (PRD 0.2.17 — Anthropic plugin protocol)
@@ -557,6 +557,27 @@ function printResult(group: string, action: string, result: Record<string, unkno
   }
   if (group === 'status') {
     printStatus(result.data as Record<string, unknown>);
+    return;
+  }
+  if (group === 'session' && action === 'send') {
+    const messageId = result.messageId ? ` ${result.messageId}` : '';
+    console.log(`\u2713 session send delivered${messageId}`);
+    if (result.replyBack === false) {
+      console.log('  notification: one-way; MyAgents will not push the target turn result back here.');
+    } else {
+      console.log('  notification: MyAgents will push the target turn result back as a <myagents-session-event type="send.result"> block.');
+    }
+    return;
+  }
+  if (group === 'session' && action === 'watch') {
+    if (typeof result.eventPrompt === 'string' && result.eventPrompt.trim()) {
+      console.log(result.eventPrompt);
+      return;
+    }
+    console.log(`\u2713 session watch registered ${result.watchId ?? ''}`.trim());
+    console.log(`  target: ${result.targetSessionId ?? '(unknown)'}`);
+    console.log(`  state:  ${result.targetStateAtRegistration ?? 'unknown'}`);
+    console.log('  result: MyAgents will push a <myagents-session-event type="watch.completed"> block when the target finishes.');
     return;
   }
   if (group === 'help') {
@@ -1696,7 +1717,7 @@ async function main(): Promise<void> {
   //   0 = delivered, 1 = sessionId not found, 2 = delivery failed/rejected,
   //   3 = arg error (already handled in buildRequestBody).
   // Cross-review CC flagged the generic exit(1) override loses CLI exit contract.
-  if (result && !result.success && group === 'session' && action === 'send') {
+  if (result && !result.success && group === 'session' && (action === 'send' || action === 'watch')) {
     const errorBody = result.error ?? result;
     const code = typeof errorBody === 'object' && errorBody && 'code' in errorBody
       ? (errorBody as { code?: string }).code
@@ -2306,7 +2327,7 @@ function buildRequestBody(
     return {};
   }
 
-  // ===== Session Inbox (PRD 0.2.18) — `myagents session send` =====
+  // ===== Session events (PRD 0.2.37) — `myagents session send/watch` =====
   if (group === 'session') {
     if (action === 'send') {
       // Positional: <sessionId>
@@ -2377,6 +2398,25 @@ function buildRequestBody(
         prompt: promptText,
         replyBack: !flags.noReply,
       };
+    }
+    if (action === 'watch') {
+      const targetSessionId = requirePositional(
+        rest[0] ?? (flags.targetSessionId as string | undefined) ?? (flags.to as string | undefined),
+        'sessionId',
+        'session watch',
+        'targetSessionId',
+      );
+      const unsupportedFlag = ['prompt', 'promptFile', 'then', 'thenFile', 'thenPrompt', 'thenPromptFile']
+        .find((key) => flags[key] !== undefined);
+      if (unsupportedFlag) {
+        console.error('Error: session watch does not accept prompt/then flags. Use `myagents session send` to ask the target session to do new work.');
+        process.exit(3);
+      }
+      if (rest.length > 1) {
+        console.error('Error: session watch accepts exactly one <sessionId> argument.');
+        process.exit(3);
+      }
+      return { targetSessionId };
     }
     return {};
   }
