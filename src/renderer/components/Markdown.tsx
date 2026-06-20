@@ -14,12 +14,6 @@ import 'katex/dist/katex.min.css';
 import { memo, useContext, useEffect, useMemo, useState, type ComponentProps } from 'react';
 import type { Components } from 'react-markdown';
 import ReactMarkdown from 'react-markdown';
-import rehypeKatex from 'rehype-katex';
-import rehypeRaw from 'rehype-raw';
-import rehypeSanitize, { defaultSchema } from 'rehype-sanitize';
-import remarkBreaks from 'remark-breaks';
-import remarkGfm from 'remark-gfm';
-import remarkMath from 'remark-math';
 
 import CodeBlock from './markdown/CodeBlock';
 import InlineCode from './markdown/InlineCode';
@@ -29,27 +23,12 @@ import { BrowserPanelContext } from '@/context/BrowserPanelContext';
 import { useFileLinkAction } from '@/context/FileActionContext';
 import { useWorkspaceFileService } from '@/hooks/useWorkspaceFileService';
 import { preprocessMarkdownContent } from '@/utils/markdownPreprocess';
-
-// Sanitize schema: allow safe HTML tags from rehype-raw, strip scripts/iframes/event handlers.
-// Extends the default GitHub-flavored schema with additional tags used in AI-generated content.
-const SANITIZE_SCHEMA = {
-  ...defaultSchema,
-  tagNames: [
-    ...(defaultSchema.tagNames ?? []),
-    'details', 'summary',  // collapsible sections
-    'mark', 'ins', 'del',  // text highlighting
-    'sub', 'sup',           // subscript/superscript
-    'kbd', 'var', 'samp',  // technical inline elements
-  ],
-  attributes: {
-    ...defaultSchema.attributes,
-    // Allow class on code/span for syntax highlighting
-    code: [...(defaultSchema.attributes?.code ?? []), 'className'],
-    span: [...(defaultSchema.attributes?.span ?? []), 'className', 'style'],
-    // Allow KaTeX-generated markup
-    div: [...(defaultSchema.attributes?.div ?? []), 'className', 'style'],
-  },
-};
+import {
+  MARKDOWN_REHYPE_PLUGINS,
+  MARKDOWN_REMARK_PLUGINS_DEFAULT,
+  MARKDOWN_REMARK_PLUGINS_WITH_BREAKS,
+  convertFrontmatter,
+} from '@/utils/markdownPipeline';
 
 // ── Streaming leading-edge fade ──
 // While streaming, wrap the LAST few characters of the last text node in a
@@ -100,17 +79,9 @@ function rehypeStreamTail() {
   };
 }
 
-// Static plugin arrays to avoid recreation on every render
-const REMARK_PLUGINS_DEFAULT = [remarkGfm, remarkMath];
-const REMARK_PLUGINS_WITH_BREAKS = [remarkGfm, remarkMath, remarkBreaks];
-const REHYPE_PLUGINS: ComponentProps<typeof ReactMarkdown>['rehypePlugins'] = [
-  rehypeRaw,
-  [rehypeSanitize, SANITIZE_SCHEMA],
-  rehypeKatex,
-];
 // Streaming variant: same chain + the trailing-fade injector last (post-sanitize).
 const REHYPE_PLUGINS_STREAMING: ComponentProps<typeof ReactMarkdown>['rehypePlugins'] = [
-  ...(REHYPE_PLUGINS ?? []),
+  ...(MARKDOWN_REHYPE_PLUGINS ?? []),
   rehypeStreamTail as unknown as NonNullable<ComponentProps<typeof ReactMarkdown>['rehypePlugins']>[number],
 ];
 
@@ -509,19 +480,6 @@ const MarkdownImage = memo(MarkdownImageInner, (prev, next) =>
   && prev.alt === next.alt,
 );
 
-/**
- * Convert YAML frontmatter (---\n...\n---) to a fenced yaml code block
- * so the existing CodeBlock component renders it with syntax highlighting.
- * Only applied in raw/file-preview mode where skill/agent .md files are displayed.
- */
-function convertFrontmatter(content: string): string {
-  if (!content) return '';
-  const match = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/.exec(content);
-  if (!match) return content;
-  const yamlBlock = '```yaml\n' + match[1] + '\n```\n';
-  return yamlBlock + content.slice(match[0].length);
-}
-
 const Markdown = memo(function Markdown({ children, compact = false, preserveNewlines = false, raw = false, basePath, workspacePath = null, streaming = false }: MarkdownProps) {
   // Skip preprocessing for raw mode (file preview) - preprocessing is for streaming chat messages.
   // In raw mode, convert YAML frontmatter to a fenced code block for proper rendering.
@@ -554,8 +512,8 @@ const Markdown = memo(function Markdown({ children, compact = false, preserveNew
   return (
     <div className={`break-words ${compact ? 'text-sm' : 'text-base'}`}>
       <ReactMarkdown
-        remarkPlugins={preserveNewlines ? REMARK_PLUGINS_WITH_BREAKS : REMARK_PLUGINS_DEFAULT}
-        rehypePlugins={streaming && !raw ? REHYPE_PLUGINS_STREAMING : REHYPE_PLUGINS}
+        remarkPlugins={preserveNewlines ? MARKDOWN_REMARK_PLUGINS_WITH_BREAKS : MARKDOWN_REMARK_PLUGINS_DEFAULT}
+        rehypePlugins={streaming && !raw ? REHYPE_PLUGINS_STREAMING : MARKDOWN_REHYPE_PLUGINS}
         components={components}
       >
         {processedContent}

@@ -14,7 +14,10 @@ const mocks = vi.hoisted(() => ({
   openInFinder: vi.fn(),
   openPathExternal: vi.fn(),
   toastSuccess: vi.fn(),
+  toastError: vi.fn(),
   toastWarning: vi.fn(),
+  copyMarkdownAsRichText: vi.fn(),
+  copyPlainText: vi.fn(),
 }));
 
 vi.mock('@/hooks/useWorkspaceFileService', () => ({
@@ -36,10 +39,15 @@ vi.mock('@/components/Toast', () => ({
   useToast: () => ({
     showToast: vi.fn(),
     success: mocks.toastSuccess,
-    error: vi.fn(),
+    error: mocks.toastError,
     warning: mocks.toastWarning,
     info: vi.fn(),
   }),
+}));
+
+vi.mock('@/utils/markdownClipboard', () => ({
+  copyMarkdownAsRichText: mocks.copyMarkdownAsRichText,
+  copyPlainText: mocks.copyPlainText,
 }));
 
 vi.mock('./Tip', () => ({
@@ -243,6 +251,7 @@ describe('FilePreviewModal live reload', () => {
     expect(screen.getByRole('button', { name: '复制文件路径' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: '打开所在文件夹' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: '重命名' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '复制全文' })).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('button', { name: '在文件目录中展示' }));
     expect(onRevealInTree).toHaveBeenCalledWith('notes.md');
@@ -266,6 +275,98 @@ describe('FilePreviewModal live reload', () => {
     fireEvent.click(screen.getByRole('button', { name: '引用' }));
     await waitFor(() => expect(onQuoteFile).toHaveBeenCalledWith('notes.md'));
     expect(onClose).toHaveBeenCalled();
+  });
+
+  it('copies markdown preview as rich text from the full-text menu action', async () => {
+    mocks.copyMarkdownAsRichText.mockResolvedValueOnce('rich');
+
+    render(
+      <FilePreviewModal {...baseProps} content={'# Title\n\n**Body**'} />,
+    );
+
+    fireEvent.click(screen.getByLabelText('更多'));
+    fireEvent.click(screen.getByRole('button', { name: '复制全文' }));
+
+    await waitFor(() => {
+      expect(mocks.copyMarkdownAsRichText).toHaveBeenCalledWith('# Title\n\n**Body**');
+    });
+    expect(mocks.copyPlainText).not.toHaveBeenCalled();
+    expect(mocks.toastSuccess).toHaveBeenCalledWith('已复制全文');
+  });
+
+  it('copies markdown source from edit mode, including unsaved text', async () => {
+    mocks.copyPlainText.mockResolvedValueOnce(undefined);
+
+    render(
+      <FilePreviewModal {...baseProps} content="# Saved" initialEditMode />,
+    );
+
+    const editor = await screen.findByTestId('monaco-editor') as HTMLTextAreaElement;
+    fireEvent.change(editor, { target: { value: '# Unsaved draft' } });
+    mocks.saveFile.mockClear();
+
+    fireEvent.click(screen.getByLabelText('更多'));
+    fireEvent.click(screen.getByRole('button', { name: '复制全文' }));
+
+    await waitFor(() => {
+      expect(mocks.copyPlainText).toHaveBeenCalledWith('# Unsaved draft');
+    });
+    expect(mocks.copyMarkdownAsRichText).not.toHaveBeenCalled();
+    expect(mocks.saveFile).not.toHaveBeenCalled();
+    expect(mocks.toastSuccess).toHaveBeenCalledWith('已复制全文');
+  });
+
+  it('copies non-markdown text/code files as raw text', async () => {
+    mocks.copyPlainText.mockResolvedValueOnce(undefined);
+
+    render(
+      <FilePreviewModal
+        {...baseProps}
+        name="app.ts"
+        path="app.ts"
+        content="const answer = 42;"
+        size={18}
+      />,
+    );
+
+    const editor = await screen.findByTestId('monaco-editor') as HTMLTextAreaElement;
+    fireEvent.change(editor, { target: { value: 'const answer = 43;' } });
+    mocks.saveFile.mockClear();
+
+    fireEvent.click(screen.getByLabelText('更多'));
+    fireEvent.click(screen.getByRole('button', { name: '复制全文' }));
+
+    await waitFor(() => {
+      expect(mocks.copyPlainText).toHaveBeenCalledWith('const answer = 43;');
+    });
+    expect(mocks.copyMarkdownAsRichText).not.toHaveBeenCalled();
+    expect(mocks.saveFile).not.toHaveBeenCalled();
+    expect(mocks.toastSuccess).toHaveBeenCalledWith('已复制全文');
+  });
+
+  it('copies read-only text previews as raw text', async () => {
+    mocks.copyPlainText.mockResolvedValueOnce(undefined);
+
+    render(
+      <FilePreviewModal
+        {...baseProps}
+        name="README.txt"
+        path="README.txt"
+        content="read-only text"
+        size={14}
+        workspacePath={null}
+      />,
+    );
+
+    fireEvent.click(screen.getByLabelText('更多'));
+    fireEvent.click(screen.getByRole('button', { name: '复制全文' }));
+
+    await waitFor(() => {
+      expect(mocks.copyPlainText).toHaveBeenCalledWith('read-only text');
+    });
+    expect(mocks.copyMarkdownAsRichText).not.toHaveBeenCalled();
+    expect(mocks.saveFile).not.toHaveBeenCalled();
+    expect(mocks.toastSuccess).toHaveBeenCalledWith('已复制全文');
   });
 
   it('passes the saved baseline to autosave and converts stale-save failures into external-update pending', async () => {

@@ -26,6 +26,7 @@ import type { FilePreviewFocusTarget } from '@/types/filePreview';
 import { getEditorMonacoLanguage, hasPathologicallyLongLine, isMarkdownFile } from '@/utils/languageUtils';
 import { shortenPathForDisplay } from '@/utils/pathDetection';
 import { retainFocusOnMouseDown } from '@/utils/focusRetention';
+import { copyMarkdownAsRichText, copyPlainText } from '@/utils/markdownClipboard';
 
 import Markdown from './Markdown';
 import { useToast } from './Toast';
@@ -960,6 +961,38 @@ export default function FilePreviewModal({
             .catch(() => toastRef.current.error('复制失败'));
     }, [absolutePathForDisplay]);
 
+    const handleCopyFullText = useCallback(() => {
+        void (async () => {
+            if (richDocKind) return;
+            if (isLoading) {
+                toastRef.current.warning('文件加载中，暂时无法复制');
+                return;
+            }
+            if (error) {
+                toastRef.current.warning('文件预览失败，暂时无法复制');
+                return;
+            }
+
+            const text = editContentRef.current;
+            if (text.length === 0) {
+                toastRef.current.warning('文档内容为空');
+                return;
+            }
+
+            try {
+                if (isMarkdown && !isMdEditView) {
+                    const result = await copyMarkdownAsRichText(text);
+                    toastRef.current.success(result === 'rich' ? '已复制全文' : '已复制纯文本');
+                } else {
+                    await copyPlainText(text);
+                    toastRef.current.success('已复制全文');
+                }
+            } catch {
+                toastRef.current.error('复制失败');
+            }
+        })();
+    }, [error, isLoading, isMarkdown, isMdEditView, richDocKind]);
+
     const handleRevealInTree = useCallback(() => {
         if (!onRevealInTree || localPath) return;
         onRevealInTree(pathRef.current);
@@ -1086,6 +1119,15 @@ export default function FilePreviewModal({
                             icon={<Edit2 className="h-3.5 w-3.5" />}
                             label="重命名"
                             onClick={() => runMenuAction(handleStartRename)}
+                        />
+                    )}
+                    {!richDocKind && (
+                        <MenuItem
+                            icon={<Copy className="h-3.5 w-3.5" />}
+                            label="复制全文"
+                            disabled={isLoading || !!error}
+                            title={isLoading ? '文件加载后可复制' : error ? '文件预览失败，无法复制全文' : undefined}
+                            onClick={() => runMenuAction(handleCopyFullText)}
                         />
                     )}
                 </Popover>
