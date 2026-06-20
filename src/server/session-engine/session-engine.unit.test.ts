@@ -11,7 +11,10 @@ const mocks = vi.hoisted(() => {
     state,
     broadcast: vi.fn(),
     cancelBuiltinImRequest: vi.fn(async () => ({ aborted: false, mode: 'unknown' as const })),
-    cancelQueueItem: vi.fn(async () => ({ status: 'not_found' as const })),
+    cancelQueueItem: vi.fn<() => Promise<
+      | { status: 'cancelled'; cancelledText: string }
+      | { status: 'not_found' | 'not_cancelled' | 'unavailable' | 'error' }
+    >>(async () => ({ status: 'not_found' as const })),
     consumeInjectedTurnOutcome: vi.fn<(injectedTurnId: string) => {
       status: 'complete' | 'stopped' | 'error';
       assistantMessagePresent: boolean;
@@ -239,6 +242,10 @@ describe('session-engine selector and adapters', () => {
       isInFlight: false,
       deliveryMode: 'queue',
     });
+    mocks.cancelQueueItem.mockResolvedValueOnce({
+      status: 'cancelled',
+      cancelledText: 'run cron',
+    });
     mocks.waitForSessionIdle.mockResolvedValueOnce(false);
 
     const result = await getSessionEngine().runInjectedTurn({
@@ -258,13 +265,14 @@ describe('session-engine selector and adapters', () => {
       error: 'Execution timed out',
     });
     expect(mocks.cancelQueueItem).toHaveBeenCalledWith('q-timeout');
-    expect(mocks.discardInjectedTurnOutcome).toHaveBeenCalledTimes(1);
+    expect(mocks.discardInjectedTurnOutcome).toHaveBeenCalledWith(
+      expect.any(String),
+      { retainForLateTerminal: false },
+    );
   });
 
   it('clears stale builtin agent errors before starting an injected turn', async () => {
-    mocks.getAndClearLastAgentError
-      .mockReturnValueOnce('stale previous error')
-      .mockReturnValueOnce(null);
+    mocks.getAndClearLastAgentError.mockReturnValueOnce('stale previous error');
 
     const result = await getSessionEngine().runInjectedTurn({
       prompt: 'heartbeat',
@@ -277,7 +285,7 @@ describe('session-engine selector and adapters', () => {
     });
 
     expect(result).toMatchObject({ success: true, text: 'builtin answer' });
-    expect(mocks.getAndClearLastAgentError).toHaveBeenCalledTimes(2);
+    expect(mocks.getAndClearLastAgentError).toHaveBeenCalledTimes(1);
     expect(mocks.getAndClearLastAgentError.mock.invocationCallOrder[0])
       .toBeLessThan(mocks.enqueueUserMessage.mock.invocationCallOrder[0]);
   });
@@ -360,6 +368,31 @@ describe('session-engine selector and adapters', () => {
       error: 'External runtime turn failed',
     });
     expect(mocks.getLastExternalAssistantText).not.toHaveBeenCalled();
+  });
+
+  it('stops the external runtime when an injected turn times out', async () => {
+    mocks.state.useExternal = true;
+    mocks.sendExternalMessage.mockResolvedValueOnce({ queued: true });
+    mocks.waitForExternalSessionIdle.mockResolvedValueOnce(false);
+
+    const result = await getSessionEngine().runInjectedTurn({
+      prompt: 'heartbeat',
+      sessionId: 'sid',
+      workspacePath: '/workspace',
+      scenario: { type: 'desktop' },
+      permissionMode: 'no-restrictions',
+      timeoutMs: 1000,
+      pollMs: 50,
+    });
+
+    expect(result).toMatchObject({
+      success: false,
+      enqueued: true,
+      status: 408,
+      error: 'Execution timed out',
+    });
+    expect(mocks.stopExternalSession).toHaveBeenCalledTimes(1);
+    expect(mocks.didLastTurnSucceed).not.toHaveBeenCalled();
   });
 
   it('routes permission responses by external liveness compatibility', () => {

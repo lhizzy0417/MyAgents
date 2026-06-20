@@ -77,7 +77,7 @@ export function createBuiltinSessionEngine(): SessionEngine {
         request.permissionMode as PermissionMode | undefined,
         request.model,
         request.providerEnv,
-        undefined,
+        request.reasoningEffort,
         request.metadata,
         request.requestId,
       );
@@ -132,7 +132,7 @@ export function createBuiltinSessionEngine(): SessionEngine {
         request.permissionMode as PermissionMode | undefined,
         request.model,
         request.providerEnv,
-        undefined,
+        request.reasoningEffort,
         request.metadata,
         undefined,
         undefined,
@@ -144,17 +144,15 @@ export function createBuiltinSessionEngine(): SessionEngine {
       }
       const completed = await waitForSessionIdle(request.timeoutMs, request.pollMs ?? 1000);
       if (!completed) {
+        let retainForLateTerminal = true;
         if (enqueueResult.queued && enqueueResult.queueId) {
-          await cancelQueueItem(enqueueResult.queueId);
+          const cancelResult = await cancelQueueItem(enqueueResult.queueId);
+          retainForLateTerminal = cancelResult.status !== 'cancelled';
         }
-        discardInjectedTurnOutcome(injectedTurnId);
+        discardInjectedTurnOutcome(injectedTurnId, { retainForLateTerminal });
         return { success: false, enqueued: true, error: 'Execution timed out', status: 408 };
       }
-      const lastError = getAndClearLastAgentError();
       const outcome = consumeInjectedTurnOutcome(injectedTurnId);
-      if (lastError) {
-        return { success: false, enqueued: true, error: lastError, status: 503 };
-      }
       if (!outcome) {
         return {
           success: false,
@@ -230,10 +228,6 @@ export function createBuiltinSessionEngine(): SessionEngine {
 
     async respondAskUserQuestion(requestId, answers) {
       return handleAskUserQuestionResponse(requestId, answers);
-    },
-
-    didLastTurnSucceed() {
-      return !getAndClearLastAgentError();
     },
   };
 }

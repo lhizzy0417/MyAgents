@@ -350,7 +350,18 @@ SDK subprocess → ANTHROPIC_BASE_URL=127.0.0.1:${sidecarPort}
 
 除内置 Claude Agent SDK（builtin）外，支持 Claude Code CLI、OpenAI Codex CLI、Google Gemini CLI 作为外部 Runtime。功能门控：`config.multiAgentRuntime`（默认关闭，设置 → 关于 → 实验室）。
 
-**抽象层**（`src/server/runtimes/`）：
+**抽象层**：
+
+`src/server/session-engine/` 是 Sidecar HTTP route 面向“当前会话运行时”的门面层：
+
+| 文件 | 职责 |
+|------|------|
+| `selector.ts` | `shouldUseExternalRuntime()` 的 route 分流 owner；选择 builtin/external `SessionEngine` |
+| `builtin-adapter.ts` | 委托 `agent-session.ts`，保持内置 Claude Agent SDK 会话语义 |
+| `external-adapter.ts` | 委托 `external-session.ts`，保持 Claude Code / Codex / Gemini 会话语义 |
+| `types.ts` | `SessionEngine` 接口：desktop send、IM enqueue、injected turn、queue、runtime config 等 route-facing 能力 |
+
+`src/server/runtimes/` 只表示外部 runtime adapter：
 
 | 文件 | 职责 |
 |------|------|
@@ -359,11 +370,11 @@ SDK subprocess → ANTHROPIC_BASE_URL=127.0.0.1:${sidecarPort}
 | `claude-code.ts` | CC Runtime：NDJSON over stdio，`-p` 模式 |
 | `codex.ts` | Codex Runtime：JSON-RPC 2.0 over stdio，`app-server` 持久进程 |
 | `gemini.ts` | Gemini Runtime：ACP JSON-RPC 2.0 over stdio，`gemini --acp` |
-| `external-session.ts` | 统一会话管理：内容块持久化、配置变更、并发守卫、看门狗、Token 用量 |
+| `external-session.ts` | 外部 runtime 会话管理：内容块持久化、配置变更、并发守卫、看门狗、Token 用量 |
 
-**门控链路：** Rust `sidecar.rs` 启动 Sidecar 时读取 `config.multiAgentRuntime` + `agent.runtime` → 注入 `MYAGENTS_RUNTIME` 环境变量 → Node.js `factory.ts` 读取 → `shouldUseExternalRuntime()` 分流。前端 `Chat.tsx` 用同样门控决定 `currentRuntime`。
+**门控链路：** Rust `sidecar.rs` 启动 Sidecar 时读取 `config.multiAgentRuntime` + `agent.runtime` → 注入 `MYAGENTS_RUNTIME` 环境变量 → Node.js `factory.ts` 读取 → `session-engine/selector.ts` 通过 `shouldUseExternalRuntime()` 选择 builtin/external `SessionEngine`。前端 `Chat.tsx` 用同样门控决定 `currentRuntime`。
 
-新增 config 同步端点时，MUST 检查 `shouldUseExternalRuntime()` 并分流到 `external-session.ts`。
+新增“config 同步 / 注入 user 消息 / 等待 turn 完成”的 Sidecar endpoint 时，MUST 走 `SessionEngine` facade；不要在 route handler 里直接手写 builtin/external 分流。仅 external-only legacy/diagnostic endpoint 可直接调用 `external-session.ts`，并需在代码注释说明兼容原因。
 
 详见 `tech_docs/multi_agent_runtime.md`。
 

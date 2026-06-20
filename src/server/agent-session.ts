@@ -6782,9 +6782,16 @@ export function consumeInjectedTurnOutcome(injectedTurnId: string): BuiltinInjec
   return outcome;
 }
 
-export function discardInjectedTurnOutcome(injectedTurnId: string): void {
+export function discardInjectedTurnOutcome(
+  injectedTurnId: string,
+  options?: { retainForLateTerminal?: boolean },
+): void {
   injectedTurnOutcomes.delete(injectedTurnId);
-  discardedInjectedTurnIds.add(injectedTurnId);
+  if (options?.retainForLateTerminal !== false) {
+    discardedInjectedTurnIds.add(injectedTurnId);
+  } else {
+    discardedInjectedTurnIds.delete(injectedTurnId);
+  }
 }
 
 export function getSystemInitInfo(): SystemInitInfo | null {

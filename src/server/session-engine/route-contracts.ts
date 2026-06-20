@@ -93,8 +93,8 @@ export const SESSION_ENGINE_ROUTE_CONTRACTS: SessionEngineRouteContract[] = [
     engineMethod: 'runInjectedTurn',
     requiredFields: ['prompt', 'source', 'sourceId'],
     responseKeys: ['status', 'text', 'reason'],
-    failureStatuses: [500],
-    behavior: 'Runs a synchronous heartbeat turn and lets the route own event drain/requeue semantics.',
+    failureStatuses: [200, 500],
+    behavior: 'Runs a synchronous heartbeat turn and lets the route own event drain/requeue semantics; runtime failures are body-level status values on HTTP 200 unless parsing/handler throws.',
   },
   {
     path: '/api/memory/update',
@@ -102,8 +102,8 @@ export const SESSION_ENGINE_ROUTE_CONTRACTS: SessionEngineRouteContract[] = [
     engineMethod: 'runInjectedTurn',
     requiredFields: ['source'],
     responseKeys: ['status', 'reason'],
-    failureStatuses: [500],
-    behavior: 'Injects memory maintenance through the active engine and gates completion on true turn success.',
+    failureStatuses: [200, 500],
+    behavior: 'Injects memory maintenance through the active engine and gates completion on true turn success; timeout/turn_failed are body-level status values on HTTP 200.',
   },
   {
     path: '/api/inbox/drain',

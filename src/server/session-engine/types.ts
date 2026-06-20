@@ -141,5 +141,4 @@ export interface SessionEngine {
     reason?: string,
   ): Promise<boolean>;
   respondAskUserQuestion(requestId: string, answers: Record<string, string> | null): Promise<boolean>;
-  didLastTurnSucceed(): boolean;
 }

@@ -167,6 +167,7 @@ export function createExternalSessionEngine(): SessionEngine {
       }
       const completed = await waitForExternalSessionIdle(request.timeoutMs, request.pollMs ?? 1000);
       if (!completed) {
+        await stopExternalSession();
         return { success: false, enqueued: true, error: 'Execution timed out', status: 408 };
       }
       if (!didLastTurnSucceed()) {
@@ -234,7 +235,5 @@ export function createExternalSessionEngine(): SessionEngine {
     respondAskUserQuestion(requestId, answers) {
       return respondExternalAskUserQuestion(requestId, answers);
     },
-
-    didLastTurnSucceed,
   };
 }
