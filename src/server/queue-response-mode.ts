@@ -27,10 +27,10 @@ export function decideQueueAdmission(params: {
   mode: ChatQueueResponseMode;
   busy: boolean;
   hasInFlight: boolean;
-  hasTurnBoundaryQueued?: boolean;
+  hasScopedTurnBoundaryQueued?: boolean;
 }): QueueAdmissionAction {
   if (!params.busy) return 'direct';
-  if (params.hasTurnBoundaryQueued) return 'turn-boundary';
+  if (params.hasScopedTurnBoundaryQueued) return 'turn-boundary';
   if (params.mode === 'turn') return 'turn-boundary';
   return params.hasInFlight ? 'realtime-buffer' : 'realtime-inflight';
 }

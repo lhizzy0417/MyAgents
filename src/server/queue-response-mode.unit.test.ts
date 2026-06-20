@@ -50,8 +50,16 @@ describe('chat queue response mode isolation', () => {
         mode: 'realtime',
         busy: true,
         hasInFlight: false,
-        hasTurnBoundaryQueued: true,
+        hasScopedTurnBoundaryQueued: true,
       }),
     ).toBe('turn-boundary');
+    expect(
+      decideQueueAdmission({
+        mode: 'realtime',
+        busy: true,
+        hasInFlight: false,
+        hasScopedTurnBoundaryQueued: false,
+      }),
+    ).toBe('realtime-inflight');
   });
 });

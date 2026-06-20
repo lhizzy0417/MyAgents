@@ -108,7 +108,7 @@ import { trackServer } from './analytics';
 import { getCurrentRuntimeType, isExternalRuntime } from './runtimes/factory';
 import { resolveLastRealUserMessagePreview } from './utils/session-message-preview';
 import { decideBuiltinSessionResume } from './utils/builtin-session-resume';
-import { decideQueueAdmission, resolveChatQueueResponseMode } from './queue-response-mode';
+import { decideQueueAdmission, resolveChatQueueResponseMode, type QueueAdmissionAction } from './queue-response-mode';
 import { elapsedMs, emitPerfTrace, nowMs } from './utils/perf-trace';
 import type { ImagePayload, ResolvedImagePayload } from './runtimes/types';
 import { messageAttachmentsFromImagePayloads, resolveImagePayloads } from './runtimes/image-payload';
@@ -1245,7 +1245,8 @@ type MessageQueueItem = {
 const messageQueue: MessageQueueItem[] = [];
 type TurnBoundaryQueueItem = {
   queueId: string;
-  sourceItem: MessageQueueItem;
+  ready: boolean;
+  sourceItem?: MessageQueueItem;
   messageText: string;
   attachments?: MessageWire['attachments'];
   requestId?: string;
@@ -1254,12 +1255,14 @@ type TurnBoundaryQueueItem = {
   mirrorImages?: MirrorImage[];
 };
 const turnBoundaryQueue: TurnBoundaryQueueItem[] = [];
+let forceTurnBoundaryQueueId: string | null = null;
 type TurnAdmissionTicket = {
   queueId: string;
   requestId?: string;
   createdAt: number;
 };
 let turnAdmissionTicket: TurnAdmissionTicket | null = null;
+let committingTurnAdmissionQueueId: string | null = null;
 
 function releaseTurnAdmissionTicket(queueId?: string): void {
   if (!turnAdmissionTicket) return;
@@ -1713,12 +1716,29 @@ function promoteNextFromPending(): void {
   wakeGenerator(pending.sourceItem);
 }
 
-function startNextTurnQueuedItem(reason: 'complete' | 'stopped' | 'error' | 'recovery'): boolean {
+function startNextTurnQueuedItem(
+  reason: 'complete' | 'stopped' | 'error' | 'recovery',
+  options?: { forceQueueId?: string; allowRealtimePending?: boolean },
+): boolean {
   if (turnBoundaryQueue.length === 0) return false;
+  const requestedQueueId = options?.forceQueueId ?? forceTurnBoundaryQueueId;
+  const queueIndex = requestedQueueId
+    ? turnBoundaryQueue.findIndex(item => item.queueId === requestedQueueId)
+    : 0;
+  if (queueIndex < 0) {
+    if (requestedQueueId === forceTurnBoundaryQueueId) {
+      forceTurnBoundaryQueueId = null;
+    }
+    return false;
+  }
+  const queuedItem = turnBoundaryQueue[queueIndex];
+  if (!queuedItem?.ready || !queuedItem.sourceItem) {
+    return false;
+  }
   if (
     isTurnInFlight()
     || inFlightToCliId !== null
-    || pendingMidTurnQueue.length > 0
+    || (pendingMidTurnQueue.length > 0 && !options?.allowRealtimePending)
     || messageQueue.length > 0
     || promotedItemInFlight
     || (shouldAbortSession && (reason !== 'recovery' || querySession !== null))
@@ -1728,7 +1748,11 @@ function startNextTurnQueuedItem(reason: 'complete' | 'stopped' | 'error' | 'rec
     return false;
   }
 
-  const item = turnBoundaryQueue.shift()!;
+  const [item] = turnBoundaryQueue.splice(queueIndex, 1);
+  if (!item.sourceItem) return false;
+  if (item.queueId === forceTurnBoundaryQueueId) {
+    forceTurnBoundaryQueueId = null;
+  }
   const userMessage: MessageWire = {
     id: String(messageSequence++),
     role: 'user',
@@ -1779,6 +1803,15 @@ function startNextTurnQueuedItem(reason: 'complete' | 'stopped' | 'error' | 'rec
 
 function schedulePostTerminalQueueDrain(reason: 'complete' | 'stopped' | 'error' | 'recovery'): void {
   setTimeout(() => {
+    if (
+      forceTurnBoundaryQueueId
+      && startNextTurnQueuedItem(reason, {
+        forceQueueId: forceTurnBoundaryQueueId,
+        allowRealtimePending: true,
+      })
+    ) {
+      return;
+    }
     promoteNextFromPending();
     startNextTurnQueuedItem(reason);
   }, 0);
@@ -1854,7 +1887,9 @@ function abortPersistentSession(): void {
   // requeue them (could duplicate a message the SDK already consumed but
   // never replayed before abort). Terminate the UI honestly.
   dropInFlightQueueItem('session aborted before SDK consumption confirmation', 'failed');
-  releaseTurnAdmissionTicket();
+  if (turnAdmissionTicket?.queueId !== committingTurnAdmissionQueueId) {
+    releaseTurnAdmissionTicket();
+  }
   promotedItemInFlight = false;
   // Subprocess is about to die — rescue pending items so the recovery session
   // re-delivers them instead of losing them with the dead stdin buffer.
@@ -6785,9 +6820,14 @@ function drainQueueWithCancellation(): void {
     broadcast('queue:cancelled', { queueId: item.id });
   }
   for (const item of turnBoundaryQueue) {
-    pushInboxAbortReplyForQueuedItem(item.sourceItem, 'message_dropped_on_reset');
+    if (item.sourceItem) {
+      pushInboxAbortReplyForQueuedItem(item.sourceItem, 'message_dropped_on_reset');
+      item.sourceItem.resolve();
+    }
+    if (item.queueId === forceTurnBoundaryQueueId) {
+      forceTurnBoundaryQueueId = null;
+    }
     releaseTurnAdmissionTicket(item.queueId);
-    item.sourceItem.resolve();
     broadcast('queue:cancelled', { queueId: item.queueId });
   }
   releaseTurnAdmissionTicket();
@@ -7814,8 +7854,11 @@ export async function enqueueUserMessage(
     || promotedItemInFlight;
   if (queueResponseMode === 'turn' && !initialAdmissionBusy) {
     turnAdmissionTicket = { queueId, requestId, createdAt: Date.now() };
+    committingTurnAdmissionQueueId = queueId;
   }
   let keepTurnAdmissionTicketUntilGenerator = false;
+  let reservedTurnBoundaryItem: TurnBoundaryQueueItem | null = null;
+  let reservedAdmissionAction: QueueAdmissionAction | null = null;
 
   try {
   // ─── DELAYED CONTINUE (consume flag) ──────────────────────────────────
@@ -7971,7 +8014,17 @@ export async function enqueueUserMessage(
     // Explicit cancel — broadcasts queue:cancelled so frontend clears stale pills
     // before the new message (added below) fires queue:added. Without this, the UI
     // would show old pills as phantoms alongside the new one.
-    drainQueueWithCancellation();
+    //
+    // Turn-mode direct admission is different: no queued work existed when
+    // the ticket was created, and any turnBoundaryQueue item that appears
+    // during awaitSessionTermination is a legitimate rapid second send behind
+    // this ticket. Do not drain that new work as if it belonged to the dead
+    // provider session.
+    if (turnAdmissionTicket?.queueId === queueId && committingTurnAdmissionQueueId === queueId) {
+      console.log('[agent] provider/history restart preserving turn-mode admission queue');
+    } else {
+      drainQueueWithCancellation();
+    }
     // Clear stream state mappings (will be rebuilt by new session)
     streamIndexToToolId.clear();
     toolResultIndexToId.clear();
@@ -8148,6 +8201,32 @@ export async function enqueueUserMessage(
   // pre-warm), the per-turn metadata still proves the subprocess is alive.
   setSessionState((systemInitInfo || sdkControlReady) ? 'running' : 'starting');
 
+  const MAX_QUEUE_SIZE = 10;
+  if (isSessionBusy && !holdForWatchdogRecovery) {
+    if (queuedWorkCount() >= MAX_QUEUE_SIZE) {
+      return { queued: false, error: `Queue full (max ${MAX_QUEUE_SIZE})` };
+    }
+    const reservationAdmissionAction = decideQueueAdmission({
+      mode: queueResponseMode,
+      busy: true,
+      hasInFlight: inFlightToCliId !== null,
+      hasScopedTurnBoundaryQueued: options?.fromDesktopChatSend === true
+        && (turnBoundaryQueue.length > 0 || turnAdmissionTicket !== null),
+    });
+    if (reservationAdmissionAction === 'turn-boundary') {
+      reservedAdmissionAction = reservationAdmissionAction;
+      reservedTurnBoundaryItem = {
+        queueId,
+        ready: false,
+        messageText: trimmed,
+        requestId,
+      };
+      turnBoundaryQueue.push(reservedTurnBoundaryItem);
+      console.log(`[agent] Reserved turn-boundary queue slot: queueId=${queueId} requestId=${requestId ?? '-'} text="${trimmed.slice(0, 50)}"`);
+      broadcast('queue:added', { queueId, messageText: trimmed.slice(0, 100), isInFlight: false, deliveryMode: 'turn' });
+    }
+  }
+
   // Persist/adopt user image attachment records, then resolve refs at the
   // Sidecar runtime boundary. Renderer path drops send attachment refs, not
   // large base64 request bodies; legacy no-path File/paste fallback may still
@@ -8314,16 +8393,16 @@ export async function enqueueUserMessage(
   if (isSessionBusy) {
     // Backend queue limit (defense-in-depth — frontend also enforces limit)
     // Count messageQueue + pendingMidTurnQueue + turnBoundaryQueue + the in-flight slot.
-    const MAX_QUEUE_SIZE = 10;
-    if (queuedWorkCount() >= MAX_QUEUE_SIZE) {
+    if (!reservedTurnBoundaryItem && queuedWorkCount() >= MAX_QUEUE_SIZE) {
       return { queued: false, error: `Queue full (max ${MAX_QUEUE_SIZE})` };
     }
-    const admissionAction = decideQueueAdmission({
-      mode: queueResponseMode,
-      busy: true,
-      hasInFlight: inFlightToCliId !== null,
-      hasTurnBoundaryQueued: turnBoundaryQueue.length > 0 || turnAdmissionTicket !== null,
-    });
+    const admissionAction = reservedAdmissionAction ?? decideQueueAdmission({
+        mode: queueResponseMode,
+        busy: true,
+        hasInFlight: inFlightToCliId !== null,
+        hasScopedTurnBoundaryQueued: options?.fromDesktopChatSend === true
+          && (turnBoundaryQueue.length > 0 || turnAdmissionTicket !== null),
+      });
     const queueDeliveryMode: QueueDeliveryMode = admissionAction === 'turn-boundary' ? 'turn' : 'realtime';
     const queueItem: MessageQueueItem = {
       id: queueId,
@@ -8347,18 +8426,29 @@ export async function enqueueUserMessage(
       console.log(`[agent] Message queued behind watchdog recovery reminder: queueId=${queueId} requestId=${requestId ?? '-'} text="${trimmed.slice(0, 50)}"`);
       broadcast('queue:added', { queueId, messageText: trimmed.slice(0, 100), isInFlight: false, deliveryMode: queueDeliveryMode });
     } else if (admissionAction === 'turn-boundary') {
-      turnBoundaryQueue.push({
+      const turnItem = reservedTurnBoundaryItem;
+      if (turnItem && !turnBoundaryQueue.includes(turnItem)) {
+        console.log(`[agent] Turn-boundary queue item ${queueId} was cancelled before preparation completed`);
+        return { queued: false };
+      }
+      const readyTurnItem = turnItem ?? {
         queueId,
-        sourceItem: queueItem,
+        ready: false,
         messageText: trimmed,
-        attachments: savedAttachments.length > 0 ? savedAttachments : undefined,
         requestId,
-        source: effectiveQueueSource === 'desktop' ? 'desktop' : metadata?.source,
-        analyticsSource: analyticsSource ?? currentScenario.type,
-        mirrorImages: toMirrorImages(resolvedImages),
-      });
+      };
+      readyTurnItem.ready = true;
+      readyTurnItem.sourceItem = queueItem;
+      readyTurnItem.attachments = savedAttachments.length > 0 ? savedAttachments : undefined;
+      readyTurnItem.source = effectiveQueueSource === 'desktop' ? 'desktop' : metadata?.source;
+      readyTurnItem.analyticsSource = analyticsSource ?? currentScenario.type;
+      readyTurnItem.mirrorImages = toMirrorImages(resolvedImages);
+      if (!turnItem) {
+        turnBoundaryQueue.push(readyTurnItem);
+        broadcast('queue:added', { queueId, messageText: trimmed.slice(0, 100), isInFlight: false, deliveryMode: 'turn' });
+      }
       console.log(`[agent] Message queued for next turn boundary: queueId=${queueId} requestId=${requestId ?? '-'} text="${trimmed.slice(0, 50)}"`);
-      broadcast('queue:added', { queueId, messageText: trimmed.slice(0, 100), isInFlight: false, deliveryMode: 'turn' });
+      startNextTurnQueuedItem('recovery');
     } else if (admissionAction === 'realtime-inflight') {
       // No in-flight queue item — this becomes the in-flight one. Yield
       // immediately so CLI receives it and the next mid-turn drain
@@ -8487,11 +8577,25 @@ export async function enqueueUserMessage(
 
   return { queued: false };
   } finally {
+    if (reservedTurnBoundaryItem && !reservedTurnBoundaryItem.ready) {
+      const reservationIdx = turnBoundaryQueue.indexOf(reservedTurnBoundaryItem);
+      if (reservationIdx >= 0) {
+        turnBoundaryQueue.splice(reservationIdx, 1);
+        if (reservedTurnBoundaryItem.queueId === forceTurnBoundaryQueueId) {
+          forceTurnBoundaryQueueId = null;
+        }
+        broadcast('queue:cancelled', { queueId: reservedTurnBoundaryItem.queueId });
+        startNextTurnQueuedItem('recovery');
+      }
+    }
     const releasedAdmissionTicket = !keepTurnAdmissionTicketUntilGenerator
       && turnAdmissionTicket?.queueId === queueId;
     if (releasedAdmissionTicket) {
       releaseTurnAdmissionTicket(queueId);
       startNextTurnQueuedItem('recovery');
+    }
+    if (committingTurnAdmissionQueueId === queueId) {
+      committingTurnAdmissionQueueId = null;
     }
   }
 }
@@ -8758,7 +8862,10 @@ export async function cancelImRequest(
   const tbIdx = turnBoundaryQueue.findIndex(item => item.requestId === requestId);
   if (tbIdx >= 0) {
     const [removed] = turnBoundaryQueue.splice(tbIdx, 1);
-    removed.sourceItem.resolve();
+    removed.sourceItem?.resolve();
+    if (removed.queueId === forceTurnBoundaryQueueId) {
+      forceTurnBoundaryQueueId = null;
+    }
     broadcast('queue:cancelled', { queueId: removed.queueId });
     console.log(`[agent] cancelImRequest requestId=${requestId} mode=turn-boundary (never yielded to CLI)`);
     return { aborted: true, mode: 'queued' };
@@ -8844,7 +8951,10 @@ export async function cancelQueueItem(queueId: string): Promise<QueueCancelResul
   const tbIdx = turnBoundaryQueue.findIndex(item => item.queueId === queueId);
   if (tbIdx >= 0) {
     const [removed] = turnBoundaryQueue.splice(tbIdx, 1);
-    removed.sourceItem.resolve();
+    removed.sourceItem?.resolve();
+    if (removed.queueId === forceTurnBoundaryQueueId) {
+      forceTurnBoundaryQueueId = null;
+    }
     broadcast('queue:cancelled', { queueId });
     console.log(`[agent] Queue item ${queueId} cancelled from turnBoundaryQueue`);
     if (!hasQueuedOrInFlightWork() && !isTurnInFlight()) {
@@ -8928,8 +9038,10 @@ export async function forceExecuteQueueItem(queueId: string): Promise<boolean> {
   }
 
   if (tbIdx >= 0 && !isTurnInFlight()) {
-    startNextTurnQueuedItem('recovery');
-    return true;
+    return startNextTurnQueuedItem('recovery', {
+      forceQueueId: queueId,
+      allowRealtimePending: true,
+    });
   }
 
   if (isSessionActive()) {
@@ -8938,14 +9050,18 @@ export async function forceExecuteQueueItem(queueId: string): Promise<boolean> {
     // by the SDK) instead of dropping it from the UI like a plain stop would.
     if (isInFlight) {
       forceSurfaceInFlightId = queueId;
+    } else if (tbIdx >= 0) {
+      forceTurnBoundaryQueueId = queueId;
     }
     await interruptCurrentResponse();
   } else {
     // Session 已死：generator 不存在，无人消费队列。
     // 启动新 session 来处理队列中的消息。
     if (tbIdx >= 0) {
-      startNextTurnQueuedItem('recovery');
-      return true;
+      return startNextTurnQueuedItem('recovery', {
+        forceQueueId: queueId,
+        allowRealtimePending: true,
+      });
     }
     console.log('[agent] forceExecuteQueueItem: session dead, starting new session');
     preWarmFailCount = 0;

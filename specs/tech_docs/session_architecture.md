@@ -101,7 +101,7 @@ querySession = query({
 
 - 只有 `/chat/send` 调 `enqueueUserMessage(..., { fromDesktopChatSend: true })` 时读取该设置；IM / Cron / Inbox drain / external runtime 继续走原有实时语义。
 - `turnBoundaryQueue` 不直接复用 `messageQueue` 的 mid-turn 投递语义；它只在 clean turn boundary 由 `startNextTurnQueuedItem()` 启动，避免轮次模式污染实时模式。
-- 一旦 `turnBoundaryQueue` 或 turn-mode admission ticket 已存在，后续同 session 的忙时发送必须继续排到 turn boundary；禁止后来的 realtime / 非桌面消息越过已经承诺的下一轮。
+- 一旦 `turnBoundaryQueue` 或 turn-mode admission ticket 已存在，后续同 session 的桌面 `/chat/send` 忙时发送必须继续排到 turn boundary；非桌面来源不读取该 UI 设置，保持各自既有队列语义。
 - abort / stop / crash recovery 必须同时清理或恢复 `messageQueue`、`pendingMidTurnQueue`、`turnBoundaryQueue` 和 admission ticket，避免只处理旧队列造成 orphan query。
 
 ### `sessionRegistered` 状态
