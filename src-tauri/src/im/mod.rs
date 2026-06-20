@@ -368,6 +368,7 @@ async fn sync_runtime_config_to_sidecars(
             .json(&json!({
                 "runtime": runtime,
                 "runtimeConfig": runtime_config,
+                "source": "im-sync",
             }))
             .send()
             .await
@@ -8411,7 +8412,11 @@ pub async fn cmd_update_agent_config(
                             match router
                                 .http_client()
                                 .post(&url)
-                                .json(&json!({ "runtime": runtime, "runtimeConfig": config }))
+                                .json(&json!({
+                                    "runtime": runtime,
+                                    "runtimeConfig": config,
+                                    "source": "im-sync",
+                                }))
                                 .send()
                                 .await
                             {

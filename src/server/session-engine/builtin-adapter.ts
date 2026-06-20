@@ -30,6 +30,7 @@ import type {
   InjectedTurnResult,
   SessionEngine,
 } from './types';
+import { decideBuiltinInjectedTurnResult } from '../session-core/turn-result-policy';
 
 export function createBuiltinSessionEngine(): SessionEngine {
   return {
@@ -150,31 +151,10 @@ export function createBuiltinSessionEngine(): SessionEngine {
           retainForLateTerminal = cancelResult.status !== 'cancelled';
         }
         discardInjectedTurnOutcome(injectedTurnId, { retainForLateTerminal });
-        return { success: false, enqueued: true, error: 'Execution timed out', status: 408 };
+        return { ...decideBuiltinInjectedTurnResult({ idleCompleted: false }), enqueued: true };
       }
       const outcome = consumeInjectedTurnOutcome(injectedTurnId);
-      if (!outcome) {
-        return {
-          success: false,
-          enqueued: true,
-          error: 'Injected turn finished without a recorded outcome',
-          status: 503,
-        };
-      }
-      if (outcome.status !== 'complete') {
-        return {
-          success: false,
-          enqueued: true,
-          error: outcome.error ?? `Injected turn ${outcome.status}`,
-          status: 503,
-        };
-      }
-      return {
-        success: true,
-        enqueued: true,
-        assistantMessagePresent: outcome.assistantMessagePresent,
-        text: outcome.text,
-      };
+      return { ...decideBuiltinInjectedTurnResult({ idleCompleted: true, outcome }), enqueued: true };
     },
 
     async stopTurn() {

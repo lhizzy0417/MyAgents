@@ -1,4 +1,4 @@
-import { getActiveRuntimeType, respondExternalPermission } from '../runtimes/external-session';
+import { getActiveRuntimeType, respondExternalPermission, type ExternalConfigSource } from '../runtimes/external-session';
 import { getSessionEngine, getSessionEngineKind } from '../session-engine';
 
 function jsonResponse(body: unknown, status = 200): Response {
@@ -13,6 +13,21 @@ export type SessionEngineRuntimeRouteDeps = {
   resolvePrewarmSessionId(requestedSessionId: string | undefined): string;
 };
 
+const RUNTIME_CONFIG_SOURCES = new Set<ExternalConfigSource>([
+  'runtime-config',
+  'message-snapshot',
+  'desktop',
+  'im-sync',
+  'cron-sync',
+  'adopt-sync',
+]);
+
+function parseRuntimeConfigSource(value: unknown): ExternalConfigSource {
+  return typeof value === 'string' && RUNTIME_CONFIG_SOURCES.has(value as ExternalConfigSource)
+    ? value as ExternalConfigSource
+    : 'runtime-config';
+}
+
 export async function handleSessionEngineRuntimeRoute(
   pathname: string,
   request: Request,
@@ -26,6 +41,7 @@ export async function handleSessionEngineRuntimeRoute(
         permissionMode?: string | null;
         reasoningEffort?: string | null;
       } | null;
+      source?: unknown;
     };
     const activeRuntime = getActiveRuntimeType();
     if (getSessionEngineKind() === 'builtin') {
@@ -36,11 +52,12 @@ export async function handleSessionEngineRuntimeRoute(
     }
 
     const runtimeConfig = body.runtimeConfig ?? {};
+    const source = parseRuntimeConfigSource(body.source);
     const result = await getSessionEngine().updateRuntimeConfig({
       ...('model' in runtimeConfig ? { model: runtimeConfig.model ?? '' } : {}),
       ...('permissionMode' in runtimeConfig ? { permissionMode: runtimeConfig.permissionMode ?? '' } : {}),
       ...('reasoningEffort' in runtimeConfig ? { reasoningEffort: runtimeConfig.reasoningEffort ?? '' } : {}),
-    }, { source: 'runtime-config' });
+    }, { source });
 
     return jsonResponse(result, result.success ? 200 : 500);
   }

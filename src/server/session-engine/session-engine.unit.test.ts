@@ -370,6 +370,15 @@ describe('session-engine selector and adapters', () => {
     expect(mocks.getLastExternalAssistantText).not.toHaveBeenCalled();
   });
 
+  it('forwards model sync source options to the external engine', async () => {
+    mocks.state.useExternal = true;
+
+    const result = await getSessionEngine().updateModel('channel-model', { imConfigSync: true });
+
+    expect(result).toEqual({ success: true });
+    expect(mocks.setExternalModel).toHaveBeenCalledWith('channel-model', { imConfigSync: true });
+  });
+
   it('stops the external runtime when an injected turn times out', async () => {
     mocks.state.useExternal = true;
     mocks.sendExternalMessage.mockResolvedValueOnce({ queued: true });

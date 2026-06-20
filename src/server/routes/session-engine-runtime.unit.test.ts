@@ -90,6 +90,30 @@ describe('handleSessionEngineRuntimeRoute', () => {
     );
   });
 
+  it('preserves IM sync source on external runtime config patches', async () => {
+    mocks.state.kind = 'external';
+
+    const response = await handleSessionEngineRuntimeRoute(
+      '/api/runtime/config',
+      new Request('http://local/api/runtime/config', {
+        method: 'POST',
+        body: JSON.stringify({
+          runtime: 'codex',
+          runtimeConfig: { model: 'channel-model' },
+          source: 'im-sync',
+        }),
+      }),
+      deps,
+    );
+
+    expect(response?.status).toBe(200);
+    expect(await readJson(response!)).toEqual({ success: true });
+    expect(mocks.engine.updateRuntimeConfig).toHaveBeenCalledWith(
+      { model: 'channel-model' },
+      { source: 'im-sync' },
+    );
+  });
+
   it('prewarms external runtime sessions with resolved session id and workspace', async () => {
     mocks.state.kind = 'external';
 

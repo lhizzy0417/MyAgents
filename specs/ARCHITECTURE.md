@@ -361,6 +361,8 @@ SDK subprocess → ANTHROPIC_BASE_URL=127.0.0.1:${sidecarPort}
 | `external-adapter.ts` | 委托 `external-session.ts`，保持 Claude Code / Codex / Gemini 会话语义 |
 | `types.ts` | `SessionEngine` 接口：desktop send、IM enqueue、injected turn、queue、runtime config 等 route-facing 能力 |
 
+`src/server/session-core/` 是 builtin / external 会话内核共享的 pure policy 层。它不拥有 SDK/CLI 进程、副作用或 SSE，只承载可单测的决策：turn result 判定、runtime config snapshot/source guard、desktop/turn-boundary queue admission、MCP authority/fingerprint/restart 决策。
+
 `src/server/runtimes/` 只表示外部 runtime adapter：
 
 | 文件 | 职责 |

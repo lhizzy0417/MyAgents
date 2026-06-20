@@ -28,6 +28,7 @@ import type {
   InjectedTurnResult,
   SessionEngine,
 } from './types';
+import { decideExternalInjectedTurnResult } from '../session-core/turn-result-policy';
 
 export function createExternalSessionEngine(): SessionEngine {
   return {
@@ -168,12 +169,15 @@ export function createExternalSessionEngine(): SessionEngine {
       const completed = await waitForExternalSessionIdle(request.timeoutMs, request.pollMs ?? 1000);
       if (!completed) {
         await stopExternalSession();
-        return { success: false, enqueued: true, error: 'Execution timed out', status: 408 };
+        return { ...decideExternalInjectedTurnResult({ idleCompleted: false }), enqueued: true };
       }
-      if (!didLastTurnSucceed()) {
-        return { success: false, enqueued: true, error: 'External runtime turn failed', status: 503 };
-      }
-      return { success: true, enqueued: true, text: getLastExternalAssistantText() };
+      const turnSucceeded = didLastTurnSucceed();
+      const decision = decideExternalInjectedTurnResult({
+        idleCompleted: true,
+        turnSucceeded,
+        text: turnSucceeded ? getLastExternalAssistantText() : undefined,
+      });
+      return { ...decision, enqueued: true };
     },
 
     async stopTurn() {
@@ -201,8 +205,8 @@ export function createExternalSessionEngine(): SessionEngine {
       return waitForExternalSessionIdle(timeoutMs, pollMs);
     },
 
-    updateModel(model) {
-      return setExternalModel(model);
+    updateModel(model, opts) {
+      return setExternalModel(model, opts);
     },
 
     updatePermissionMode(mode) {

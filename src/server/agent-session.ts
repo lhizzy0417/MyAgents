@@ -108,7 +108,9 @@ import { trackServer } from './analytics';
 import { getCurrentRuntimeType, isExternalRuntime } from './runtimes/factory';
 import { resolveLastRealUserMessagePreview } from './utils/session-message-preview';
 import { decideBuiltinSessionResume } from './utils/builtin-session-resume';
-import { decideQueueAdmission, resolveChatQueueResponseMode, type QueueAdmissionAction } from './queue-response-mode';
+import { decideQueueAdmission, findQueueLocation, resolveChatQueueResponseMode, shouldClearAdmissionTicketOnAbort, shouldStartTurnBoundaryItem, moveQueueIndexToFront, type QueueAdmissionAction } from './session-core/turn-queue';
+import { decideMcpSync, getMcpAuthorityForScenario, mcpConfigFingerprint } from './session-core/mcp-sync-policy';
+import { shouldApplySnapshotConfigUpdate } from './session-core/runtime-config-policy';
 import { elapsedMs, emitPerfTrace, nowMs } from './utils/perf-trace';
 import type { ImagePayload, ResolvedImagePayload } from './runtimes/types';
 import { messageAttachmentsFromImagePayloads, resolveImagePayloads } from './runtimes/image-payload';
@@ -1769,16 +1771,19 @@ function startNextTurnQueuedItem(
   if (!queuedItem?.ready || !queuedItem.sourceItem) {
     return false;
   }
-  if (
-    isTurnInFlight()
-    || inFlightToCliId !== null
-    || (pendingMidTurnQueue.length > 0 && !options?.allowRealtimePending)
-    || messageQueue.length > 0
-    || promotedItemInFlight
-    || (shouldAbortSession && (reason !== 'recovery' || querySession !== null))
-    || resetPromise
-    || rewindPromise
-  ) {
+  if (!shouldStartTurnBoundaryItem({
+    hasTurnInFlight: isTurnInFlight(),
+    hasInFlightToCli: inFlightToCliId !== null,
+    hasPendingMidTurn: pendingMidTurnQueue.length > 0,
+    allowRealtimePending: options?.allowRealtimePending,
+    hasMessageQueue: messageQueue.length > 0,
+    promotedItemInFlight,
+    shouldAbortSession,
+    reason,
+    hasQuerySession: querySession !== null,
+    hasResetInProgress: Boolean(resetPromise),
+    hasRewindInProgress: Boolean(rewindPromise),
+  })) {
     return false;
   }
 
@@ -1921,7 +1926,10 @@ function abortPersistentSession(): void {
   // requeue them (could duplicate a message the SDK already consumed but
   // never replayed before abort). Terminate the UI honestly.
   dropInFlightQueueItem('session aborted before SDK consumption confirmation', 'failed');
-  if (turnAdmissionTicket?.queueId !== committingTurnAdmissionQueueId) {
+  if (shouldClearAdmissionTicketOnAbort({
+    ticketQueueId: turnAdmissionTicket?.queueId,
+    committingQueueId: committingTurnAdmissionQueueId,
+  })) {
     releaseTurnAdmissionTicket();
   }
   promotedItemInFlight = false;
@@ -2656,7 +2664,7 @@ export async function withCronDispatchLock<T>(fn: () => Promise<T>): Promise<T> 
  *      the deferred-restart machinery.
  *
  * Behaviour:
- *   - Calls `setMcpServers(servers)` to update `currentMcpServers`.
+ *   - Updates `currentMcpServers` directly because cron owns the override.
  *   - If the MCP fingerprint changed AND a session is live: cancels the
  *     pre-warm timer, drains the deferred-restart reasons, aborts the
  *     persistent session, awaits termination, kicks off a fresh
@@ -2673,7 +2681,7 @@ export async function withCronDispatchLock<T>(fn: () => Promise<T>): Promise<T> 
 export async function applyMcpOverrideAndAwaitReady(servers: McpServerDefinition[]): Promise<void> {
   const before = mcpConfigFingerprint(currentMcpServers ?? []);
   const after = mcpConfigFingerprint(servers);
-  setMcpServers(servers);
+  currentMcpServers = servers;
   if (before === after) return;
   if (!querySession) return; // no live session — next enqueueUserMessage starts one with the current fingerprint
   // Live session with a different MCP fingerprint — force restart.
@@ -2711,9 +2719,22 @@ export async function applyMcpOverrideAndAwaitReady(servers: McpServerDefinition
  * If MCP config changed and a session is running, it will be restarted with resume
  */
 export function setMcpServers(servers: McpServerDefinition[]): void {
-  // Detect config changes: compare full config fingerprint (not just IDs)
-  // so that env/args changes (e.g. API key update) also trigger session restart.
-  const mcpChanged = mcpConfigFingerprint(currentMcpServers ?? []) !== mcpConfigFingerprint(servers);
+  const mcpDecision = decideMcpSync({
+    previousServers: currentMcpServers ?? [],
+    nextServers: servers,
+    hasQuerySession: Boolean(querySession),
+    isSnapshotted: isCurrentSessionSnapshotted(),
+  });
+
+  if (mcpDecision.changed && querySession && mcpDecision.reason === 'snapshot-authoritative') {
+    // v0.1.69 T14: Locked session owns its MCP list — agent-level toggles don't apply here.
+    // Expected frontend behavior is to pass the session-resolved list so mcpChanged is false;
+    // if we got here, it means someone passed the agent's raw list. Do not mutate
+    // currentMcpServers: ensureSdkMcpInSync() reads that state and would otherwise
+    // apply the wrong list later without a restart.
+    console.log(`[agent] MCP changed but session ${sessionId} is snapshotted — skip state update/restart (snapshot is authoritative)`);
+    return;
+  }
 
   currentMcpServers = servers;
   if (isDebugMode) {
@@ -2730,13 +2751,8 @@ export function setMcpServers(servers: McpServerDefinition[]): void {
   // (e.g. 7 calls in 4s when toggling one server in Settings) would kill the SDK
   // subprocess + all stdio MCP servers repeatedly, destroying in-process state.
   // The timer in schedulePreWarm() batches these into a single abort+restart.
-  if (mcpChanged && querySession) {
-    if (isCurrentSessionSnapshotted()) {
-      // v0.1.69 T14: Locked session owns its MCP list — agent-level toggles don't apply here.
-      // Expected frontend behavior is to pass the session-resolved list so mcpChanged is false;
-      // if we got here, it means someone passed the agent's raw list. Log and skip restart.
-      console.log(`[agent] MCP changed but session ${sessionId} is snapshotted — skip restart (snapshot is authoritative)`);
-    } else {
+  if (mcpDecision.changed && querySession) {
+    if (mcpDecision.shouldRestart) {
       const ids = servers.map(s => s.id).join(', ') || 'none';
       console.log(`[agent] MCP config changed → [${ids}], deferring restart to pre-warm debounce`);
       scheduleDeferredRestart('mcp');
@@ -2748,16 +2764,6 @@ export function setMcpServers(servers: McpServerDefinition[]): void {
   if (!isProcessing || isPreWarming) {
     schedulePreWarm();
   }
-}
-
-/** Stable fingerprint of MCP config for change detection (covers id + command + args + env + url + headers) */
-function mcpConfigFingerprint(servers: McpServerDefinition[]): string {
-  return JSON.stringify(
-    servers
-      .slice()
-      .sort((a, b) => a.id.localeCompare(b.id))
-      .map(s => ({ id: s.id, type: s.type, command: s.command, args: s.args, url: s.url, env: s.env, headers: s.headers }))
-  );
 }
 
 /**
@@ -2872,7 +2878,11 @@ export function setSessionPermissionMode(mode: PermissionMode): void {
   // change the live mode. This is security-relevant: an IM channel on fullAgency
   // must NOT silently downgrade a desktop session's plan-mode hard gate. Pure IM
   // sessions (not snapshotted) fall through and live-follow the channel mode.
-  if (isCurrentSessionSnapshotted()) {
+  if (!shouldApplySnapshotConfigUpdate({
+    field: 'permissionMode',
+    source: 'im-sync',
+    isSnapshotted: isCurrentSessionSnapshotted(),
+  })) {
     // warn, not log: this guard is UNCONDITIONAL (no imConfigSync flag) because a
     // caller audit proved only the Rust IM router hits this endpoint. If a future
     // desktop/renderer caller ever lands here, its change is swallowed — make
@@ -3025,7 +3035,11 @@ export function setSessionModel(model: string, opts?: { imConfigSync?: boolean }
   // no `imConfigSync`) stays authoritative — it updates the snapshot itself.
   // Pure IM / cron / live-follow sessions have no snapshot, so this is a no-op
   // for them (isCurrentSessionSnapshotted() === false) and the override applies.
-  if (opts?.imConfigSync && isCurrentSessionSnapshotted()) {
+  if (!shouldApplySnapshotConfigUpdate({
+    field: 'model',
+    source: opts?.imConfigSync ? 'im-sync' : 'desktop',
+    isSnapshotted: isCurrentSessionSnapshotted(),
+  })) {
     console.log(`[agent] IM config sync model '${model}' ignored — session ${sessionId} is snapshotted (snapshot wins)`);
     return;
   }
@@ -3202,7 +3216,11 @@ export function setSessionProviderEnv(providerEnv: ProviderEnv | undefined): voi
   // still became the channel's (e.g. Xunfei) while the resolved model stayed
   // DeepSeek → real "Model Not Found" 500 (#327 comment). Pure IM / cron
   // sessions (not snapshotted) fall through to the normal live-follow path.
-  if (isCurrentSessionSnapshotted()) {
+  if (!shouldApplySnapshotConfigUpdate({
+    field: 'provider',
+    source: 'im-sync',
+    isSnapshotted: isCurrentSessionSnapshotted(),
+  })) {
     // warn, not log: same rationale as the permissionMode guard — unconditional
     // by caller audit (Rust-IM-router-only); a future non-IM caller's change
     // would be swallowed here and must be loud.
@@ -7328,25 +7346,28 @@ export async function initializeAgent(
   if (!preWarmDisabled) {
     try {
       const { resolveWorkspaceConfig } = await import('./utils/admin-config');
+      const mcpAuthority = getMcpAuthorityForScenario(currentScenario.type);
+      const shouldSelfResolveMcp = mcpAuthority === 'self-resolve' && hasInitialPrompt;
       // v0.1.69: pass session metadata so the sidecar prefers session snapshot
       // (`meta.model`, `meta.providerId/EnvJson`, `meta.mcpEnabledServers`) over the
       // agent's current values. For IM sessions (which deliberately don't snapshot
       // these fields), this is a no-op — the agent fallback handles them.
       //
-      // Pass `includeMcp: hasInitialPrompt` — Tab sessions (no initial prompt)
-      // deliberately skip MCP self-resolve below anyway (the frontend's
-      // /api/mcp/set is authoritative), so asking resolveWorkspaceConfig to
-      // compute an MCP list that will be discarded is pure waste. Cuts the
-      // expensive getAllMcpServers/getEffectiveMcpServers disk walk out of
-      // the Tab-open critical path.
+      // Pass `includeMcp: shouldSelfResolveMcp` — Tab sessions deliberately
+      // skip MCP self-resolve because the frontend's /api/mcp/set is
+      // authoritative, so asking resolveWorkspaceConfig to compute an MCP list
+      // that will be discarded is pure waste. Cuts the expensive
+      // getAllMcpServers/getEffectiveMcpServers disk walk out of the Tab-open
+      // critical path.
       const resolved = resolveWorkspaceConfig(agentDir, initMeta, {
-        includeMcp: hasInitialPrompt,
+        includeMcp: shouldSelfResolveMcp,
       });
-      // Only self-resolve MCP for sessions with initialPrompt (IM/Cron).
-      // Tab sessions must NOT self-resolve: the frontend's /api/mcp/set is the
-      // authoritative source, and self-resolve produces slightly different field
-      // structures (env/args) that trigger a fingerprint mismatch → abort → 30s delay.
-      if (hasInitialPrompt && currentMcpServers === null && resolved.mcpServers.length > 0) {
+      // Only self-resolve MCP for background authorities (IM/Cron/agent-channel)
+      // with an initial prompt. Tab sessions must NOT self-resolve: the
+      // frontend's /api/mcp/set is authoritative, and self-resolve produces
+      // slightly different field structures (env/args) that trigger a fingerprint
+      // mismatch → abort → 30s delay.
+      if (shouldSelfResolveMcp && currentMcpServers === null && resolved.mcpServers.length > 0) {
         currentMcpServers = resolved.mcpServers;
         console.log(`[agent] self-resolved ${resolved.mcpServers.length} MCP server(s): ${resolved.mcpServers.map((s: { id: string }) => s.id).join(', ')}`);
       }
@@ -9023,68 +9044,67 @@ export type QueueCancelResult =
  *     cancel_async_message; it succeeds only before SDK dequeues execution.
  */
 export async function cancelQueueItem(queueId: string): Promise<QueueCancelResult> {
-  // 1. messageQueue (no active turn — generator about to pull)
-  const mqIdx = messageQueue.findIndex(item => item.id === queueId);
-  if (mqIdx >= 0) {
-    const [item] = messageQueue.splice(mqIdx, 1);
-    item.resolve();
-    broadcast('queue:cancelled', { queueId });
-    console.log(`[agent] Queue item ${queueId} cancelled from messageQueue (wasQueued=${item.wasQueued})`);
-    return { status: 'cancelled', cancelledText: item.messageText };
-  }
+  const location = findQueueLocation({
+    messageIndex: messageQueue.findIndex(item => item.id === queueId),
+    pendingMidTurnIndex: pendingMidTurnQueue.findIndex(p => p.queueId === queueId),
+    turnBoundaryIndex: turnBoundaryQueue.findIndex(item => item.queueId === queueId),
+    inFlight: inFlightToCliId === queueId,
+  });
 
-  // 2. pendingMidTurnQueue (buffered, in-flight slot occupied by another item)
-  const pmIdx = pendingMidTurnQueue.findIndex(p => p.queueId === queueId);
-  if (pmIdx >= 0) {
-    const [removed] = pendingMidTurnQueue.splice(pmIdx, 1);
-    removed.sourceItem.resolve();
-    broadcast('queue:cancelled', { queueId });
-    console.log(`[agent] Queue item ${queueId} cancelled from pendingMidTurnQueue (never yielded to CLI)`);
-    if (!hasQueuedOrInFlightWork() && !isTurnInFlight()) {
-      setSessionState('idle');
+  switch (location?.location) {
+    case 'message': {
+      const [item] = messageQueue.splice(location.index, 1);
+      item.resolve();
+      broadcast('queue:cancelled', { queueId });
+      console.log(`[agent] Queue item ${queueId} cancelled from messageQueue (wasQueued=${item.wasQueued})`);
+      return { status: 'cancelled', cancelledText: item.messageText };
     }
-    return {
-      status: 'cancelled',
-      cancelledText: typeof removed.userMessage.content === 'string' ? removed.userMessage.content : '',
-    };
-  }
-
-  // 3. turnBoundaryQueue (desktop turn-mode item waiting for a clean boundary)
-  const tbIdx = turnBoundaryQueue.findIndex(item => item.queueId === queueId);
-  if (tbIdx >= 0) {
-    const [removed] = turnBoundaryQueue.splice(tbIdx, 1);
-    removed.sourceItem?.resolve();
-    if (removed.queueId === forceTurnBoundaryQueueId) {
-      forceTurnBoundaryQueueId = null;
-    }
-    broadcast('queue:cancelled', { queueId });
-    console.log(`[agent] Queue item ${queueId} cancelled from turnBoundaryQueue`);
-    if (!hasQueuedOrInFlightWork() && !isTurnInFlight()) {
-      setSessionState('idle');
-    }
-    return { status: 'cancelled', cancelledText: removed.messageText };
-  }
-
-  // 4. In-flight to CLI — conditionally cancellable via SDK control plane.
-  if (inFlightToCliId === queueId) {
-    const meta = inFlightMetadata;
-    const cancelResult = await cancelSdkAsyncMessage(queueId);
-    const settlement = decideInFlightCancelSettlement(cancelResult);
-    if (settlement.cancelled) {
-      const cancelledText = meta?.messageText ?? '';
-      if (settlement.removePendingRequest) removePendingRequest(meta?.requestId);
-      if (settlement.clearSlot) clearInFlightSlot();
-      if (settlement.broadcastCancelled) broadcast('queue:cancelled', { queueId });
-      console.log(`[agent] Queue item ${queueId} cancelled from SDK commandQueue via cancel_async_message`);
-      if (settlement.promoteNext) schedulePostTerminalQueueDrain('stopped');
+    case 'pending-mid-turn': {
+      const [removed] = pendingMidTurnQueue.splice(location.index, 1);
+      removed.sourceItem.resolve();
+      broadcast('queue:cancelled', { queueId });
+      console.log(`[agent] Queue item ${queueId} cancelled from pendingMidTurnQueue (never yielded to CLI)`);
       if (!hasQueuedOrInFlightWork() && !isTurnInFlight()) {
         setSessionState('idle');
       }
-      return { status: 'cancelled', cancelledText };
+      return {
+        status: 'cancelled',
+        cancelledText: typeof removed.userMessage.content === 'string' ? removed.userMessage.content : '',
+      };
     }
-    console.log(`[agent] Queue item ${queueId} cancel rejected — SDK async cancel result=${cancelResult}`);
-    if (cancelResult === 'not-cancelled') return { status: 'not_cancelled' };
-    return { status: cancelResult === 'unavailable' ? 'unavailable' : 'error' };
+    case 'turn-boundary': {
+      const [removed] = turnBoundaryQueue.splice(location.index, 1);
+      removed.sourceItem?.resolve();
+      if (removed.queueId === forceTurnBoundaryQueueId) {
+        forceTurnBoundaryQueueId = null;
+      }
+      broadcast('queue:cancelled', { queueId });
+      console.log(`[agent] Queue item ${queueId} cancelled from turnBoundaryQueue`);
+      if (!hasQueuedOrInFlightWork() && !isTurnInFlight()) {
+        setSessionState('idle');
+      }
+      return { status: 'cancelled', cancelledText: removed.messageText };
+    }
+    case 'in-flight': {
+      const meta = inFlightMetadata;
+      const cancelResult = await cancelSdkAsyncMessage(queueId);
+      const settlement = decideInFlightCancelSettlement(cancelResult);
+      if (settlement.cancelled) {
+        const cancelledText = meta?.messageText ?? '';
+        if (settlement.removePendingRequest) removePendingRequest(meta?.requestId);
+        if (settlement.clearSlot) clearInFlightSlot();
+        if (settlement.broadcastCancelled) broadcast('queue:cancelled', { queueId });
+        console.log(`[agent] Queue item ${queueId} cancelled from SDK commandQueue via cancel_async_message`);
+        if (settlement.promoteNext) schedulePostTerminalQueueDrain('stopped');
+        if (!hasQueuedOrInFlightWork() && !isTurnInFlight()) {
+          setSessionState('idle');
+        }
+        return { status: 'cancelled', cancelledText };
+      }
+      console.log(`[agent] Queue item ${queueId} cancel rejected — SDK async cancel result=${cancelResult}`);
+      if (cancelResult === 'not-cancelled') return { status: 'not_cancelled' };
+      return { status: cancelResult === 'unavailable' ? 'unavailable' : 'error' };
+    }
   }
 
   console.log(`[agent] Queue item ${queueId} not found — already consumed or never existed`);
@@ -9128,15 +9148,12 @@ export async function forceExecuteQueueItem(queueId: string): Promise<boolean> {
   if (mqIdx === -1 && pmIdx === -1 && tbIdx === -1 && !isInFlight) return false;
 
   // Move target to front of its queue so it's first when the turn ends.
-  if (mqIdx > 0) {
-    const [item] = messageQueue.splice(mqIdx, 1);
-    messageQueue.unshift(item);
-  } else if (pmIdx > 0) {
-    const [pending] = pendingMidTurnQueue.splice(pmIdx, 1);
-    pendingMidTurnQueue.unshift(pending);
-  } else if (tbIdx > 0) {
-    const [item] = turnBoundaryQueue.splice(tbIdx, 1);
-    turnBoundaryQueue.unshift(item);
+  if (mqIdx >= 0) {
+    moveQueueIndexToFront(messageQueue, mqIdx);
+  } else if (pmIdx >= 0) {
+    moveQueueIndexToFront(pendingMidTurnQueue, pmIdx);
+  } else if (tbIdx >= 0) {
+    moveQueueIndexToFront(turnBoundaryQueue, tbIdx);
   }
 
   if (tbIdx >= 0 && !isTurnInFlight()) {
@@ -12176,6 +12193,9 @@ async function startStreamingSession(preWarm = false): Promise<void> {
 
         if (recoveredAssistantMessageError && currentTurnLastAssistantMessageError) {
           console.log('[agent] SDK assistant message error recovered by successful result:', currentTurnLastAssistantMessageError);
+        }
+        if (resultMessage.is_error && !isAbortResult) {
+          recordInjectedTurnOutcome('error', resultErrorText || resultText || 'turn ended with error');
         }
         emitBuiltinTurnTrace('final', {
           status: resultMessage.is_error || (emptySuccessfulResult && !successfulCompactControlTurn) ? 'error' : 'ok',

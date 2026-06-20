@@ -121,7 +121,7 @@ export const SESSION_ENGINE_ROUTE_CONTRACTS: SessionEngineRouteContract[] = [
     requiredFields: ['model'],
     responseKeys: ['success', 'error'],
     failureStatuses: [400, 500],
-    behavior: 'Updates active engine model; builtin preserves imConfigSync snapshot guard.',
+    behavior: 'Updates active engine model; active engine preserves imConfigSync snapshot guard.',
   },
   {
     path: '/api/reasoning-effort/set',
@@ -147,7 +147,7 @@ export const SESSION_ENGINE_ROUTE_CONTRACTS: SessionEngineRouteContract[] = [
     engineMethod: 'updateRuntimeConfig',
     responseKeys: ['success', 'error', 'skipped'],
     failureStatuses: [400, 500],
-    behavior: 'Applies external runtime config only; builtin returns a 400-compatible error.',
+    behavior: 'Applies external runtime config only; source-aware snapshot guard preserves desktop-owned external sessions; builtin returns a 400-compatible error.',
   },
   {
     path: '/api/runtime/prewarm',

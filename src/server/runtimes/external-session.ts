@@ -78,6 +78,23 @@ import { observedContextTokens } from '../utils/context-occupancy';
 import { computeContextUsage } from '../../shared/contextUsage';
 import type { ContextUsage } from '../../shared/types/context-usage';
 import { lookupModelContextLength } from '../utils/model-capabilities';
+import {
+  filterRuntimeConfigPatchForSnapshot,
+  getDefaultExternalConfigCapabilities,
+  isRuntimeConfigPatchNoopAgainstDesired,
+  mergeRuntimeConfigPatches as mergeExternalRuntimeConfigPatches,
+  runtimeConfigPatchKeys as externalConfigPatchKeys,
+  shouldApplySnapshotConfigUpdate,
+  shouldDeferExternalConfigOperation,
+} from '../session-core/runtime-config-policy';
+
+export {
+  filterRuntimeConfigPatchForSnapshot,
+  getDefaultExternalConfigCapabilities,
+  isExternalModelConfigNoop,
+  mergeRuntimeConfigPatches as mergeExternalRuntimeConfigPatches,
+  shouldDeferExternalConfigOperation,
+} from '../session-core/runtime-config-policy';
 import { elapsedMs, emitPerfTrace, nowMs } from '../utils/perf-trace';
 import { queryRuntimeModelsSingleFlight } from './runtime-model-singleflight';
 
@@ -1554,35 +1571,6 @@ export function isExternalModelFallbackRestartNeeded(
   return true;
 }
 
-export function getDefaultExternalConfigCapabilities(runtimeType: RuntimeType): RuntimeConfigCapabilities {
-  switch (runtimeType) {
-    case 'codex':
-      return { model: 'next_turn_state', permissionMode: 'next_turn_state', reasoningEffort: 'next_turn_state' };
-    case 'gemini':
-      return { model: 'live_session_rpc', permissionMode: 'live_session_rpc', reasoningEffort: 'unsupported' };
-    case 'claude-code':
-      return { model: 'next_turn_state', permissionMode: 'next_turn_state', reasoningEffort: 'next_turn_state' };
-    default:
-      return { model: 'restart_when_idle', permissionMode: 'restart_when_idle', reasoningEffort: 'restart_when_idle' };
-  }
-}
-
-export function mergeExternalRuntimeConfigPatches(
-  base: ExternalRuntimeConfigPatch,
-  next: ExternalRuntimeConfigPatch,
-): ExternalRuntimeConfigPatch {
-  return {
-    ...base,
-    ...(next.model !== undefined ? { model: next.model } : {}),
-    ...(next.permissionMode !== undefined ? { permissionMode: next.permissionMode } : {}),
-    ...(next.reasoningEffort !== undefined ? { reasoningEffort: next.reasoningEffort } : {}),
-  };
-}
-
-function externalConfigPatchKeys(patch: ExternalRuntimeConfigPatch): Array<keyof ExternalRuntimeConfigPatch> {
-  return (['model', 'permissionMode', 'reasoningEffort'] as const).filter((key) => patch[key] !== undefined);
-}
-
 function normalizeExternalRuntimeConfigPatch(
   patch: ExternalRuntimeConfigPatch,
   source: ExternalConfigSource,
@@ -1612,49 +1600,10 @@ function normalizeExternalRuntimeConfigPatch(
   return normalized;
 }
 
-export function isExternalModelConfigNoop(
-  nextModel: string,
-  desiredModel: string,
-  liveReportedModel: string,
-  options: { allowLiveReportedModel: boolean },
-): boolean {
-  if (nextModel === desiredModel) return true;
-  return Boolean(options.allowLiveReportedModel && liveReportedModel && nextModel === liveReportedModel);
-}
-
-function isExternalRuntimeConfigNoopAgainstDesired(
-  patch: ExternalRuntimeConfigPatch,
-  options: { allowLiveReportedModel: boolean },
-): boolean {
-  const keys = externalConfigPatchKeys(patch);
-  if (keys.length === 0) return true;
-  return keys.every((key) => {
-    switch (key) {
-      case 'model': {
-        const nextModel = patch.model ?? '';
-        return isExternalModelConfigNoop(nextModel, lastModel, lastRuntimeReportedModel, options);
-      }
-      case 'permissionMode':
-        return (patch.permissionMode ?? '') === lastPermissionMode;
-      case 'reasoningEffort':
-        return (patch.reasoningEffort ?? '') === lastReasoningEffort;
-    }
-  });
-}
-
 function applyDesiredExternalRuntimeConfigPatch(patch: ExternalRuntimeConfigPatch): void {
   if (patch.model !== undefined) lastModel = patch.model;
   if (patch.permissionMode !== undefined) lastPermissionMode = patch.permissionMode;
   if (patch.reasoningEffort !== undefined) lastReasoningEffort = patch.reasoningEffort;
-}
-
-export function shouldDeferExternalConfigOperation(
-  state: ExternalSessionState,
-  queueLength: number,
-  drainInFlight: boolean,
-  finalizationInFlight: boolean,
-): boolean {
-  return state === 'running' || queueLength > 0 || drainInFlight || finalizationInFlight;
 }
 
 function isCurrentExternalSessionSnapshotted(): boolean {
@@ -1770,11 +1719,23 @@ export async function updateExternalRuntimeConfig(
 
   const source = opts.source ?? 'runtime-config';
   const runtime = getCurrentRuntimeType();
-  const normalized = normalizeExternalRuntimeConfigPatch(patch, source);
+  const normalizedInput = normalizeExternalRuntimeConfigPatch(patch, source);
+  const snapshotFiltered = filterRuntimeConfigPatchForSnapshot({
+    patch: normalizedInput,
+    source,
+    isSnapshotted: isCurrentExternalSessionSnapshotted(),
+  });
+  const normalized = snapshotFiltered.patch;
   const keys = externalConfigPatchKeys(normalized);
+  const skippedWarnings = snapshotFiltered.skippedKeys.length > 0
+    ? [`snapshot-authoritative fields skipped: ${snapshotFiltered.skippedKeys.join(',')}`]
+    : [];
+  if (snapshotFiltered.skippedKeys.length > 0) {
+    console.warn(`[external-session] external-config skipped snapshot-owned fields: sessionId=${lastSessionId || getCurrentBoundSessionId() || '(none)'} runtime=${runtime} source=${source} keys=${snapshotFiltered.skippedKeys.join(',')}`);
+  }
   if (keys.length === 0) {
     console.log(`[external-session] external-config noop: sessionId=${lastSessionId || '(none)'} runtime=${runtime} source=${source} keys=(none)`);
-    return { success: true, runtime, status: 'noop', warnings: [] };
+    return { success: true, runtime, status: 'noop', warnings: skippedWarnings };
   }
 
   const shouldDefer = shouldDeferExternalConfigOperation(
@@ -1783,13 +1744,20 @@ export async function updateExternalRuntimeConfig(
     externalOperationDrainInFlight,
     turnFinalization.inFlight,
   );
-  const noop = isExternalRuntimeConfigNoopAgainstDesired(normalized, {
-    allowLiveReportedModel: !shouldDefer,
-  });
+  const noop = isRuntimeConfigPatchNoopAgainstDesired(
+    normalized,
+    {
+      desiredModel: lastModel,
+      liveReportedModel: lastRuntimeReportedModel,
+      desiredPermissionMode: lastPermissionMode,
+      desiredReasoningEffort: lastReasoningEffort,
+    },
+    { allowLiveReportedModel: !shouldDefer },
+  );
   applyDesiredExternalRuntimeConfigPatch(normalized);
   if (noop) {
     console.log(`[external-session] external-config noop: sessionId=${lastSessionId || '(none)'} runtime=${runtime} source=${source} keys=${keys.join(',')}`);
-    return { success: true, runtime, status: 'noop', warnings: [] };
+    return { success: true, runtime, status: 'noop', warnings: skippedWarnings };
   }
 
   if (shouldDefer) {
@@ -1798,22 +1766,35 @@ export async function updateExternalRuntimeConfig(
     if (externalSessionState !== 'running' && turnFinalization.inFlight) {
       void turnFinalization.settled(60_000).then(() => drainExternalQueueAfterTurn());
     }
-    return { success: true, runtime, status: 'queued', warnings: [] };
+    return { success: true, runtime, status: 'queued', warnings: skippedWarnings };
   }
 
   const result = await applyExternalRuntimeConfigAtBoundary(normalized, source);
   if (result.error) {
-    return { success: false, runtime, status: 'applied', warnings: result.warnings, error: result.error };
+    return { success: false, runtime, status: 'applied', warnings: [...skippedWarnings, ...result.warnings], error: result.error };
   }
-  return { success: true, runtime, status: 'applied', warnings: result.warnings };
+  return { success: true, runtime, status: 'applied', warnings: [...skippedWarnings, ...result.warnings] };
 }
 
-export async function setExternalModel(model: string): Promise<ExternalConfigUpdateResult> {
-  return updateExternalRuntimeConfig({ model }, { source: 'legacy-model-set' });
+export async function setExternalModel(model: string, opts?: { imConfigSync?: boolean }): Promise<ExternalConfigUpdateResult> {
+  const source: ExternalConfigSource = opts?.imConfigSync ? 'im-sync' : 'desktop';
+  if (!shouldApplySnapshotConfigUpdate({
+    field: 'model',
+    source,
+    isSnapshotted: isCurrentExternalSessionSnapshotted(),
+  })) {
+    console.warn(`[external-session] IM config sync model '${model}' ignored — session ${lastSessionId || getCurrentBoundSessionId() || '(none)'} is snapshotted (snapshot wins)`);
+    return { success: true, runtime: getCurrentRuntimeType(), status: 'noop', warnings: [] };
+  }
+  return updateExternalRuntimeConfig({ model }, { source });
 }
 
 export async function setExternalPermissionMode(mode: string): Promise<ExternalConfigUpdateResult> {
-  if (isCurrentExternalSessionSnapshotted()) {
+  if (!shouldApplySnapshotConfigUpdate({
+    field: 'permissionMode',
+    source: 'legacy-permission-mode-set',
+    isSnapshotted: isCurrentExternalSessionSnapshotted(),
+  })) {
     console.warn(`[external-session] config sync permissionMode '${mode}' ignored — session ${lastSessionId || getCurrentBoundSessionId() || '(none)'} is snapshotted (snapshot wins; legacy endpoint is Rust-IM-router-only by contract)`);
     return { success: true, runtime: getCurrentRuntimeType(), status: 'noop', warnings: [] };
   }
@@ -1823,7 +1804,7 @@ export async function setExternalPermissionMode(mode: string): Promise<ExternalC
 export async function setExternalReasoningEffort(setting: string): Promise<ExternalConfigUpdateResult> {
   return updateExternalRuntimeConfig(
     { reasoningEffort: setting },
-    { source: 'legacy-reasoning-effort-set' },
+    { source: 'desktop' },
   );
 }
 
