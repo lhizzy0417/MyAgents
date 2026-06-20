@@ -662,7 +662,7 @@ trusted root `~/.myagents/generated/tool-attachments/<sid>/<tid>/<file>`（base6
 |------|-------|---------|-------|
 | 字体渲染 | 更平滑 | 更锐利 | 介于之间 |
 | 窗口控制 | 左上红绿灯 | 右上三按钮 | 取决于桌面环境 |
-| 滚动条 | 自动隐藏 | 常显示 | 取决于桌面环境 |
+| 滚动条 | 自动隐藏 | WebView2 经典滚动条（renderer 用活动态隐藏 thumb） | 取决于桌面环境 |
 | Shell | zsh | PowerShell / cmd | bash |
 | Console window 抑制 | — | `process_cmd::new()` 注入 `CREATE_NO_WINDOW` | — |
 | 系统 PATH 查找 | `system_binary::find()`（Finder 启动 PATH 缺失） | — | — |

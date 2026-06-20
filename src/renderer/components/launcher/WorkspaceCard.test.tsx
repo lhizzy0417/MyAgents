@@ -115,7 +115,7 @@ describe('WorkspaceCard', () => {
 
         expect(screen.getByText('Telegram').closest('.workspace-card-channel-tags-fade')).not.toBeNull();
         const moreButton = screen.getByLabelText('更多');
-        expect(moreButton.closest('button')).toHaveClass('hover:z-20');
+        expect(moreButton.closest('button')).toHaveClass('overflow-hidden', 'hover:z-20');
         expect(moreButton.parentElement).toHaveClass('workspace-card-action-overlay', 'z-20');
         expect(screen.queryByText('更多')).not.toBeInTheDocument();
     });

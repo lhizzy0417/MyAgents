@@ -8,6 +8,7 @@ import { ToastProvider } from './components/Toast';
 import { ImagePreviewProvider } from './context/ImagePreviewContext';
 import { initFrontendLogger, setLogServerUrl, setRendererLogLabel } from './utils/frontendLogger';
 import { installMacFunctionKeyGuard } from './utils/macFunctionKeyGuard';
+import { installOverlayScrollbarActivity, isWindowsRendererPlatform } from './utils/overlayScrollbarActivity';
 
 import './index.css';
 
@@ -20,14 +21,17 @@ initFrontendLogger();
 installMacFunctionKeyGuard();
 
 function installPlatformClass(): void {
-  const platformText = `${navigator.platform || ''} ${navigator.userAgent || ''}`.toLowerCase();
+  const platform = navigator.platform || '';
+  const userAgent = navigator.userAgent || '';
+  const platformText = `${platform} ${userAgent}`.toLowerCase();
   const html = document.documentElement;
-  html.classList.toggle('platform-windows', platformText.includes('win'));
+  html.classList.toggle('platform-windows', isWindowsRendererPlatform(platform, userAgent));
   html.classList.toggle('platform-macos', platformText.includes('mac'));
   html.classList.toggle('platform-linux', platformText.includes('linux') || platformText.includes('x11'));
 }
 
 installPlatformClass();
+installOverlayScrollbarActivity();
 
 // Block native "Reload / Inspect Element" context menu in production.
 // Keep native menu for: input fields, text selection, contenteditable, links, images, media.

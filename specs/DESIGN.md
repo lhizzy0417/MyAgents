@@ -1013,7 +1013,7 @@ Shadows are managed via Tailwind v4 `@theme` — see Section 5.
 |------|-------|---------|---------|
 | 字体渲染 | 更平滑 | 更锐利 | 使用系统字体，信任系统渲染 |
 | 窗口控制 | 左上角红绿灯 | 右上角三按钮 | Tauri 自动处理 |
-| 滚动条 | 自动隐藏 | 常显示 | CSS `scrollbar-width: thin` |
+| 滚动条 | 自动隐藏 | WebView2 经典滚动条 | 全局活动态控制：稳定 6px 几何，thumb 仅滚动中显色 |
 | 圆角 | 系统级大圆角 | 小圆角/直角 | 使用自定义圆角，两端一致 |
 
 ### 12.2 字体渲染优化
@@ -1047,6 +1047,19 @@ body {
 }
 ::-webkit-scrollbar-track {
   background: transparent;
+}
+
+/* Windows: renderer 全局 scroll capture 给正在滚动的元素加
+   .myagents-scrollbar-active。默认 thumb 透明，滚动停止后恢复透明，
+   保留 6px 几何以避免内容列重排。 */
+html.platform-windows.platform-windows,
+html.platform-windows.platform-windows * {
+  scrollbar-color: transparent transparent;
+}
+
+html.platform-windows.platform-windows.myagents-scrollbar-active,
+html.platform-windows.platform-windows .myagents-scrollbar-active {
+  scrollbar-color: var(--ink-subtle) transparent;
 }
 ```
 
@@ -1207,6 +1220,7 @@ Hover 状态:
   - 右侧以 absolute overlay 显示「更多」icon button，不占用卡片正文布局宽度
   - 「更多」只显示 icon，不显示 hover tooltip；点击后打开与右键一致的工作区菜单
   - overlay 使用从透明到 `var(--paper-elevated)` 的弱渐显遮罩，避免按钮浮在文字上
+  - 卡片自身负责 rounded 裁剪（`overflow-hidden`），absolute overlay 不得把右上/右下圆角画成方角
 
 文件夹图标:
   - 容器: 28px

@@ -110,7 +110,7 @@ export default memo(function WorkspaceCard({
                 onClick={() => !isLoading && onLaunch(project)}
                 onContextMenu={handleContextMenu}
                 disabled={isLoading}
-                className={`group relative flex w-full items-center gap-3 rounded-xl bg-[var(--paper-elevated)] px-4 py-3 text-left transition-shadow duration-150 ease-out hover:z-20 hover:shadow-sm focus-visible:z-20 active:scale-[0.98] ${
+                className={`group relative flex w-full items-center gap-3 overflow-hidden rounded-xl bg-[var(--paper-elevated)] px-4 py-3 text-left transition-shadow duration-150 ease-out hover:z-20 hover:shadow-sm focus-visible:z-20 active:scale-[0.98] ${
                     isLoading ? 'pointer-events-none opacity-60' : 'cursor-pointer'
                 }`}
             >

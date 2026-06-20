@@ -71,6 +71,7 @@
 
 ### W3 — Windows 滚动条占布局宽，打乱 Virtuoso 高度模型 🟠 `needs-verify`
 
+- **v0.2.37 补充（视觉显隐）**：renderer 全局已在 Windows 上把滚动条 thumb 改为“默认透明、滚动中短暂显色”，以匹配 macOS overlay scrollbar 的静止观感；实现位于 `src/renderer/utils/overlayScrollbarActivity.ts` + `src/renderer/index.css`。这只解决可见 thumb 常驻的问题，仍保留 6px scrollbar 几何，所以下面的布局宽 / gutter 稳定性分析仍成立。
 - **现象（预期）**：长会话流式输出时，消息列表滚动**抖动/跳动**比 Mac 明显；正文列（居中的 `max-w-3xl`）相对窗口**略偏左**；滚动条出现/消失瞬间整列重排。
 - **根因**：`src/renderer/components/MessageList.tsx` 滚动模型按 macOS **overlay 滚动条（0px 布局宽）** 标定。Windows/WebView2 是**经典非 overlay 滚动条**，占布局宽（`index.css:532-554` 的 `::-webkit-scrollbar{width:6px}` 在 Chromium 下仍占宽、只是渲染细）。后果：① 居中列在 scroller client 宽里居中 → Windows 上左移、且 item 按不同于 Mac 标定的宽度重测 → `defaultItemHeight=480`（`:601`）更不准 → 更多挂载后高度修正/滚动抖；② 滚动条出现（内容越过 overflow 阈值）瞬间收窄内容盒 → 重排每行 → 正好在流式 reveal 想保持 pin 时打断 `atBottom`。
 - **验证步骤**：
