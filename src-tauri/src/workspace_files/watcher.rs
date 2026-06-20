@@ -42,7 +42,7 @@ use std::time::Duration;
 use notify_debouncer_full::{
     new_debouncer,
     notify::{RecommendedWatcher, RecursiveMode},
-    DebounceEventResult, Debouncer, FileIdMap,
+    DebounceEventResult, Debouncer, RecommendedCache,
 };
 use serde::Serialize;
 use tauri::{AppHandle, Emitter};
@@ -83,7 +83,7 @@ struct WatcherEntry {
     refs: usize,
     /// Holding the debouncer alive keeps the watch active. Dropping it stops
     /// the OS-level watch.
-    _debouncer: Debouncer<RecommendedWatcher, FileIdMap>,
+    _debouncer: Debouncer<RecommendedWatcher, RecommendedCache>,
 }
 
 /// Compute the stable event-key suffix for a workspace path. Uses std's
