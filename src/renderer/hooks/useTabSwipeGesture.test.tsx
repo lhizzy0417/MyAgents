@@ -141,6 +141,10 @@ function phases(): string[] {
     .filter((phase): phase is string => Boolean(phase));
 }
 
+function debugLines(): string[] {
+  return vi.mocked(console.debug).mock.calls.map(([line]) => String(line));
+}
+
 describe('useTabSwipeGesture Phase 0 trace', () => {
   beforeEach(() => {
     vi.spyOn(console, 'debug').mockImplementation(() => {});
@@ -243,6 +247,32 @@ describe('useTabSwipeGesture Phase 0 trace', () => {
       'tab_swipe_snap_start',
     ]));
     expect(onSwitchTab).toHaveBeenCalledWith('tab-b');
+  });
+
+  it('uses inferred momentum as release when WebKit does not expose phase events', () => {
+    vi.useFakeTimers();
+    try {
+      const onSwitchTab = vi.fn();
+      render(<Harness onSwitchTab={onSwitchTab} />);
+      const content = screen.getByTestId('tab-content');
+      setContainerWidth(content, 1000);
+
+      for (const deltaX of [120, 100, 80, 64, 51, 41, 33, 26, 21, 17, 14, 11, 9, 7, 6, 5]) {
+        dispatchWheel(content, { deltaX, deltaY: 0 });
+        vi.advanceTimersByTime(16);
+      }
+
+      expect(onSwitchTab).toHaveBeenCalledTimes(1);
+      expect(onSwitchTab).toHaveBeenCalledWith('tab-b');
+      expect(phases()).toEqual(expect.arrayContaining([
+        'tab_swipe_release',
+        'tab_swipe_decision',
+        'tab_swipe_snap_start',
+      ]));
+      expect(debugLines().some((line) => line.includes('source=momentum-detector'))).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('absorbs post-commit inertia without switching again after the active tab changes', () => {

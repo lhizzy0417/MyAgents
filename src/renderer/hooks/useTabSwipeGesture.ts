@@ -92,7 +92,7 @@ function clamp(val: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, val));
 }
 
-type SnapDecisionSource = 'manual' | 'webkit-phase' | 'momentum-phase' | 'idle';
+type SnapDecisionSource = 'manual' | 'webkit-phase' | 'momentum-phase' | 'momentum-detector' | 'idle';
 
 function roundPx(value: number): number {
   return Math.round(value * 10) / 10;
@@ -882,6 +882,23 @@ export function useTabSwipeGesture({
           adjacentIndex: state.adjacentIndex,
           momentum: state.momentumFlag,
         });
+      }
+
+      // ── Inferred momentum release ──
+      // Some WebViews do not expose WebKit phase/momentumPhase, but still emit
+      // a long decaying wheel tail after the fingers leave the trackpad. Once
+      // the acceleration-factor detector confirms that tail, treat it as the
+      // missing release signal so the active tab and visual page stay in sync.
+      if (state.momentumFlag) {
+        if (state.idleTimer !== null) { clearTimeout(state.idleTimer); state.idleTimer = null; }
+        traceTabSwipe('release', {
+          gestureId: state.traceGestureId,
+          source: 'momentum-detector',
+          wheelPhase: phaseValue(wheelPhase),
+          momentumPhase: phaseValue(momentumPhase),
+        });
+        makeSnapDecision('momentum-detector');
+        return;
       }
 
       // ── WebKit phase-based gesture end (if available) ──
