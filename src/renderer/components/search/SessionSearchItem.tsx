@@ -24,7 +24,7 @@ interface SessionSearchItemProps {
 
 export default memo(function SessionSearchItem({
     hit,
-    session: _session,
+    session,
     project,
     isCronProtected,
     onClick,
@@ -33,6 +33,7 @@ export default memo(function SessionSearchItem({
 }: SessionSearchItemProps) {
     // If we don't have project info, fallback to showing just the agentDir
     const projectName = project ? getFolderName(project.path) : getFolderName(hit.agentDir);
+    const displayLastActiveAt = session?.lastActiveAt ?? hit.lastActiveAt;
     const msgCountStr = hit.messageCount !== null && hit.messageCount > 0 ? `${hit.messageCount}条` : '';
 
     return (
@@ -44,7 +45,7 @@ export default memo(function SessionSearchItem({
             {/* Left column: Time — fixed width so content column is consistently left-aligned */}
             <div className="mt-1 flex w-16 shrink-0 items-center gap-1 whitespace-nowrap text-xs text-[var(--ink-muted)]/50">
                 <Clock className="h-2.5 w-2.5" />
-                <span>{formatTime(hit.lastActiveAt)}</span>
+                <span>{formatTime(displayLastActiveAt)}</span>
             </div>
 
             {/* Middle column: Title + Snippet */}

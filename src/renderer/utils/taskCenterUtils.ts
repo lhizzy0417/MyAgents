@@ -21,21 +21,25 @@ export function getFolderName(path: string): string {
 /**
  * Format ISO timestamp as relative time (zh-CN)
  */
-export function formatTime(isoString: string): string {
+export function formatTime(isoString: string, now: Date = new Date()): string {
     const date = new Date(isoString);
-    const now = new Date();
-    const diffMs = now.getTime() - date.getTime();
-    const diffDays = Math.floor(diffMs / (1000 * 60 * 60 * 24));
+    if (Number.isNaN(date.getTime())) return '';
+
+    const diffDays = localCalendarDayIndex(now) - localCalendarDayIndex(date);
 
     if (diffDays === 0) {
         return date.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' });
     } else if (diffDays === 1) {
         return '昨天';
-    } else if (diffDays < 7) {
+    } else if (diffDays > 1 && diffDays < 7) {
         return `${diffDays}天前`;
     } else {
         return date.toLocaleDateString('zh-CN', { month: 'short', day: 'numeric' });
     }
+}
+
+function localCalendarDayIndex(date: Date): number {
+    return Math.floor(Date.UTC(date.getFullYear(), date.getMonth(), date.getDate()) / (1000 * 60 * 60 * 24));
 }
 
 /**

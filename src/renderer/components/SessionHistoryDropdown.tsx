@@ -9,6 +9,7 @@ import { CUSTOM_EVENTS } from '../../shared/constants';
 import { getWorkspaceCronTasks, getBackgroundSessions } from '@/api/cronTaskClient';
 import type { CronTask } from '@/types/cronTask';
 import { formatTokens } from '@/utils/formatTokens';
+import { formatTime } from '@/utils/taskCenterUtils';
 import { isTauriEnvironment } from '@/utils/browserMock';
 import { listenWithCleanup } from '@/utils/tauriListen';
 import type { AgentStatusMap } from '@/hooks/useAgentStatuses';
@@ -347,23 +348,6 @@ export default function SessionHistoryDropdown({
             setExportingId(null);
         }
     }, [toast]);
-
-    const formatTime = (isoString: string) => {
-        const date = new Date(isoString);
-        const now = new Date();
-        const diffMs = now.getTime() - date.getTime();
-        const diffDays = Math.floor(diffMs / (1000 * 60 * 60 * 24));
-
-        if (diffDays === 0) {
-            return date.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' });
-        } else if (diffDays === 1) {
-            return '昨天';
-        } else if (diffDays < 7) {
-            return `${diffDays}天前`;
-        } else {
-            return date.toLocaleDateString('zh-CN', { month: 'short', day: 'numeric' });
-        }
-    };
 
     // Derive loading state: open but sessions not yet fetched
     const isLoading = sessions === null;
