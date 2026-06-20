@@ -1,0 +1,576 @@
+use super::*;
+
+// ============= Session-Centric Sidecar Architecture =============
+// Sidecar is a service process for Sessions, not for Tabs or CronTasks.
+// Multiple owners (Tabs, CronTasks) can share a Session's Sidecar.
+
+/// Owner of a Sidecar - can be a Tab, CronTask, or BackgroundCompletion
+/// When all owners release, the Sidecar is stopped.
+#[derive(Debug, Clone, Eq, PartialEq, Hash, Serialize, Deserialize)]
+pub enum SidecarOwner {
+    /// Tab ID that owns part of this Sidecar
+    Tab(String),
+    /// Cron Task ID that owns part of this Sidecar
+    CronTask(String),
+    /// Background completion owner - keeps Sidecar alive while AI finishes responding
+    /// String is the session ID for identification
+    BackgroundCompletion(String),
+    /// Agent owner - keeps Sidecar alive for IM/Agent message processing
+    /// String is the session_key (e.g. "agent:{agentId}:{channel}:{type}:{id}")
+    Agent(String),
+}
+
+/// Explicit three-state lifecycle for a SessionSidecar.
+///
+/// Replaces the previous `healthy: bool` which conflated Starting (process alive,
+/// not yet healthy) with Dead (process exited), causing race conditions where
+/// health monitors would kill Starting sidecars.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SidecarState {
+    /// Process spawned, `wait_for_health` in progress — do not kill.
+    Starting,
+    /// TCP health check passed (`wait_for_health`), ready to serve requests.
+    Healthy,
+    /// Process exited or health check permanently failed.
+    Dead,
+}
+
+/// Session-centric Sidecar instance
+/// Each Session has at most one Sidecar, shared by multiple owners.
+/// Result of `SidecarManager::kill_sidecar_if_runtime_differs`.
+///
+/// Distinguishes between three cases:
+/// - `NoDrift`: the existing Sidecar's runtime matches the desired runtime
+///   (or there's no existing Sidecar).
+/// - `DetectedKeptAlive`: drift was detected but the Sidecar has non-Agent
+///   owners (Tab/Cron/BackgroundCompletion) attached, so killing would
+///   orphan a desktop session. The caller (IM router) should still treat
+///   this as drift and fork the peer to a new session_id.
+/// - `KilledAndRemoved`: drift was detected AND the Sidecar had only Agent
+///   owners, so it's been killed and evicted from the manager.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuntimeDriftResult {
+    NoDrift,
+    DetectedKeptAlive,
+    KilledAndRemoved,
+}
+
+impl RuntimeDriftResult {
+    /// Did we observe a runtime drift? (True for both kill outcomes.)
+    pub fn is_drift(&self) -> bool {
+        matches!(self, Self::KilledAndRemoved | Self::DetectedKeptAlive)
+    }
+}
+
+pub(super) enum ExistingSidecarReuse {
+    Healthy {
+        port: u16,
+        generation: u64,
+        runtime: String,
+    },
+    /// `owner_added` = whether THIS ensure call newly inserted its owner when it
+    /// joined the still-starting Sidecar. Only true means a readiness-timeout
+    /// detach may safely remove that owner (see `add_owner`).
+    Starting {
+        port: u16,
+        generation: u64,
+        runtime: String,
+        owner_added: bool,
+    },
+}
+
+pub(super) fn normalize_runtime_name(runtime: Option<&str>) -> &str {
+    match runtime {
+        Some(runtime) if !runtime.is_empty() => runtime,
+        _ => "builtin",
+    }
+}
+
+pub(super) fn sidecar_has_non_agent_owner(owners: &HashSet<SidecarOwner>) -> bool {
+    owners
+        .iter()
+        .any(|owner| !matches!(owner, SidecarOwner::Agent(_)))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct SidecarRemovalEventPolicy {
+    pub(super) emit_stop: bool,
+    pub(super) emit_terminal: bool,
+}
+
+pub(super) fn sidecar_removal_event_policy(
+    owners: &HashSet<SidecarOwner>,
+) -> SidecarRemovalEventPolicy {
+    SidecarRemovalEventPolicy {
+        emit_stop: true,
+        emit_terminal: owners.is_empty(),
+    }
+}
+
+pub(super) fn decide_runtime_drift_result(
+    sidecar_runtime: Option<&str>,
+    desired_runtime: &str,
+    owners: &HashSet<SidecarOwner>,
+) -> RuntimeDriftResult {
+    let sidecar_runtime = normalize_runtime_name(sidecar_runtime);
+    let desired_runtime = normalize_runtime_name(Some(desired_runtime));
+
+    if sidecar_runtime == desired_runtime {
+        RuntimeDriftResult::NoDrift
+    } else if sidecar_has_non_agent_owner(owners) {
+        RuntimeDriftResult::DetectedKeptAlive
+    } else {
+        RuntimeDriftResult::KilledAndRemoved
+    }
+}
+
+pub(super) fn owner_prefers_live_agent_runtime(owner: &SidecarOwner) -> bool {
+    matches!(
+        owner,
+        SidecarOwner::Agent(key) if key.starts_with("agent:") || key.starts_with("im:")
+    )
+}
+
+pub(super) fn resolve_runtime_for_owner(
+    runtime_override: Option<String>,
+    owner: &SidecarOwner,
+    session_runtime: Option<String>,
+    agent_runtime: Option<String>,
+) -> Option<String> {
+    runtime_override.or_else(|| {
+        if owner_prefers_live_agent_runtime(owner) {
+            agent_runtime
+        } else {
+            session_runtime.or(agent_runtime)
+        }
+    })
+}
+
+#[cfg(test)]
+mod lifecycle_contract_tests {
+    use super::*;
+    use std::collections::HashSet;
+
+    fn owners(values: Vec<SidecarOwner>) -> HashSet<SidecarOwner> {
+        values.into_iter().collect()
+    }
+
+    #[test]
+    fn runtime_drift_with_tab_and_agent_owner_is_kept_alive() {
+        let owners = owners(vec![
+            SidecarOwner::Tab("tab-a".to_string()),
+            SidecarOwner::Agent("agent-a".to_string()),
+        ]);
+
+        assert_eq!(
+            decide_runtime_drift_result(Some("codex"), "gemini", &owners),
+            RuntimeDriftResult::DetectedKeptAlive
+        );
+    }
+
+    #[test]
+    fn runtime_drift_with_only_agent_owners_is_killable() {
+        let owners = owners(vec![SidecarOwner::Agent("agent-a".to_string())]);
+
+        assert_eq!(
+            decide_runtime_drift_result(Some("codex"), "gemini", &owners),
+            RuntimeDriftResult::KilledAndRemoved
+        );
+    }
+
+    #[test]
+    fn builtin_runtime_names_are_normalized_for_no_drift() {
+        let owners = owners(vec![SidecarOwner::Agent("agent-a".to_string())]);
+
+        assert_eq!(
+            decide_runtime_drift_result(None, "", &owners),
+            RuntimeDriftResult::NoDrift
+        );
+        assert_eq!(
+            decide_runtime_drift_result(None, "builtin", &owners),
+            RuntimeDriftResult::NoDrift
+        );
+    }
+
+    #[test]
+    fn desktop_style_owner_prefers_builtin_session_metadata_over_agent_runtime() {
+        assert_eq!(
+            resolve_runtime_for_owner(
+                None,
+                &SidecarOwner::Tab("tab-a".to_string()),
+                Some("builtin".to_string()),
+                Some("codex".to_string()),
+            ),
+            Some("builtin".to_string())
+        );
+    }
+
+    #[test]
+    fn agent_owner_ignores_session_runtime_and_follows_agent_runtime() {
+        assert_eq!(
+            resolve_runtime_for_owner(
+                None,
+                &SidecarOwner::Agent("agent:a:openclaw:feishu:private:user".to_string()),
+                Some("builtin".to_string()),
+                Some("codex".to_string()),
+            ),
+            Some("codex".to_string())
+        );
+    }
+
+    #[test]
+    fn maintenance_agent_owner_prefers_session_metadata_over_agent_runtime() {
+        assert_eq!(
+            resolve_runtime_for_owner(
+                None,
+                &SidecarOwner::Agent("memory_update:a:s1".to_string()),
+                Some("builtin".to_string()),
+                Some("codex".to_string()),
+            ),
+            Some("builtin".to_string())
+        );
+    }
+
+    #[test]
+    fn session_runtime_identity_parser_preserves_builtin_metadata() {
+        let content = serde_json::json!([
+            { "id": "missing-runtime" },
+            { "id": "builtin-runtime", "runtime": "builtin" },
+            { "id": "codex-runtime", "runtime": "codex" }
+        ])
+        .to_string();
+
+        assert_eq!(
+            resolve_session_runtime_identity_from_json("missing-runtime", &content),
+            Some("builtin".to_string())
+        );
+        assert_eq!(
+            resolve_session_runtime_identity_from_json("builtin-runtime", &content),
+            Some("builtin".to_string())
+        );
+        assert_eq!(
+            resolve_session_runtime_identity_from_json("codex-runtime", &content),
+            Some("codex".to_string())
+        );
+        assert_eq!(
+            resolve_session_runtime_identity_from_json("unknown", &content),
+            None
+        );
+    }
+
+    #[test]
+    fn cron_and_background_owners_make_runtime_drift_non_killable() {
+        let cron = owners(vec![SidecarOwner::CronTask("cron-a".to_string())]);
+        let background = owners(vec![SidecarOwner::BackgroundCompletion(
+            "session-a".to_string(),
+        )]);
+
+        assert_eq!(
+            decide_runtime_drift_result(Some("codex"), "gemini", &cron),
+            RuntimeDriftResult::DetectedKeptAlive
+        );
+        assert_eq!(
+            decide_runtime_drift_result(Some("codex"), "gemini", &background),
+            RuntimeDriftResult::DetectedKeptAlive
+        );
+    }
+
+    #[test]
+    fn terminal_removal_requires_no_remaining_owners() {
+        assert_eq!(
+            sidecar_removal_event_policy(&HashSet::new()),
+            SidecarRemovalEventPolicy {
+                emit_stop: true,
+                emit_terminal: true
+            }
+        );
+        assert_eq!(
+            sidecar_removal_event_policy(&owners(vec![SidecarOwner::Tab("tab-a".to_string())])),
+            SidecarRemovalEventPolicy {
+                emit_stop: true,
+                emit_terminal: false
+            }
+        );
+        assert_eq!(
+            sidecar_removal_event_policy(&owners(vec![SidecarOwner::Agent("agent-a".to_string())])),
+            SidecarRemovalEventPolicy {
+                emit_stop: true,
+                emit_terminal: false
+            }
+        );
+    }
+
+    #[test]
+    fn sidecar_generation_is_monotonic_and_not_reused_after_clear() {
+        let mut manager = SidecarManager::new();
+
+        let first = manager.next_generation("session-a");
+        let second = manager.next_generation("session-a");
+        assert!(second > first);
+
+        manager.clear_generation("session-a");
+        assert_eq!(manager.current_generation("session-a"), 0);
+
+        let third = manager.next_generation("session-a");
+        assert!(third > second);
+    }
+
+    fn spawn_test_child() -> Child {
+        #[cfg(windows)]
+        let mut cmd = {
+            let mut cmd = crate::process_cmd::new("powershell");
+            cmd.args(["-NoProfile", "-Command", "Start-Sleep -Seconds 60"]);
+            cmd
+        };
+
+        #[cfg(not(windows))]
+        let mut cmd = {
+            let mut cmd = crate::process_cmd::new("sleep");
+            cmd.arg("60");
+            cmd
+        };
+
+        cmd.stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn test child")
+    }
+
+    fn insert_test_sidecar(manager: &mut SidecarManager, session_id: &str, state: SidecarState) {
+        manager.insert_sidecar(
+            session_id,
+            SessionSidecar {
+                process: spawn_test_child(),
+                port: 31418,
+                session_id: session_id.to_string(),
+                workspace_path: PathBuf::from("/tmp/workspace"),
+                state,
+                owners: owners(vec![SidecarOwner::Tab("tab-a".to_string())]),
+                created_at: std::time::Instant::now(),
+                runtime: None,
+            },
+        );
+    }
+
+    #[test]
+    fn session_port_is_not_exposed_until_sidecar_is_healthy() {
+        let mut manager = SidecarManager::new();
+        insert_test_sidecar(&mut manager, "session-a", SidecarState::Starting);
+
+        assert_eq!(manager.get_session_port("session-a"), None);
+
+        manager
+            .get_session_sidecar_mut("session-a")
+            .expect("session sidecar")
+            .state = SidecarState::Healthy;
+
+        assert_eq!(manager.get_session_port("session-a"), Some(31418));
+    }
+
+    #[test]
+    fn generation_for_requires_current_sidecar_entry() {
+        let mut manager = SidecarManager::new();
+        insert_test_sidecar(&mut manager, "session-a", SidecarState::Healthy);
+        let generation = manager
+            .generation_for("session-a")
+            .expect("current generation");
+
+        manager.remove_sidecar("session-a");
+
+        assert_eq!(manager.current_generation("session-a"), generation);
+        assert_eq!(manager.generation_for("session-a"), None);
+    }
+}
+
+pub struct SessionSidecar {
+    /// The child process handle
+    pub process: Child,
+    /// Port this instance is running on
+    pub port: u16,
+    /// Session ID this Sidecar serves
+    pub session_id: String,
+    /// Workspace path for this session
+    /// Reserved for future use (e.g., workspace-aware operations)
+    #[allow(dead_code)]
+    pub workspace_path: PathBuf,
+    /// Lifecycle state: Starting → Healthy → Dead
+    pub state: SidecarState,
+    /// Set of owners (Tabs and CronTasks) that are using this Sidecar
+    pub owners: HashSet<SidecarOwner>,
+    /// Creation timestamp
+    /// Reserved for future use (e.g., TTL-based cleanup)
+    #[allow(dead_code)]
+    pub created_at: std::time::Instant,
+    /// MYAGENTS_RUNTIME env var value this Sidecar was spawned with.
+    /// Used for drift detection on Agent-owner reuse: when the agent's
+    /// runtime config changes (e.g. codex → gemini), subsequent IM messages
+    /// for the same peer session must not reuse a Sidecar that's still
+    /// running the old runtime. None = builtin (no env var injected).
+    pub runtime: Option<String>,
+}
+
+impl SessionSidecar {
+    /// Is this sidecar healthy and ready to accept requests?
+    pub fn is_reusable(&self) -> bool {
+        matches!(self.state, SidecarState::Healthy)
+    }
+
+    /// Is this sidecar both marked healthy and still alive?
+    pub fn is_ready_for_requests(&mut self) -> bool {
+        !self.is_dead() && self.is_reusable()
+    }
+
+    /// Is this sidecar still starting up? (process alive, `wait_for_health` in progress)
+    pub fn is_starting(&self) -> bool {
+        matches!(self.state, SidecarState::Starting)
+    }
+
+    /// Is this sidecar dead?
+    /// Also auto-detects process exit and transitions Starting/Healthy → Dead.
+    pub fn is_dead(&mut self) -> bool {
+        if self.state == SidecarState::Dead {
+            return true;
+        }
+        // Check if the process actually exited while we thought it was alive
+        match self.process.try_wait() {
+            Ok(Some(_)) => {
+                self.state = SidecarState::Dead;
+                true
+            }
+            Ok(None) => false, // Still running
+            Err(_) => {
+                self.state = SidecarState::Dead;
+                true
+            }
+        }
+    }
+
+    /// Check if this Sidecar has any owners
+    /// Reserved for future use (e.g., lifecycle management)
+    #[allow(dead_code)]
+    pub fn has_owners(&self) -> bool {
+        !self.owners.is_empty()
+    }
+
+    /// Add an owner to this Sidecar.
+    /// Returns true if the owner was newly inserted, false if it already owned
+    /// this Sidecar (symmetric with `remove_owner`). The Starting-join path uses
+    /// this to decide whether a later readiness-timeout detach is safe: only the
+    /// call that actually added a *new* owner may remove it on timeout. A
+    /// same-owner concurrent ensure (e.g. two `ensure_session_sidecar(.., Tab(t))`
+    /// for one tab) gets `false` here, so it must NOT remove the shared owner —
+    /// doing so would empty the owner set and kill a Sidecar another caller is
+    /// still starting.
+    pub fn add_owner(&mut self, owner: SidecarOwner) -> bool {
+        self.owners.insert(owner)
+    }
+
+    /// Remove an owner from this Sidecar
+    /// Returns true if this was the last owner (Sidecar should be stopped)
+    pub fn remove_owner(&mut self, owner: &SidecarOwner) -> bool {
+        self.owners.remove(owner);
+        self.owners.is_empty()
+    }
+}
+
+/// Ensure Sidecar process is killed when SessionSidecar is dropped
+impl Drop for SessionSidecar {
+    fn drop(&mut self) {
+        ulog_info!(
+            "[sidecar] Drop: killing SessionSidecar for session {} on port {} (state: {:?})",
+            self.session_id,
+            self.port,
+            self.state
+        );
+        let _ = kill_process(&mut self.process);
+    }
+}
+
+/// Single Sidecar instance (legacy - used only for Global Sidecar).
+/// Still uses `healthy: bool` since the Global Sidecar is a singleton
+/// without the multi-owner race conditions that motivated `SidecarState`.
+pub struct SidecarInstance {
+    /// The child process handle
+    pub process: Child,
+    /// Port this instance is running on
+    pub port: u16,
+    /// Agent directory (None for global sidecar)
+    pub agent_dir: Option<PathBuf>,
+    /// Whether the sidecar passed initial health check
+    pub healthy: bool,
+    /// Whether this is a global sidecar (uses temp directory)
+    pub is_global: bool,
+    /// When this instance was created — used by health monitor to apply startup grace period.
+    /// During the grace window the monitor skips health checks, preventing false "unhealthy"
+    /// verdicts while the sidecar is still initialising (TCP check, Bun startup, Plugin Bridge…).
+    pub created_at: std::time::Instant,
+}
+
+impl SidecarInstance {
+    /// Check if the sidecar process is still running
+    /// This actively checks the process rather than just relying on the healthy flag
+    pub fn is_running(&mut self) -> bool {
+        if !self.healthy {
+            return false;
+        }
+
+        // Try to check if process has exited
+        match self.process.try_wait() {
+            Ok(Some(_)) => {
+                // Process has exited
+                self.healthy = false;
+                false
+            }
+            Ok(None) => true, // Still running
+            Err(_) => {
+                self.healthy = false;
+                false
+            }
+        }
+    }
+}
+
+/// Ensure Node.js process is killed when SidecarInstance is dropped
+impl Drop for SidecarInstance {
+    fn drop(&mut self) {
+        ulog_info!("[sidecar] Drop: killing process on port {}", self.port);
+        let _ = kill_process(&mut self.process);
+
+        // Clean up temp directory for global sidecar
+        if self.is_global {
+            if let Some(ref dir) = self.agent_dir {
+                ulog_info!("[sidecar] Cleaning up temp directory: {:?}", dir);
+                let _ = std::fs::remove_dir_all(dir);
+            }
+        }
+    }
+}
+
+/// Session activation record
+/// Tracks which Sidecar is currently "activating" a Session
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct SessionActivation {
+    /// Session ID being activated
+    pub session_id: String,
+    /// Tab ID that owns this activation (None for headless cron tasks)
+    pub tab_id: Option<String>,
+    /// Cron task ID if activated by cron task
+    pub task_id: Option<String>,
+    /// Port of the Sidecar handling this session
+    pub port: u16,
+    /// Workspace path
+    pub workspace_path: String,
+    /// Whether this is a cron task activation
+    pub is_cron_task: bool,
+}
+
+/// Sidecar info for external queries
+/// Reserved for future use (e.g., admin UI, debugging endpoints)
+#[allow(dead_code)]
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SidecarInfo {
+    pub port: u16,
+    pub workspace_path: String,
+    pub is_healthy: bool,
+}
