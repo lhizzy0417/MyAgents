@@ -45,6 +45,7 @@ MyAgents 是一款 AI Agent 桌面客户端，采用**温暖纸张质感**的设
 |-------|------|------|
 | `--paper` | `#faf6ee` | 主背景 |
 | `--paper-elevated` | `#fffcf7` | 卡片、弹层背景 |
+| `--message-user-bg` | `#fffefa` | 用户 Query 气泡背景（比对话页更白，去阴影后保持层次） |
 | `--paper-inset` | `#e8dccf` | 输入框内部、小按钮 hover |
 | `--hover-bg` | `rgba(194, 109, 58, 0.07)` | 通用列表项 hover（7% 暖棕 accent） |
 

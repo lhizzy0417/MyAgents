@@ -394,7 +394,7 @@ const Message = memo(function Message({ message, isLoading = false, onRewind, on
           )}
           {/* text-base 自带 1.7 行高（@theme 配对），与 .ai-message-content 一致 —— 用户气泡
               与 AI 正文同为 prose 档，行高不再分叉（PRD 0.2.34 P2-5） */}
-          <article className="relative w-fit max-w-[85%] rounded-2xl border border-[var(--line)] bg-[var(--paper-elevated)] p-4 text-base text-[var(--ink)] select-text">
+          <article className="relative w-fit max-w-[85%] rounded-2xl border border-[var(--line)] bg-[var(--message-user-bg)] p-4 text-base text-[var(--ink)] select-text">
             {/* System injection tag badge */}
             {systemTag && (
               <div className="mb-2 -mt-0.5">
@@ -427,11 +427,11 @@ const Message = memo(function Message({ message, isLoading = false, onRewind, on
             {/* Expand button with gradient fade — gradient overlaps bottom of content */}
             {!userExpanded && userOverflows && (
               <div className="relative z-10 -mx-4 -mb-4 -mt-14">
-                <div className="pointer-events-none h-14 bg-gradient-to-t from-[var(--paper-elevated)] to-[var(--paper-elevated-a0)]" />
+                <div className="pointer-events-none h-14 bg-gradient-to-t from-[var(--message-user-bg)] to-[var(--message-user-bg-a0)]" />
                 <button
                   type="button"
                   onClick={() => setUserExpanded(true)}
-                  className="flex w-full items-center justify-center gap-1 rounded-b-2xl bg-[var(--paper-elevated)] py-1.5 text-sm font-medium text-[var(--ink-muted)] transition-colors hover:text-[var(--ink)]"
+                  className="flex w-full items-center justify-center gap-1 rounded-b-2xl bg-[var(--message-user-bg)] py-1.5 text-sm font-medium text-[var(--ink-muted)] transition-colors hover:text-[var(--ink)]"
                 >
                   <ChevronDown className="size-3.5" />
                   展开

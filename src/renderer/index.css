@@ -185,6 +185,7 @@
   /* ========== Colors: Paper (Background) ========== */
   --paper: #faf6ee;
   --paper-elevated: #fffcf7;
+  --message-user-bg: #fffefa;
   --paper-inset: #e8dccf;
   /* #333 渐变端点 0-alpha 孪生色：渐变里禁止 `transparent` 关键字（= rgba(0,0,0,0)，
      插值不做 premultiply 的引擎——macOS 27 beta WebKit 的 oklab 渐变路径实测如此——
@@ -192,6 +193,7 @@
      改上面的 paper token 时 MUST 同步这里（eslint 封禁 to-/from-/via-transparent 兜底）。 */
   --paper-a0: rgb(250 246 238 / 0);
   --paper-elevated-a0: rgb(255 252 247 / 0);
+  --message-user-bg-a0: rgb(255 254 250 / 0);
   --paper-inset-a0: rgb(232 220 207 / 0);
   --hover-bg: rgba(194, 109, 58, 0.07); /* 通用列表项 hover：7% 暖棕 accent，与整体棕色调一致 */
 
@@ -332,10 +334,12 @@
   /* ========== Colors: Paper (Dark backgrounds) ========== */
   --paper: #1a1614;
   --paper-elevated: #242018;
+  --message-user-bg: #2a251d;
   --paper-inset: #12100e;
   /* #333 0-alpha 孪生色（同 light 块注释），与上面三个 token 同步维护 */
   --paper-a0: rgb(26 22 20 / 0);
   --paper-elevated-a0: rgb(36 32 24 / 0);
+  --message-user-bg-a0: rgb(42 37 29 / 0);
   --paper-inset-a0: rgb(18 16 14 / 0);
   --hover-bg: rgba(194, 109, 58, 0.12);
 
