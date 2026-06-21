@@ -59,8 +59,30 @@ export function getMessages(): MessageWire[] {
   return messages;
 }
 
+export function getLastAssistantMessageId(): string | null {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i].role === 'assistant') return messages[i].id;
+  }
+  return null;
+}
+
 export function appendMessage(message: MessageWire): void {
   messages.push(message);
+}
+
+export function bindSdkUuidToLatestUnboundUserMessage(sdkUuid: string): string | null {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i].role === 'user' && !messages[i].sdkUuid) {
+      messages[i].sdkUuid = sdkUuid;
+      return messages[i].id;
+    }
+  }
+  return null;
+}
+
+export function bindSdkUuidToMessage(message: MessageWire, sdkUuid: string): string {
+  message.sdkUuid = sdkUuid;
+  return message.id;
 }
 
 export function removeMessageAt(index: number): MessageWire[] {

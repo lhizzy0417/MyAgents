@@ -67,7 +67,6 @@ import { deriveSessionTitle } from '../shared/sessionTitle';
 import { workspacePathsEqual } from '../shared/workspacePath';
 import { normalizeReasoningEffort, isSdkEffortLevel } from '../shared/reasoningEffort';
 import { computeContextUsage } from '../shared/contextUsage';
-import { canResumeAcrossProviderBoundary, type ProviderHistoryEnv } from '../shared/providerHistory';
 import {
   chooseBuiltinContextUsageModel,
   inferContextWindowFromSdkModelTag,
@@ -102,8 +101,7 @@ import { trackServer } from './analytics';
 import { getCurrentRuntimeType, isExternalRuntime } from './runtimes/factory';
 import { decideBuiltinSessionResume } from './utils/builtin-session-resume';
 import { decideQueueAdmission, findQueueLocation, resolveChatQueueResponseMode, shouldClearAdmissionTicketOnAbort, shouldStartTurnBoundaryItem, type QueueAdmissionAction } from './session-core/turn-queue';
-import { decideMcpSync, getMcpAuthorityForScenario, mcpConfigFingerprint } from './session-core/mcp-sync-policy';
-import { shouldApplySnapshotConfigUpdate } from './session-core/runtime-config-policy';
+import { getMcpAuthorityForScenario, mcpConfigFingerprint } from './session-core/mcp-sync-policy';
 import { elapsedMs, emitPerfTrace, nowMs } from './utils/perf-trace';
 import type { ImagePayload, ResolvedImagePayload } from './runtimes/types';
 import { messageAttachmentsFromImagePayloads, resolveImagePayloads } from './runtimes/image-payload';
@@ -165,6 +163,7 @@ import {
   getInFlightQueueId,
   getMessageQueue,
   getPendingMidTurnQueue,
+  getQueueStatus as queueGetQueueStatus,
   getTurnAdmissionTicket,
   getTurnBoundaryQueue,
   hasQueuedOrInFlightWork as queueHasQueuedOrInFlightWork,
@@ -223,10 +222,16 @@ import {
   turnState,
 } from './builtin-session/turn';
 import {
+  applyAgentDefinitionsUpdate as configApplyAgentDefinitionsUpdate,
+  applyMcpServersUpdate as configApplyMcpServersUpdate,
+  applyModelUpdate as configApplyModelUpdate,
+  applyProviderEnvUpdate as configApplyProviderEnvUpdate,
+  applyReasoningEffortUpdate as configApplyReasoningEffortUpdate,
+  canResumeAcrossBuiltinProviderHistory,
   clearDeferredRestart as configClearDeferredRestart,
   drainDeferredRestart as configDrainDeferredRestart,
+  providerEnvEqual as configProviderEnvEqual,
   setBackgroundAgentPermissionMode as configSetBackgroundAgentPermissionMode,
-  setCurrentAgentDefinitions,
   setCurrentMcpServers,
   setFrozenSdkMcpFingerprint,
   hasDeferredRestart as configHasDeferredRestart,
@@ -237,6 +242,7 @@ import {
   setReasoningEffort as configSetReasoningEffort,
   scheduleDeferredRestart as configScheduleDeferredRestart,
   setSessionEnabledPluginIds as configSetSessionEnabledPluginIds,
+  shouldApplyConfigUpdate,
   configState,
 } from './builtin-session/config';
 import {
@@ -244,11 +250,14 @@ import {
   addLiveSessionUuid,
   allocateMessageId,
   appendMessage,
+  bindSdkUuidToLatestUnboundUserMessage,
+  bindSdkUuidToMessage,
   clearCurrentSessionUuids,
   clearLiveSessionUuids,
   clearMessages,
   deleteCurrentSessionUuid,
   deleteLiveSessionUuid,
+  getLastAssistantMessageId,
   setMessageSequence,
   setPendingReloadAnchor,
   truncateMessages,
@@ -1234,21 +1243,6 @@ function hasQueuedOrInFlightWork(excludeAdmissionTicketId?: string): boolean {
 }
 // Pending attachments to persist with user transcriptState.messages
 const _pendingAttachments: MessageAttachment[] = [];
-// #324 — current reasoning effort, NORMALIZED: undefined = default (pre-#324
-// behavior: SDK effort 'high', bridge omits reasoning fields). Set via
-// setSessionReasoningEffort (desktop push), enqueue payload, or
-// switchToSession restore. Read live by resolveActiveSessionUpstreamConfig
-// (OpenAI bridge) and at query() spawn (Anthropic-protocol effort option).
-function toProviderHistoryEnv(providerEnv: ProviderEnv | undefined, model?: string): ProviderHistoryEnv | undefined {
-  if (!providerEnv) return model ? { model } : undefined;
-  return {
-    providerId: providerEnv.providerId,
-    baseUrl: providerEnv.baseUrl,
-    apiProtocol: providerEnv.apiProtocol,
-    model,
-  };
-}
-
 // OpenAI Bridge: sidecar port for loopback. Per-token bridge state lives
 // in `./openai-bridge/bridge-registry`; this module owns its session's
 // token (`activeSessionBridgeToken` below) and the resolver that updates
@@ -1476,10 +1470,7 @@ export function isTurnInFlight(): boolean {
 /** 当前正在流式传输的 assistant 消息 ID（未在流式传输时返回 null） */
 export function getStreamingAssistantId(): string | null {
   if (!isStreamingMessage) return null;
-  for (let i = transcriptState.messages.length - 1; i >= 0; i--) {
-    if (transcriptState.messages[i].role === 'assistant') return transcriptState.messages[i].id;
-  }
-  return null;
+  return getLastAssistantMessageId();
 }
 
 // Mid-turn deferred yield buffer (v0.2.11 cross-bugfix #142):
@@ -2487,14 +2478,12 @@ export async function applyMcpOverrideAndAwaitReady(servers: McpServerDefinition
  * If MCP config changed and a session is running, it will be restarted with resume
  */
 export function setMcpServers(servers: McpServerDefinition[]): void {
-  const mcpDecision = decideMcpSync({
-    previousServers: configState.currentMcpServers ?? [],
-    nextServers: servers,
+  const mcpDecision = configApplyMcpServersUpdate(servers, {
     hasQuerySession: Boolean(lifecycleState.query),
     isSnapshotted: isCurrentSessionSnapshotted(),
   });
 
-  if (mcpDecision.changed && lifecycleState.query && mcpDecision.reason === 'snapshot-authoritative') {
+  if (!mcpDecision.applied && mcpDecision.reason === 'snapshot-authoritative') {
     // v0.1.69 T14: Locked session owns its MCP list — agent-level toggles don't apply here.
     // Expected frontend behavior is to pass the session-resolved list so mcpChanged is false;
     // if we got here, it means someone passed the agent's raw list. Do not mutate
@@ -2504,7 +2493,6 @@ export function setMcpServers(servers: McpServerDefinition[]): void {
     return;
   }
 
-  setCurrentMcpServers(servers);
   if (isDebugMode) {
     console.log(`[agent] MCP servers set: ${servers.map(s => s.id).join(', ') || 'none'}`);
     for (const s of servers) {
@@ -2535,41 +2523,6 @@ export function setMcpServers(servers: McpServerDefinition[]): void {
 }
 
 /**
- * Stable fingerprint of the sub-agent definition set.
- *
- * Covers the fields the SDK actually consumes per `AgentDefinition` — model,
- * tools, disallowedTools, description, prompt body, skills, maxTurns — so an
- * edit to `model:` in `<name>.md` frontmatter (a common reload case) gets
- * detected as a real change and triggers a deferred restart.
- *
- * The previous fingerprint hashed only `Object.keys(...).sort()`, which meant
- * "same agent names → no change" even when the payload differed. That was
- * the root cause of `myagents reload` silently ignoring frontmatter edits
- * (GitHub #98).
- */
-function agentsFingerprint(agents: Record<string, AgentDefinition> | null): string {
-  if (!agents) return '';
-  return JSON.stringify(
-    Object.keys(agents)
-      .sort()
-      .map(name => {
-        const a = agents[name];
-        return {
-          name,
-          description: a.description,
-          prompt: a.prompt,
-          tools: a.tools,
-          disallowedTools: a.disallowedTools,
-          model: a.model,
-          skills: a.skills,
-          maxTurns: a.maxTurns,
-        };
-      }),
-  );
-}
-
-
-/**
  * Get current MCP servers
  * Returns null if never set (workspace not initialized), or array (possibly empty)
  */
@@ -2582,26 +2535,22 @@ export function getMcpServers(): McpServerDefinition[] | null {
  * If agents changed and a session is running, it will be restarted with resume
  */
 export function setAgents(agents: Record<string, AgentDefinition>): void {
-  // Content fingerprint (not just names) — frontmatter-only edits (e.g. changing
-  // `model:` on an existing sub-agent) MUST trigger a restart. Names-only diff
-  // silently dropped these edits and forced users to restart the whole app (#98).
-  const currentFingerprint = agentsFingerprint(configState.currentAgentDefinitions);
-  const nextFingerprint = agentsFingerprint(agents);
-  const agentsChanged = currentFingerprint !== nextFingerprint;
-
   const newNames = Object.keys(agents).sort().join(',');
+  const agentsDecision = configApplyAgentDefinitionsUpdate(agents, {
+    hasQuerySession: Boolean(lifecycleState.query),
+    isSnapshotted: isCurrentSessionSnapshotted(),
+  });
 
-  setCurrentAgentDefinitions(agents);
   if (isDebugMode) {
     console.log(`[agent] Sub-agents set: ${newNames || 'none'}`);
   }
 
   // Defer restart to pre-warm debounce (same as setMcpServers — see comment there).
-  if (agentsChanged && lifecycleState.query) {
-    if (isCurrentSessionSnapshotted()) {
+  if (agentsDecision.changed && lifecycleState.query) {
+    if (agentsDecision.reason === 'snapshot-authoritative') {
       // v0.1.69 T14: Locked session owns its sub-agents — skip restart (same rationale as MCP).
       console.log(`[agent] Sub-agents changed but session ${sessionId} is snapshotted — skip restart`);
-    } else {
+    } else if (agentsDecision.shouldRestart) {
       console.log(`[agent] Sub-agents content changed (${newNames || 'none'}), deferring restart to pre-warm debounce`);
       scheduleDeferredRestart('agents');
     }
@@ -2646,7 +2595,7 @@ export function setSessionPermissionMode(mode: PermissionMode): void {
   // change the live mode. This is security-relevant: an IM channel on fullAgency
   // must NOT silently downgrade a desktop session's plan-mode hard gate. Pure IM
   // sessions (not snapshotted) fall through and live-follow the channel mode.
-  if (!shouldApplySnapshotConfigUpdate({
+  if (!shouldApplyConfigUpdate({
     field: 'permissionMode',
     source: 'im-sync',
     isSnapshotted: isCurrentSessionSnapshotted(),
@@ -2782,8 +2731,6 @@ function dispatchSetModelToSdk(model: string): Promise<void> {
 }
 
 export function setSessionModel(model: string, opts?: { imConfigSync?: boolean }): void {
-  if (model === configState.currentModel) return;
-
   // #327 — snapshot authority. An owned (snapshotted) desktop session's model is
   // frozen at the snapshot, and the per-turn /api/im/enqueue resolver already
   // applies "snapshot wins" (index.ts). But the Rust IM router ALSO pushes the
@@ -2800,22 +2747,19 @@ export function setSessionModel(model: string, opts?: { imConfigSync?: boolean }
   // no `imConfigSync`) stays authoritative — it updates the snapshot itself.
   // Pure IM / cron / live-follow sessions have no snapshot, so this is a no-op
   // for them (isCurrentSessionSnapshotted() === false) and the override applies.
-  if (!shouldApplySnapshotConfigUpdate({
-    field: 'model',
+  const modelUpdate = configApplyModelUpdate(model, {
     source: opts?.imConfigSync ? 'im-sync' : 'desktop',
     isSnapshotted: isCurrentSessionSnapshotted(),
-  })) {
+  });
+  if (!modelUpdate.applied) {
+    if (modelUpdate.reason === 'unchanged') return;
     console.log(`[agent] IM config sync model '${model}' ignored — session ${sessionId} is snapshotted (snapshot wins)`);
     return;
   }
 
-  const oldModel = configState.currentModel;
-  const aliasEnvChanged = modelAliasEnvChangesForModel(configState.currentProviderEnv?.modelAliases, oldModel, model);
-  const crossesProviderHistoryBoundary = !canResumeAcrossProviderBoundary(
-    toProviderHistoryEnv(configState.currentProviderEnv, oldModel),
-    toProviderHistoryEnv(configState.currentProviderEnv, model),
-  );
-  configSetModel(model);
+  const oldModel = modelUpdate.oldModel;
+  const aliasEnvChanged = modelUpdate.aliasEnvChanged;
+  const crossesProviderHistoryBoundary = modelUpdate.crossesProviderHistoryBoundary;
   console.log(`[agent] session model set: ${oldModel ?? 'undefined'} -> ${model}`);
 
   if (crossesProviderHistoryBoundary) {
@@ -2902,13 +2846,13 @@ export function setSessionModel(model: string, opts?: { imConfigSync?: boolean }
  */
 export function setSessionReasoningEffort(value: string | null | undefined): void {
   const normalized = normalizeReasoningEffort(value);
-  if (normalized === configState.currentReasoningEffort) return;
+  const effortUpdate = configApplyReasoningEffortUpdate(normalized);
+  if (!effortUpdate.changed) return;
 
-  const old = configState.currentReasoningEffort;
-  configSetReasoningEffort(normalized);
+  const old = effortUpdate.oldValue;
   console.log(`[agent] session reasoning effort set: ${old ?? 'default'} -> ${normalized ?? 'default'}`);
 
-  if (configState.currentProviderEnv?.apiProtocol === 'openai') {
+  if (effortUpdate.providerApiProtocol === 'openai') {
     // Live bridge resolver picks it up on the next request — no respawn.
     return;
   }
@@ -2966,24 +2910,12 @@ export function setSessionProviderEnv(providerEnv: ProviderEnv | undefined): voi
   const oldLabel = configState.currentProviderEnv?.baseUrl ?? 'anthropic';
   const newLabel = providerEnv?.baseUrl ?? 'anthropic';
   // Full equality check — all ProviderEnv fields affect subprocess env (authType, apiProtocol, etc.)
-  if (providerEnvEqual(configState.currentProviderEnv, providerEnv)) return;
-
-  // #327 — snapshot authority (see setSessionModel). `/api/provider/set` is
-  // Rust-IM-router-only (no renderer caller); desktop provider changes are baked
-  // at sidecar spawn from the snapshot and re-applied per-turn inline by
-  // enqueueUserMessage — they never reach this setter. So for a snapshotted
-  // owned session, ANY call here is a channel/agent provider sync that must be
-  // ignored: the snapshot provider (self-resolved at boot) stays authoritative.
-  // This MUST no-op BEFORE mutating `configState.currentProviderEnv` — the v0.1.69 guard
-  // below only skipped the abort/restart, so the desktop session's LIVE provider
-  // still became the channel's (e.g. Xunfei) while the resolved model stayed
-  // DeepSeek → real "Model Not Found" 500 (#327 comment). Pure IM / cron
-  // sessions (not snapshotted) fall through to the normal live-follow path.
-  if (!shouldApplySnapshotConfigUpdate({
-    field: 'provider',
+  const providerUpdate = configApplyProviderEnvUpdate(providerEnv, {
     source: 'im-sync',
     isSnapshotted: isCurrentSessionSnapshotted(),
-  })) {
+  });
+  if (!providerUpdate.applied) {
+    if (providerUpdate.reason === 'unchanged') return;
     // warn, not log: same rationale as the permissionMode guard — unconditional
     // by caller audit (Rust-IM-router-only); a future non-IM caller's change
     // would be swallowed here and must be loud.
@@ -2991,16 +2923,10 @@ export function setSessionProviderEnv(providerEnv: ProviderEnv | undefined): voi
     return;
   }
 
-  // Resume safety: SDK transcripts are only safe to resume inside one provider history family.
-  // Third-party providers can differ in replay/tool/thinking compatibility even when both expose
-  // an Anthropic-compatible surface; provider verification only proves a fresh minimal turn.
-  // Must check BEFORE updating configState.currentProviderEnv.
-  // Note: Desktop Chat also shows a ConfirmDialog for non-empty provider switches, but this
-  // backend guard is defense-in-depth for non-frontend callers (IM Bot, Cron, Agent Channel).
-  const crossesProviderHistoryBoundary = !canResumeAcrossProviderBoundary(
-    toProviderHistoryEnv(configState.currentProviderEnv, configState.currentModel),
-    toProviderHistoryEnv(providerEnv, configState.currentModel),
-  );
+  // Config owner has already applied the snapshot guard and computed provider-history
+  // compatibility before mutating currentProviderEnv. The facade only performs the
+  // subprocess restart / bridge side effects that follow from that decision.
+  const crossesProviderHistoryBoundary = providerUpdate.crossesProviderHistoryBoundary;
   if (crossesProviderHistoryBoundary) {
     if (lifecycleState.processing && !lifecycleState.preWarming) {
       setPendingProviderHistoryBoundaryReset(true);
@@ -3011,7 +2937,6 @@ export function setSessionProviderEnv(providerEnv: ProviderEnv | undefined): voi
     }
   }
 
-  configSetProviderEnv(providerEnv);
   console.log(`[agent] session provider env set: ${oldLabel} → ${newLabel}`);
   // PRD #124: keep the active session's bridge registration in sync with the
   // new provider. Function is idempotent and handles all transitions
@@ -3046,23 +2971,6 @@ export function setSessionProviderEnv(providerEnv: ProviderEnv | undefined): voi
   if (!lifecycleState.processing || lifecycleState.preWarming) {
     schedulePreWarm();
   }
-}
-
-/** Deep equality check for ProviderEnv — all fields affect subprocess environment. */
-function providerEnvEqual(a: ProviderEnv | undefined, b: ProviderEnv | undefined): boolean {
-  if (!a && !b) return true;
-  if (!a || !b) return false;
-  return a.providerId === b.providerId
-    && a.baseUrl === b.baseUrl
-    && a.apiKey === b.apiKey
-    && a.authType === b.authType
-    && a.apiProtocol === b.apiProtocol
-    && a.maxOutputTokens === b.maxOutputTokens
-    && a.maxOutputTokensParamName === b.maxOutputTokensParamName
-    && a.upstreamFormat === b.upstreamFormat
-    && a.modelAliases?.sonnet === b.modelAliases?.sonnet
-    && a.modelAliases?.opus === b.modelAliases?.opus
-    && a.modelAliases?.haiku === b.modelAliases?.haiku;
 }
 
 /**
@@ -7310,16 +7218,18 @@ export async function enqueueUserMessage(
   const providerChanged = !isSessionBusy && (
     providerEnv === 'subscription'
       ? configState.currentProviderEnv !== undefined
-      : providerEnv !== undefined && !providerEnvEqual(configState.currentProviderEnv, effectiveProviderEnv)
+      : providerEnv !== undefined && !configProviderEnvEqual(configState.currentProviderEnv, effectiveProviderEnv)
   );
   const nextModel = model ?? configState.currentModel;
   const modelChanged = !isSessionBusy && model !== undefined && model !== configState.currentModel;
   const crossesProviderHistoryBoundary = !isSessionBusy
     && (providerChanged || modelChanged)
-    && !canResumeAcrossProviderBoundary(
-      toProviderHistoryEnv(configState.currentProviderEnv, configState.currentModel),
-      toProviderHistoryEnv(effectiveProviderEnv, nextModel),
-    );
+    && !canResumeAcrossBuiltinProviderHistory({
+      currentProviderEnv: configState.currentProviderEnv,
+      currentModel: configState.currentModel,
+      nextProviderEnv: effectiveProviderEnv,
+      nextModel,
+    });
 
   if ((providerChanged || crossesProviderHistoryBoundary) && lifecycleState.query) {
     const fromLabel = configState.currentProviderEnv?.baseUrl ?? 'anthropic';
@@ -8397,16 +8307,7 @@ export async function forceExecuteQueueItem(queueId: string): Promise<boolean> {
  * Get current queue status — list of queued items with their IDs and preview text.
  */
 export function getQueueStatus(): Array<{ id: string; messagePreview: string }> {
-  return [
-    ...queueState.messageQueue.map(item => ({
-      id: item.id,
-      messagePreview: item.messageText.slice(0, 100),
-    })),
-    ...queueState.turnBoundaryQueue.map(item => ({
-      id: item.queueId,
-      messagePreview: item.messageText.slice(0, 100),
-    })),
-  ];
+  return queueGetQueueStatus();
 }
 
 /**
@@ -9303,7 +9204,7 @@ async function startStreamingSession(preWarm = false): Promise<void> {
       // pinned to a 1M model gets the [1m] tag independently of the main session's
       // model (the parent could be on a 200K model, the sub-agent on a 1M one,
       // or vice versa). The original configState.currentAgentDefinitions is left untouched
-      // so agentsFingerprint() and downstream config consumers see clean names.
+      // so config owner fingerprinting and downstream config consumers see clean names.
       ...(configState.currentAgentDefinitions && Object.keys(configState.currentAgentDefinitions).length > 0
         ? {
             agents: Object.fromEntries(
@@ -10786,12 +10687,9 @@ async function startStreamingSession(preWarm = false): Promise<void> {
           if (sdkMessage.uuid) {
             addCurrentSessionUuid(sdkMessage.uuid);
             addLiveSessionUuid(sdkMessage.uuid);
-            for (let i = transcriptState.messages.length - 1; i >= 0; i--) {
-              if (transcriptState.messages[i].role === 'user' && !transcriptState.messages[i].sdkUuid) {
-                transcriptState.messages[i].sdkUuid = sdkMessage.uuid;
-                broadcast('chat:message-sdk-uuid', { messageId: transcriptState.messages[i].id, sdkUuid: sdkMessage.uuid });
-                break;
-              }
+            const boundMessageId = bindSdkUuidToLatestUnboundUserMessage(sdkMessage.uuid);
+            if (boundMessageId) {
+              broadcast('chat:message-sdk-uuid', { messageId: boundMessageId, sdkUuid: sdkMessage.uuid });
             }
           }
           continue;
@@ -10836,12 +10734,9 @@ async function startStreamingSession(preWarm = false): Promise<void> {
         if (sdkMessage.uuid) {
           addCurrentSessionUuid(sdkMessage.uuid);
           addLiveSessionUuid(sdkMessage.uuid);
-          for (let i = transcriptState.messages.length - 1; i >= 0; i--) {
-            if (transcriptState.messages[i].role === 'user' && !transcriptState.messages[i].sdkUuid) {
-              transcriptState.messages[i].sdkUuid = sdkMessage.uuid;
-              broadcast('chat:message-sdk-uuid', { messageId: transcriptState.messages[i].id, sdkUuid: sdkMessage.uuid });
-              break;
-            }
+          const boundMessageId = bindSdkUuidToLatestUnboundUserMessage(sdkMessage.uuid);
+          if (boundMessageId) {
+            broadcast('chat:message-sdk-uuid', { messageId: boundMessageId, sdkUuid: sdkMessage.uuid });
           }
         }
         // Process tool_result blocks from user transcriptState.messages
@@ -10959,10 +10854,10 @@ async function startStreamingSession(preWarm = false): Promise<void> {
         if (sdkMessage.uuid) {
           addCurrentSessionUuid(sdkMessage.uuid);
           addLiveSessionUuid(sdkMessage.uuid);
-          currentAssistant.sdkUuid = sdkMessage.uuid;
+          const boundMessageId = bindSdkUuidToMessage(currentAssistant, sdkMessage.uuid);
           // Broadcast to frontend so fork button appears during streaming
           // (user transcriptState.messages already broadcast this; assistant transcriptState.messages were missing it)
-          broadcast('chat:message-sdk-uuid', { messageId: currentAssistant.id, sdkUuid: sdkMessage.uuid });
+          broadcast('chat:message-sdk-uuid', { messageId: boundMessageId, sdkUuid: sdkMessage.uuid });
         }
         const assistantMessage = sdkMessage.message;
         // Main turn token usage is extracted from result message (more reliable across providers)

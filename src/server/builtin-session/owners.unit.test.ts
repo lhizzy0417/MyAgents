@@ -51,13 +51,19 @@ import {
   setAssistantMessagePresent,
 } from './turn';
 import {
+  applyAgentDefinitionsUpdate,
+  applyMcpServersUpdate,
+  applyModelUpdate,
+  applyProviderEnvUpdate,
   consumePendingProviderHistoryBoundaryReset,
+  getCurrentAgentDefinitions,
   drainDeferredRestart,
   getModel,
   getPermissionMode,
   hasDeferredRestart,
   resetConfigForTest,
   scheduleDeferredRestart,
+  setCurrentMcpServers,
   setModel,
   setPendingProviderHistoryBoundaryReset,
   setPermissionPlanState,
@@ -65,6 +71,8 @@ import {
 } from './config';
 import {
   addCurrentSessionUuid,
+  bindSdkUuidToLatestUnboundUserMessage,
+  bindSdkUuidToMessage,
   clearTranscriptState,
   getCurrentSessionUuids,
   getLastPersistedIndex,
@@ -268,13 +276,80 @@ describe('builtin-session owners', () => {
     expect(consumePendingProviderHistoryBoundaryReset()).toBe(false);
   });
 
+  it('config owner applies policy decisions before state mutation', () => {
+    setCurrentMcpServers([{ id: 'old', name: 'old', command: 'node', args: [], type: 'stdio', isBuiltin: false }]);
+    const skippedMcp = applyMcpServersUpdate(
+      [{ id: 'new', name: 'new', command: 'node', args: [], type: 'stdio', isBuiltin: false }],
+      { hasQuerySession: true, isSnapshotted: true },
+    );
+    expect(skippedMcp).toMatchObject({
+      applied: false,
+      changed: true,
+      shouldRestart: false,
+      reason: 'snapshot-authoritative',
+    });
+    expect(snapshotConfig().mcpServers?.map(server => server.id)).toEqual(['old']);
+
+    const skippedModel = applyModelUpdate('im-model', { source: 'im-sync', isSnapshotted: true });
+    expect(skippedModel).toMatchObject({ applied: false, reason: 'snapshot-authoritative' });
+    expect(getModel()).toBeUndefined();
+
+    const appliedModel = applyModelUpdate('desktop-model', { source: 'desktop', isSnapshotted: true });
+    expect(appliedModel).toMatchObject({ applied: true, oldModel: undefined, newModel: 'desktop-model' });
+    expect(getModel()).toBe('desktop-model');
+
+    const skippedProvider = applyProviderEnvUpdate(
+      { baseUrl: 'https://channel.example.com', apiKey: 'k' },
+      { source: 'im-sync', isSnapshotted: true },
+    );
+    expect(skippedProvider).toMatchObject({ applied: false, reason: 'snapshot-authoritative' });
+    expect(snapshotConfig().providerEnv).toBeUndefined();
+
+    const initialAgents = {
+      existing: {
+        description: 'existing',
+        prompt: 'existing prompt',
+        tools: [],
+      },
+    };
+    const nextAgents = {
+      changed: {
+        description: 'changed',
+        prompt: 'changed prompt',
+        tools: [],
+      },
+    };
+    expect(applyAgentDefinitionsUpdate(initialAgents, { hasQuerySession: false, isSnapshotted: false }))
+      .toMatchObject({ applied: true, reason: 'no-active-session' });
+    expect(Object.keys(getCurrentAgentDefinitions() ?? {})).toEqual(['existing']);
+
+    const skippedAgents = applyAgentDefinitionsUpdate(nextAgents, {
+      hasQuerySession: true,
+      isSnapshotted: true,
+    });
+    expect(skippedAgents).toMatchObject({
+      applied: false,
+      changed: true,
+      shouldRestart: false,
+      reason: 'snapshot-authoritative',
+    });
+    expect(Object.keys(getCurrentAgentDefinitions() ?? {})).toEqual(['existing']);
+  });
+
   it('transcript owner owns sequence cursor and uuid freshness', () => {
     expect(nextMessageSequence()).toBe(1);
-    replaceMessages([{ id: 'm1', role: 'user', content: 'hello', timestamp: 'now' }]);
+    const assistant = { id: 'm2', role: 'assistant' as const, content: 'hi', timestamp: 'now' };
+    replaceMessages([
+      { id: 'm1', role: 'user', content: 'hello', timestamp: 'now' },
+      assistant,
+    ]);
     setLastPersistedIndex(1);
     addCurrentSessionUuid('uuid-1');
 
-    expect(getMessages()).toHaveLength(1);
+    expect(bindSdkUuidToLatestUnboundUserMessage('user-uuid')).toBe('m1');
+    expect(bindSdkUuidToMessage(assistant, 'assistant-uuid')).toBe('m2');
+    expect(getMessages()).toHaveLength(2);
+    expect(getMessages().map(message => message.sdkUuid)).toEqual(['user-uuid', 'assistant-uuid']);
     expect(getLastPersistedIndex()).toBe(1);
     expect(getCurrentSessionUuids().has('uuid-1')).toBe(true);
 

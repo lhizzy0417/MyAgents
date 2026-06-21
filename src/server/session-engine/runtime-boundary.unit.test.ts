@@ -111,6 +111,7 @@ describe('SessionEngine runtime boundary', () => {
       /lifecycleState\.(?:messageResolver|query|processing|preWarming|preWarmFailCount|preWarmTimer|systemInitInfo|sdkControlReady|termination)\s*(?<!=)=(?!=)/,
       /queueState\.(?:messageQueue|pendingMidTurnQueue|turnBoundaryQueue|turnAdmissionTicket|inFlightToCliId|inFlightMetadata|forceSurfaceInFlightId|forceTurnBoundaryQueueId|promotedItemInFlight|awaitingAssistantStartAckQueueId|committingTurnAdmissionQueueId|interruptingInFlightQueueId)\s*(?<!=)=(?!=)/,
       /queueState\.(?:messageQueue|pendingMidTurnQueue|turnBoundaryQueue)\.(?:push|unshift|shift|splice)\(/,
+      /queueState\.(?:messageQueue|pendingMidTurnQueue|turnBoundaryQueue)\.map\(/,
       /turnState\.(?:injectedTurnOutcomes|discardedInjectedTurnIds)\.(?:set|delete|clear|add)\(/,
       /turnState\.(?:currentTurnInjectedTurnId|currentTurnImTerminalEmitted|currentPlanFileMinMtimeMs|currentTurnStartTime|currentTurnToolCount|sessionBrowserToolUsed|sessionStorageStateSaved|turnHadSubstantiveActivity|currentTurnCompactResult|currentTurnSawCompactBoundary|currentTurnHadAssistantMessageError|currentTurnLastAssistantMessageError|currentTurnHasOutput|latestMainAssistantUsage|currentTurnAnalyticsSource|currentTurnProviderAnalytics|currentTurnAssistantMessagePresent)\s*(?:(?<!=)=(?!=)|\+\+|--)/,
       /turnState\.currentTurnUsage\.[A-Za-z0-9_]+\s*(?<!=)=(?!=)/,
@@ -121,6 +122,8 @@ describe('SessionEngine runtime boundary', () => {
       /turnState\.currentTurnInboxMeta\s*(?<!=)=(?!=)/,
       /configState\.(?:currentMcpServers|currentEnabledPluginIds|currentAgentDefinitions|currentPermissionMode|prePlanPermissionMode|currentBackgroundAgentPermissionMode|currentModel|currentReasoningEffort|currentProviderEnv|pendingProviderHistoryBoundaryReset|frozenSdkMcpFingerprint)\s*(?<!=)=(?!=)/,
       /transcriptState\.(?:messages|messageSequence|lastPersistedIndex|persistedSessionMessageCache|persistChainBySession|currentSessionUuids|liveSessionUuids|pendingReloadAnchor)\s*(?:(?<!=)=(?!=)|\+\+|--)/,
+      /transcriptState\.messages\[[^\n]+\]\.sdkUuid\s*(?<!=)=(?!=)/,
+      /\bcurrentAssistant\.sdkUuid\s*(?<!=)=(?!=)/,
       /transcriptState\.(?:messages|persistedSessionMessageCache)\.length\s*(?<!=)=(?!=)/,
       /transcriptState\.(?:messages|persistedSessionMessageCache|persistChainBySession|currentSessionUuids|liveSessionUuids)\.(?:push|splice|add|delete|clear)\(/,
     ];
