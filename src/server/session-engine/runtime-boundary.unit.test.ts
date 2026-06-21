@@ -1,11 +1,12 @@
 import { describe, expect, it } from 'vitest';
-import { readdirSync, readFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { join, relative } from 'node:path';
 
 const repoRoot = process.cwd();
 
 function listSourceFiles(relativeDir: string): string[] {
   const root = join(repoRoot, relativeDir);
+  if (!existsSync(root)) return [];
   const files: string[] = [];
   for (const entry of readdirSync(root, { withFileTypes: true })) {
     const fullPath = join(root, entry.name);
@@ -106,6 +107,84 @@ describe('SessionEngine runtime boundary', () => {
     });
 
     expect(violations).toEqual([]);
+  });
+
+  it('keeps Phase8 external owner modules behind the external-session facade', () => {
+    const routeFiles = listSourceFiles('src/server/routes');
+    const adapterFiles = listSourceFiles('src/server/session-engine');
+
+    const violations = [...routeFiles, ...adapterFiles].flatMap((file) => {
+      const source = readFileSync(file, 'utf8');
+      return [
+        '../runtimes/external-session/',
+        './external-session/',
+        'src/server/runtimes/external-session/',
+      ]
+        .filter(pattern => source.includes(pattern))
+        .map(pattern => `${relative(repoRoot, file)} imports external-session owner internals via ${pattern}`);
+    });
+
+    expect(violations).toEqual([]);
+  });
+
+  it('keeps external owner modules independent from routes and SessionEngine', () => {
+    const ownerFiles = listSourceFiles('src/server/runtimes/external-session');
+
+    const violations = ownerFiles.flatMap((file) => {
+      const source = readFileSync(file, 'utf8');
+      return [
+        '../../routes',
+        '../routes',
+        './routes',
+        '../../session-engine',
+        '../session-engine',
+        './session-engine',
+        '../../index',
+        '../index',
+      ]
+        .filter(pattern => source.includes(pattern))
+        .map(pattern => `${relative(repoRoot, file)} contains ${pattern}`);
+    });
+
+    expect(violations).toEqual([]);
+  });
+
+  it('keeps Phase8 external owner state out of the external-session facade', () => {
+    const source = sourceWithoutCommentLines(join(repoRoot, 'src/server/runtimes/external-session.ts'));
+    const forbidden = [
+      /\blet activeProcess\b/,
+      /\blet activeRuntime\b/,
+      /\blet isRunning\b/,
+      /\blet startingPromise\b/,
+      /\blet startingSessionId\b/,
+      /\blet externalOperationQueue\b/,
+      /\blet turnCompleted\b/,
+      /\bconst turnFinalization\b/,
+      /\blet currentTurnUsage\b/,
+      /\blet currentTurnContextUsage\b/,
+      /\blet currentContentBlocks\b/,
+      /\blet currentAssistantText\b/,
+      /\blet allSessionMessages\b/,
+      /\bconst pendingExternalInteractiveRequests\b/,
+      /\bconst pendingExternalAskUserQuestions\b/,
+      /\bconst pendingPermissionSuggestions\b/,
+      /\blet activeRequestId\b/,
+      /\blet currentTurnInboxMeta\b/,
+      /\bgetExternalContentBlocksRef\b/,
+      /\bgetExternalPendingToolInputs\b/,
+      /\bgetExternalChildToolToParent\b/,
+      /\bgetExternalSubagentTraceBuffers\b/,
+      /\bgetExternalSubagentAttachmentParents\b/,
+      /\bpushExternalContentBlock\b/,
+      /\bresolveLastRealUserMessagePreview\b/,
+    ];
+
+    const violations = forbidden
+      .filter(pattern => pattern.test(source))
+      .map(pattern => String(pattern));
+
+    expect(violations).toEqual([]);
+    expect(source).toContain('appendAndPersistExternalAssistantTurn');
   });
 
   it('keeps builtin owner writes behind owner APIs instead of mutable state bags', () => {

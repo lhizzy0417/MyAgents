@@ -150,6 +150,27 @@ delivery 成功后，目标 sidecar 才 ack 并清理 pending watch；Management
 - `agent-session.ts` 需要修改 owner state 时走 `builtin-session/*` 的命名 API；`runtime-boundary.unit.test.ts` 有 direct-write guard，防止重新裸写 lifecycle/queue/turn/config/transcript 状态。
 - `agent-session.ts` 不再解释 SDK terminal result，也不再实现 transcript persistence mapping/chain；这两类行为分别归 `turn-lifecycle.ts` 与 `transcript-persistence.ts`，facade 只组装必要依赖并委托。
 
+### External Session Owner Split（Phase8）
+
+`src/server/runtimes/external-session.ts` 是 external runtime public facade：`SessionEngine` adapter、external-only legacy endpoints 和 runtime event shell 仍从这里进入。Phase8 后，facade 不再直接拥有 external runtime 的核心 state bags；真实 owner 位于 `src/server/runtimes/external-session/`：
+
+| Owner | 拥有内容 | 典型写入 / 行为入口 |
+|---|---|---|
+| `lifecycle.ts` | active process/runtime、starting guard、session binding、runtimeSessionId、prewarm/system-init、user-stop flag | start/prewarm/restore/stop/session_init |
+| `runtime-config.ts` | desired/live model、permission mode、reasoning effort；snapshot/source guard integration | runtime config setters、message snapshot capture、restore metadata |
+| `operation-queue.ts` | desktop queued message/config FIFO、drain reservation、generation-based stale dispatch rejection、desktop send tail reset、force/cancel/status | mid-turn desktop send、turn-boundary drain、config deferral、session reset cleanup |
+| `turn-lifecycle.ts` | turn completed/success flags、finalization gate、turn start time、usage/context usage | terminal events、wait idle、cron/IM true-success gating |
+| `content-blocks.ts` | streaming text/thinking/tool/subagent content state、tool result/attachment mutation、live/turn snapshot | UnifiedEvent text/thinking/tool/subagent cases、live snapshot、turn persistence snapshot |
+| `transcript-persistence.ts` | in-memory `SessionMessage[]`、persisted runtime usage totals、assistant turn append + SessionStore save + metadata preview/context update | restore state、append user/assistant、retry truncate、turn-end SessionStore write |
+| `interactive.ts` | permission / AskUserQuestion pending state、active IM request id、inbox/watch reply metadata | permission request/response、AskUserQuestion response、stop/error cleanup；permission delivery 成功后才 consume/delete |
+
+边界规则：
+
+- `session-engine/*` 和 `routes/*` 不 import `runtimes/external-session/*` owner modules，只通过 `external-session.ts` public facade。
+- `runtimes/external-session/*` 不 import route、SessionEngine 或 `index.ts`。
+- `external-session.ts` 需要读写 owner state 时走命名 API；`runtime-boundary.unit.test.ts` 有 facade-state guard，防止 `activeProcess`、operation queue、turn finalization、content raw refs/maps、transcript messages、interactive pending maps 回流成顶层裸状态。特别是 content owner 不向 facade 暴露 live mutable block/map refs；turn-end assistant append + SessionStore save 归 transcript owner。
+- Phase8 没有抽 builtin/external 通用 runtime framework。两边共享 `session-core/*` pure policy；进程模型和副作用 owner 保持各自 runtime-native。
+
 ### `sessionRegistered` 状态
 
 ```typescript
@@ -524,7 +545,7 @@ Tab 翻成 chat 时，Chat 要决定**如何与该 session 的 sidecar 对齐配
 **External runtime 补充（0.2.34+ / 0.2.40 policy owner）**：外部 runtime 的 model / permission /
 reasoning effort setter 不再是“直接 stop 进程”的 process-global 操作。`/api/runtime/config`
 和旧 `/api/model/set` / `/api/session/permission-mode` / `/api/reasoning-effort/set`
-的 external 分支都会进入 `external-session.ts::updateExternalRuntimeConfig()`:
+的 external 分支都会进入 `external-session.ts::updateExternalRuntimeConfig()`；desired/live config state 与 snapshot/source filtering 由 `runtimes/external-session/runtime-config.ts` 拥有:
 
 - active turn 中的配置变更入 `externalOperationQueue`,当前 turn 继续运行。
 - desktop queued message 捕获入队时的 runtime config snapshot,后续 config op 不会倒灌。

@@ -428,7 +428,20 @@ SDK subprocess → ANTHROPIC_BASE_URL=127.0.0.1:${sidecarPort}
 | `claude-code.ts` | CC Runtime：NDJSON over stdio，`-p` 模式 |
 | `codex.ts` | Codex Runtime：JSON-RPC 2.0 over stdio，`app-server` 持久进程 |
 | `gemini.ts` | Gemini Runtime：ACP JSON-RPC 2.0 over stdio，`gemini --acp` |
-| `external-session.ts` | 外部 runtime 会话管理：内容块持久化、配置变更、并发守卫、看门狗、Token 用量 |
+| `external-session.ts` | 外部 runtime public facade：start/send/prewarm/stop、UnifiedEvent shell、SessionEngine-facing exports |
+| `external-session/*` | 外部 runtime owner modules：lifecycle、runtime config、operation queue、turn lifecycle、content blocks、transcript persistence、interactive requests |
+
+`external-session.ts` 不再是 external runtime 的 state owner。真实 mutable state 归 `src/server/runtimes/external-session/`：
+
+| Owner module | 职责 |
+|------|------|
+| `lifecycle.ts` | active runtime/process、starting guard、session binding、prewarm/system-init、user-stop flag |
+| `runtime-config.ts` | desired/live model、permission、reasoning effort state；snapshot/source guard integration |
+| `operation-queue.ts` | desktop queued message/config FIFO、drain reservation、generation-based stale dispatch rejection、desktop send tail reset、force/cancel/status bookkeeping |
+| `turn-lifecycle.ts` | turn completed/success、finalization gate、turn start time、usage/context usage state |
+| `content-blocks.ts` | streaming text/thinking/tool/subagent content state、tool result/attachment mutation、live/turn snapshot backing state |
+| `transcript-persistence.ts` | in-memory session messages、persisted runtime usage totals、assistant turn append + SessionStore save + metadata preview/context update |
+| `interactive.ts` | permission/AskUserQuestion pending state、active IM request id、inbox/watch reply metadata；permission response 成功 delivery 后才 consume pending state |
 
 **门控链路：** Rust `sidecar/runtime_identity.rs` 读取 `config.multiAgentRuntime` + `agent.runtime`，`sidecar/session_lifecycle.rs` / `sidecar/instances.rs` 在 spawn Sidecar 时注入 `MYAGENTS_RUNTIME` 环境变量 → Node.js `factory.ts` 读取 → `session-engine/selector.ts` 通过 `shouldUseExternalRuntime()` 选择 builtin/external `SessionEngine`。前端 `Chat.tsx` 用同样门控决定 `currentRuntime`。
 
