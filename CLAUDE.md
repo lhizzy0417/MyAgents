@@ -143,6 +143,8 @@ MCP / Agents 同步触发 `schedulePreWarm()`（500ms 防抖），Model 同步**
 ### Multi-Agent Runtime
 内置 SDK（builtin）+ 外部 Runtime（Claude Code CLI / Codex CLI / Gemini CLI）。功能门控 `config.multiAgentRuntime`（默认关闭）。**新增"config 同步"、"注入 user 消息"、"等待 turn 完成"、"session 读/操作"的 sidecar 端点 MUST 走 `src/server/session-engine/` facade**，由 `selector.ts` 统一选择 builtin/external adapter；禁止在 `index.ts` 或新 route module 里手写 `shouldUseExternalRuntime()` 分支。漏分流会让 builtin SDK 去 resume 一个外部 runtime 从没创建的会话 → `No conversation found` → `num_turns:0` 静默空转 + 假成功（#2145eddd memory-update 实战：夜间记忆更新对 Codex 会话 0 turn、孤儿气泡）。同步/注入类 endpoint 的 `completed` 必须 gate 在真·turn 成功上（external=`didLastTurnSucceed`，builtin=`!getAndClearLastAgentError()`），由 Engine adapter 封装，别只凭 `waitForSessionIdle`。详见 `tech_docs/multi_agent_runtime.md`。
 
+`agent-session.ts` / `runtimes/external-session.ts` 都是 public facade，不是新 owner state 的落点。Builtin 内核状态与行为在 `src/server/builtin-session/*`；external runtime 内核状态与行为在 `src/server/runtimes/external-session/*`（lifecycle / runtime-config / operation-queue / turn-lifecycle / content-blocks / transcript-persistence / interactive）。改 terminal、transcript、queue、interactive、content 相关问题时先找对应 owner API，禁止把 `saveSessionMessages()`、IM registry、terminal classification、mutable content/transcript refs 重新写回 facade。
+
 ### 定时任务系统
 Rust `CronTaskManager` 统一管理所有定时任务（Chat 定时 / 独立创建 / AI 工具 / IM Cron / Heartbeat）。Cron Tool（`im-cron` MCP）已泛化为**所有 Session 可用**，始终信任。新增 `CronTask` 字段 MUST 带 `#[serde(default)]`。详见 ARCHITECTURE「定时任务系统」。
 
