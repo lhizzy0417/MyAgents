@@ -28,17 +28,14 @@ import type { AskUserQuestionInput, AskUserQuestion } from '../../shared/types/a
 import { withQuestionTextAnswerKeys } from '../../shared/types/askUserQuestion';
 import { getExternalRuntime, getCurrentRuntimeType, isExternalRuntime } from './factory';
 import { resolveCodexWorkspaceInstructions } from './workspace-instructions';
-import { decideSessionCompleteErrorAction } from './external-abort-policy';
 import { RUNTIME_DISPLAY_NAMES, type RuntimeType } from '../../shared/types/runtime';
 import { deriveSessionTitle } from '../../shared/sessionTitle';
 import { isPendingSessionId } from '../../shared/constants';
 import {
   saveSessionMetadata,
-  saveSessionMessages,
   updateSessionMetadata,
   getSessionMetadata,
   getSessionData,
-  type SaveSessionMessagesResult,
 } from '../SessionStore';
 import { firePostTurnTitleHook } from '../turn-hooks';
 import {
@@ -57,8 +54,6 @@ import {
   normalizeUsage,
   restoreRuntimeUsageTotals,
 } from './usage-utils';
-import { imEventBus, type ImEventType } from '../utils/im-event-bus';
-import { imRequestRegistry } from '../utils/im-request-registry';
 import {
   EXTERNAL_WATCHDOG_DEFAULT_TIMEOUT_MS,
   externalRuntimeWatchdogTimeoutMs,
@@ -172,6 +167,8 @@ import {
   getExternalTurnStartTime,
   isExternalTurnCompleted,
   isExternalTurnFinalizationInFlight,
+  markExternalSessionComplete,
+  markExternalTurnComplete,
   markExternalTurnStarted,
   resetExternalTurnAccumulators,
   resetExternalTurnLifecycleState,
@@ -223,35 +220,37 @@ import {
 import {
   appendAndPersistExternalAssistantTurn,
   clearExternalSessionMessages,
-  findExternalSessionMessageIndex,
-  getExternalSessionMessageAt,
+  forEachExternalSessionMessage,
+  getLastExternalAssistantTextFromTranscript,
   getExternalSessionMessageCount,
-  getExternalSessionMessagesRef,
+  getExternalSessionMessagesSnapshot,
   getLastPersistedRuntimeUsageTotals,
+  persistExternalUserMessageAppend,
   pushExternalSessionMessage,
   removeExternalSessionMessageById,
   resetExternalTranscriptState,
   setExternalSessionMessages,
   setLastPersistedRuntimeUsageTotals,
-  truncateExternalSessionMessages,
+  truncateExternalTranscriptForRetry,
 } from './external-session/transcript-persistence';
 import {
   addExternalTurnAttachmentHint,
-  clearExternalActiveRequestId,
   clearExternalAskUserQuestions,
+  clearExternalInboxMetaOnRejection,
   clearExternalInteractiveRequests,
   clearExternalPermissionSuggestions,
-  clearExternalTurnInboxMeta,
   consumeExternalPermissionSuggestions,
   deleteExternalAskUserQuestion,
   deleteExternalInteractiveRequest,
+  deliverExternalWatchError,
+  finalizeExternalActiveRequest,
+  fireExternalImCallback,
   getExternalActiveRequestId,
   getExternalAskUserQuestion,
   getExternalInteractiveRequest,
   getExternalInteractiveRequestEntries,
   getExternalInteractiveRequestsSnapshot,
   getExternalPermissionSuggestions,
-  getExternalTurnAttachmentHintsSnapshot,
   getExternalTurnInboxMeta,
   hasExternalAskUserQuestion,
   hasExternalInteractiveRequests,
@@ -274,7 +273,6 @@ import type {
   ExternalSessionState,
   ExternalTurnUsage,
   PendingExternalSessionBirth,
-  PersistContentBlock,
 } from './external-session/types';
 
 export type {
@@ -296,6 +294,10 @@ export type {
 } from './external-session/types';
 
 export { buildExternalAssistantSnapshotContent } from './external-session/content-blocks';
+export {
+  classifyExternalTurnFailureCleanup,
+  isSuccessfulExternalTurnCompletion,
+} from './external-session/turn-lifecycle';
 
 // ─── Module state ───
 // #307: set true while stopExternalSession() is tearing down the process (user
@@ -629,28 +631,6 @@ function clearPendingExternalSessionBirth(sessionId: string): void {
   }
 }
 
-function describeSaveSessionMessagesFailure(
-  result: Extract<SaveSessionMessagesResult, { ok: false }>,
-): string {
-  switch (result.reason) {
-    case 'unindexed-create-refused':
-      return `session metadata is missing; refused to create JSONL (${result.count} message(s))`;
-    case 'shrink-refused':
-      return `append-only save saw shorter memory history (${result.count}) than disk (${result.existingCount})`;
-    case 'write-error':
-      return result.error;
-  }
-}
-
-function assertSessionMessagesPersisted(
-  result: SaveSessionMessagesResult,
-  context: string,
-): void {
-  if (!result.ok) {
-    throw new Error(`${context}: ${describeSaveSessionMessagesFailure(result)}`);
-  }
-}
-
 function removeMessageFromInMemoryHistory(messageId: string): boolean {
   return removeExternalSessionMessageById(messageId);
 }
@@ -695,8 +675,7 @@ async function persistUserMessageBeforeRuntimeDispatch(params: {
       scenario: params.scenario,
       turnPath: params.turnPath,
     });
-    const saveResult = await saveSessionMessages(params.sessionId, getExternalSessionMessagesRef(), { allowShrink: false });
-    assertSessionMessagesPersisted(saveResult, params.failureContext);
+    await persistExternalUserMessageAppend(params.sessionId, params.failureContext);
   } catch (err) {
     rollbackPreDispatchUserTurn(params.userMsg, err instanceof Error ? err.message : String(err));
     throw err;
@@ -865,7 +844,7 @@ function resetWatchdog(): void {
     console.error(`[external-session] Watchdog: no runtime activity for ${minutes} minutes of active time, killing process`);
     broadcast('chat:agent-error', { message: `External runtime timed out (no activity for ${minutes} minutes)` });
     broadcast('chat:message-error', 'External runtime timed out');
-    fireImCallback('error', 'External runtime timed out');
+    fireExternalImCallback('error', 'External runtime timed out');
     void stopExternalSession();
   }, WATCHDOG_INTERVAL_MS);
   watchdogTimer.unref?.();
@@ -971,7 +950,7 @@ function clearExternalTurnTrace(): void {
 function seedTurnWatchdogEstimate(extraText = ''): void {
   const runtimeType = getExternalActiveRuntime()?.type ?? getCurrentRuntimeType();
   setExternalCurrentTurnEstimatedInputTokens(runtimeType === 'codex'
-    ? estimatedContextTokensFromMessages(getExternalSessionMessagesRef(), extraText)
+    ? estimatedContextTokensFromMessages(getExternalSessionMessagesSnapshot(), extraText)
     : 0);
 }
 
@@ -1028,60 +1007,9 @@ function buildPersistedTurnUsage(): MessageUsage | undefined {
   return normalizedCurrent;
 }
 
-/** Check if content looks like JSON ContentBlock[] (matches frontend heuristic in TabProvider.tsx:1969) */
-function isContentBlockJson(content: string): boolean {
-  return content.startsWith('[') && content.includes('"type"');
-}
-
 function currentExternalTurnTextSnapshot(): string {
   const blockText = getExternalContentBlockText();
   return blockText || getExternalAssistantText().trim();
-}
-
-function deliverExternalWatchError(errorCode: string, errorMessage: string): void {
-  const lifecycleSessionId = getExternalLifecycleSessionId();
-  if (!lifecycleSessionId) return;
-  const sid = lifecycleSessionId;
-  const text = currentExternalTurnTextSnapshot();
-  const attachmentHintSnapshot = getExternalTurnAttachmentHintsSnapshot();
-  const attachmentHints = attachmentHintSnapshot.length > 0
-    ? attachmentHintSnapshot
-    : undefined;
-  void import('../inbox/watch-deliver').then(({ deliverSessionWatchEvents }) =>
-    deliverSessionWatchEvents(sid, {
-      text,
-      error: { code: errorCode, message: errorMessage },
-      attachmentHints,
-    }),
-  ).catch((err) =>
-    console.error('[session-watch] external failure watch push failed:', err),
-  );
-}
-
-/**
- * PRD 0.2.18 — clear inbox meta + push error reply if needed when
- * sendExternalMessage rejects BEFORE persistTurnResult ever runs (Case 1/2/3
- * throw paths). Without this helper the meta would leak to the next turn and
- * a stale reply would be pushed to the wrong caller.
- *
- * Cross-review CC + Codex both flagged this leak. Call from EVERY rejection
- * return inside sendExternalMessage that runs after the meta-binding line.
- */
-function clearInboxMetaOnRejection(errorCode: string, errorMessage: string): void {
-  const meta = getExternalTurnInboxMeta();
-  if (!meta) return;
-  clearExternalTurnInboxMeta();
-  resetExternalTurnAttachmentHints();
-  if (!meta.replyBack) return;
-  const sid = getExternalLifecycleSessionId() || meta.fromSessionId; // best-effort
-  void import('../inbox/reply-deliver').then(({ deliverInboxReply }) =>
-    deliverInboxReply(sid, meta, {
-      text: '',
-      error: { code: errorCode, message: errorMessage },
-    }),
-  ).catch((err) =>
-    console.error('[inbox] external rejection reply pushback failed:', err),
-  );
 }
 
 // Mirrors agent-session.ts `isValidAskUserQuestionInput`. Malformed input would crash
@@ -1104,15 +1032,6 @@ function isAskUserQuestionInput(input: unknown): input is AskUserQuestionInput {
       (question.isSecret === undefined || typeof question.isSecret === 'boolean')
     );
   });
-}
-
-/** Pattern B — emit per-request IM event. Subscribers in /api/im/chat filter
- *  by matching requestId. No-op when no active IM trace (desktop / cron). */
-function fireImCallback(type: ImEventType, data: string): void {
-  const activeRequestId = getExternalActiveRequestId();
-  if (activeRequestId !== null) {
-    imEventBus.emit(activeRequestId, type, data);
-  }
 }
 
 /**
@@ -1175,8 +1094,8 @@ export function restoreExternalSessionState(
   // this rebuild, history replay shows broken images for any savedPath that
   // didn't land in our trusted root.
   if (hasExistingMessages) {
-    for (const msg of getExternalSessionMessagesRef()) {
-      if (msg.role !== 'assistant' || typeof msg.content !== 'string') continue;
+    forEachExternalSessionMessage((msg) => {
+      if (msg.role !== 'assistant' || typeof msg.content !== 'string') return;
       try {
         const blocks = JSON.parse(msg.content);
         if (Array.isArray(blocks)) {
@@ -1185,15 +1104,16 @@ export function restoreExternalSessionState(
       } catch {
         // Plain-text assistant messages have no blocks — fine.
       }
-    }
+    });
   }
+  const sessionMessagesSnapshot = getExternalSessionMessagesSnapshot();
   setLastPersistedRuntimeUsageTotals(restoreRuntimeUsageTotals(
     currentRuntimeType,
-    getExternalSessionMessagesRef(),
+    sessionMessagesSnapshot,
     meta?.runtimeUsageTotals,
   ));
   const restoredRuntimeReportedModel = meta?.runtimeUsageTotals?.model
-    || getExternalSessionMessagesRef()
+    || sessionMessagesSnapshot
       .slice()
       .reverse()
       .find((msg) => msg.role === 'assistant' && msg.usage?.model)?.usage?.model
@@ -1535,61 +1455,13 @@ export function didLastTurnSucceed(): boolean {
   return didExternalLastTurnSucceed();
 }
 
-export function isSuccessfulExternalTurnCompletion(
-  event: Pick<Extract<UnifiedEvent, { kind: 'turn_complete' }>, 'status'>,
-): boolean {
-  return !event.status
-    || event.status === 'completed'
-    || event.status === 'success'
-    || event.status === 'succeeded';
-}
-
-type ExternalTurnFailureCleanup = 'defer-to-stop' | 'stopped' | 'error';
-
-function isInterruptedExternalTurnStatus(status: string | undefined): boolean {
-  return status === 'interrupted' || status === 'cancelled' || status === 'canceled';
-}
-
-export function classifyExternalTurnFailureCleanup(
-  event: Pick<Extract<UnifiedEvent, { kind: 'turn_complete' }>, 'status'>,
-  intentionalStopInProgress: boolean,
-): ExternalTurnFailureCleanup {
-  if (intentionalStopInProgress) return 'defer-to-stop';
-  if (isInterruptedExternalTurnStatus(event.status)) return 'stopped';
-  return 'error';
-}
-
-function externalTurnFailureMessage(event: Extract<UnifiedEvent, { kind: 'turn_complete' }>): string {
-  return event.error
-    || event.result
-    || (event.status ? `External runtime turn ended with status ${event.status}` : 'External runtime turn failed');
-}
-
 /**
  * Get the last assistant message text from the current session.
  * Used by Cron handler and IM heartbeat to extract response text.
  * Handles both JSON ContentBlock[] and plain text formats.
  */
 export function getLastExternalAssistantText(): string {
-  const messages = getExternalSessionMessagesRef();
-  for (let i = messages.length - 1; i >= 0; i--) {
-    const msg = messages[i];
-    if (msg.role === 'assistant') {
-      const content = msg.content ?? '';
-      // If stored as JSON ContentBlock[], extract text blocks
-      if (isContentBlockJson(content)) {
-        try {
-          const blocks = JSON.parse(content) as PersistContentBlock[];
-          return blocks
-            .filter((b) => b.type === 'text' && b.text)
-            .map((b) => b.text)
-            .join('');
-        } catch { /* fall through to plain text */ }
-      }
-      return content;
-    }
-  }
-  return '';
+  return getLastExternalAssistantTextFromTranscript();
 }
 
 /**
@@ -2076,7 +1948,7 @@ export async function sendExternalMessage(
   // PRD 0.2.18 Session Inbox — bind per-turn inbox meta + reset attachment hints
   // accumulator now that we know this turn is going to run. (After the busy
   // check, before kicking the runtime.) Cleared at persistTurnResult finally
-  // OR via clearInboxMetaOnRejection() below when sendExternalMessage rejects
+  // OR via clearExternalInboxMetaOnRejection() below when sendExternalMessage rejects
   // before persistTurnResult ever runs.
   setExternalTurnInboxMeta(context?.inboxMeta ?? null);
   resetExternalTurnAttachmentHints();
@@ -2110,7 +1982,11 @@ export async function sendExternalMessage(
   // Case 1: No previous session — start fresh
   if (!getExternalRuntimeSessionId() && !isExternalLifecycleRunning()) {
     if (!context) {
-      clearInboxMetaOnRejection('no_context', 'No session context for first message');
+      clearExternalInboxMetaOnRejection({
+        sessionId: getExternalLifecycleSessionId(),
+        errorCode: 'no_context',
+        errorMessage: 'No session context for first message',
+      });
       return { queued: false, error: 'No session context for first message' };
     }
     try {
@@ -2130,7 +2006,11 @@ export async function sendExternalMessage(
     } catch (err) {
       earlyBroadcastedUserMsg = null;  // Defensive: prevent stale msg leaking to next send
       const msg = err instanceof Error ? err.message : String(err);
-      clearInboxMetaOnRejection('start_failed', msg);
+      clearExternalInboxMetaOnRejection({
+        sessionId: getExternalLifecycleSessionId(),
+        errorCode: 'start_failed',
+        errorMessage: msg,
+      });
       return { queued: false, error: msg };
     }
   }
@@ -2165,7 +2045,11 @@ export async function sendExternalMessage(
     } catch (err) {
       earlyBroadcastedUserMsg = null;  // Defensive: prevent stale msg leaking to next send
       const msg = err instanceof Error ? err.message : String(err);
-      clearInboxMetaOnRejection('resume_failed', msg);
+      clearExternalInboxMetaOnRejection({
+        sessionId: getExternalLifecycleSessionId(),
+        errorCode: 'resume_failed',
+        errorMessage: msg,
+      });
       return { queued: false, error: msg };
     }
   }
@@ -2174,7 +2058,11 @@ export async function sendExternalMessage(
   // This is the normal path for persistent-process runtimes like Codex app-server.
   const activeRuntime = getExternalActiveRuntime();
   if (!activeRuntime) {
-    clearInboxMetaOnRejection('no_runtime', 'No active runtime');
+    clearExternalInboxMetaOnRejection({
+      sessionId: getExternalLifecycleSessionId(),
+      errorCode: 'no_runtime',
+      errorMessage: 'No active runtime',
+    });
     return { queued: false, error: 'No active runtime' };
   }
   try {
@@ -2234,7 +2122,11 @@ export async function sendExternalMessage(
       clearWatchdog();
       clearExternalTurnStartTime();
       setExternalTurnCompleted(true);
-      clearInboxMetaOnRejection('config_apply_failed', applyResult.error);
+      clearExternalInboxMetaOnRejection({
+        sessionId: getExternalLifecycleSessionId(),
+        errorCode: 'config_apply_failed',
+        errorMessage: applyResult.error,
+      });
       setExternalSessionState('idle');
       emitExternalTurnTrace('final', {
         status: 'error',
@@ -2249,7 +2141,11 @@ export async function sendExternalMessage(
     return { queued: true };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    clearInboxMetaOnRejection('send_failed', msg);
+    clearExternalInboxMetaOnRejection({
+      sessionId: getExternalLifecycleSessionId(),
+      errorCode: 'send_failed',
+      errorMessage: msg,
+    });
     return { queued: false, error: msg };
   }
 }
@@ -2693,17 +2589,21 @@ export async function stopExternalSession(): Promise<boolean> {
     setExternalSystemInitPayload(null);
     // Pattern B: notify IM bus subscribers (prevents orphaned SSE streams on user-stop) + clear active ID.
     // Pattern C: also unregister from request registry.
-    fireImCallback('error', 'Session stopped');
-    const activeRequestId = getExternalActiveRequestId();
-    if (activeRequestId) {
-      imRequestRegistry.setStatus(activeRequestId, 'failed');
-      imRequestRegistry.unregister(activeRequestId);
-    }
-    clearExternalActiveRequestId();
+    fireExternalImCallback('error', 'Session stopped');
+    finalizeExternalActiveRequest('failed');
     // PRD 0.2.18 — clear inbox meta on hard stop (user clicked stop / runtime
     // killed mid-turn). Push session_aborted reply so caller doesn't hang.
-    deliverExternalWatchError('session_aborted', 'external runtime session was stopped before turn completed');
-    clearInboxMetaOnRejection('session_aborted', 'external runtime session was stopped before turn completed');
+    deliverExternalWatchError({
+      sessionId: getExternalLifecycleSessionId(),
+      text: currentExternalTurnTextSnapshot(),
+      errorCode: 'session_aborted',
+      errorMessage: 'external runtime session was stopped before turn completed',
+    });
+    clearExternalInboxMetaOnRejection({
+      sessionId: getExternalLifecycleSessionId(),
+      errorCode: 'session_aborted',
+      errorMessage: 'external runtime session was stopped before turn completed',
+    });
     // Drop queued desktop messages on a hard stop (user clicked Stop) — otherwise the pills
     // orphan and, with state now 'idle' + queueLength>0, the next send queues behind stale
     // items that nothing will ever drain (no turn is running) → the session wedges.
@@ -2756,31 +2656,7 @@ export async function popLastUserMessageForRetry(userMessageId: string): Promise
   if (isExternalSessionActive()) {
     return { success: false, error: 'Cannot retry while a turn is in progress' };
   }
-  const targetIndex = findExternalSessionMessageIndex(
-    m => m.id === userMessageId && m.role === 'user',
-  );
-  if (targetIndex < 0) {
-    return { success: false, error: 'Message not found' };
-  }
-  const target = getExternalSessionMessageAt(targetIndex);
-  if (!target) {
-    return { success: false, error: 'Message not found' };
-  }
-  const content = typeof target.content === 'string' ? target.content : '';
-  const attachments = target.attachments;
-
-  // Truncate (drops the failed user msg + any partial assistant blocks left
-  // behind from a half-finalized turn). saveSessionMessages already detects
-  // `messages.length < existingCount` and rewrites the JSONL.
-  truncateExternalSessionMessages(targetIndex);
-  try {
-    const saveResult = await saveSessionMessages(lifecycleSessionId, getExternalSessionMessagesRef());
-    assertSessionMessagesPersisted(saveResult, '[external-session] popLastUserMessageForRetry failed to persist truncation');
-  } catch (err) {
-    console.error('[external-session] popLastUserMessageForRetry: failed to persist truncation:', err);
-    return { success: false, error: 'Failed to persist truncation' };
-  }
-  return { success: true, content, attachments };
+  return truncateExternalTranscriptForRetry(lifecycleSessionId, userMessageId);
 }
 
 /**
@@ -3192,17 +3068,12 @@ async function persistTurnResult(): Promise<void> {
     // session_complete handler counts on us to drain the deferred idle.
     setExternalSessionState('idle');
     if (didExternalLastTurnSucceed()) {
-      fireImCallback('complete', '');
+      fireExternalImCallback('complete', '');
     } else {
-      fireImCallback('error', persistFailureReason ?? 'external runtime turn did not complete successfully');
+      fireExternalImCallback('error', persistFailureReason ?? 'external runtime turn did not complete successfully');
     }
     // Pattern B/C: turn complete — clear active trace ID + unregister from registry.
-    const activeRequestId = getExternalActiveRequestId();
-    if (activeRequestId) {
-      imRequestRegistry.setStatus(activeRequestId, didExternalLastTurnSucceed() ? 'completed' : 'failed');
-      imRequestRegistry.unregister(activeRequestId);
-    }
-    clearExternalActiveRequestId();
+    finalizeExternalActiveRequest(didExternalLastTurnSucceed() ? 'completed' : 'failed');
     // Mid-turn queue drain: a turn just ended (completed OR interrupted via force) → surface +
     // send the next queued desktop message. Deferred to the next macrotask so queue:started
     // never races chat:message-complete / chat:status idle on the SSE wire.
@@ -3277,7 +3148,7 @@ function autoDenyNonInteractiveRequest(event: Extract<UnifiedEvent, { kind: 'per
   if (scenario.type === 'desktop') return false;
   const reason = `External runtime interactive request "${event.toolName}" was denied because ${scenario.type} sessions cannot render approval UI.`;
   console.warn(`[external-session] ${reason} requestId=${event.requestId}`);
-  fireImCallback('error', reason);
+  fireExternalImCallback('error', reason);
   const active = getExternalActivePair();
   if (active) {
     void active.runtime.respondPermission(active.process, event.requestId, 'deny', reason, undefined, undefined, true)
@@ -3298,7 +3169,7 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
       broadcast('chat:message-chunk', event.text);
       appendExternalAssistantText(event.text);
       appendExternalPendingText(event.text);
-      fireImCallback('delta', event.text);
+      fireExternalImCallback('delta', event.text);
       break;
 
     case 'text_stop':
@@ -3312,7 +3183,7 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
       // `streamingTextActive` and the tail-fade stops (same bug class, sibling runtime
       // path). type:'text' is the discriminator; index is unused for the text case.
       broadcast('chat:content-block-stop', { index: -1, type: 'text' });
-      fireImCallback('block-end', '');
+      fireExternalImCallback('block-end', '');
       break;
 
     case 'thinking_start':
@@ -3327,7 +3198,7 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
       }
       resetExternalPendingThinking({ index: event.index, active: true, startedAt: Date.now() });
       broadcast('chat:thinking-start', { index: event.index });
-      fireImCallback('activity', '');
+      fireExternalImCallback('activity', '');
       break;
 
     case 'thinking_delta':
@@ -3372,7 +3243,7 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
         name: event.toolName,
         input: event.input ?? {},
       });
-      fireImCallback('activity', '');
+      fireExternalImCallback('activity', '');
       break;
 
     case 'tool_input_delta': {
@@ -3540,7 +3411,7 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
         toolUseId: event.toolUseId,
         input: typeof event.input === 'object' ? JSON.stringify(event.input).slice(0, 500) : String(event.input ?? '').slice(0, 500),
       });
-      fireImCallback('permission-request', JSON.stringify({
+      fireExternalImCallback('permission-request', JSON.stringify({
         requestId: event.requestId,
         toolName: event.toolName,
         input: event.input,
@@ -3713,18 +3584,17 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
 
     case 'turn_complete': {
       // Mark turn complete — session_complete will follow for CC -p mode
-      setExternalTurnCompleted(true);
       clearWatchdog();
-      const turnSucceeded = isSuccessfulExternalTurnCompletion(event);
-      setExternalLastTurnSucceeded(turnSucceeded);
+      const turnPlan = markExternalTurnComplete(event, {
+        intentionalStopInProgress: getExternalUserRequestedStop(),
+      });
 
-      if (!turnSucceeded) {
-        const message = externalTurnFailureMessage(event);
-        const cleanup = classifyExternalTurnFailureCleanup(event, getExternalUserRequestedStop());
+      if (turnPlan.kind !== 'persist-success') {
+        const message = turnPlan.message;
         console.warn(
           `[external-session] turn_complete: non-success status=${event.status ?? 'unknown'}, elapsed=${getExternalTurnStartTime() ? Date.now() - getExternalTurnStartTime() : 0}ms, message=${message}`,
         );
-        if (cleanup === 'defer-to-stop') {
+        if (turnPlan.kind === 'defer-to-stop') {
           console.log('[external-session] turn_complete arrived during intentional stop; deferring idle/drain cleanup to stopExternalSession');
           broadcast('chat:message-stopped', null);
           resetTurnAccumulators();
@@ -3735,6 +3605,7 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
           break;
         }
 
+        const cleanup = turnPlan.cleanup;
         emitExternalTurnTrace('final', {
           status: 'error',
           detail: {
@@ -3749,15 +3620,19 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
           broadcast('chat:agent-error', { message });
           broadcast('chat:message-error', message);
         }
-        fireImCallback('error', message);
-        const activeRequestId = getExternalActiveRequestId();
-        if (activeRequestId) {
-          imRequestRegistry.setStatus(activeRequestId, 'failed');
-          imRequestRegistry.unregister(activeRequestId);
-        }
-        clearExternalActiveRequestId();
-        deliverExternalWatchError(cleanup === 'stopped' ? 'session_aborted' : 'turn_failed', message);
-        clearInboxMetaOnRejection('turn_failed', message);
+        fireExternalImCallback('error', message);
+        finalizeExternalActiveRequest('failed');
+        deliverExternalWatchError({
+          sessionId: getExternalLifecycleSessionId(),
+          text: currentExternalTurnTextSnapshot(),
+          errorCode: cleanup === 'stopped' ? 'session_aborted' : 'turn_failed',
+          errorMessage: message,
+        });
+        clearExternalInboxMetaOnRejection({
+          sessionId: getExternalLifecycleSessionId(),
+          errorCode: 'turn_failed',
+          errorMessage: message,
+        });
         resetTurnAccumulators();
         clearExternalPermissionSuggestions();
         drainPendingInteractiveRequestsAsExpired('error');
@@ -3802,30 +3677,23 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
       // Set this BEFORE the if/else so the error branch also honours the
       // in-flight contract.
       let persistInFlight = isExternalTurnFinalizationInFlight();
-      // Pre-warm exit: process died after spawn but before any user turn
-      // started. `currentTurnStartTime === 0` distinguishes this from a
-      // mid-turn exit (which sets the timestamp at turn kickoff). Applies to
-      // BOTH subtypes:
-      //   - subtype='error' (SIGKILL / init timeout) → silent retry on send
-      //   - subtype='success' (graceful exit code 0 during our timeout kill)
-      //     → would otherwise fall through to persistTurnResult and broadcast
-      //     chat:message-complete — triggering a misleading "任务完成" OS
-      //     notification on an empty tab that never ran a turn.
-      const isPrewarmExit = !isExternalTurnCompleted() && getExternalTurnStartTime() === 0;
-      if (isPrewarmExit) {
+      const sessionPlan = markExternalSessionComplete(event, {
+        hasAssistantText: !!getExternalAssistantText().trim(),
+        consumeUserRequestedStop: consumeExternalUserRequestedStop,
+      });
+      if (sessionPlan.kind === 'ignore-prewarm-exit') {
         console.log(`[external-session] Ignoring pre-warm exit (subtype=${event.subtype}) — no user turn was in flight; next send will start fresh`);
-      } else if (event.subtype === 'success') {
+      } else if (sessionPlan.kind === 'success') {
         // CC slash commands (e.g. /context, /cost) return output directly in `result`
         // without streaming text_delta events. Only broadcast if NO turn completed
         // (turnCompleted means text was already streamed + persisted normally).
-        if (event.result && !isExternalTurnCompleted() && !getExternalAssistantText().trim()) {
+        if (event.result && sessionPlan.shouldFinalize && !getExternalAssistantText().trim()) {
           broadcast('chat:message-chunk', event.result);
           appendExternalAssistantText(event.result);
           appendExternalPendingText(event.result);
         }
         // Only finalize if turn_complete didn't already (Codex emits turn_complete; CC uses session_complete only)
-        if (!isExternalTurnCompleted()) {
-          setExternalLastTurnSucceeded(true);
+        if (sessionPlan.shouldFinalize) {
           emitExternalTurnTrace('final', {
             status: 'ok',
             detail: {
@@ -3844,39 +3712,21 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
         // broadcast it emits after chat:message-complete is the authoritative
         // idle.
       } else {
-        const errorMessage = event.result || 'Session ended with error';
-        // Suppress user-visible error when the external runtime's persistent process
-        // dies while idle (after a turn already completed, with no new turn in flight).
-        // Common cause: OS memory pressure / SIGKILL (exit 137) after tens of minutes
-        // of inactivity on Codex/Gemini. The next sendExternalMessage will hit the
-        // "Previous process exited, resuming" branch and transparently spawn a fresh
-        // process — the user never needed to see an error in the first place.
-        //
-        // Repro: user reported "Gemini process exited with code 137" toast after
-        // leaving a session idle for 26 minutes with no interaction. See
-        // ~/Downloads/myagents-logs-2026-04-14T17-28-53.txt final session_complete line.
-        // #307: consume the intentional-stop flag (read-and-clear) so a single stop
-        // suppresses exactly one session_complete; later genuine errors still surface.
-        const wasUserStop = consumeExternalUserRequestedStop();
-        const errorAction = decideSessionCompleteErrorAction({
-          turnCompleted: isExternalTurnCompleted(),
-          hasAssistantText: !!getExternalAssistantText().trim(),
-          userRequestedStop: wasUserStop,
-          // Cross-review 0.2.32: while persistTurnResult is flushing the
-          // completed turn, the leftover accumulator text belongs to that
-          // SUCCESSFUL turn — a death in this window is between-turns, not a
-          // failure to surface.
-          finalizationInFlight: isExternalTurnFinalizationInFlight(),
-        });
-        if (errorAction === 'ignore-idle') {
+        const errorMessage = sessionPlan.message;
+        if (sessionPlan.kind === 'ignore-idle') {
           console.log(`[external-session] Ignoring idle-exit "${errorMessage}" — process was between turns; next message will auto-resume`);
-        } else if (errorAction === 'suppress-user-stop') {
+        } else if (sessionPlan.kind === 'suppress-user-stop') {
           emitExternalTurnTrace('final', {
             status: 'error',
             detail: { source: 'user_stop', error: errorMessage },
           });
           console.log(`[external-session] Suppressing error banner for user-initiated stop (was: "${errorMessage}")`);
-          deliverExternalWatchError('session_aborted', 'external runtime session was stopped before turn completed');
+          deliverExternalWatchError({
+            sessionId: getExternalLifecycleSessionId(),
+            text: currentExternalTurnTextSnapshot(),
+            errorCode: 'session_aborted',
+            errorMessage: 'external runtime session was stopped before turn completed',
+          });
           // Cross-review 0.2.32: when persistTurnResult is in flight it OWNS the
           // accumulators (it still has to read the content blocks; its push
           // branches reset them). Resetting here would race it and drop the
@@ -3889,8 +3739,13 @@ function handleUnifiedEvent(event: UnifiedEvent): void {
           });
           broadcast('chat:agent-error', { message: errorMessage });
           broadcast('chat:message-error', errorMessage);
-          fireImCallback('error', errorMessage);
-          deliverExternalWatchError('turn_failed', errorMessage);
+          fireExternalImCallback('error', errorMessage);
+          deliverExternalWatchError({
+            sessionId: getExternalLifecycleSessionId(),
+            text: currentExternalTurnTextSnapshot(),
+            errorCode: 'turn_failed',
+            errorMessage,
+          });
           // Same finalization-ownership rule as the suppress branch above.
           if (!isExternalTurnFinalizationInFlight()) resetTurnAccumulators(); // Prevent stale content leaking into next turn
         }

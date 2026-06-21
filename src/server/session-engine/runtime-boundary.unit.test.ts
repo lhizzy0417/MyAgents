@@ -175,8 +175,17 @@ describe('SessionEngine runtime boundary', () => {
       /\bgetExternalChildToolToParent\b/,
       /\bgetExternalSubagentTraceBuffers\b/,
       /\bgetExternalSubagentAttachmentParents\b/,
+      /\bgetExternalSessionMessagesRef\b/,
       /\bpushExternalContentBlock\b/,
       /\bresolveLastRealUserMessagePreview\b/,
+      /\bsaveSessionMessages\(/,
+      /\bdecideSessionCompleteErrorAction\b/,
+      /\bexternalTurnFailureMessage\b/,
+      /\bimRequestRegistry\b/,
+      /\bimEventBus\b/,
+      /\bfunction\s+deliverExternalWatchError\b/,
+      /\bfunction\s+clearInboxMetaOnRejection\b/,
+      /\bfunction\s+fireImCallback\b/,
     ];
 
     const violations = forbidden
@@ -185,6 +194,12 @@ describe('SessionEngine runtime boundary', () => {
 
     expect(violations).toEqual([]);
     expect(source).toContain('appendAndPersistExternalAssistantTurn');
+    expect(source).toContain('persistExternalUserMessageAppend');
+    expect(source).toContain('truncateExternalTranscriptForRetry');
+    expect(source).toContain('markExternalTurnComplete');
+    expect(source).toContain('markExternalSessionComplete');
+    expect(source).toContain('fireExternalImCallback');
+    expect(source).toContain('finalizeExternalActiveRequest');
   });
 
   it('keeps builtin owner writes behind owner APIs instead of mutable state bags', () => {

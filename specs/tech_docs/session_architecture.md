@@ -159,16 +159,16 @@ delivery 成功后，目标 sidecar 才 ack 并清理 pending watch；Management
 | `lifecycle.ts` | active process/runtime、starting guard、session binding、runtimeSessionId、prewarm/system-init、user-stop flag | start/prewarm/restore/stop/session_init |
 | `runtime-config.ts` | desired/live model、permission mode、reasoning effort；snapshot/source guard integration | runtime config setters、message snapshot capture、restore metadata |
 | `operation-queue.ts` | desktop queued message/config FIFO、drain reservation、generation-based stale dispatch rejection、desktop send tail reset、force/cancel/status | mid-turn desktop send、turn-boundary drain、config deferral、session reset cleanup |
-| `turn-lifecycle.ts` | turn completed/success flags、finalization gate、turn start time、usage/context usage | terminal events、wait idle、cron/IM true-success gating |
+| `turn-lifecycle.ts` | turn completed/success flags、finalization gate、turn start time、usage/context usage、terminal plan classification | `turn_complete` / `session_complete` success/failure/prewarm/idle/user-stop 分类、wait idle、cron/IM true-success gating |
 | `content-blocks.ts` | streaming text/thinking/tool/subagent content state、tool result/attachment mutation、live/turn snapshot | UnifiedEvent text/thinking/tool/subagent cases、live snapshot、turn persistence snapshot |
-| `transcript-persistence.ts` | in-memory `SessionMessage[]`、persisted runtime usage totals、assistant turn append + SessionStore save + metadata preview/context update | restore state、append user/assistant、retry truncate、turn-end SessionStore write |
-| `interactive.ts` | permission / AskUserQuestion pending state、active IM request id、inbox/watch reply metadata | permission request/response、AskUserQuestion response、stop/error cleanup；permission delivery 成功后才 consume/delete |
+| `transcript-persistence.ts` | in-memory `SessionMessage[]`、persisted runtime usage totals、user/assistant append、retry truncate、last assistant read、SessionStore save + metadata preview/context update | restore state、append user/assistant、retry truncate、turn-end SessionStore write；facade 只拿 snapshot/owner API，不拿 mutable message ref |
+| `interactive.ts` | permission / AskUserQuestion pending state、active IM request id、IM registry cleanup、inbox/watch reply metadata与错误推送 | permission request/response、AskUserQuestion response、stop/error cleanup、IM complete/error fan-out；permission delivery 成功后才 consume/delete |
 
 边界规则：
 
 - `session-engine/*` 和 `routes/*` 不 import `runtimes/external-session/*` owner modules，只通过 `external-session.ts` public facade。
 - `runtimes/external-session/*` 不 import route、SessionEngine 或 `index.ts`。
-- `external-session.ts` 需要读写 owner state 时走命名 API；`runtime-boundary.unit.test.ts` 有 facade-state guard，防止 `activeProcess`、operation queue、turn finalization、content raw refs/maps、transcript messages、interactive pending maps 回流成顶层裸状态。特别是 content owner 不向 facade 暴露 live mutable block/map refs；turn-end assistant append + SessionStore save 归 transcript owner。
+- `external-session.ts` 需要读写 owner state 时走命名 API；`runtime-boundary.unit.test.ts` 有 facade-state guard，防止 `activeProcess`、operation queue、turn finalization、content raw refs/maps、transcript mutable message ref、interactive pending maps、IM registry、terminal classification helper 回流成顶层裸状态。特别是 content owner 不向 facade 暴露 live mutable block/map refs；user/assistant append、retry truncate、last assistant read 与 SessionStore save 归 transcript owner；IM event bus / registry cleanup 与 inbox/watch error delivery 归 interactive owner；terminal success/failure/prewarm/idle/user-stop 分类归 turn-lifecycle owner。
 - Phase8 没有抽 builtin/external 通用 runtime framework。两边共享 `session-core/*` pure policy；进程模型和副作用 owner 保持各自 runtime-native。
 
 ### `sessionRegistered` 状态

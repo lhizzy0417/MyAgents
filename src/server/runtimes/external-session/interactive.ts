@@ -1,4 +1,6 @@
 import type { InboxTurnMeta } from '../../inbox/types';
+import { imEventBus, type ImEventType } from '../../utils/im-event-bus';
+import { imRequestRegistry } from '../../utils/im-request-registry';
 import type { ExternalPendingInteractiveRequest } from './types';
 
 let activeRequestId: string | null = null;
@@ -27,6 +29,22 @@ export function setExternalActiveRequestId(requestId: string | null | undefined)
 }
 
 export function clearExternalActiveRequestId(): void {
+  activeRequestId = null;
+}
+
+/** Pattern B — emit per-request IM event. Subscribers in /api/im/chat filter
+ *  by matching requestId. No-op when no active IM trace (desktop / cron). */
+export function fireExternalImCallback(type: ImEventType, data: string): void {
+  if (activeRequestId !== null) {
+    imEventBus.emit(activeRequestId, type, data);
+  }
+}
+
+export function finalizeExternalActiveRequest(status: 'completed' | 'failed'): void {
+  if (activeRequestId) {
+    imRequestRegistry.setStatus(activeRequestId, status);
+    imRequestRegistry.unregister(activeRequestId);
+  }
   activeRequestId = null;
 }
 
@@ -62,6 +80,55 @@ export function snapshotExternalTurnReplyState(): {
   currentTurnInboxMeta = null;
   const attachmentHints = currentTurnAttachmentHints.splice(0);
   return { inboxMeta, attachmentHints };
+}
+
+export function deliverExternalWatchError(input: {
+  sessionId: string | null | undefined;
+  text: string;
+  errorCode: string;
+  errorMessage: string;
+}): void {
+  if (!input.sessionId) return;
+  const attachmentHintSnapshot = getExternalTurnAttachmentHintsSnapshot();
+  const attachmentHints = attachmentHintSnapshot.length > 0
+    ? attachmentHintSnapshot
+    : undefined;
+  void import('../../inbox/watch-deliver').then(({ deliverSessionWatchEvents }) =>
+    deliverSessionWatchEvents(input.sessionId!, {
+      text: input.text,
+      error: { code: input.errorCode, message: input.errorMessage },
+      attachmentHints,
+    }),
+  ).catch((err) =>
+    console.error('[session-watch] external failure watch push failed:', err),
+  );
+}
+
+/**
+ * PRD 0.2.18 — clear inbox meta + push error reply if needed when
+ * sendExternalMessage rejects BEFORE persistTurnResult ever runs (Case 1/2/3
+ * throw paths). Without this helper the meta would leak to the next turn and
+ * a stale reply would be pushed to the wrong caller.
+ */
+export function clearExternalInboxMetaOnRejection(input: {
+  sessionId: string | null | undefined;
+  errorCode: string;
+  errorMessage: string;
+}): void {
+  const meta = currentTurnInboxMeta;
+  if (!meta) return;
+  currentTurnInboxMeta = null;
+  resetExternalTurnAttachmentHints();
+  if (!meta.replyBack) return;
+  const sid = input.sessionId || meta.fromSessionId; // best-effort
+  void import('../../inbox/reply-deliver').then(({ deliverInboxReply }) =>
+    deliverInboxReply(sid, meta, {
+      text: '',
+      error: { code: input.errorCode, message: input.errorMessage },
+    }),
+  ).catch((err) =>
+    console.error('[inbox] external rejection reply pushback failed:', err),
+  );
 }
 
 export function setExternalPermissionSuggestions(requestId: string, suggestions: unknown[] | undefined): void {
