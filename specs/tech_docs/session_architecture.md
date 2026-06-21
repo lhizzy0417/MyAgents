@@ -125,7 +125,27 @@ delivery 成功后，目标 sidecar 才 ack 并清理 pending watch；Management
 - 一旦 `turnBoundaryQueue` 或 turn-mode admission ticket 已存在，后续同 session 的桌面 `/chat/send` 忙时发送必须继续排到 turn boundary；非桌面来源不读取该 UI 设置，保持各自既有队列语义。
 - abort / stop / crash recovery 必须同时清理或恢复 `messageQueue`、`pendingMidTurnQueue`、`turnBoundaryQueue` 和 admission ticket，避免只处理旧队列造成 orphan query。
 
-规则 owner：`src/server/session-core/turn-queue.ts`。`agent-session.ts` 只保留 queue 数组、广播、SDK wakeup 等副作用；admission、cancel location、force-start reordering、abort ticket 清理必须调用 `turn-queue` policy，不再在巨型 session 文件里复制条件树。
+规则 owner：`src/server/session-core/turn-queue.ts`。副作用 state owner：`src/server/builtin-session/queue.ts`。`agent-session.ts` facade 负责把 enqueue / cancel / force / terminal orchestration 接到 SDK、SSE、IM reply 等副作用，但 queue 数组、in-flight slot、turn admission ticket 不再作为 facade 顶层裸状态维护。admission、cancel location、force-start reordering、abort ticket 清理必须继续调用 `turn-queue` policy。
+
+### Builtin Session Owner Split（Phase6）
+
+`src/server/agent-session.ts` 是 builtin SDK 会话的 public facade：`SessionEngine` adapter、legacy callers、route-facing code 仍从这里 import。Phase6 后，facade 后面的核心 mutable state 分给 `src/server/builtin-session/` owner：
+
+| Owner | 拥有状态 | 典型写入入口 |
+|---|---|---|
+| `lifecycle.ts` | SDK `Query`、processing/abort、termination promise、generator resolver、pre-warm/readiness | abort/restart/termination/pre-warm/generator wakeup |
+| `queue.ts` | `messageQueue`、`pendingMidTurnQueue`、`turnBoundaryQueue`、in-flight metadata、admission ticket | enqueue/cancel/force/rescue/drain |
+| `turn.ts` | current turn usage/output/error、pending request FIFO、injected turn outcomes、inbox binding | turn start、terminal complete/stopped/error、IM event finalization |
+| `config.ts` | MCP/agents/plugins/model/permission/reasoning/provider、deferred restart、MCP fingerprint | config setters、provider boundary reset、MCP sync |
+| `transcript.ts` | live `messages`、message sequence、persist cursor/cache、current/live SDK UUID sets、reload anchor | load/persist/reset/switch/rewind/fork |
+
+边界规则：
+
+- `session-engine/*` 和 `routes/*` 不 import `builtin-session/*`，只通过 `agent-session.ts` public facade。
+- `builtin-session/*` 不 import route 或 SessionEngine；需要 pure decision 时调用 `session-core/*`。
+- `session-core/*` 仍是无副作用 pure policy，不读写 SDK/SSE/SessionStore。
+- `abortPersistentSession()` 仍是唯一语义化 abort 入口；abort flag 的内部写入归 `lifecycle.ts`。
+- `agent-session.ts` 需要修改 owner state 时走 `builtin-session/*` 的命名 API；`runtime-boundary.unit.test.ts` 有 direct-write guard，防止重新裸写 lifecycle/queue/turn/config/transcript 状态。
 
 ### `sessionRegistered` 状态
 

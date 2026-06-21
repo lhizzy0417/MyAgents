@@ -404,6 +404,19 @@ SDK subprocess → ANTHROPIC_BASE_URL=127.0.0.1:${sidecarPort}
 
 `src/server/session-core/` 是 builtin / external 会话内核共享的 pure policy 层。它不拥有 SDK/CLI 进程、副作用或 SSE，只承载可单测的决策：turn result 判定、runtime config snapshot/source guard、desktop/turn-boundary queue admission、MCP authority/fingerprint/restart 决策。
 
+`src/server/agent-session.ts` 仍是 builtin SDK 的 public facade，供 `session-engine/builtin-adapter.ts` 委托。Phase6 后，主要 mutable state 不再由 facade 顶层变量直接拥有，而在 `src/server/builtin-session/` 的 owner 模块中维护：
+
+| Owner module | 职责 |
+|------|------|
+| `lifecycle.ts` | SDK `Query` 进程、abort flag、termination promise、generator wakeup、pre-warm readiness |
+| `queue.ts` | realtime queue、mid-turn buffer、turn-boundary queue、in-flight slot、admission ticket |
+| `turn.ts` | current turn usage/output/error state、IM pending request FIFO、injected turn outcome |
+| `config.ts` | MCP/agents/plugins/model/permission/provider state、deferred restart latch |
+| `transcript.ts` | live messages、message sequence、persist cursor/cache、SDK UUID freshness sets |
+| `types.ts` | builtin owner 间共享的结构类型 |
+
+约束：route modules 与 `session-engine/*` 不直接 import `builtin-session/*`；它们只看 `agent-session.ts` facade。`builtin-session/*` 也不 import route 或 SessionEngine。`session-core/*` 继续保持 pure policy，不引入 SDK/SSE/文件系统副作用。`runtime-boundary.unit.test.ts` 会目录级扫描这些边界，并拦截 `agent-session.ts` 对 owner state 的 direct write 回退；新增写入应先在 owner 中加命名 API。
+
 `src/server/runtimes/` 只表示外部 runtime adapter：
 
 | 文件 | 职责 |
