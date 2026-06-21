@@ -1335,7 +1335,7 @@ async function routeAdminApi(pathname: string, payload: Record<string, unknown>)
 
   // MCP commands
   if (route === 'mcp/list') return api.handleMcpList();
-  if (route === 'mcp/show') return api.handleMcpShow(payload as Parameters<typeof api.handleMcpShow>[0]);
+  if (route === 'mcp/show') return await api.handleMcpShow(payload as Parameters<typeof api.handleMcpShow>[0]);
   if (route === 'mcp/add') return api.handleMcpAdd(payload as Parameters<typeof api.handleMcpAdd>[0]);
   if (route === 'mcp/remove') return api.handleMcpRemove(payload as Parameters<typeof api.handleMcpRemove>[0]);
   if (route === 'mcp/enable') return api.handleMcpEnable(payload as Parameters<typeof api.handleMcpEnable>[0]);

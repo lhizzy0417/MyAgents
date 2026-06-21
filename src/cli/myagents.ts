@@ -357,6 +357,10 @@ function printResult(group: string, action: string, result: Record<string, unkno
     printMcpShow(result.data as Record<string, unknown>);
     return;
   }
+  if (group === 'mcp' && action === 'test') {
+    printMcpTest(result.data as Record<string, unknown>, result.hint);
+    return;
+  }
   if (group === 'tool' && action === 'list') {
     const data = result.data as { tools?: Array<Record<string, unknown>> } | undefined;
     printToolList(data?.tools ?? []);
@@ -1004,6 +1008,52 @@ function printMcpList(servers: Array<Record<string, unknown>>): void {
   console.log(`\n${servers.length} MCP servers (${enabled} enabled)`);
 }
 
+function printCuseDiagnostics(cuse: Record<string, unknown>, indent = '  '): void {
+  const bundled = (cuse.bundled as Record<string, unknown> | undefined) ?? {};
+  console.log(`${indent}path:       ${String(bundled.path ?? '(not resolved)')}`);
+  console.log(`${indent}version:    ${String(bundled.rawVersion ?? bundled.version ?? '(unknown)')}`);
+  if (bundled.error) console.log(`${indent}error:      ${String(bundled.error)}`);
+
+  const marker = cuse.versionMarker as Record<string, unknown> | null | undefined;
+  if (marker) {
+    const markerState = marker.matchesBundled === false ? 'mismatch' : 'ok';
+    console.log(`${indent}marker:     ${String(marker.rawVersion ?? marker.version ?? '(unknown)')} (${markerState})`);
+    console.log(`${indent}markerPath: ${String(marker.path ?? '')}`);
+  }
+
+  const latest = cuse.r2Latest as Record<string, unknown> | null | undefined;
+  if (latest) {
+    const suffix = latest.error ? ` (${String(latest.error)})` : '';
+    console.log(`${indent}r2Latest:   ${String(latest.version ?? '(unknown)')}${suffix}`);
+  }
+
+  const caches = (cuse.skillCaches as Array<Record<string, unknown>> | undefined) ?? [];
+  if (caches.length > 0) {
+    console.log(`${indent}skill caches:`);
+    for (const cache of caches) {
+      const status = cache.differsFromBundledHash === true
+        ? 'fingerprint differs'
+        : cache.differsFromBundledHash === false
+          ? 'same fingerprint'
+          : 'fingerprint unknown';
+      const size = typeof cache.sizeBytes === 'number' ? `, ${cache.sizeBytes} bytes` : '';
+      console.log(`${indent}  - ${String(cache.label ?? cache.source ?? 'skill')}: ${status}${size}`);
+      console.log(`${indent}    ${String(cache.path ?? '')}`);
+      if (cache.sha256) console.log(`${indent}    sha256: ${String(cache.sha256).slice(0, 12)}...`);
+      if (cache.checkCommand) console.log(`${indent}    check: ${String(cache.checkCommand)}`);
+      if (cache.error) console.log(`${indent}    note: ${String(cache.error)}`);
+    }
+  }
+
+  const warnings = (cuse.warnings as string[] | undefined) ?? [];
+  if (warnings.length > 0) {
+    console.log(`${indent}warnings:`);
+    for (const warning of warnings) {
+      console.log(`${indent}  - ${warning}`);
+    }
+  }
+}
+
 /**
  * Format `myagents mcp show <id>` output.
  *
@@ -1039,10 +1089,19 @@ function printMcpShow(data: Record<string, unknown>): void {
   console.log('');
   console.log('Transport:');
   if (data.command) console.log(`  command:    ${String(data.command)}`);
+  if (data.resolvedCommand) console.log(`  resolved:   ${String(data.resolvedCommand)}`);
   if (Array.isArray(data.args) && (data.args as unknown[]).length > 0) {
     console.log(`  args:       ${(data.args as unknown[]).map(String).join(' ')}`);
   }
   if (data.url) console.log(`  url:        ${String(data.url)}`);
+
+  const diagnostics = data.diagnostics as Record<string, unknown> | undefined;
+  const cuse = diagnostics?.cuse as Record<string, unknown> | undefined;
+  if (cuse) {
+    console.log('');
+    console.log('Bundled cuse:');
+    printCuseDiagnostics(cuse);
+  }
 
   const env = data.env as Record<string, string> | undefined;
   if (env && Object.keys(env).length > 0) {
@@ -1066,6 +1125,19 @@ function printMcpShow(data: Record<string, unknown>): void {
     console.log('Note: this server requires configuration before it can be enabled.');
     if (data.websiteUrl) console.log(`  See: ${String(data.websiteUrl)}`);
   }
+}
+
+function printMcpTest(data: Record<string, unknown>, hint?: unknown): void {
+  const id = String(data?.id ?? 'unknown');
+  console.log(`✓ MCP ${id} validated`);
+  const cuse = data?.cuse as Record<string, unknown> | undefined;
+  if (cuse) {
+    console.log('');
+    console.log('Bundled cuse:');
+    printCuseDiagnostics(cuse);
+    return;
+  }
+  if (hint) console.log(`\n${String(hint)}`);
 }
 
 function printModelList(providers: Array<Record<string, unknown>>): void {
