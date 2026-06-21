@@ -127,17 +127,19 @@ delivery 成功后，目标 sidecar 才 ack 并清理 pending watch；Management
 
 规则 owner：`src/server/session-core/turn-queue.ts`。副作用 state owner：`src/server/builtin-session/queue.ts`。`agent-session.ts` facade 负责把 enqueue / cancel / force / terminal orchestration 接到 SDK、SSE、IM reply 等副作用，但 queue 数组、in-flight slot、turn admission ticket 不再作为 facade 顶层裸状态维护。admission、cancel location、force-start reordering、abort ticket 清理必须继续调用 `turn-queue` policy。
 
-### Builtin Session Owner Split（Phase6）
+### Builtin Session Owner Split（Phase6 / Phase7）
 
-`src/server/agent-session.ts` 是 builtin SDK 会话的 public facade：`SessionEngine` adapter、legacy callers、route-facing code 仍从这里 import。Phase6 后，facade 后面的核心 mutable state 分给 `src/server/builtin-session/` owner：
+`src/server/agent-session.ts` 是 builtin SDK 会话的 public facade：`SessionEngine` adapter、legacy callers、route-facing code 仍从这里 import。Phase6 后，facade 后面的核心 mutable state 分给 `src/server/builtin-session/` owner；Phase7 后，turn terminal 与 transcript persistence 这两类最重行为也拆到明确 owner：
 
-| Owner | 拥有状态 | 典型写入入口 |
+| Owner | 拥有内容 | 典型写入 / 行为入口 |
 |---|---|---|
 | `lifecycle.ts` | SDK `Query`、processing/abort、termination promise、generator resolver、pre-warm/readiness | abort/restart/termination/pre-warm/generator wakeup |
 | `queue.ts` | `messageQueue`、`pendingMidTurnQueue`、`turnBoundaryQueue`、in-flight metadata、admission ticket | enqueue/cancel/force/rescue/drain |
-| `turn.ts` | current turn usage/output/error、pending request FIFO、injected turn outcomes、inbox binding | turn start、terminal complete/stopped/error、IM event finalization |
+| `turn.ts` | current turn usage/output/error、pending request FIFO、injected turn outcomes、inbox binding | turn state mutation API |
+| `turn-lifecycle.ts` | SDK `result` / stopped / error terminal 语义、usage stamping、queue/IM/inbox/watch/analytics/title hook 顺序 | terminal complete/stopped/error、SDK result finalization |
 | `config.ts` | MCP/agents/plugins/model/permission/reasoning/provider、deferred restart、MCP fingerprint | config setters、provider boundary reset、MCP sync |
-| `transcript.ts` | live `messages`、message sequence、persist cursor/cache、current/live SDK UUID sets、reload anchor | load/persist/reset/switch/rewind/fork |
+| `transcript.ts` | live `messages`、message sequence、persist cursor/cache、current/live SDK UUID sets、reload anchor | transcript state mutation API |
+| `transcript-persistence.ts` | SessionStore mapping、incremental persist chain、load seeding、cursor/cache reset、rewind/fork/retraction persistence consistency | load/persist/reset/switch/rewind/fork/retraction persistence behavior |
 
 边界规则：
 
@@ -146,6 +148,7 @@ delivery 成功后，目标 sidecar 才 ack 并清理 pending watch；Management
 - `session-core/*` 仍是无副作用 pure policy，不读写 SDK/SSE/SessionStore。
 - `abortPersistentSession()` 仍是唯一语义化 abort 入口；abort flag 的内部写入归 `lifecycle.ts`。
 - `agent-session.ts` 需要修改 owner state 时走 `builtin-session/*` 的命名 API；`runtime-boundary.unit.test.ts` 有 direct-write guard，防止重新裸写 lifecycle/queue/turn/config/transcript 状态。
+- `agent-session.ts` 不再解释 SDK terminal result，也不再实现 transcript persistence mapping/chain；这两类行为分别归 `turn-lifecycle.ts` 与 `transcript-persistence.ts`，facade 只组装必要依赖并委托。
 
 ### `sessionRegistered` 状态
 

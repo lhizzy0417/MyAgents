@@ -16,16 +16,14 @@ import { ensureDirSync, isDirEntry } from './utils/fs-utils';
 import { getMyAgentsNpmGlobalBinDir, getMyAgentsNpmGlobalPrefix, scrubMyAgentsNpmPrefixEnv } from './utils/npm-prefix-env';
 import { applyContextWindowSuffix, lookupModelContextLength, modelSupportsModality } from './utils/model-capabilities';
 import { modelAliasEnvChangesForModel, resolveSessionModelAliases } from './utils/model-aliases';
-import { deriveReloadResumeAnchor, resolveEffectiveResumeAt } from './utils/rewind-anchor';
+import { resolveEffectiveResumeAt } from './utils/rewind-anchor';
 import { buildForkUuidRemap, remapStoredSdkUuids } from './utils/fork-remap';
 import {
-  decideInFlightActionOnResult,
   decideInFlightCancelSettlement,
   terminalEventMatchesInFlight,
   type InFlightAsyncCancelResult,
 } from './utils/inflight-terminal';
 import { shouldBlockToolInPlanMode, planModeDenyMessage, isPlanModeInEffect, PLAN_MODE_READONLY_TOOLS, PLAN_MODE_HOST_INTERACTION_TOOLS, applyPermissionModeSelection, computePlanExitState, computeRestoredPlanState } from './utils/plan-mode-gate';
-import { isEmptySuccessfulSdkResult, isRecoveredAssistantMessageError, findTurnUsageStampIndex, extractTurnUsageFromSdkResult, isSuccessfulCompactControlTurn } from './utils/sdk-turn-outcome';
 import { planRetraction } from './utils/message-retraction';
 import { diagnoseSdkSubprocessFailure } from './utils/sdk-subprocess-diagnostics';
 import { InactivityWatchdog } from './utils/inactivity-watchdog';
@@ -79,7 +77,7 @@ import {
 } from './utils/context-occupancy';
 import type { SystemInitInfo } from '../shared/types/system';
 import type { SlashCommand as UiSlashCommand } from '../shared/slashCommands';
-import { saveSessionMetadata, updateSessionTitleFromMessage, saveSessionMessages, updateSessionMetadata, getSessionMetadata, getSessionData } from './SessionStore';
+import { saveSessionMetadata, updateSessionTitleFromMessage, updateSessionMetadata, getSessionMetadata, getSessionData } from './SessionStore';
 import { firePostTurnTitleHook } from './turn-hooks';
 import { createSessionMetadata, type SessionMessage, type MessageAttachment, type SessionSource, type TurnAnalyticsSource } from './types/session';
 import { extractAssistantTextFromStoredContent } from './inbox/latest-result';
@@ -95,16 +93,13 @@ import {
   getEnabledPluginSdkConfigs,
   getDefaultEnabledPluginIdsForWorkspace,
 } from './plugins/store';
-import { seedBridgeThoughtSignatures } from './bridge-cache';
 import { initLogger, appendLog, getLogLines as getLogLinesFromLogger } from './AgentLogger';
 import { setAmbientLogContext, clearAmbientLogContextField } from './logger-context';
 import { beginTurn as beginTurnAbort, endTurn as endTurnAbort, abortTurn as abortTurnAbort } from './utils/turn-abort';
 import type { CancelReason } from './utils/cancellation';
 import { localTimestamp } from '../shared/logTime';
-import { isAbortedTerminalReason, shouldTitleCompletedTurn } from '../shared/terminalReason';
 import { trackServer } from './analytics';
 import { getCurrentRuntimeType, isExternalRuntime } from './runtimes/factory';
-import { resolveLastRealUserMessagePreview } from './utils/session-message-preview';
 import { decideBuiltinSessionResume } from './utils/builtin-session-resume';
 import { decideQueueAdmission, findQueueLocation, resolveChatQueueResponseMode, shouldClearAdmissionTicketOnAbort, shouldStartTurnBoundaryItem, type QueueAdmissionAction } from './session-core/turn-queue';
 import { decideMcpSync, getMcpAuthorityForScenario, mcpConfigFingerprint } from './session-core/mcp-sync-policy';
@@ -137,6 +132,7 @@ export type {
   PermissionMode,
   ProviderEnv,
 } from './builtin-session/types';
+export { stripPlaywrightResults } from './builtin-session/transcript-persistence';
 import {
   awaitSessionTermination as awaitBuiltinSessionTermination,
   clearAbortFlag,
@@ -163,7 +159,6 @@ import {
   clearPendingMidTurn,
   dequeueMessage,
   drainQueuedItems,
-  getForceSurfaceInFlightId,
   getForceTurnBoundaryQueueId,
   getCommittingTurnAdmissionQueueId,
   getInFlightMetadata,
@@ -197,23 +192,18 @@ import {
 } from './builtin-session/queue';
 import {
   appendCurrentTurnTextBlock,
-  clearCurrentTurnTextBlocks,
   clearInjectedTurnOutcomes,
   clearPendingRequests as turnClearPendingRequests,
   consumeInjectedTurnOutcome as turnConsumeInjectedTurnOutcome,
   getCurrentTurnInboxMeta,
   discardInjectedTurnOutcomeWithOptions as turnDiscardInjectedTurnOutcome,
-  getCurrentTurnText,
   getPendingRequestIds,
-  hasCurrentTurnImTerminalEmitted,
   incrementCurrentTurnToolCount,
   markAssistantMessageError,
   markCurrentTurnHasOutput,
   popPendingRequest as turnPopPendingRequest,
   pushPendingRequest as turnPushPendingRequest,
-  recordInjectedTurnOutcome as turnRecordInjectedTurnOutcome,
   removePendingRequest as turnRemovePendingRequest,
-  replaceCurrentTurnUsage,
   resetTurnUsage as resetBuiltinTurnUsage,
   setAssistantMessagePresent,
   setBrowserToolUsed,
@@ -254,24 +244,30 @@ import {
   addLiveSessionUuid,
   allocateMessageId,
   appendMessage,
-  appendPersistedSessionMessage,
   clearCurrentSessionUuids,
   clearLiveSessionUuids,
   clearMessages,
-  clearPersistedSessionMessageCache,
   deleteCurrentSessionUuid,
   deleteLiveSessionUuid,
-  deletePersistChain,
-  removeMessageAt,
-  removePersistedSessionMessageAt,
-  replacePersistedSessionMessageCache,
-  setLastPersistedIndex,
   setMessageSequence,
   setPendingReloadAnchor,
   truncateMessages,
-  truncatePersistedSessionMessageCache,
   transcriptState,
 } from './builtin-session/transcript';
+import {
+  PLAYWRIGHT_RESULT_SENTINEL,
+  applyTranscriptRetractionToPersistence,
+  loadTranscriptFromSessionMessages,
+  messageWireToSessionMessage,
+  resetTranscriptPersistenceForSession,
+  restoreTranscriptPersistenceState,
+  saveForkTranscript,
+  scheduleTranscriptPersist,
+  sessionMessageToMessageWire,
+  snapshotTranscriptPersistenceState,
+  truncateTranscriptPersistenceForRewind,
+} from './builtin-session/transcript-persistence';
+import { createBuiltinTurnLifecycle, type BuiltinSdkResultMessage } from './builtin-session/turn-lifecycle';
 import type {
   BuiltinRestartReason as RestartReason,
   BuiltinInjectedTurnOutcome,
@@ -828,6 +824,7 @@ let forceDrainTurnStarting = false;
 // stream-event handlers in startStreamingSession; reset to 0 on each new
 // turn (and on session restart) so values never leak across turns.
 let inFlightToolCount = 0;
+let watchdogFired = false;
 // (v0.2.11 cross-bugfix #142 review-fix-2 #1) True from the moment
 // promotePendingMidTurnItem shifts an item out of queueState.pendingMidTurnQueue
 // until the generator's `item.resolve()` after yield. Plugs the gap
@@ -1191,10 +1188,6 @@ function clearPendingRequests(): string[] {
 }
 // Group chat tool deny list (v0.1.28): set per IM message, cleared on next non-group request
 let currentGroupToolsDeny: string[] = [];
-// Flag: auto-reset session after image content pollutes conversation history
-let shouldResetSessionAfterError = false;
-// Reason for the auto-reset (used to skip auto-reset for desktop image errors)
-let shouldResetReason: 'image' | 'stale' | undefined;
 // Track text block indices for detecting text-type content_block_stop
 const imTextBlockIndices = new Set<number>();
 
@@ -1928,13 +1921,6 @@ const builtinToolTraceStarts = new Map<string, number>();
 // only reads it when an inbox binding exists, while session watch reads it for
 // ordinary user/cron/IM turns too. Reset at turn start.
 export type { BuiltinInjectedTurnOutcome } from './builtin-session/types';
-
-function recordInjectedTurnOutcome(
-  status: BuiltinInjectedTurnOutcome['status'],
-  error?: string,
-): void {
-  turnRecordInjectedTurnOutcome(status, error);
-}
 
 // ─── Watchdog Auto Resume (watchdog-driven session resume) ────────────────
 //
@@ -2956,9 +2942,7 @@ function resetForProviderHistoryBoundary(): void {
   sessionId = randomUUID();
   hasInitialPrompt = false;
   clearMessages();
-  setLastPersistedIndex(0);
-  clearPersistedSessionMessageCache();
-  deletePersistChain(previousSessionId);
+  resetTranscriptPersistenceForSession(previousSessionId);
   clearCurrentSessionUuids();
   clearLiveSessionUuids();
   setMessageSequence(0);
@@ -4374,147 +4358,11 @@ export function getPendingInteractiveRequests(): Array<{
   return result;
 }
 
-/**
- * Persist transcriptState.messages to SessionStore for session recovery.
- *
- * Pattern 3 §3.2.4 — incremental contract. The legacy implementation mapped the
- * entire `transcriptState.messages` array on every turn (O(history) per turn). We now only map
- * the new tail: `transcriptState.messages.slice(transcriptState.lastPersistedIndex)`. SessionStore's
- * `saveSessionMessages` is given the *full* logical array shape it expects by
- * passing `[ ...alreadyPersisted (placeholders), ...newTail ]`? No — that would
- * defeat the purpose. Instead we leverage the contract that
- * `saveSessionMessages` already only appends the new tail (it slices internally
- * by file line count). So we map only the tail and pass it along with a
- * synthesised "head spacer" length — or, simpler, we pass the full array to
- * `saveSessionMessages` (so its rewind-detection still works), but build it as
- * a sparse mapping where the head is reused from a cache.
- *
- * Implementation choice: keep it simple — only map the tail; for the head we
- * skip rebuilding the SessionMessage objects entirely and rely on
- * `saveSessionMessages` slicing by `existingCount`. We pass `transcriptState.messages.length`
- * total objects but the head ones are *not* deeply remapped each turn — they
- * are cached in `persistedTailCache` and reused.
- *
- * Cursor advances on success. Rewind / fork / session-reset paths reset the
- * cursor to 0 so a full remap runs the next time.
- *
- * #331 — usage/toolCount/durationMs are read off each assistant message OBJECT
- * (stamped at handleMessageComplete), NOT passed in / inferred positionally. This
- * makes persistence indifferent to where the assistant sits in `transcriptState.messages[]` when
- * the (fire-and-forget) persist actually runs.
- */
-// Pattern 3 §3.2.4 — fix #2 (reentrance). The four fire-and-forget callsites
-// in handleMessageComplete / handleMessageStopped / handleMessageError used to
-// fire `void persistMessagesToStorage()` independently. Two overlapping
-// invocations would each snapshot `transcriptState.lastPersistedIndex`, both await
-// `saveSessionMessages` serially, and the second would write a stale cursor —
-// double-counting head or losing tail. We serialize per-session via an
-// in-flight chain map (keyed by sessionId at call time so that a forkSession
-// or fresh-session swap doesn't replay onto the wrong key).
-function schedulePersist(targetMessageCount = transcriptState.messages.length): Promise<void> {
-  const key = sessionId;
-  const prev = transcriptState.persistChainBySession.get(key) ?? Promise.resolve();
-  const next = prev.then(() => {
-    // Bind the queued work to the id captured at SCHEDULE time. The module-global
-    // `sessionId` can rotate while we wait on the chain (resetSession / switch /
-    // provider-change fresh start); doPersistMessagesToStorage reads the global at
-    // RUN time, so a stale invocation would write the OLD session's tail under the
-    // NEW session's file. Every rotation path explicitly flushes before rotating,
-    // so a skipped stale persist loses nothing — but log it: this firing means a
-    // rotation overlapped an in-flight persist chain.
-    if (key !== sessionId) {
-      console.warn(`[agent-session] skipping stale queued persist: scheduled for ${key}, current session is ${sessionId}`);
-      return;
-    }
-    return doPersistMessagesToStorage(targetMessageCount);
-  }).catch(err => {
-    console.warn('[agent-session] persist failed:', err);
-  });
-  transcriptState.persistChainBySession.set(key, next);
-  // Best-effort cleanup once the tail settles — only delete if we are still
-  // the tail (another schedulePersist may have pushed onto the chain since).
-  void next.then(() => {
-    if (transcriptState.persistChainBySession.get(key) === next) {
-      deletePersistChain(key);
-    }
-  });
-  return next;
-}
-
 async function persistMessagesToStorage(targetMessageCount = transcriptState.messages.length): Promise<void> {
-  // Top-level entry — go through the per-session serializer so concurrent
-  // callers don't interleave their cursor writes.
-  return schedulePersist(targetMessageCount);
-}
-
-async function doPersistMessagesToStorage(targetMessageCount: number): Promise<void> {
-  // Defensive: if the cursor is somehow > transcriptState.messages.length on entry (rewind
-  // race, fork side-effect), log a warning and reset rather than silently
-  // skipping the rest of the work.
-  if (transcriptState.lastPersistedIndex > transcriptState.messages.length) {
-    console.warn(`[agent-session] persist cursor (${transcriptState.lastPersistedIndex}) exceeds transcriptState.messages.length (${transcriptState.messages.length}); resetting`);
-    setLastPersistedIndex(0);
-    clearPersistedSessionMessageCache();
-  }
-  // Trim cache if it has grown past current message count (defensive).
-  if (transcriptState.persistedSessionMessageCache.length > transcriptState.messages.length) {
-    truncatePersistedSessionMessageCache(transcriptState.messages.length);
-  }
-
-  const boundedTargetCount = Math.min(targetMessageCount, transcriptState.messages.length);
-  if (transcriptState.lastPersistedIndex >= boundedTargetCount) {
-    return;
-  }
-
-  const tail = transcriptState.messages.slice(transcriptState.lastPersistedIndex, boundedTargetCount);
-  const tailMapped: SessionMessage[] = tail.map((msg) => {
-    const contentForDisk = typeof msg.content === 'string'
-      ? msg.content
-      : JSON.stringify(stripPlaywrightResults(msg.content));
-    // #331 — usage/toolCount/duration come off the assistant message object
-    // (stamped at handleMessageComplete), never from a positional "is this the
-    // last element" check. Position is unreliable by persist time.
-    const isAssistant = msg.role === 'assistant';
-    return {
-      id: msg.id,
-      role: msg.role,
-      content: contentForDisk,
-      timestamp: msg.timestamp,
-      sdkUuid: msg.sdkUuid,
-      attachments: msg.attachments?.map((att) => ({
-        id: att.id,
-        name: att.name,
-        mimeType: att.mimeType,
-        path: att.relativePath ?? '',
-      })),
-      metadata: msg.metadata,
-      usage: isAssistant ? msg.usage : undefined,
-      toolCount: isAssistant ? msg.toolCount : undefined,
-      durationMs: isAssistant ? msg.durationMs : undefined,
-    };
-  });
-
-  // Stitch cached head + freshly-mapped tail. Cache holds previously-persisted
-  // SessionMessage objects so we don't pay map cost on them every turn.
-  const sessionMessages: SessionMessage[] = transcriptState.persistedSessionMessageCache
-    .slice(0, transcriptState.lastPersistedIndex)
-    .concat(tailMapped);
-
-  await saveSessionMessages(sessionId, sessionMessages);
-
-  // Commit the new tail into the cache and bump the cursor.
-  truncatePersistedSessionMessageCache(transcriptState.lastPersistedIndex); // ensure size matches cursor
-  for (const m of tailMapped) {
-    appendPersistedSessionMessage(m);
-  }
-  setLastPersistedIndex(boundedTargetCount);
-  const { found: foundRealUserMessage, preview: lastMessagePreview } =
-    resolveLastRealUserMessagePreview(sessionMessages);
-  // Only update lastActiveAt if a real user message exists (not just system injections).
-  // This prevents heartbeat/memory-update from making stale sessions appear "active".
-  await updateSessionMetadata(sessionId, {
-    ...(foundRealUserMessage ? { lastActiveAt: new Date().toISOString() } : {}),
-    lastMessagePreview,
+  return scheduleTranscriptPersist({
+    sessionId,
+    getCurrentSessionId: () => sessionId,
+    targetMessageCount,
   });
 }
 
@@ -5444,14 +5292,7 @@ function applyMessageRetraction(retractedUuids: readonly string[] | undefined, s
     // message forever AND drop a legitimate message into the dead zone below
     // the cursor where it never persists. Splice both arrays in lockstep and
     // pull the cursor back by the number of removed entries below it.
-    let removedBelowCursor = 0;
-    for (let i = transcriptState.messages.length - 1; i >= 0; i--) {
-      if (!removed.has(transcriptState.messages[i].id)) continue;
-      if (i < transcriptState.lastPersistedIndex) removedBelowCursor++;
-      if (i < transcriptState.persistedSessionMessageCache.length) removePersistedSessionMessageAt(i);
-      removeMessageAt(i);
-    }
-    transcriptState.lastPersistedIndex -= removedBelowCursor;
+    const { removedBelowCursor } = applyTranscriptRetractionToPersistence(removed);
     // Live frontend streaming bubbles use client-generated ids that never
     // match server transcriptState.messageSequence ids mid-turn (see the message-complete
     // assistant_message_id piggyback) — the id list below only evicts
@@ -5841,374 +5682,113 @@ function handleToolResultComplete(toolUseId: string, content: string, isError?: 
   setToolResult(toolUseId, content, isError);
 }
 
-// #296 — the most recent turn-end persist promise (assigned inside
-// handleMessageComplete). The post-turn auto-title hook chains off this so it
-// reads a transcript + stats.messageCount that already include the just-completed
-// turn (the Title Service reads from disk). Turns are serial per session, so this
-// is always the current turn's persist at the fire site. Initialized resolved so a
-// fire before any turn is a harmless no-op.
-let lastTurnEndPersist: Promise<unknown> = Promise.resolve();
-
-function handleMessageComplete(): void {
-  isStreamingMessage = false;
-  recordInjectedTurnOutcome('complete');
-  // Capture before a confirmed force-send handoff potentially re-arms it, so
-  // the post-teardown re-arm at the end of this function knows whether to do so.
-  let confirmedQueueTurnKeepStreaming = false;
-  // (v0.2.34) Result handling for the lockstep-yield in-flight queued item.
-  //
-  // Two regimes the same `result` event covers:
-  //   (a) Natural completion: NOT a consumption acknowledgement. Keep the
-  //       queue pill waiting for SDKUserMessageReplay or the first assistant
-  //       event of the boundary-drained next turn.
-  //   (b) Graceful interrupt (user pressed stop): the SDK fires `result`
-  //       with terminal_reason='aborted_streaming' which still routes
-  //       through handleMessageComplete. In this regime AI may not have
-  //       seen the in-flight item; treating it as queue:started would
-  //       show an unanswered user bubble in chat history. Drop it via
-  //       queue:cancelled instead — UI honesty matches handleMessageStopped.
-  //   (Codex review fix #2 v2)
-  if (queueState.inFlightToCliId !== null) {
-    const stale = queueState.inFlightToCliId;
-    const meta = queueState.inFlightMetadata;
-    const interruptTargetMismatch = isInterruptingResponse && queueState.interruptingInFlightQueueId !== stale;
-    if (interruptTargetMismatch) {
-      preserveInFlightAfterTerminalBoundary(`interrupt result targets ${queueState.interruptingInFlightQueueId ?? 'none'}`);
-    } else {
-      // Issue #289 — a force-send ("立即发送") of THIS item must SURFACE it (the SDK drains +
-      // processes it post-abort), unlike a plain stop which drops it.
-      const forced = getForceSurfaceInFlightId() === stale;
-      const inFlightAction = decideInFlightActionOnResult({
-        isInterrupting: isInterruptingResponse,
-        forced,
-        hasMeta: !!meta,
-      });
-      if (inFlightAction === 'drop') {
-        dropInFlightQueueItem('graceful interrupt result before SDK consumption confirmation', 'cancelled');
-      } else if (inFlightAction === 'surface' && meta) {
-        // Issue #289 — a FORCE surface means the SDK is draining this item into a NEW turn;
-        // tell interruptCurrentResponse() to skip its redundant trailing handleMessageStopped()
-        // (which would undo the streaming re-arm below + double-pop the IM request → idle gap).
-        // Natural completion no longer surfaces without confirmation, so only
-        // force-send reaches this re-arm path.
-        if (forced) forceDrainTurnStarting = true;
-        void surfaceInFlightQueueItem(stale, meta, {
-          sdkUuid: stale,
-          reason: forced ? 'force-send #289' : 'confirmed result handoff',
-          awaitPersist: false,
-        }).catch((error) => {
-          console.error(`[agent] Failed to surface in-flight queue item ${stale} at result boundary:`, error);
-        });
-        // (v0.2.12 Codex review fix v3 #2) Force-send represents a brand-
-        // new SDK turn starting inside CLI via drainCommandQueue. Mark
-        // for a post-teardown re-arm of isStreamingMessage so isSessionBusy()
-        // still gates new direct-sends through the queue path during the
-        // gap before the new turn's first event reaches MyAgents.
-        confirmedQueueTurnKeepStreaming = true;
-        // turnState.pendingRequestIds: queued item's requestId was pushed at yield
-        // time and remains in the FIFO behind msg1's; popPendingRequest()
-        // below pops msg1, leaving msg2 as new head — popped on its own
-        // result. No push needed.
-      } else if (inFlightAction === 'await-replay') {
-        preserveInFlightAfterTerminalBoundary('natural result');
-      }
+const builtinTurnLifecycle = createBuiltinTurnLifecycle({
+  getSessionId: () => sessionId,
+  getCurrentScenario: () => currentScenario,
+  getProviderEnv: () => configState.currentProviderEnv,
+  getCurrentModel: () => configState.currentModel,
+  getIsInterruptingResponse: () => isInterruptingResponse,
+  setStreamingMessage: (value) => { isStreamingMessage = value; },
+  setForceDrainTurnStarting: (value) => { forceDrainTurnStarting = value; },
+  resetInFlightToolCount: () => { inFlightToolCount = 0; },
+  resetWatchdogFired: () => { watchdogFired = false; },
+  resolvePostInterruptTurnEnd: () => {
+    if (postInterruptTurnEndResolve) {
+      postInterruptTurnEndResolve();
+      postInterruptTurnEndResolve = null;
     }
-  }
-  // (v0.2.12 Codex review fix v2 #1) DEFER promote to next macrotask.
-  //
-  // handleMessageComplete is called from inside the SDK result handler.
-  // After it returns, the result handler can synchronously decide to
-  // resetSession() / setSessionModel() / hasDeferredRestart() — any of
-  // those calls abortPersistentSession() which flips lifecycleState.abortRequested
-  // and resolves the generator with null. If we promote synchronously,
-  // we resolve lifecycleState.messageResolver with our pending item BEFORE the abort
-  // fires, leaving the item in generator's closure (already-resumed but
-  // not yet yielded). abortPersistentSession's rescue can't see it
-  // (rescuePendingToQueue only sees queueState.pendingMidTurnQueue, not generator's
-  // local item) and the item lands on a dying SDK subprocess.
-  //
-  // setTimeout(0) lets the result-handler tail run first, including any
-  // abort decision. If abort fired, promoteNextFromPending observes
-  // lifecycleState.abortRequested=true and skips — pending stays put OR has been
-  // moved to queueState.messageQueue by rescuePendingToQueue. Either way preserved.
-  schedulePostTerminalQueueDrain('complete');
-  // Pattern 1 follow-up: turn finished cleanly — drop the registration
-  // without aborting. The next turn will register a fresh controller.
-  if (sessionId) endTurnAbort(sessionId);
-  // Pattern 6: turn finished — drop the ambient turnId so subsequent logs
-  // (idle / pre-warm / next turn) don't inherit the stale id.
-  // Cross-owner fix: scope by sessionId so we only clear OUR slot.
-  clearAmbientLogContextField(sessionId, 'turnId');
-  // Pattern B/C/G: turn complete → emit 'complete' for the head request, then
-  // pop it. Some result-handler fallback paths surface terminal text/error and
-  // finalize the same SDK boundary before reaching here; in that case do not
-  // advance the FIFO again and accidentally complete the next pending request.
-  if (!hasCurrentTurnImTerminalEmitted()) {
-    completeCurrentImRequest('');
-  }
-  setCurrentTurnImTerminalEmitted(false);
-  // PRD 0.2.14 — desktop turn ended; release mirror state so the next
-  // (possibly IM-driven) turn doesn't accidentally mirror through here.
-  clearMirrorState();
-  // 跨回合状态清理（持久 session 下多回合共享同一个 for-await 循环）
-  // SDK 的 stream event index 是 per-message 的，不同回合的 index 可能冲突
-  streamIndexToToolId.clear();
-  streamIndexToBlockType.clear();
-  toolResultIndexToId.clear();
-  childToolToParent.clear();
-  imTextBlockIndices.clear();
-
-  clearCronTaskContext();
-  // NOTE: Do NOT clearImMediaContext() here — im-media is per-Sidecar context (re-set on each
-  // /api/im/chat call). Clearing it between turns causes im-media to be missing from
-  // buildSdkMcpServers() if the session restarts (MCP change, error recovery, etc.).
-  // It is still cleared on full session termination (see below).
-
-  // Force-close any unclosed thinking blocks (parity with handleMessageStopped).
-  // If content_block_stop was lost (transport issue, subagent edge case, or API error),
-  // the thinking block stays incomplete and the frontend timer runs indefinitely.
-  // This safety net ensures thinking state is always consistent at turn boundary.
-  const lastMsg = transcriptState.messages[transcriptState.messages.length - 1];
-  if (lastMsg?.role === 'assistant' && typeof lastMsg.content !== 'string') {
-    let patched = false;
-    lastMsg.content = lastMsg.content.map((block) => {
-      if (block.type === 'thinking' && !block.isComplete) {
-        patched = true;
-        return {
-          ...block,
-          isComplete: true,
-          thinkingDurationMs: block.thinkingStartedAt ? Date.now() - block.thinkingStartedAt : undefined
-        };
-      }
-      return block;
-    });
-    if (patched) {
-      console.warn('[agent] Force-closed orphaned thinking block(s) in handleMessageComplete');
-    }
-  }
-
-  // Transition to idle only when no queued transcriptState.messages remain.
-  // With mid-turn injection, the generator is always at waitForMessage() after yield
-  // (no waitForTurnComplete gate). Queued transcriptState.messages are delivered via wakeGenerator()
-  // at enqueue time, so the generator drains them naturally. No need to dequeue here.
-  // (v0.2.11 cross-bugfix #142 review-fix #4) Also gate on queueState.pendingMidTurnQueue.length
-  // so waitForSessionIdle() doesn't claim idle while a deferred mid-turn message is
-  // about to be promoted into the next turn.
-  if (!hasQueuedOrInFlightWork()) {
-    setSessionState('idle');
-  }
-
-  // Calculate duration for this turn
-  const durationMs = turnState.currentTurnStartTime ? Date.now() - turnState.currentTurnStartTime : undefined;
-
-  // #331 — stamp this turn's usage onto its assistant message OBJECT, here and now,
-  // while turnState.currentTurnUsage is still this turn's. Persistence then serializes usage
-  // from the message itself (see doPersistMessagesToStorage) instead of guessing
-  // "the last array element". `findTurnUsageStampIndex` targets the trailing
-  // assistant in the not-yet-persisted range, so a confirmed queued user message
-  // surfaced just above or the next turn's transcriptState.messages can't steal/drop the usage.
-  // (Does not retroactively fix turns whose assistant line was already appended
-  // usage-less by a mid-turn persist — queue replay / local-command echo — because
-  // the JSONL writer is append-only. KNOWN RESIDUAL, see the #331 commit message
-  // (83f2ef7d) "Known residual" section for scope/evidence: not observed in any
-  // of 782 local sessions. Candidate root fix: make the mid-turn persist cursor
-  // stop BEFORE the current turn's unfinished assistant message so its line is
-  // never appended without usage — touches the persistence core, needs its own
-  // reviewed change.)
-  const usageStampIndex = findTurnUsageStampIndex(transcriptState.messages, transcriptState.lastPersistedIndex);
-  if (usageStampIndex >= 0) {
-    const completedAssistant = transcriptState.messages[usageStampIndex];
-    completedAssistant.usage = {
-      inputTokens: turnState.currentTurnUsage.inputTokens,
-      outputTokens: turnState.currentTurnUsage.outputTokens,
-      cacheReadTokens: turnState.currentTurnUsage.cacheReadTokens || undefined,
-      cacheCreationTokens: turnState.currentTurnUsage.cacheCreationTokens || undefined,
-      model: turnState.currentTurnUsage.model,
-      modelUsage: turnState.currentTurnUsage.modelUsage,
-    };
-    completedAssistant.toolCount = turnState.currentTurnToolCount;
-    completedAssistant.durationMs = durationMs;
-  }
-
-  // Persist transcriptState.messages after AI response completes (usage now lives on the message
-  // object above, so no usage args are threaded through the persist).
-  // Fire-and-forget: persistMessagesToStorage is async (cooperative file lock),
-  // but the enclosing handler is a sync stream-event callback. Errors are already
-  // swallowed inside SessionStore writers; surfacing them here would be no-op.
-  // #296: capture the promise into `lastTurnEndPersist` so the post-turn auto-title
-  // hook can fire AFTER this turn is durable on disk (still fire-and-forget here).
-  const persistTrace = snapshotBuiltinTurnTrace();
-  const persistTraceStarted = nowMs();
-  const persistTraceToolCount = turnState.currentTurnToolCount;
-  const persistTraceMessageCount = transcriptState.messages.length;
-  lastTurnEndPersist = persistMessagesToStorage()
-    .then(() => {
-      emitBuiltinTurnTrace('persist_done', {
-        durationMs: elapsedMs(persistTraceStarted),
-        status: 'ok',
-        count: persistTraceMessageCount,
-        detail: { toolCount: persistTraceToolCount },
-      }, persistTrace);
-      clearBuiltinTurnTrace(persistTrace);
-    })
-    .catch(err => {
-      emitBuiltinTurnTrace('persist_done', {
-        durationMs: elapsedMs(persistTraceStarted),
-        status: 'error',
-        count: persistTraceMessageCount,
-        detail: { toolCount: persistTraceToolCount },
-      }, persistTrace);
-      clearBuiltinTurnTrace(persistTrace);
-      console.error('[agent] persistMessagesToStorage failed:', err);
-    });
-
-  // (v0.2.12 Codex review fix v3 #2 follow-up) Re-arm streaming flag for
-  // the confirmed queued handoff AFTER all teardown has run, so endTurnAbort
-  // / clearAmbientLogContextField don't undo what we set up. The new
-  // turn driven by CLI's drainCommandQueue will re-emit a `result` of
-  // its own; isStreamingMessage will flip back to false there.
-  if (confirmedQueueTurnKeepStreaming) {
-    isStreamingMessage = true;
-  }
-}
+  },
+  terminalEventAppliesToCurrentInFlight,
+  dropInFlightQueueItem,
+  preserveInFlightAfterTerminalBoundary,
+  surfaceInFlightQueueItem,
+  schedulePostTerminalQueueDrain,
+  endTurnAbort,
+  abortTurnAbort,
+  clearAmbientTurnId: (sid) => clearAmbientLogContextField(sid, 'turnId'),
+  completeCurrentImRequest,
+  failCurrentImRequest,
+  clearMirrorState,
+  clearStreamTurnMaps: () => {
+    streamIndexToToolId.clear();
+    streamIndexToBlockType.clear();
+    toolResultIndexToId.clear();
+    childToolToParent.clear();
+    imTextBlockIndices.clear();
+  },
+  clearCronTaskContext,
+  hasQueuedOrInFlightWork,
+  setSessionState,
+  persistTranscript: persistMessagesToStorage,
+  snapshotTrace: snapshotBuiltinTurnTrace,
+  emitTrace: emitBuiltinTurnTrace,
+  emitFirstDeltaTrace: emitBuiltinFirstDeltaTrace,
+  clearTrace: clearBuiltinTurnTrace,
+  nowMs,
+  elapsedMs,
+  broadcast,
+  broadcastBuiltinContextUsage,
+  trackServer,
+  firePostTurnTitleHook,
+  appendTextChunk,
+  localizeImError,
+  setLastAgentError: (error) => { lastAgentError = error; },
+  buildTurnProviderAnalytics,
+  probeForkPersistenceIfReady,
+  handleTerminalRecovery,
+  applyDeferredRestartIfNeeded,
+});
 
 function handleMessageStopped(): void {
-  isStreamingMessage = false;
-  recordInjectedTurnOutcome('stopped', 'Execution stopped');
-  const stoppedTrace = snapshotBuiltinTurnTrace();
-  emitBuiltinTurnTrace('final', {
-    status: 'error',
-    detail: { source: 'message_stopped' },
-  }, stoppedTrace);
-  // (v0.2.12 Codex review fix #2) On interrupt/abort the in-flight queue
-  // item is dropped — broadcast queue:cancelled so the frontend can
-  // clear the pill. See handleMessageComplete for the matching
-  // graceful-interrupt branch.
-  if (queueState.inFlightToCliId !== null) {
-    if (terminalEventAppliesToCurrentInFlight()) {
-      dropInFlightQueueItem('message stopped before SDK consumption confirmation', 'cancelled');
-    } else {
-      preserveInFlightAfterTerminalBoundary(`stop targets ${queueState.interruptingInFlightQueueId ?? 'none'}`);
-    }
-  }
-  // Defer promote to next macrotask — abortPersistentSession may follow.
-  schedulePostTerminalQueueDrain('stopped');
-  // Pattern 1 follow-up: turn ended (interrupted). Drop the registration.
-  // If interruptCurrentResponse drove the stop it already abort()ed the
-  // controller; this endTurn is the idempotent cleanup of the slot.
-  if (sessionId) endTurnAbort(sessionId);
-  // Pattern 6: clear turnId on stop (mirror of handleMessageComplete).
-  // Cross-owner fix: scope by sessionId so we only clear OUR slot.
-  clearAmbientLogContextField(sessionId, 'turnId');
-  // Pattern B/C/G: turn stopped → emit 'complete' for head + pop queue.
-  emitImEvent('complete', '');
-  const stoppedReq = popPendingRequest();
-  if (stoppedReq) {
-    imRequestRegistry.setStatus(stoppedReq, 'completed');
-    imRequestRegistry.unregister(stoppedReq);
-  }
-  // PRD 0.2.14 — desktop turn stopped; release mirror state.
-  clearMirrorState();
-  // 跨回合状态清理（与 handleMessageComplete 保持一致）
-  streamIndexToToolId.clear();
-  streamIndexToBlockType.clear();
-  toolResultIndexToId.clear();
-  childToolToParent.clear();
-  imTextBlockIndices.clear();
-  clearCronTaskContext();
-
-
-  // Only transition to idle if no queued transcriptState.messages waiting (same logic as handleMessageComplete).
-  // (v0.2.11 cross-bugfix #142 review-fix #4) Includes queueState.pendingMidTurnQueue.
-  if (!hasQueuedOrInFlightWork()) {
-    setSessionState('idle');
-  }
-  const lastMessage = transcriptState.messages[transcriptState.messages.length - 1];
-  if (!lastMessage || lastMessage.role !== 'assistant' || typeof lastMessage.content === 'string') {
-    // Persist even if no assistant message (fire-and-forget — async lock).
-    void persistMessagesToStorage().catch(err => console.error('[agent] persistMessagesToStorage failed:', err));
-    clearBuiltinTurnTrace(stoppedTrace);
-    return;
-  }
-  lastMessage.content = lastMessage.content.map((block) => {
-    if (block.type === 'thinking' && !block.isComplete) {
-      return {
-        ...block,
-        isComplete: true,
-        thinkingDurationMs:
-          block.thinkingStartedAt ? Date.now() - block.thinkingStartedAt : undefined
-      };
-    }
-    return block;
-  });
-  // Persist after processing message (fire-and-forget — async lock).
-  void persistMessagesToStorage().catch(err => console.error('[agent] persistMessagesToStorage failed:', err));
-  clearBuiltinTurnTrace(stoppedTrace);
+  builtinTurnLifecycle.stopTurn();
 }
 
 function handleMessageError(error: string, localizedError?: string): void {
-  isStreamingMessage = false;
-  recordInjectedTurnOutcome('error', localizedError ?? error);
-  const errorTrace = snapshotBuiltinTurnTrace();
-  emitBuiltinTurnTrace('final', {
-    status: 'error',
-    detail: { source: 'message_error', error },
-  }, errorTrace);
-  // (v0.2.12 Codex review fix #2) Drop the in-flight item on error and
-  // surface queue:cancelled — see handleMessageStopped for rationale.
-  if (queueState.inFlightToCliId !== null) {
-    if (terminalEventAppliesToCurrentInFlight()) {
-      dropInFlightQueueItem('message error before SDK consumption confirmation', 'failed');
-    } else {
-      preserveInFlightAfterTerminalBoundary(`error targets ${queueState.interruptingInFlightQueueId ?? 'none'}`);
-    }
-  }
-  // Defer promote to next macrotask — abortPersistentSession may follow.
-  schedulePostTerminalQueueDrain('error');
-  // Pattern 1 follow-up: turn ended due to error. Abort the turn signal so
-  // any in-flight tool fetches release immediately rather than waiting on
-  // their own per-call timeouts. Ignored if no turn is registered.
-  if (sessionId) abortTurnAbort(sessionId, 'error');
-  // Pattern 6: clear turnId on error too — turn is over either way.
-  // Cross-owner fix: scope by sessionId so we only clear OUR slot.
-  clearAmbientLogContextField(sessionId, 'turnId');
-  // Pattern B/C/G: error → emit 'error' for head + pop queue. If the result
-  // handler already finalized this SDK boundary, don't advance to the next
-  // pending request here.
-  if (!hasCurrentTurnImTerminalEmitted()) {
-    failCurrentImRequest(localizedError ?? localizeImError(error));
-  }
-  setCurrentTurnImTerminalEmitted(false);
-  // PRD 0.2.14 — desktop turn errored out; release mirror state.
-  clearMirrorState();
-  if (!hasQueuedOrInFlightWork()) {
-    setSessionState('idle');
-  }
+  builtinTurnLifecycle.failTurn(error, localizedError);
+}
 
-  // Don't persist expected termination signals as errors
-  // These occur during normal session switching or app shutdown
-  const isExpectedTermination =
-    error.includes('SIGTERM') ||
-    error.includes('SIGKILL') ||
-    error.includes('SIGINT') ||
-    error.includes('process terminated') ||
-    error.includes('AbortError');
+function probeForkPersistenceIfReady(resultMessage: BuiltinSdkResultMessage): void {
+  if (resultMessage.is_error) return;
+  const meta = getSessionMetadata(sessionId);
+  const sdkSid = meta?.sdkSessionId;
+  const probeDir = agentDir;
+  if (!meta?.forkFrom || !sdkSid) return;
+  sdkGetSessionMessages(sdkSid, { dir: probeDir, limit: 1 })
+    .then(found => {
+      if (found.length === 0) return;
+      const fresh = getSessionMetadata(sessionId);
+      if (!fresh?.forkFrom) return;
+      console.log(`[agent] fork session ${sessionId} persisted in SDK store — clearing forkFrom`);
+      delete fresh.forkFrom;
+      saveSessionMetadata(fresh).catch(e =>
+        console.warn('[agent] forkFrom clear failed (non-fatal, will retry on next turn):', e),
+      );
+    })
+    .catch(e => {
+      console.log(`[agent] forkFrom persistence probe inconclusive, keeping flag: ${(e as Error)?.message ?? e}`);
+    });
+}
 
-  if (isExpectedTermination) {
-    console.log('[agent] Skipping error persistence for expected termination:', error);
-    clearBuiltinTurnTrace(errorTrace);
-    return;
+function handleTerminalRecovery(reason: 'image' | 'stale' | undefined): void {
+  if (!reason) return;
+  const isDesktop = currentScenario.type === 'desktop';
+  if (isDesktop && reason === 'image') {
+    console.warn('[agent] Desktop image error — skipping auto-reset, frontend will offer rewind');
+  } else if (isDesktop && reason === 'stale') {
+    console.warn('[agent] Desktop stale session — recovering in place, sessionId + history preserved');
+    recoverFromStaleSession().catch(e => console.error('[agent] Stale recovery failed:', e));
+  } else {
+    console.warn('[agent] Auto-resetting session due to unrecoverable conversation error');
+    resetSession().catch(e => console.error('[agent] Auto-reset failed:', e));
   }
+}
 
-  appendMessage({
-    id: allocateMessageId(),
-    role: 'assistant',
-    content: `Error: ${error}`,
-    timestamp: new Date().toISOString()
-  });
-  // Persist error message (fire-and-forget — async lock).
-  void persistMessagesToStorage().catch(err => console.error('[agent] persistMessagesToStorage failed:', err));
-  clearBuiltinTurnTrace(errorTrace);
+function applyDeferredRestartIfNeeded(): void {
+  if (!hasDeferredRestart()) return;
+  const reasons = drainDeferredRestart();
+  console.log(`[agent] Turn complete, applying deferred config restart (reasons=${reasons})`);
+  abortPersistentSession();
+  schedulePreWarm();
 }
 
 function findToolBlockById(toolUseId: string): { tool: ToolUseState } | null {
@@ -6230,34 +5810,12 @@ function findToolBlockById(toolUseId: string): { tool: ToolUseState } | null {
   return null;
 }
 
-/** Sentinel value for stripped Playwright tool results (truthy, so ProcessRow sees tool as complete) */
-const PLAYWRIGHT_RESULT_SENTINEL = '[playwright_result_stripped]';
-
 /** Set of tool_use IDs whose results are stripped from frontend broadcast in the current turn */
 const strippedToolResultIds = new Set<string>();
 
 function isPlaywrightTool(toolUseId: string): boolean {
   const toolBlock = findToolBlockById(toolUseId);
   return toolBlock?.tool.name.startsWith('mcp__playwright__') ?? false;
-}
-
-/**
- * Strip Playwright tool results from ContentBlock[] for frontend/persistence.
- * Replaces tool.result with a sentinel so ProcessRow still sees the tool as complete.
- * Keeps in-memory SDK data intact for conversation context.
- */
-export function stripPlaywrightResults(content: ContentBlock[]): ContentBlock[] {
-  return content.map(block => {
-    if (
-      block.type === 'tool_use' &&
-      block.tool?.name.startsWith('mcp__playwright__') &&
-      block.tool.result &&
-      block.tool.result !== PLAYWRIGHT_RESULT_SENTINEL
-    ) {
-      return { ...block, tool: { ...block.tool, result: PLAYWRIGHT_RESULT_SENTINEL } };
-    }
-    return block;
-  });
 }
 
 function appendToolResultDelta(toolUseId: string, delta: string): void {
@@ -6605,16 +6163,7 @@ export function getAndClearLastAgentError(): string | null {
  */
 function clearMessageState(): void {
   clearMessages();
-  // Pattern 3 §3.2.4 — `transcriptState.messages` was just emptied; reset the persistence
-  // cursor so the next persist run sees `slice(0) === []` and does not
-  // mistakenly believe N transcriptState.messages have already been persisted. Drop the
-  // cached SessionMessage objects too — they belong to a different session.
-  setLastPersistedIndex(0);
-  clearPersistedSessionMessageCache();
-  // Pattern 3 §3.2.4 — fix #2 (reentrance). Drop the per-session persist
-  // chain so a fresh session starts with no in-flight tail awaiting writes
-  // that no longer match the cleared in-memory state.
-  deletePersistChain(sessionId);
+  resetTranscriptPersistenceForSession(sessionId);
   // Pattern 3 §D.3 — drop parsePartialJson throttle cursors so a recycled
   // toolId in a fresh session is not confused with the old buffer length.
   lastParsedBytesByToolId.clear();
@@ -6742,93 +6291,6 @@ function pushInboxAbortReplyForQueuedItem(
  * Sets transcriptState.messageSequence to continue from the last stored message ID.
  * Used by initializeAgent (resume) and switchToSession to restore conversation state.
  */
-function loadMessagesFromStorage(storedMessages: SessionMessage[]): void {
-  for (const storedMsg of storedMessages) {
-    let parsedContent: string | ContentBlock[] = storedMsg.content;
-    if (storedMsg.content.startsWith('[')) {
-      try {
-        const parsed = JSON.parse(storedMsg.content);
-        if (Array.isArray(parsed)) {
-          parsedContent = parsed as ContentBlock[];
-        }
-      } catch {
-        // Keep as string if parse fails
-      }
-    }
-    appendMessage({
-      id: storedMsg.id,
-      role: storedMsg.role,
-      content: parsedContent,
-      timestamp: storedMsg.timestamp,
-      sdkUuid: storedMsg.sdkUuid,
-      attachments: storedMsg.attachments?.map((att) => ({
-        id: att.id,
-        name: att.name,
-        size: 0,
-        mimeType: att.mimeType,
-        relativePath: att.path,
-      })),
-      metadata: storedMsg.metadata,
-      // #331 — round-trip persisted usage back onto the in-memory message so a
-      // later FULL remap (rewind / fork / session-reset resets the cursor to 0 and
-      // re-maps from these MessageWire objects) re-serializes usage instead of
-      // dropping it. The persisted-tail cache below preserves it for the common
-      // incremental path; this covers the cursor-reset path.
-      usage: storedMsg.usage,
-      toolCount: storedMsg.toolCount,
-      durationMs: storedMsg.durationMs,
-    });
-  }
-  // Pattern 3 §3.2.4 — these transcriptState.messages are already on disk; seed the persist
-  // cursor + cache so the next persist run only maps the new tail (transcriptState.messages
-  // produced after this load), not the entire restored history.
-  setLastPersistedIndex(transcriptState.messages.length);
-  clearPersistedSessionMessageCache();
-  for (const sm of storedMessages) {
-    appendPersistedSessionMessage(sm);
-  }
-  // Update transcriptState.messageSequence to continue from the last message
-  if (storedMessages.length > 0) {
-    const lastMsgId = storedMessages[storedMessages.length - 1].id;
-    const parsedId = parseInt(lastMsgId, 10);
-    if (!isNaN(parsedId)) {
-      setMessageSequence(parsedId + 1);
-    }
-  }
-
-  // Seed transcriptState.currentSessionUuids from disk transcriptState.messages so that rewind works immediately
-  // after loading a resume session (before SDK system_init populates them at runtime).
-  // Without this, rewinding during pre-warm window fails UUID validation → new session → context lost.
-  // Safe because sessionRegistered=true means we're resuming the same session ID.
-  for (const msg of transcriptState.messages) {
-    if (msg.sdkUuid) {
-      addCurrentSessionUuid(msg.sdkUuid);
-    }
-  }
-
-  // PRD 0.2.27 — capture the cold-reload window-B anchor NOW, from the durable persisted
-  // tail (before any new direct-send user row is appended). Always assigned (value or
-  // undefined) so it never carries a stale value from a prior load. Consumed by the next
-  // startStreamingSession. See deriveReloadResumeAnchor + the `transcriptState.pendingReloadAnchor` decl.
-  setPendingReloadAnchor(deriveReloadResumeAnchor(transcriptState.messages, transcriptState.currentSessionUuids));
-
-  // Seed Bridge thought_signature cache from persisted tool_use blocks
-  // (Gemini thinking models require round-tripping this field; the cache is lost on sidecar restart)
-  const thoughtSigEntries: Array<{ id: string; thought_signature: string }> = [];
-  for (const msg of transcriptState.messages) {
-    if (Array.isArray(msg.content)) {
-      for (const block of msg.content) {
-        if (block.type === 'tool_use' && block.tool?.thought_signature) {
-          thoughtSigEntries.push({ id: block.tool.id, thought_signature: block.tool.thought_signature });
-        }
-      }
-    }
-  }
-  if (thoughtSigEntries.length > 0) {
-    seedBridgeThoughtSignatures(thoughtSigEntries);
-  }
-}
-
 /**
  * Reset the current session for "new conversation" functionality
  * This FULLY terminates the SDK session and clears all state
@@ -7089,7 +6551,7 @@ export async function initializeAgent(
   if (initialSessionId && initMeta) {
 	  const sessionData = getSessionData(initialSessionId);
 	  if (sessionData?.messages?.length) {
-	    loadMessagesFromStorage(sessionData.messages);
+	    loadTranscriptFromSessionMessages(sessionData.messages);
 	    console.log(`[agent] initializeAgent: loaded ${sessionData.messages.length} existing transcriptState.messages, transcriptState.messageSequence=${transcriptState.messageSequence}`);
 	  }
   }
@@ -7268,7 +6730,7 @@ export async function switchToSession(targetSessionId: string): Promise<boolean>
   // This is critical for incremental save logic in saveSessionMessages
 	  const sessionData = getSessionData(targetSessionId);
 	  if (sessionData?.messages?.length) {
-	    loadMessagesFromStorage(sessionData.messages);
+	    loadTranscriptFromSessionMessages(sessionData.messages);
 	    console.log(`[agent] switchToSession: loaded ${sessionData.messages.length} existing transcriptState.messages`);
 	  }
 
@@ -9014,11 +8476,7 @@ export async function rewindSession(userMessageId: string): Promise<{
 
     // 6. 截断消息
     truncateMessages(targetIndex);
-    // Pattern 3 §3.2.4 — rewind shrinks the array; force a full remap by
-    // resetting the cursor + cache. SessionStore detects the truncation and
-    // rewrites the JSONL file so the on-disk state matches.
-    setLastPersistedIndex(0);
-    clearPersistedSessionMessageCache();
+    truncateTranscriptPersistenceForRewind();
     await persistMessagesToStorage();
 
     // 7. 设置下次 query 的对话截断点 — 三分支决策树
@@ -9200,27 +8658,7 @@ export async function forkSession(assistantMessageId: string): Promise<{
         console.log(`[agent] forkSession: message ${assistantMessageId} not in memory, found in storage`);
         // Use stored transcriptState.messages directly for fork (they already have sdkUuid persisted)
         targetIndex = storedIdx;
-	        messageSource = stored.messages.map(m => ({
-          id: m.id,
-          role: m.role,
-          content: m.content,
-          timestamp: m.timestamp,
-          sdkUuid: m.sdkUuid,
-          attachments: m.attachments?.map(att => ({
-            id: att.id,
-            name: att.name,
-            size: 0,
-            mimeType: att.mimeType,
-            relativePath: att.path,
-          })),
-          metadata: m.metadata,
-          // #331 — round-trip usage here too; otherwise the fork-copy map below
-          // reads `m.usage === undefined` and the forked session loses its
-          // inherited token stats when forking from storage (not in-memory).
-          usage: m.usage,
-          toolCount: m.toolCount,
-          durationMs: m.durationMs,
-        }));
+	        messageSource = stored.messages.map(sessionMessageToMessageWire);
       }
     }
   }
@@ -9266,39 +8704,16 @@ export async function forkSession(assistantMessageId: string): Promise<{
 
     // Copy transcriptState.messages up to and including the fork point (sdkUuid preserved here; the EAGER
     // path re-stamps them to the fork's new uuids before persisting).
-    const forkedMessages: SessionMessage[] = messageSource.slice(0, targetIndex + 1).map(m => ({
-      id: m.id,
-      role: m.role,
-      content: typeof m.content === 'string' ? m.content : JSON.stringify(stripPlaywrightResults(m.content)),
-      timestamp: m.timestamp,
-      sdkUuid: m.sdkUuid,
-      attachments: m.attachments?.map(att => ({
-        id: att.id,
-        name: att.name,
-        mimeType: att.mimeType,
-        path: ('relativePath' in att ? att.relativePath : (att as { path?: string }).path) ?? '',
-      })),
-      metadata: m.metadata,
-      // #331 — carry token usage into the fork so the forked session's stats
-      // reflect the inherited history (this explicit map omitted them).
-      usage: m.usage,
-      toolCount: m.toolCount,
-      durationMs: m.durationMs,
-    }));
+    const forkedMessages: SessionMessage[] = messageSource
+      .slice(0, targetIndex + 1)
+      .map(messageWireToSessionMessage);
 
     // Pattern 3 §3.2.4 — fix #2 (forkSession parent cursor). Snapshot the parent's persist
     // cursor + cache before invoking SessionStore writers for the FORKED session; restore
     // them afterwards so a subsequent persist on the parent doesn't observe stale state.
-    const parentPersistCursorSnapshot = transcriptState.lastPersistedIndex;
-    const parentPersistCacheSnapshot = transcriptState.persistedSessionMessageCache.slice();
+    const parentPersistStateSnapshot = snapshotTranscriptPersistenceState();
     const restoreParentPersistState = () => {
-      if (transcriptState.lastPersistedIndex !== parentPersistCursorSnapshot) {
-        console.warn(`[agent] forkSession: parent persist cursor drifted (${parentPersistCursorSnapshot} → ${transcriptState.lastPersistedIndex}); restoring`);
-        setLastPersistedIndex(parentPersistCursorSnapshot);
-      }
-      if (transcriptState.persistedSessionMessageCache.length !== parentPersistCacheSnapshot.length) {
-        replacePersistedSessionMessageCache(parentPersistCacheSnapshot);
-      }
+      restoreTranscriptPersistenceState(parentPersistStateSnapshot);
     };
 
     // PRD 0.2.27 — EAGER fork (AppConfig.eagerFork, developer toggle in Settings→About, DEFAULT
@@ -9327,7 +8742,7 @@ export async function forkSession(assistantMessageId: string): Promise<{
         newSession.titleSource = 'auto';
         try {
           await saveSessionMetadata(newSession);
-          await saveSessionMessages(newSession.id, eager.remapped);
+          await saveForkTranscript(newSession.id, eager.remapped);
         } catch (persistErr) {
           // Persist threw AFTER the SDK fork file was created — clean up the orphan SDK
           // transcript so we don't leak it, then let the outer catch surface the failure.
@@ -9355,7 +8770,7 @@ export async function forkSession(assistantMessageId: string): Promise<{
       messageUuid: targetMsg.sdkUuid,
     };
     await saveSessionMetadata(newSession);
-    await saveSessionMessages(newSession.id, forkedMessages);
+    await saveForkTranscript(newSession.id, forkedMessages);
     restoreParentPersistState();
 
     console.log(`[agent] forked session ${sourceSessionId} → ${newSession.id} at message ${assistantMessageId} (sdkUuid: ${targetMsg.sdkUuid}), ${forkedMessages.length} transcriptState.messages copied`);
@@ -10566,7 +9981,7 @@ async function startStreamingSession(preWarm = false): Promise<void> {
     // during an active turn — the credited tick-gap on the first post-idle tick
     // naturally absorbs inter-turn idle.
     const watchdog = new InactivityWatchdog({ timeoutMs: WATCHDOG_TIMEOUT_MS, intervalMs: API_WATCHDOG_INTERVAL_MS });
-    let watchdogFired = false;
+    watchdogFired = false;
     apiWatchdogId = setInterval(async () => {
       // Only check during active turns (not pre-warm, not idle between turns)
       if (!isStreamingMessage || lifecycleState.preWarming) return;
@@ -11717,486 +11132,7 @@ async function startStreamingSession(preWarm = false): Promise<void> {
           }
         }
       } else if (sdkMessage.type === 'result') {
-        // Turn complete — reset watchdog state for next turn
-        inFlightToolCount = 0;
-        watchdogFired = false;
-        // Signal post-interrupt verification (if waiting)
-        if (postInterruptTurnEndResolve) {
-          postInterruptTurnEndResolve();
-          postInterruptTurnEndResolve = null;
-        }
-        // Extract token usage from result message
-        // SDK result contains modelUsage (per-model stats) and/or usage (aggregate)
-        // This is the authoritative source for token statistics
-        const resultMessage = sdkMessage as {
-          type: 'result';
-          is_error?: boolean;
-          result?: string;
-          errors?: string[];
-          // SDK 0.2.91+ 新增：标识 result 终止原因。字段缺失表示 loop 被 bypass
-          // (本地 slash 命令) 或在 yield 之间被外部中断。使用 SDK 导出的 TerminalReason
-          // 联合类型而非裸 string，确保 SDK 升级新增枚举值时 tsc 能捕获缺失处理。
-          terminal_reason?: import('@anthropic-ai/claude-agent-sdk').TerminalReason;
-          usage?: {
-            input_tokens?: number;
-            output_tokens?: number;
-            cache_read_input_tokens?: number;
-            cache_creation_input_tokens?: number;
-          };
-          modelUsage?: Record<string, {
-            inputTokens?: number;
-            outputTokens?: number;
-            cacheReadInputTokens?: number;
-            cacheCreationInputTokens?: number;
-          }>;
-        };
-        const resultText = resultMessage.result || '';
-
-        // #307: did the user/system just abort this turn (stop button, config-change
-        // restart, session takeover)? The SDK wraps an abort as an is_error result
-        // whose `result` text is the internal parser diagnostic
-        // ("[ede_diagnostic] result_type=user ..."). That string must never reach a
-        // user — not the desktop error banner, not the IM error reply. We detect the
-        // abort two ways because terminal_reason can be MISSING when the interrupt
-        // lands between yields (see the terminal_reason field comment above):
-        //   1. terminal_reason starts with 'aborted_' (the normal abort result), or
-        //   2. an interrupt is actively in progress (isInterruptingResponse).
-        // NOT shouldSurfaceTerminalReason() — that returns false for a *missing*
-        // reason too, which would wrongly swallow legitimate no-terminal_reason
-        // errors from third-party providers.
-        const isAbortResult =
-          isAbortedTerminalReason(resultMessage.terminal_reason) || isInterruptingResponse;
-
-        // Forward SDK error results to IM callback (prevents "(No Response)")
-        if (resultMessage.is_error) {
-          const rawError = resultText || resultMessage.errors?.join('; ') || turnState.currentTurnLastAssistantMessageError || '';
-          // Detect image content error — reset session to clear polluted history
-          // (applies to both IM and desktop: prevents all subsequent transcriptState.messages from failing)
-          // Pattern 1: malformed image block (e.g., wrong content type)
-          // Pattern 2: oversized image (>8000px, from tools returning large screenshots)
-          // Known API error: "...image.source.base64.data: At least one of the image dimensions exceed max allowed size: 8000 pixels"
-          if (
-            (rawError.includes('unknown variant') && rawError.includes('image')) ||
-            (rawError.includes('image') && rawError.includes('exceed') && rawError.includes('max allowed size'))
-          ) {
-            shouldResetSessionAfterError = true;
-            shouldResetReason = 'image';
-          }
-          // Detect stale session — SDK started (system_init received) but conversation
-          // data is broken (e.g., IM Bot restart: old session_id restored from disk,
-          // SDK directory exists but conversation context is unusable).
-          // Without this, the persistent session loops: every message gets the same error
-          // because sessionRegistered stays true and SDK keeps trying --resume.
-          // The catch-block recovery (below) only covers Scenario A (SDK throws on startup);
-          // this covers Scenario B (SDK starts, returns is_error in result message).
-          if (rawError.includes('No conversation found')) {
-            shouldResetSessionAfterError = true;
-            shouldResetReason = 'stale';
-          }
-          if (getPendingRequestIds().length > 0 && !isAbortResult) {
-            const errorText = localizeImError(rawError);
-            console.warn('[agent] SDK result is_error, forwarding to IM bus:', errorText);
-            failCurrentImRequest(errorText);
-          } else if (getPendingRequestIds().length > 0 && isAbortResult) {
-            // #307: an aborted IM turn must NOT push the internal diagnostic to the
-            // IM peer as an error. handleMessageComplete() below runs for is_error
-            // aborts (isEmptySuccessfulSdkResult is false when is_error), so it
-            // emits the IM 'complete' event and pops/unregisters the pending request.
-            console.log('[agent] Suppressing IM error forward for aborted turn (handleMessageComplete will finalize)');
-          }
-        }
-
-        // Prefer modelUsage (per-model breakdown), fallback to aggregate usage.
-        // Pure extraction lives in sdk-turn-outcome.ts so the shape contract is
-        // unit-tested (#358 regression).
-        const turnUsage = extractTurnUsageFromSdkResult(resultMessage);
-        replaceCurrentTurnUsage(turnUsage);
-        if (isDebugMode) {
-          if (turnUsage.modelUsage) {
-            console.log(`[agent] Token usage from result.modelUsage: input=${turnUsage.inputTokens}, output=${turnUsage.outputTokens}, models=${Object.keys(turnUsage.modelUsage).join(', ')}`);
-          } else if (resultMessage.usage) {
-            console.log(`[agent] Token usage from result.usage: input=${turnUsage.inputTokens}, output=${turnUsage.outputTokens}`);
-          }
-        }
-        if (!resultMessage.modelUsage && !resultMessage.usage) {
-          console.warn('[agent] Result message has no usage data, token statistics may be incomplete');
-        }
-
-        // Calculate duration for analytics
-        const durationMs = turnState.currentTurnStartTime ? Date.now() - turnState.currentTurnStartTime : 0;
-
-        // #358 — stamp turn usage onto the trailing assistant message NOW, before
-        // the empty-success / error / success branching decides whether
-        // handleMessageComplete runs. Stats persistence used to live inside
-        // handleMessageComplete, which is only reached on the success branch
-        // (else of emptySuccessfulResult). Any path that finalized the turn
-        // through chat:message-error / chat:agent-error — empty success, silent
-        // sub-agent intermediate result, third-party Anthropic-compat upstream
-        // shape that race-zeroed the result handler's downstream view — left
-        // the assistant on disk usage-less and `/sessions/:id/stats` summed 0
-        // forever (the JSONL writer is append-only). Stamping here, immediately
-        // after the SDK-authoritative usage is extracted, makes stats correct
-        // even when the broadcast path short-circuits later. handleMessageComplete
-        // still calls findTurnUsageStampIndex on its own branch — that becomes
-        // an idempotent no-op (`usage === undefined` returns -1).
-        const earlyStampIndex = findTurnUsageStampIndex(transcriptState.messages, transcriptState.lastPersistedIndex);
-        if (earlyStampIndex >= 0) {
-          const stampedAssistant = transcriptState.messages[earlyStampIndex];
-          stampedAssistant.usage = {
-            inputTokens: turnState.currentTurnUsage.inputTokens,
-            outputTokens: turnState.currentTurnUsage.outputTokens,
-            cacheReadTokens: turnState.currentTurnUsage.cacheReadTokens || undefined,
-            cacheCreationTokens: turnState.currentTurnUsage.cacheCreationTokens || undefined,
-            model: turnState.currentTurnUsage.model,
-            modelUsage: turnState.currentTurnUsage.modelUsage,
-          };
-          stampedAssistant.toolCount = turnState.currentTurnToolCount;
-          stampedAssistant.durationMs = durationMs || undefined;
-        }
-
-        // Surface SDK-level errors that produced no assistant output (e.g. "Unknown skill: xxx").
-        // These results have non-empty result text but no visible assistant text was streamed.
-        // Without this, the user sees nothing — the message just silently completes.
-        // Only show agent-error for is_error results — non-error results from non-streaming
-        // providers are handled in the assistant message handler above.
-        const hasResultText = resultText.trim().length > 0;
-        const resultErrorText = (hasResultText ? resultText : '') || resultMessage.errors?.join('; ') || turnState.currentTurnLastAssistantMessageError || '';
-        const noOutputResultText = resultMessage.is_error ? resultErrorText : (hasResultText ? resultText : '');
-        // #307: skip the no-output error/banner block for aborts (isAbortResult
-        // computed above). On abort the only "result text" is the SDK's internal
-        // parser diagnostic; surfacing it via the is_error branch below would show
-        // that scary internal string in the red error banner. The turn instead flows
-        // to handleMessageComplete() below carrying terminal_reason='aborted_streaming',
-        // which the frontend renders as the normal inline "已停止" feedback (banner
-        // suppressed by describeTerminalReason).
-        if (noOutputResultText && !turnState.currentTurnHasOutput && !turnState.currentTurnToolCount && !isAbortResult) {
-          let shouldCompleteNoOutputImRequest = false;
-          if (resultMessage.is_error) {
-            console.warn('[agent] SDK error result with no streamed output, showing as agent-error:', resultErrorText);
-            lastAgentError = resultErrorText;
-            broadcast('chat:agent-error', { message: resultErrorText });
-            shouldCompleteNoOutputImRequest = true;
-          } else if (resultText) {
-            // Non-error result text that wasn't captured by streaming or assistant handler
-            // (safety net — should rarely trigger after the assistant handler fix above)
-            console.warn('[agent] SDK non-error result with no streamed output, showing as message:', resultText);
-            emitBuiltinFirstDeltaTrace(resultText);
-            // Handler first (same pattern as streamed text path)
-            if (appendTextChunk(resultText)) {
-              broadcast('chat:message-chunk', resultText);
-              markCurrentTurnHasOutput();
-              shouldCompleteNoOutputImRequest = true;
-            }
-          }
-          // Forward to IM event bus (prevents "(No Response)" for SDK failures).
-          // Pattern B+G: pop the head request — the upcoming handleMessageComplete
-          // for this turn will find the head already cleared and skip duplicate
-          // emission. Defensive against handleMessageComplete not running for
-          // is_error / no-output results.
-          // Non-error terminal text only completes IM early if it was actually
-          // appended to the transcript. Decorative provider wrappers can be
-          // rejected by appendTextChunk(); those must fall through to the empty
-          // result error path rather than reporting a hidden string as success.
-          if (shouldCompleteNoOutputImRequest && !hasCurrentTurnImTerminalEmitted()) {
-            completeCurrentImRequest(noOutputResultText);
-          }
-        }
-
-        const emptySuccessfulResult = isEmptySuccessfulSdkResult({
-          isError: resultMessage.is_error,
-          result: resultText,
-          terminalReason: resultMessage.terminal_reason,
-          hasVisibleOutput: turnState.currentTurnHasOutput,
-          toolCount: turnState.currentTurnToolCount,
-          outputTokens: turnState.currentTurnUsage.outputTokens,
-        });
-        const successfulCompactControlTurn = isSuccessfulCompactControlTurn({
-          emptySuccessfulResult,
-          compactResult: turnState.currentTurnCompactResult,
-          sawCompactBoundary: turnState.currentTurnSawCompactBoundary,
-        });
-        const recoveredAssistantMessageError = isRecoveredAssistantMessageError({
-          hadAssistantMessageError: turnState.currentTurnHadAssistantMessageError,
-          isError: resultMessage.is_error,
-          terminalReason: resultMessage.terminal_reason,
-          emptySuccessfulResult: emptySuccessfulResult && !successfulCompactControlTurn,
-        });
-
-        if (recoveredAssistantMessageError && turnState.currentTurnLastAssistantMessageError) {
-          console.log('[agent] SDK assistant message error recovered by successful result:', turnState.currentTurnLastAssistantMessageError);
-        }
-        if (resultMessage.is_error && !isAbortResult) {
-          recordInjectedTurnOutcome('error', resultErrorText || resultText || 'turn ended with error');
-        }
-        emitBuiltinTurnTrace('final', {
-          status: resultMessage.is_error || (emptySuccessfulResult && !successfulCompactControlTurn) ? 'error' : 'ok',
-          durationMs,
-          count: turnState.currentTurnToolCount,
-          detail: {
-            terminalReason: resultMessage.terminal_reason ?? 'completed',
-            hasOutput: turnState.currentTurnHasOutput,
-            emptySuccessfulResult,
-            successfulCompactControlTurn,
-          },
-        });
-
-        // Find the last assistant message's sdkUuid to piggyback on message-complete.
-        // This avoids the ID mismatch problem: frontend streaming transcriptState.messages use Date.now()
-        // IDs while backend uses transcriptState.messageSequence IDs, so the separate chat:message-sdk-uuid
-        // event can't match. Piggybacking on message-complete lets the frontend set sdkUuid
-        // on the just-moved history message without needing ID matching.
-        const lastAssistant = transcriptState.messages.length > 0 && transcriptState.messages[transcriptState.messages.length - 1].role === 'assistant'
-          ? transcriptState.messages[transcriptState.messages.length - 1] : null;
-
-        // Log non-completed terminal_reasons to unified logs for debugging.
-        // Some reasons (e.g. aborted_streaming) suppress the UI banner entirely
-        // (see src/shared/terminalReason.ts), so this is the ONLY surface left
-        // for figuring out why a turn ended early. One line per non-trivial turn
-        // — low frequency, keeps signal tight.
-        if (resultMessage.terminal_reason && resultMessage.terminal_reason !== 'completed') {
-          console.log(`[agent][terminal_reason] ${resultMessage.terminal_reason} scenario=${currentScenario.type} model=${turnState.currentTurnUsage.model ?? 'unknown'} duration_ms=${durationMs} tool_count=${turnState.currentTurnToolCount}`);
-        }
-
-        if (emptySuccessfulResult && !successfulCompactControlTurn) {
-          const emptyResultError = 'AI 未返回任何内容，但 SDK 将本轮标记为完成。请在当前会话重试；如果使用第三方兼容供应商，建议切换模型、减少上下文或压缩后重试。';
-          console.warn(`[agent][empty_result] model=${turnState.currentTurnUsage.model ?? 'unknown'} terminal_reason=${resultMessage.terminal_reason ?? 'none'} input=${turnState.currentTurnUsage.inputTokens} output=${turnState.currentTurnUsage.outputTokens} duration_ms=${durationMs} provisional_error=${turnState.currentTurnLastAssistantMessageError ?? 'none'}`);
-          lastAgentError = emptyResultError;
-          broadcast('chat:message-error', emptyResultError);
-          handleMessageError(emptyResultError);
-          const replyText = getCurrentTurnText();
-          const replyMeta = getCurrentTurnInboxMeta();
-          if (replyMeta) {
-            setCurrentTurnInboxMeta(undefined);
-            void import('./inbox/reply-deliver').then(({ deliverInboxReply }) =>
-              deliverInboxReply(sessionId, replyMeta, {
-                text: replyText,
-                error: {
-                  code: 'turn_failed',
-                  message: emptyResultError,
-                },
-              }),
-            ).catch((err) =>
-              console.error('[inbox] empty-result reply pushback failed:', err),
-            );
-          }
-          clearCurrentTurnTextBlocks();
-          void import('./inbox/watch-deliver').then(({ deliverSessionWatchEvents }) =>
-            deliverSessionWatchEvents(sessionId, {
-              text: replyText,
-              error: {
-                code: 'turn_failed',
-                message: emptyResultError,
-              },
-            }),
-          ).catch((err) =>
-            console.error('[session-watch] empty-result watch push failed:', err),
-          );
-        } else {
-          console.log('[agent][sdk] Broadcasting chat:message-complete');
-          // Include usage data for frontend analytics tracking + assistant sdkUuid for fork button
-          broadcast('chat:message-complete', {
-            model: turnState.currentTurnUsage.model,
-            input_tokens: turnState.currentTurnUsage.inputTokens,
-            output_tokens: turnState.currentTurnUsage.outputTokens,
-            cache_read_tokens: turnState.currentTurnUsage.cacheReadTokens,
-            cache_creation_tokens: turnState.currentTurnUsage.cacheCreationTokens,
-            tool_count: turnState.currentTurnToolCount,
-            duration_ms: durationMs,
-            // SDK 0.2.91+ terminal_reason — 前端映射为中文 banner/toast。
-            // 未设置时前端按 `completed` 处理（不显示额外提示）。
-            terminal_reason: resultMessage.terminal_reason,
-            // Piggyback sdkUuid + real message ID so fork button works immediately after streaming.
-            // Frontend streaming transcriptState.messages use Date.now() IDs that don't match backend transcriptState.messageSequence IDs.
-            assistant_sdk_uuid: lastAssistant?.sdkUuid,
-            assistant_message_id: lastAssistant?.id,
-            compact_result: successfulCompactControlTurn ? 'success' : undefined,
-          });
-
-          // PRD 0.2.32 — 并发 context 用量快照。快路径取「最近一条主轮 message」per-call usage；
-          // 缺失时回落 SDK `getContextUsage()`（/context 命令同源），覆盖 #343 / #323-善后两类。
-          // 窗口用 lookupModelContextLength ?? 200K（对齐 auto-compact，**不**用 SDK contextWindow，
-          // 理由见 broadcastBuiltinContextUsage）。fire-and-forget — 持久化在内部已经异步。
-          void broadcastBuiltinContextUsage();
-
-          // Server-side unified analytics: covers all sources (desktop/cron/im).
-          // PRD 0.2.19 — `session_id` lets analytics join this back to the renderer's
-          // `session_new` event to reconstruct full per-session funnels (entry surface
-          // → first message → token cost → tool usage → outcome).
-          const turnAnalyticsSource = turnState.currentTurnAnalyticsSource ?? currentScenario.type;
-          trackServer('ai_turn_complete', {
-            source: turnAnalyticsSource,
-            session_id: sessionId,
-            platform: currentScenario.type === 'im' ? currentScenario.platform : null,
-            runtime: 'builtin',
-            model: turnState.currentTurnUsage.model ?? null,
-            ...(turnState.currentTurnProviderAnalytics ?? buildTurnProviderAnalytics(configState.currentProviderEnv)),
-            input_tokens: turnState.currentTurnUsage.inputTokens,
-            output_tokens: turnState.currentTurnUsage.outputTokens,
-            cache_read_tokens: turnState.currentTurnUsage.cacheReadTokens,
-            cache_creation_tokens: turnState.currentTurnUsage.cacheCreationTokens,
-            tool_count: turnState.currentTurnToolCount,
-            duration_ms: durationMs,
-          });
-
-          handleMessageComplete();
-
-          // #296 — backend-owned auto session titling, fired through the
-          // `turn-hooks` leaf slot (dependency inversion) so this file never
-          // imports the Title Service / title-generator (no import cycle). Three
-          // correctness requirements, all handled here:
-          //  1. Gate on a genuinely successful turn — mirror the external path's
-          //     `lastTurnSucceeded` and the retired renderer's #245 gate. This
-          //     `else` branch is also reached by is_error results with visible
-          //     text and by non-completed terminal reasons (aborted_streaming /
-          //     max_turns); those must never seed a title.
-          //  2. Fire AFTER the turn-end persist resolves so the Title Service
-          //     reads a transcript + stats.messageCount that already include THIS
-          //     turn — matches external ordering and ensures a session ending at
-          //     exactly the round threshold still gets titled (not one turn late,
-          //     not never-titled if the tab is then closed).
-          //  3. Snapshot raw model + providerEnv now (module globals a mid-session
-          //     /model/set could mutate before the persist resolves).
-          // Still best-effort + non-blocking (void .then, errors swallowed downstream).
-          if (shouldTitleCompletedTurn(resultMessage.is_error === true, resultMessage.terminal_reason)) {
-            const titleSid = sessionId;
-            const titleModel = configState.currentModel;
-            const titleProviderEnv = configState.currentProviderEnv;
-            void lastTurnEndPersist.then(() =>
-              firePostTurnTitleHook(titleSid, 'builtin', titleModel, titleProviderEnv));
-          }
-
-          // PRD 0.2.18 Session Inbox — turn-end reply pushback.
-          // If this turn was triggered by an inbox message with replyBack=true,
-          // collect the turn's text + error and push back to caller session.
-          // Fire-and-forget: don't await (network errors logged but not surfaced).
-          const sessionEventText = getCurrentTurnText();
-          const sessionEventError = resultMessage.is_error
-            ? {
-                code: 'turn_failed',
-                message:
-                  resultMessage.result ||
-                  (resultMessage.errors?.join('; ') ?? 'turn ended with error'),
-              }
-            : undefined;
-          const replyMeta = getCurrentTurnInboxMeta();
-          if (replyMeta) {
-            // Clear immediately to prevent the next turn from inheriting (per-turn
-            // semantics — multiple inbox transcriptState.messages each get their own binding).
-            setCurrentTurnInboxMeta(undefined);
-            void import('./inbox/reply-deliver').then(({ deliverInboxReply }) =>
-              deliverInboxReply(sessionId, replyMeta, {
-                text: sessionEventText,
-                error: sessionEventError,
-              }),
-            ).catch((err) =>
-              console.error('[inbox] result-handler reply pushback failed:', err),
-            );
-          }
-          clearCurrentTurnTextBlocks();
-          void import('./inbox/watch-deliver').then(({ deliverSessionWatchEvents }) =>
-            deliverSessionWatchEvents(sessionId, {
-              text: sessionEventText,
-              error: sessionEventError,
-            }),
-          ).catch((err) =>
-            console.error('[session-watch] result-handler watch push failed:', err),
-          );
-        }
-
-        // PRD #134 — clear `forkFrom` only once we've VERIFIED the SDK has
-        // persisted the forked conversation to its on-disk store. "First
-        // non-error result" is necessary but not sufficient: the SDK's
-        // JSONL flush is async, and the deferred-restart abort triggered
-        // by `setSessionModel` (model-window restart) can fire on the
-        // same `result` message and race with the flush. If we cleared
-        // `forkFrom` here speculatively, the next subprocess would
-        // resume by sdkSessionId, fail with "No conversation found",
-        // and `recoverFromStaleSession()` would silently spawn a fresh
-        // SDK conversation — exactly the user-visible bug from #134/#135
-        // (40+ failed turns reported in a single day).
-        //
-        // Probe via `sdkGetSessionMessages(sdkSid)` — reads the SDK's
-        // own project JSONL. If it returns at least one message, the
-        // conversation is durably persisted and any future restart can
-        // resume normally. If it throws / returns empty, keep
-        // `forkFrom` so the next `startStreamingSession` re-runs fork
-        // mode (idempotent — SDK reloads source history and writes to
-        // the same new sessionId). Async — the result handler doesn't
-        // block on this.
-        if (!resultMessage.is_error) {
-          const meta = getSessionMetadata(sessionId);
-          const sdkSid = meta?.sdkSessionId;
-          const probeDir = agentDir;
-          if (meta?.forkFrom && sdkSid) {
-            sdkGetSessionMessages(sdkSid, { dir: probeDir, limit: 1 })
-              .then(found => {
-                if (found.length === 0) return; // not persisted yet — keep forkFrom
-                // Re-fetch metadata in case anything changed since the
-                // result handler captured it (e.g., restart already
-                // re-issued fork mode in the gap).
-                const fresh = getSessionMetadata(sessionId);
-                if (!fresh?.forkFrom) return;
-                console.log(`[agent] fork session ${sessionId} persisted in SDK store — clearing forkFrom`);
-                delete fresh.forkFrom;
-                saveSessionMetadata(fresh).catch(e =>
-                  console.warn('[agent] forkFrom clear failed (non-fatal, will retry on next turn):', e),
-                );
-              })
-              .catch(e => {
-                // ENOENT / "No conversation found" / etc. — SDK hasn't
-                // persisted yet. forkFrom stays; next start re-forks.
-                console.log(`[agent] forkFrom persistence probe inconclusive, keeping flag: ${(e as Error)?.message ?? e}`);
-              });
-          }
-        }
-
-        // Post-turn error recovery. Three policies based on scenario × reason:
-        //
-        // 1. desktop + 'image': skip reset. Frontend surfaces an error banner that
-        //    guides the user to time-rewind (preserves conversation context).
-        //
-        // 2. desktop + 'stale' ("No conversation found"): SessionStore still has
-        //    the history but SDK's project data was wiped (old build, external
-        //    clear, etc.). Do NOT call resetSession — that generates a new
-        //    sessionId, broadcasts chat:init, and wipes the frontend's loaded
-        //    view. Instead, recover in place: tear down the failed SDK
-        //    subprocess, disarm resume, and pre-warm a fresh SDK session reusing
-        //    the same sessionId. The user keeps seeing their history, next
-        //    message starts a brand-new conversation inside the same session
-        //    timeline. Data/UX never appears to "vanish".
-        //
-        // 3. everything else (IM, cron, sub-agent, unknown reason): full
-        //    resetSession. IM/cron has no UI to confirm against.
-        if (shouldResetSessionAfterError) {
-          shouldResetSessionAfterError = false;
-          const reason = shouldResetReason;
-          shouldResetReason = undefined;
-          const isDesktop = currentScenario.type === 'desktop';
-
-          if (isDesktop && reason === 'image') {
-            console.warn('[agent] Desktop image error — skipping auto-reset, frontend will offer rewind');
-          } else if (isDesktop && reason === 'stale') {
-            console.warn('[agent] Desktop stale session — recovering in place, sessionId + history preserved');
-            recoverFromStaleSession().catch(e => console.error('[agent] Stale recovery failed:', e));
-          } else {
-            console.warn('[agent] Auto-resetting session due to unrecoverable conversation error');
-            resetSession().catch(e => console.error('[agent] Auto-reset failed:', e));
-          }
-        }
-
-        // Deferred config restart: MCP/Agents changed during this turn but we didn't
-        // abort mid-response. Now that the turn completed naturally, restart the session
-        // so the new config takes effect. The generator will see lifecycleState.abortRequested and exit.
-        // schedulePreWarm() ensures a new session starts after the abort completes.
-        // The 500ms timer gives enough time for the finally block to run (lifecycleState.processing=false)
-        // before the new startStreamingSession is called.
-        // sessionRegistered is preserved, so the new session will use resume.
-        if (hasDeferredRestart()) {
-          const reasons = drainDeferredRestart();
-          console.log(`[agent] Turn complete, applying deferred config restart (reasons=${reasons})`);
-          abortPersistentSession();
-          schedulePreWarm();
-        }
+        builtinTurnLifecycle.handleSdkResult(sdkMessage as BuiltinSdkResultMessage);
       } else if (!KNOWN_MESSAGE_TYPES.has(sdkMessage.type) && !warnedUnknownMessageTypes.has(sdkMessage.type)) {
         // Top-level half of the unknown-message sentinel (the system-subtype
         // half lives in the system block above): a type outside the 0.3.173

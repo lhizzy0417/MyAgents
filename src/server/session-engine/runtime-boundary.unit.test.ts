@@ -131,6 +131,37 @@ describe('SessionEngine runtime boundary', () => {
     expect(violations).toEqual([]);
   });
 
+  it('keeps Phase7 turn terminal and transcript persistence behavior out of the facade', () => {
+    const facade = sourceWithoutCommentLines(join(repoRoot, 'src/server/agent-session.ts'));
+    const turnLifecycle = sourceWithoutCommentLines(join(repoRoot, 'src/server/builtin-session/turn-lifecycle.ts'));
+    const transcriptPersistence = sourceWithoutCommentLines(join(repoRoot, 'src/server/builtin-session/transcript-persistence.ts'));
+    const forbiddenFacadePatterns = [
+      /\bextractTurnUsageFromSdkResult\b/,
+      /\bisEmptySuccessfulSdkResult\b/,
+      /\bisSuccessfulCompactControlTurn\b/,
+      /\bisRecoveredAssistantMessageError\b/,
+      /\bfindTurnUsageStampIndex\b/,
+      /\bresolveLastRealUserMessagePreview\b/,
+      /\bseedBridgeThoughtSignatures\b/,
+      /\blastTurnEndPersist\b/,
+      /\bsaveSessionMessages\b/,
+      /\b(?:function|const|let|var)\s+(?:schedulePersist|doPersistMessagesToStorage|loadMessagesFromStorage)\b/,
+    ];
+
+    expect(facade).toContain('builtinTurnLifecycle.handleSdkResult');
+    expect(forbiddenFacadePatterns.filter(pattern => pattern.test(facade)).map(String)).toEqual([]);
+    expect(facade).toContain('saveForkTranscript');
+
+    expect(turnLifecycle).toContain('extractTurnUsageFromSdkResult');
+    expect(turnLifecycle).toContain('isEmptySuccessfulSdkResult');
+    expect(turnLifecycle).toContain('lastTurnEndPersist');
+    expect(turnLifecycle).toContain('stampTurnUsageOnPendingAssistant');
+    expect(transcriptPersistence).toContain('saveSessionMessages');
+    expect(transcriptPersistence).toContain('saveForkTranscript');
+    expect(transcriptPersistence).toContain('scheduleTranscriptPersist');
+    expect(transcriptPersistence).toContain('loadTranscriptFromSessionMessages');
+  });
+
   it('keeps session-core pure and side-effect free', () => {
     const coreFiles = [
       'src/server/session-core/turn-result-policy.ts',
