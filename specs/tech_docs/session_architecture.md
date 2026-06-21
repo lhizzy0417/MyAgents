@@ -457,6 +457,7 @@ setSystemStatus(null);
 
 - `loadSession` 用**同步**标志 `restoredSessionIdRef`（**不是**异步滞后的 `historyMessagesRef.length`）决定是否 skip replay。在 `setHistoryMessages` 前就放开 loading 标志，会让迟到的 `chat:init` 命中 `!isLoading && length===0` → 清掉刚恢复的 REST 页 + `seenIds` → 内存 replay（可能传输截断）回填**旧**集（#0608 实测：后端发 id 111-190，前端却停在 109）。
 - 冷历史 backfill 打 `replayKind:'cold-history'`，**只 skip 它**；live echo 不打标记、永远渲染（统一 skip 会吞掉刚发的 user 气泡）。决策纯核心 `sessionRestoreGuards.ts`（可单测）。
+- `GET /sessions/:id` 的 active overlay（builtin 内存未持久化消息、external live streaming message、live session state）由 `SessionEngine.getLiveSessionOverlay()` 提供。Route 只做分页、redaction、response shaping，不直接读取 `agent-session.ts` / `external-session.ts`。
 - 诊断"恢复只显示一部分"：读磁盘 `~/.myagents/refs/<id>` 的 spilled body（后端实发的 JSON，可直接 `node` 解析）对比前端显示，先把"后端发了什么 vs 前端显示什么"一刀切开。
 
 ### Sidecar 配置归置：`sidecarConfigDisposition`（push / adopt / pending，0.2.31）
@@ -491,9 +492,9 @@ Tab 翻成 chat 时，Chat 要决定**如何与该 session 的 sidecar 对齐配
 
 | 端点 / setter | 调用方 | 守卫形态 | 快照会话行为 |
 |---|---|---|---|
-| `/api/model/set` → `setSessionModel` | 桌面 picker **和** Rust IM router 共用 | **显式 source flag**：Rust 带 `imConfigSync:true` | 仅 `imConfigSync` 调用被忽略；桌面 picker 保持权威（它自己更新快照） |
-| `/api/provider/set` → `setSessionProviderEnv` | **仅 Rust IM router**（caller audit；桌面 provider 走 chat-send payload / boot env，从不到这） | 无条件守卫 | 任何调用都被忽略（snapshot wins），`console.warn` 记录 |
-| `/api/session/permission-mode` → `setSessionPermissionMode` | **仅 Rust IM router**（同上） | 无条件守卫 | 同上。安全相关：fullAgency 的 IM channel 不得静默降级桌面 plan-mode 硬闸 |
+| `/api/model/set` → `SessionEngine.updateModel()` → adapter setter | 桌面 picker **和** Rust IM router 共用 | **显式 source flag**：Rust 带 `imConfigSync:true` | 仅 `imConfigSync` 调用被忽略；桌面 picker 保持权威（它自己更新快照） |
+| `/api/provider/set` → `SessionEngine.updateProviderEnv()` → builtin `setSessionProviderEnv` / external skip | **仅 Rust IM router**（caller audit；桌面 provider 走 chat-send payload / boot env，从不到这） | builtin 无条件守卫；external runtime 显式 skip | builtin 快照会话任何调用都被忽略（snapshot wins），`console.warn` 记录；external 不接收该 setter |
+| `/api/session/permission-mode` → `SessionEngine.updatePermissionMode()` → adapter setter | **仅 Rust IM router**（同上） | 无条件守卫 | 同上。安全相关：fullAgency 的 IM channel 不得静默降级桌面 plan-mode 硬闸 |
 
 配套 Rust 根因：`SessionRouter::ensure_sidecar` 曾在 create 路径无条件返回 `is_new=true`——复用既有健康 sidecar（只加 owner）也被当"新建"推配置。现透传 manager 锁内权威的 `EnsureSidecarResult.is_new`，复用即跳过 `sync_ai_config`（复用的 sidecar 已有配置；per-message enqueue 每轮重解析 channel 配置，不受影响）。
 

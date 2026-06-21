@@ -5,10 +5,14 @@ import {
 } from './route-contracts';
 
 describe('SESSION_ENGINE_ROUTE_CONTRACTS', () => {
-  it('covers the Phase1 high-risk runtime split routes', () => {
+  it('covers the Phase1 and Phase5 high-risk runtime split routes', () => {
     const required = [
       'POST /chat/send',
       'POST /chat/stop',
+      'POST /chat/reset',
+      'POST /chat/rewind',
+      'POST /chat/external-retry',
+      'GET /chat/stream',
       'POST /chat/queue/cancel',
       'POST /chat/queue/force',
       'GET /chat/queue/status',
@@ -22,6 +26,18 @@ describe('SESSION_ENGINE_ROUTE_CONTRACTS', () => {
       'POST /api/model/set',
       'POST /api/reasoning-effort/set',
       'POST /api/session/permission-mode',
+      'GET /api/session/config',
+      'GET /api/session-state',
+      'GET /api/session-latest-result',
+      'POST /api/session-watch/register',
+      'GET /sessions/:id',
+      'POST /sessions/fork',
+      'POST /sessions/switch',
+      'POST /api/im/session/new',
+      'POST /api/interaction-scenario/set',
+      'POST /api/mcp/set',
+      'POST /api/agents/set',
+      'POST /api/provider/set',
       'POST /api/runtime/config',
       'POST /api/runtime/prewarm',
       'POST /api/runtime/permission-response',

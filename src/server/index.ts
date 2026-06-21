@@ -497,26 +497,15 @@ import {
   getLogLines,
   getMessages,
   getSessionId,
-  getSystemInitInfo,
-  getLastBuiltinAssistantText,
   initializeAgent,
-  getStreamingAssistantId,
   switchToSession,
-  setMcpServers,
   getMcpServers,
   getCurrentMcpServers,
   applyMcpOverrideAndAwaitReady,
   withCronDispatchLock,
-  setAgents,
-  resetSession,
-  materializeCurrentSessionMetadataForPublishedReset,
   setGroupToolsDeny,
   setInteractionScenario,
   resetInteractionScenario,
-  rewindSession,
-  forkSession,
-  getPendingInteractiveRequests,
-  stripPlaywrightResults,
   setSidecarPort,
   hasActiveBridge,
   getSessionModel,
@@ -544,9 +533,7 @@ import {
 import { decodeProviderEnvSnapshot, findAgentByWorkspacePath, findProvider, getAllMcpServers, getEffectiveMcpServers, isProviderDisabled, loadConfig, resolveImProviderEnv, resolveProviderEnv } from './utils/admin-config';
 import { snapshotForOwnedSession } from './utils/session-snapshot';
 import { resolveSessionConfig } from './utils/resolve-session-config';
-import { resolveLastRealUserMessagePreview, shrinkSessionMessageForClient, shrinkSessionMessagesForClient, shrinkReplayContentForClient } from './utils/session-message-preview';
-import { getLatestAssistantResultFromMessages, NO_TEXT_RESPONSE } from './inbox/latest-result';
-import { pendingSessionWatchCount, registerPendingSessionWatch } from './inbox/watch-registry';
+import { resolveLastRealUserMessagePreview, shrinkSessionMessagesForClient } from './utils/session-message-preview';
 import type { AgentConfig } from '../shared/types/agent';
 import type { SessionMetadata } from './types/session';
 import { initLogger, getLoggerDiagnostics, withLogContext, setStdioBrokenProbe } from './logger';
@@ -580,25 +567,9 @@ import { registerBridgeSeedFn } from './bridge-cache';
 // native binary failed to load. The handler is in the post-bind path, so
 // dynamic-import there is free.
 import {
-  shouldUseExternalRuntime,
-  stopExternalSession,
-  isExternalSessionActive,
   queryRuntimeModels,
   getRuntimePermissionModes,
   getActiveRuntimeType,
-  restoreExternalSessionState,
-  getLastExternalAssistantText,
-  getExternalSessionState,
-  getExternalSystemInitPayload,
-  getExternalPendingInteractiveRequests,
-  getExternalSessionId,
-  getExternalLiveAssistantMessage,
-  getExternalSessionModel,
-  getExternalSessionPermissionMode,
-  getExternalSessionReasoningEffort,
-  awaitExternalSessionStarting,
-  getCurrentBoundSessionId,
-  popLastUserMessageForRetry,
 } from './runtimes/external-session';
 import {
   getAskUserQuestionResponseEngine,
@@ -608,6 +579,10 @@ import {
 } from './session-engine';
 import { handleSessionEngineQueueRoute } from './routes/session-engine-queue';
 import { handleSessionEngineRuntimeRoute } from './routes/session-engine-runtime';
+import { handleSessionReadRoute } from './routes/session-read';
+import { handleChatStreamRoute } from './routes/chat-stream';
+import { handleSessionConfigRoute } from './routes/session-config';
+import { handleSessionOperationRoute } from './routes/session-operations';
 import { installAutoTitleHook } from './session-title-service';
 import type { ImagePayload } from './runtimes/types';
 import { rehomeImagePayloadsForSession } from './runtimes/image-payload';
@@ -627,10 +602,7 @@ import { neutralizeInboxStructuralTags, sanitizeInboxLabel } from './inbox/sanit
 type PermissionMode = 'auto' | 'plan' | 'fullAgency' | 'custom';
 
 function getRuntimeSessionIdForRequest(): string {
-  if (shouldUseExternalRuntime()) {
-    return getExternalSessionId() || getCurrentBoundSessionId() || getSessionId();
-  }
-  return getSessionId();
+  return getSessionEngine().getRuntimeIdentity().sessionId;
 }
 
 function resolveExternalPrewarmSessionId(requestedSessionId: string | undefined): string {
@@ -638,19 +610,6 @@ function resolveExternalPrewarmSessionId(requestedSessionId: string | undefined)
     return requestedSessionId;
   }
   return getRuntimeSessionIdForRequest();
-}
-
-function latestAssistantResultForCurrentSession(): string {
-  let latestResult = shouldUseExternalRuntime()
-    ? getLastExternalAssistantText()
-    : getLastBuiltinAssistantText();
-  if (!latestResult.trim()) {
-    const data = getSessionData(getRuntimeSessionIdForRequest());
-    latestResult = data
-      ? getLatestAssistantResultFromMessages(data.messages)
-      : NO_TEXT_RESPONSE;
-  }
-  return latestResult.trim() || NO_TEXT_RESPONSE;
 }
 
 /**
@@ -717,17 +676,6 @@ function desktopScenarioForAnalyticsSource(
   return source === 'floating_ball'
     ? { type: 'desktop', surface: 'floating-ball' }
     : { type: 'desktop' };
-}
-
-function parseDesktopInteractionScenario(value: unknown): Extract<InteractionScenario, { type: 'desktop' }> | null {
-  if (!value || typeof value !== 'object') return null;
-  const scenario = value as { type?: unknown; surface?: unknown };
-  if (scenario.type !== 'desktop') return null;
-  if (scenario.surface === undefined) return { type: 'desktop' };
-  if (scenario.surface === 'chat' || scenario.surface === 'floating-ball') {
-    return { type: 'desktop', surface: scenario.surface };
-  }
-  return null;
 }
 
 function getRuntimeConfigModel(
@@ -2222,83 +2170,9 @@ async function main() {
         return fileResp ?? new Response('Not Found', { status: 404 });
       }
 
-      // Session state endpoint - used by Rust background completion polling
-      if (pathname === '/api/session-state' && request.method === 'GET') {
-        const sessionState = shouldUseExternalRuntime()
-          ? getExternalSessionState()
-          : getAgentState().sessionState;
-        return jsonResponse({ sessionState });
-      }
-
-      // Latest assistant result endpoint. Prefer live runtime memory over disk
-      // so callers do not read the previous turn during finalization windows.
-      if (pathname === '/api/session-latest-result' && request.method === 'GET') {
-        return jsonResponse({
-          sessionId: getRuntimeSessionIdForRequest(),
-          latestResult: latestAssistantResultForCurrentSession(),
-        });
-      }
-
-      // Internal endpoint: Rust management API registers a one-shot watcher
-      // on the target sidecar. The target turn-end hook drains these watches
-      // and pushes watch.completed/error back through /api/inbox/deliver.
-      if (pathname === '/api/session-watch/register' && request.method === 'POST') {
-        const body = (await request.json().catch(() => null)) as {
-          watchId?: string;
-          watcherSessionId?: string;
-          watcherResumeWorkspacePath?: string;
-          targetSessionId?: string;
-          targetLabel?: string;
-          observedSidecarState?: string;
-        } | null;
-        if (!body?.watchId || !body.watcherSessionId || !body.targetSessionId) {
-          return jsonResponse({ accepted: false, reason: 'invalid body' }, 400);
-        }
-        const runtimeSessionId = getRuntimeSessionIdForRequest();
-        if (body.targetSessionId !== runtimeSessionId) {
-          return jsonResponse({ accepted: false, reason: 'target session mismatch' }, 409);
-        }
-        const targetSessionState = shouldUseExternalRuntime()
-          ? getExternalSessionState()
-          : getAgentState().sessionState;
-        const latestResult = latestAssistantResultForCurrentSession();
-        if (targetSessionState === 'error') {
-          return jsonResponse({
-            accepted: false,
-            delivery: 'error',
-            reason: 'target_error',
-            targetStateAtRegistration: targetSessionState,
-            finalState: 'error',
-            terminalReason: 'target_error',
-            latestResult,
-          });
-        }
-        if (targetSessionState !== 'running' && targetSessionState !== 'starting') {
-          return jsonResponse({
-            accepted: false,
-            delivery: 'already_idle',
-            reason: 'already_idle',
-            targetStateAtRegistration: targetSessionState,
-            finalState: 'idle',
-            terminalReason: 'already_idle',
-            latestResult,
-          });
-        }
-        registerPendingSessionWatch({
-          watchId: body.watchId,
-          watcherSessionId: body.watcherSessionId,
-          watcherResumeWorkspacePath: body.watcherResumeWorkspacePath,
-          targetSessionId: body.targetSessionId,
-          targetLabel: body.targetLabel || 'a session',
-          targetStateAtRegistration: targetSessionState,
-          registeredAt: new Date().toISOString(),
-        });
-        return jsonResponse({
-          accepted: true,
-          delivery: 'registered',
-          targetStateAtRegistration: targetSessionState,
-          pending: pendingSessionWatchCount(),
-        });
+      const sessionReadRouteResponse = await handleSessionReadRoute(pathname, request, url);
+      if (sessionReadRouteResponse) {
+        return sessionReadRouteResponse;
       }
 
       // Read historical session messages from SDK's persisted session files (v0.2.59+)
@@ -2335,64 +2209,12 @@ async function main() {
         }, 200);
       }
 
-      if (pathname === '/chat/stream' && request.method === 'GET') {
-        // No onClose turn-interrupt: SSE disconnect is not a cancellation
-        // authority (see the note above — turn lifecycle = Rust Owner model).
-        const { client, response } = createSseClient(() => {});
-        const state = shouldUseExternalRuntime()
-          ? { ...getAgentState(), sessionState: getExternalSessionState() }
-          : getAgentState();
-        client.send('chat:init', state);
-        const allMessages = getMessages();
-        // When a turn is in-flight, skip the streaming assistant message.
-        // Live SSE events (thinking-start, thinking-chunk, message-chunk) will build it from
-        // scratch. Replaying it here would create a duplicate in historyMessages alongside the
-        // streamingMessage being assembled from live events → duplicate thinking blocks.
-        // Filter by message ID (not array position) because mid-turn queued user messages
-        // can appear after the streaming assistant in messages[].
-        const streamingId = getStreamingAssistantId();
-        allMessages.forEach((message) => {
-          if (streamingId && message.id === streamingId) return; // skip streaming message
-          // Strip Playwright tool results, then cap each replayed message at the
-          // 256KB inline limit (parity with the REST /sessions/:id path's
-          // shrinkSessionMessagesForClient). Without the cap a multi-MB persisted
-          // message (e.g. a Codex sub-agent fan-out turn, 757 blocks) ships as one
-          // oversized chat:message-replay SSE event, breaks the SSE→Tauri-IPC
-          // handoff, and truncates restored history at the first oversized message.
-          const strippedContent = typeof message.content !== 'string'
-            ? stripPlaywrightResults(message.content)
-            : message.content;
-          const content = shrinkReplayContentForClient(strippedContent);
-          // `replayKind: 'cold-history'` marks this as the SSE-connect history
-          // backfill (the whole in-memory transcript), distinct from the LIVE
-          // `chat:message-replay` echoes that broadcast a freshly-sent user /
-          // command bubble (agent-session.ts). The renderer suppresses ONLY
-          // cold-history replay for a REST-restored session (REST owns ordered
-          // history); live echoes must always render or new user bubbles vanish
-          // after a restore (#0608 review — Codex caught the overload).
-          client.send('chat:message-replay', { message: { ...message, content }, replayKind: 'cold-history' });
-        });
-        client.send('chat:logs', { lines: getLogLines() });
-        if (shouldUseExternalRuntime()) {
-          const externalSystemInitPayload = getExternalSystemInitPayload();
-          if (externalSystemInitPayload) {
-            client.send('chat:system-init', externalSystemInitPayload);
-          }
-        } else {
-          const systemInitInfo = getSystemInitInfo();
-          if (systemInitInfo) {
-            client.send('chat:system-init', { info: systemInitInfo });
-          }
-        }
-        // Replay pending interactive requests (permission, ask-user-question)
-        // so that a Tab joining mid-session can display and respond to them.
-        const pendingRequests = shouldUseExternalRuntime()
-          ? getExternalPendingInteractiveRequests()
-          : getPendingInteractiveRequests();
-        for (const pending of pendingRequests) {
-          client.send(pending.type, pending.data);
-        }
-        return response;
+      const chatStreamRouteResponse = await handleChatStreamRoute(pathname, request, {
+        createSseClient,
+        getLogLines,
+      });
+      if (chatStreamRouteResponse) {
+        return chatStreamRouteResponse;
       }
 
       if (pathname === '/chat/send' && request.method === 'POST') {
@@ -2505,6 +2327,13 @@ async function main() {
         return runtimeRouteResponse;
       }
 
+      const sessionOperationRouteResponse = await handleSessionOperationRoute(pathname, request, {
+        workspacePath: currentAgentDir,
+      });
+      if (sessionOperationRouteResponse) {
+        return sessionOperationRouteResponse;
+      }
+
       // CC SessionStart hook receiver (v0.1.59)
       // CC fires this hook when a session starts/resumes/compacts.
       // The forwarder script (cc-session-hook-forwarder.cjs) POSTs the hook input here.
@@ -2522,53 +2351,6 @@ async function main() {
         } catch {
           return jsonResponse({ ok: false }, 500);
         }
-      }
-
-      // Rewind session to a specific user message (time travel)
-      if (pathname === '/chat/rewind' && request.method === 'POST') {
-        if (shouldUseExternalRuntime()) {
-          return jsonResponse({ success: false, error: 'Rewind is not supported for external runtimes (CC/Codex)' }, 400);
-        }
-        const body = (await request.json().catch(() => ({}))) as Record<string, unknown>;
-        const userMessageId = typeof body.userMessageId === 'string' ? body.userMessageId : '';
-        if (!userMessageId) {
-          return jsonResponse({ success: false, error: 'Missing userMessageId' }, 400);
-        }
-        const result = await rewindSession(userMessageId);
-        return jsonResponse(result);
-      }
-
-      // External-runtime retry: truncate the failed user turn from
-      // allSessionMessages and return its content for re-send. Builtin uses
-      // /chat/rewind which has SDK resume-anchor + file-checkpoint semantics;
-      // external runtimes don't have those, but a "drop the tail + resend"
-      // semantic is still sound when the previous turn never produced an
-      // assistant message (model capacity, network error, etc.). Issue #192.
-      if (pathname === '/chat/external-retry' && request.method === 'POST') {
-        if (!shouldUseExternalRuntime()) {
-          return jsonResponse({ success: false, error: 'external-retry is only for external runtimes; builtin uses /chat/rewind' }, 400);
-        }
-        const body = (await request.json().catch(() => ({}))) as Record<string, unknown>;
-        const userMessageId = typeof body.userMessageId === 'string' ? body.userMessageId : '';
-        if (!userMessageId) {
-          return jsonResponse({ success: false, error: 'Missing userMessageId' }, 400);
-        }
-        const result = await popLastUserMessageForRetry(userMessageId);
-        return jsonResponse(result);
-      }
-
-      // Fork session at a specific assistant message (create branch)
-      if (pathname === '/sessions/fork' && request.method === 'POST') {
-        if (shouldUseExternalRuntime()) {
-          return jsonResponse({ success: false, error: 'Fork is not supported for external runtimes (CC/Codex)' }, 400);
-        }
-        const body = (await request.json().catch(() => ({}))) as Record<string, unknown>;
-        const messageId = typeof body.messageId === 'string' ? body.messageId : '';
-        if (!messageId) {
-          return jsonResponse({ success: false, error: 'Missing messageId' }, 400);
-        }
-        const result = await forkSession(messageId);
-        return jsonResponse(result);
       }
 
       const sessionEngineQueueRoute = await handleSessionEngineQueueRoute(pathname, request);
@@ -2679,24 +2461,6 @@ async function main() {
             newOffset: readEnd,
             isComplete
           });
-        } catch (error) {
-          return jsonResponse(
-            { success: false, error: error instanceof Error ? error.message : 'Unknown error' },
-            500
-          );
-        }
-      }
-
-      // Reset session for "new conversation" - clears all messages and state
-      if (pathname === '/chat/reset' && request.method === 'POST') {
-        try {
-          console.log('[chat] reset (new conversation)');
-          // Stop external runtime subprocess if active (prevents orphaned processes)
-          if (shouldUseExternalRuntime() && isExternalSessionActive()) {
-            await stopExternalSession();
-          }
-          await resetSession();
-          return jsonResponse({ success: true, sessionId: getSessionId() });
         } catch (error) {
           return jsonResponse(
             { success: false, error: error instanceof Error ? error.message : 'Unknown error' },
@@ -3758,7 +3522,8 @@ async function main() {
       }
 
       // GET /sessions/:id/stats - Get detailed session statistics
-      // NOTE: This route must be BEFORE /sessions/:id to avoid being caught by the generic route
+      // The generic GET /sessions/:id handler lives in routes/session-read.ts and
+      // only matches one path segment, so stats/since subroutes remain owned here.
       if (pathname.match(/^\/sessions\/[^/]+\/stats$/) && request.method === 'GET') {
         const sessionId = pathname.replace('/sessions/', '').replace('/stats', '');
         if (!sessionId) {
@@ -3862,157 +3627,6 @@ async function main() {
             messageDetails,
           },
         });
-      }
-
-      // GET /sessions/:id - Get session details
-      if (pathname.startsWith('/sessions/') && request.method === 'GET') {
-        const sessionId = pathname.replace('/sessions/', '');
-        if (!sessionId) {
-          return jsonResponse({ success: false, error: 'Session ID required.' }, 400);
-        }
-
-        const session = getSessionData(sessionId);
-        if (!session) {
-          // An active session may not yet have on-disk metadata: external runtimes
-          // pre-warm before the first user message, and builtin can race in the
-          // window between Tab open and first persisted turn. Treat the active
-          // session as an empty session-in-progress instead of 404 (which the
-          // frontend retries, producing log noise).
-          const isActiveBuiltin = sessionId === getSessionId();
-          const isActiveExternal = shouldUseExternalRuntime() && sessionId === getExternalSessionId();
-          if (isActiveBuiltin || isActiveExternal) {
-            // CRITICAL: include `runtime` so the frontend's TabProvider doesn't
-            // fall back to `'builtin'` (line 2645: `runtime || 'builtin'`). For
-            // a pre-warmed external session whose metadata hasn't been persisted
-            // yet, omitting runtime makes `currentRuntime` resolve to 'builtin',
-            // which then triggers the unified model-push effect to send the
-            // builtin preset model — killing the just-prewarmed external process.
-            return jsonResponse({
-              success: true,
-              session: {
-                id: sessionId,
-                runtime: isActiveExternal ? getActiveRuntimeType() : 'builtin',
-                messages: [],
-                liveStreamingMessage: null,
-                liveSessionState: isActiveExternal ? getExternalSessionState() : undefined,
-                totalCount: 0,
-                hasMoreBefore: false,
-              },
-            });
-          }
-          return jsonResponse({ success: false, error: 'Session not found.' }, 404);
-        }
-
-        // Pagination: `?limit=N` returns only the most recent N messages,
-        // keeping the first-paint JSON body tiny even for 600-message sessions.
-        // `?before=<messageId>` loads the N messages immediately older than the
-        // given id, used by the MessageList startReached handler to lazily
-        // fetch history as the user scrolls up.
-        //
-        // Clamp limit to [1, 500]. 0 / missing means "full load" (preserved for
-        // callers that genuinely need all messages, e.g. sessions/fork UI).
-        const rawLimit = parseInt(url.searchParams.get('limit') ?? '0', 10);
-        const limit = Number.isFinite(rawLimit) && rawLimit > 0 ? Math.min(rawLimit, 500) : 0;
-        const before = url.searchParams.get('before');
-
-        let liveStreamingMessage: {
-          id: string;
-          role: 'assistant';
-          content: string;
-          timestamp: string;
-          sdkUuid?: string;
-        } | null = null;
-
-        // If this is the currently active session, merge in-memory messages.
-        // In-memory messages include the current turn's in-progress content
-        // (thinking, text, tool_use) that hasn't been persisted to disk yet.
-        // This is critical for shared Sidecar: when a Tab opens an IM session
-        // mid-turn, it needs to see the partial assistant response.
-        let mergedMessages = session.messages;
-        if (shouldUseExternalRuntime() && sessionId === getExternalSessionId()) {
-          const liveMessage = getExternalLiveAssistantMessage();
-          if (liveMessage) {
-            const shrunkLive = shrinkSessionMessageForClient({
-              id: liveMessage.id,
-              role: 'assistant',
-              content: liveMessage.content,
-              timestamp: liveMessage.timestamp,
-            });
-            liveStreamingMessage = {
-              id: shrunkLive.id,
-              role: 'assistant',
-              content: shrunkLive.content,
-              timestamp: shrunkLive.timestamp,
-            };
-          }
-        } else if (sessionId === getSessionId()) {
-          const inMemory = getMessages();
-          if (inMemory.length > 0) {
-            const diskIds = new Set(session.messages.map(m => m.id));
-            const newMessages = inMemory
-              .filter(m => !diskIds.has(m.id))
-              .map(m => ({
-                id: m.id,
-                role: m.role,
-                content: typeof m.content === 'string' ? m.content : JSON.stringify(stripPlaywrightResults(m.content)),
-                timestamp: m.timestamp,
-                sdkUuid: m.sdkUuid,
-                attachments: m.attachments?.map(a => ({
-                  id: a.id,
-                  name: a.name,
-                  mimeType: a.mimeType,
-                  path: a.savedPath ?? a.relativePath ?? '',
-                })),
-                metadata: m.metadata,
-              }));
-            if (newMessages.length > 0) {
-              mergedMessages = [...session.messages, ...newMessages];
-            }
-          }
-        }
-
-        // Apply pagination slice. hasMoreBefore tells the client whether there
-        // are older messages on disk that it could fetch with ?before=.
-        const totalCount = mergedMessages.length;
-        let paginatedMessages = mergedMessages;
-        let hasMoreBefore = false;
-        if (limit > 0) {
-          if (before) {
-            const beforeIdx = mergedMessages.findIndex(m => m.id === before);
-            // beforeIdx < 0 is a stale cursor — the client's baseline is gone,
-            // so return an empty page and let the client fall back to full load.
-            if (beforeIdx < 0) {
-              paginatedMessages = [];
-              hasMoreBefore = false;
-            } else {
-              const start = Math.max(0, beforeIdx - limit);
-              paginatedMessages = mergedMessages.slice(start, beforeIdx);
-              hasMoreBefore = start > 0;
-            }
-          } else {
-            const start = Math.max(0, totalCount - limit);
-            paginatedMessages = mergedMessages.slice(start);
-            hasMoreBefore = start > 0;
-          }
-        }
-
-        // Attachments ship as metadata only. Binary previews are served by the
-        // Tauri `myagents://attachment/<path>` custom protocol (zero-copy, no JSON
-        // round-trip), keeping the JSON body small even for sessions with dozens
-        // of screenshots. Browser dev mode uses the /api/attachment/* fallback
-        // route below.
-        const sessionWithPreview = {
-          ...redactSessionMetadata(session),
-          liveStreamingMessage,
-          liveSessionState: shouldUseExternalRuntime() && sessionId === getExternalSessionId()
-            ? getExternalSessionState()
-            : undefined,
-          messages: shrinkSessionMessagesForClient(paginatedMessages),
-          totalCount,
-          hasMoreBefore,
-        };
-
-        return jsonResponse({ success: true, session: sessionWithPreview });
       }
 
       // DELETE /sessions/:id - Delete a session
@@ -4152,83 +3766,6 @@ async function main() {
         // Zero-trust: redact credential-bearing fields from the echo payload.
         // The client already owns what it sent; no need to round-trip secrets.
         return jsonResponse({ success: true, session: redactSessionMetadata(updated) });
-      }
-
-      // POST /sessions/switch - Switch to existing session for resume
-      if (pathname === '/sessions/switch' && request.method === 'POST') {
-        let payload: { sessionId?: string };
-        try {
-          payload = (await request.json()) as { sessionId?: string };
-        } catch {
-          return jsonResponse({ success: false, error: 'Invalid JSON payload.' }, 400);
-        }
-
-        if (!payload.sessionId) {
-          return jsonResponse({ success: false, error: 'sessionId is required.' }, 400);
-        }
-
-        // External runtime path: builtin's `switchToSession` looks up the session
-        // in builtin SessionStore, but external sessions are persisted lazily
-        // (only on first user message — pre-warm doesn't write metadata). Falling
-        // through to builtin would always 404 for a freshly-prewarmed external
-        // session and pollute the log with misleading "session not found" errors.
-        // Handle external runtime directly without consulting builtin's store.
-        if (shouldUseExternalRuntime()) {
-          // Fast path: the Sidecar is already (or about to be) bound to this
-          // session. Boot's restoreExternalSessionState and any in-flight prewarm
-          // both converge on the same module state, so a switch into that target
-          // is a no-op. Skipping the prewarm await here is what makes opening
-          // Gemini session history feel instant instead of paying the 8-10s
-          // CLI cold-start. sendExternalMessage's own startingPromise guard
-          // (external-session.ts) still serializes any user message that races
-          // an in-flight prewarm, so this fast return is safe.
-          if (getCurrentBoundSessionId() === payload.sessionId) {
-            return jsonResponse({ success: true, sessionId: payload.sessionId });
-          }
-
-          // Cross-session switch: must serialize against any in-flight prewarm
-          // so its post-spawn writes (lastSessionId / lastModel / etc.) don't
-          // clobber the state restoreExternalSessionState is about to set up
-          // for the new target. Mirrors the guard in setExternalModel /
-          // setExternalPermissionMode (different races, same serialization).
-          await awaitExternalSessionStarting();
-
-          // Validate target: cross-session switches must point at a real
-          // persisted session — same-target switches were already handled by
-          // the fast path above and don't require metadata (a freshly-prewarmed
-          // session writes metadata only on first user message).
-          const meta = getSessionMetadata(payload.sessionId);
-          if (!meta) {
-            return jsonResponse({ success: false, error: 'Session not found.' }, 404);
-          }
-          // Cross-runtime guard — refuse to attach to a session created by
-          // a different runtime. The cross-runtime fork flow goes through
-          // new-session creation, not switch.
-          if (meta.runtime && meta.runtime !== getActiveRuntimeType()) {
-            return jsonResponse(
-              { success: false, error: `Session runtime mismatch: persisted=${meta.runtime}, current=${getActiveRuntimeType()}` },
-              409,
-            );
-          }
-
-          // Tear down the previous live session before binding to the new
-          // one. (Same-target reattach was handled by the fast path; if we
-          // reach here, the bound session is genuinely different.)
-          if (isExternalSessionActive()) {
-            await stopExternalSession();
-          }
-          restoreExternalSessionState(payload.sessionId, agentDir, { type: 'desktop' });
-          console.log(`[sessions] Switched to external session: ${payload.sessionId}`);
-          return jsonResponse({ success: true, sessionId: payload.sessionId });
-        }
-
-        const success = await switchToSession(payload.sessionId);
-        if (!success) {
-          return jsonResponse({ success: false, error: 'Session not found.' }, 404);
-        }
-
-        console.log(`[sessions] Switched to session: ${payload.sessionId}`);
-        return jsonResponse({ success: true, sessionId: payload.sessionId });
       }
 
       // POST /api/generate-session-title - AI-generate a short session title
@@ -4842,6 +4379,11 @@ async function main() {
 
       // ============= END PROVIDER VERIFICATION API =============
 
+      const sessionConfigRouteResponse = await handleSessionConfigRoute(pathname, request);
+      if (sessionConfigRouteResponse) {
+        return sessionConfigRouteResponse;
+      }
+
       // ============= PROXY API =============
 
       // POST /api/proxy/set - Hot-reload proxy config into this Sidecar process
@@ -4859,54 +4401,7 @@ async function main() {
         }
       }
 
-      // POST /api/interaction-scenario/set - Set desktop prompt surface before pre-warm
-      if (pathname === '/api/interaction-scenario/set' && request.method === 'POST') {
-        try {
-          const payload = await request.json() as { scenario?: unknown };
-          const scenario = parseDesktopInteractionScenario(payload?.scenario);
-          if (!scenario) {
-            return jsonResponse({ success: false, error: 'Invalid desktop interaction scenario.' }, 400);
-          }
-          if (shouldUseExternalRuntime()) {
-            return jsonResponse({ success: true, skipped: 'external-runtime' });
-          }
-          setInteractionScenario(scenario);
-          return jsonResponse({ success: true });
-        } catch (error) {
-          console.error('[api/interaction-scenario/set] Error:', error);
-          return jsonResponse(
-            { success: false, error: error instanceof Error ? error.message : 'Failed to set interaction scenario' },
-            500
-          );
-        }
-      }
-
       // ============= MCP API =============
-
-      // POST /api/mcp/set - Set MCP servers for current workspace
-      if (pathname === '/api/mcp/set' && request.method === 'POST') {
-        try {
-          const payload = await request.json() as { servers?: McpServerDefinition[] };
-          const servers = payload?.servers ?? [];
-          // Multi-Agent Runtime gate (defense-in-depth): builtin SDK pre-warm
-          // path is irrelevant for external runtimes (Claude Code CLI / Codex /
-          // Gemini), which carry their own MCP config via their CLI flags.
-          // Driving setMcpServers() here would only trigger noisy fingerprint-
-          // diff + 500ms-debounced pre-warm in the builtin path. Renderer-side
-          // gate exists in Chat.tsx; this is the server-side belt.
-          if (shouldUseExternalRuntime()) {
-            return jsonResponse({ success: true, servers: servers.map(s => s.id), skipped: 'external-runtime' });
-          }
-          setMcpServers(servers);
-          return jsonResponse({ success: true, servers: servers.map(s => s.id) });
-        } catch (error) {
-          console.error('[api/mcp/set] Error:', error);
-          return jsonResponse(
-            { success: false, error: error instanceof Error ? error.message : 'Failed to set MCP servers' },
-            500
-          );
-        }
-      }
 
       // GET /api/mcp - Get current MCP servers
       if (pathname === '/api/mcp' && request.method === 'GET') {
@@ -7959,29 +7454,6 @@ async function main() {
         }
       }
 
-      // POST /api/agents/set - Set agents and trigger session resume
-      if (pathname === '/api/agents/set' && request.method === 'POST') {
-        try {
-          const payload = await request.json() as { agents: Record<string, unknown> };
-          // Multi-Agent Runtime gate (mirrors /api/mcp/set above): external
-          // runtimes don't consume the SDK AgentDefinition map, so forwarding
-          // to setAgents() in builtin agent-session would just churn the
-          // pre-warm fingerprint without effect. The renderer should not be
-          // posting here when external runtime is active; this is the
-          // server-side belt for the cases when it does (heartbeat, IM Cron,
-          // tooling that hasn't been migrated).
-          if (shouldUseExternalRuntime()) {
-            return jsonResponse({ success: true, skipped: 'external-runtime' });
-          }
-          // The payload.agents is already in SDK AgentDefinition format
-          setAgents(payload.agents as Record<string, import('@anthropic-ai/claude-agent-sdk').AgentDefinition>);
-          return jsonResponse({ success: true });
-        } catch (error) {
-          console.error('[api/agents/set] Error:', error);
-          return jsonResponse({ success: false, error: error instanceof Error ? error.message : 'Failed to set agents' }, 500);
-        }
-      }
-
       // GET /api/supported-models - Get available models from SDK
       // Spawns a lightweight SDK subprocess (same pattern as provider verify)
       if (pathname === '/api/supported-models' && request.method === 'GET') {
@@ -8031,35 +7503,6 @@ async function main() {
         } catch (error) {
           console.error('[api/reasoning-effort/set] Error:', error);
           return jsonResponse({ success: false, error: error instanceof Error ? error.message : 'Failed to set reasoning effort' }, 500);
-        }
-      }
-
-      // POST /api/provider/set - Set provider env for this session (called by Rust IM router on sidecar creation)
-      if (pathname === '/api/provider/set' && request.method === 'POST') {
-        try {
-          const payload = await request.json() as { providerEnv?: Record<string, unknown> };
-          const { setSessionProviderEnv } = await import('./agent-session');
-          // Normalize null → undefined (Rust sends { "providerEnv": null } when clearing)
-          setSessionProviderEnv((payload?.providerEnv ?? undefined) as import('./agent-session').ProviderEnv | undefined);
-          return jsonResponse({ success: true });
-        } catch (error) {
-          console.error('[api/provider/set] Error:', error);
-          return jsonResponse({ success: false, error: error instanceof Error ? error.message : 'Failed to set provider' }, 500);
-        }
-      }
-
-      // POST /api/session/permission-mode - Set permission mode for this session (called by Rust IM router)
-      if (pathname === '/api/session/permission-mode' && request.method === 'POST') {
-        try {
-          const payload = await request.json() as { permissionMode?: string };
-          if (!payload?.permissionMode) {
-            return jsonResponse({ success: false, error: 'permissionMode is required' }, 400);
-          }
-          const result = await getSessionEngine().updatePermissionMode(payload.permissionMode);
-          return jsonResponse(result, result.success ? 200 : 500);
-        } catch (error) {
-          console.error('[api/session/permission-mode] Error:', error);
-          return jsonResponse({ success: false, error: error instanceof Error ? error.message : 'Failed to set permission mode' }, 500);
         }
       }
 
@@ -8141,46 +7584,6 @@ async function main() {
         } catch (error) {
           console.error('[api/session/freeze] Error:', error);
           return jsonResponse({ success: false, error: error instanceof Error ? error.message : 'Failed to freeze session' }, 500);
-        }
-      }
-
-      // GET /api/session/config - Read sidecar's current config state
-      // Used by Tabs joining an existing sidecar (e.g. IM Bot session) to adopt
-      // the session's config instead of pushing their own.
-      if (pathname === '/api/session/config' && request.method === 'GET') {
-        try {
-          if (shouldUseExternalRuntime()) {
-            return jsonResponse({
-              success: true,
-              runtime: getActiveRuntimeType(),
-              model: getExternalSessionModel(),
-              mcpServerIds: null,
-              agentNames: null,
-              permissionMode: getExternalSessionPermissionMode(),
-              // #324 — 'default' when unset so the adoption effect can mirror
-              // the live sidecar value into the picker without a null-vs-default
-              // ambiguity.
-              reasoningEffort: getExternalSessionReasoningEffort() ?? 'default',
-            });
-          }
-
-          const { getSessionModel, getMcpServers, getAgents, getSessionPermissionMode, getSessionReasoningEffort } = await import('./agent-session');
-          const model = getSessionModel();
-          const mcpServers = getMcpServers();
-          const agents = getAgents();
-          const permissionMode = getSessionPermissionMode();
-          return jsonResponse({
-            success: true,
-            runtime: 'builtin',
-            model: model ?? null,
-            mcpServerIds: mcpServers?.map(s => s.id) ?? null,
-            agentNames: agents ? Object.keys(agents) : null,
-            permissionMode,
-            reasoningEffort: getSessionReasoningEffort() ?? 'default',
-          });
-        } catch (error) {
-          console.error('[api/session/config] Error:', error);
-          return jsonResponse({ success: false, error: error instanceof Error ? error.message : 'Failed to get session config' }, 500);
         }
       }
 
@@ -9236,8 +8639,8 @@ description: >
           // through the builtin SDK path asks Claude Code to *resume* a session it never
           // created → "No conversation found with session ID" → 0 turns, no assistant
           // output, leaving an orphaned <MEMORY_UPDATE> user bubble and the memory
-          // silently NOT updated. Every other injection endpoint (heartbeat, chat/send,
-          // cron) already branches on shouldUseExternalRuntime(); this one had missed it.
+          // silently NOT updated. Runtime-specific injection now lives behind
+          // SessionEngine, matching heartbeat, chat/send, and cron routing.
           //
           // 60 min timeout — memory update is slow for large sessions (loading 100K+
           // token context, reading log/topic files, writing updates, git commit+push).
@@ -9317,52 +8720,6 @@ description: >
         } catch (error) {
           console.error('[im/permission-response] Error:', error);
           return jsonResponse({ success: false, error: String(error) }, 500);
-        }
-      }
-
-      // POST /api/im/session/new — Start a new session (preserving workspace)
-      if (pathname === '/api/im/session/new' && request.method === 'POST') {
-        try {
-          // Stop external runtime subprocess if active. First await any
-          // in-flight start/pre-warm so isExternalSessionActive() is truthful
-          // — otherwise a half-spawned subprocess (startingPromise pending,
-          // activeProcess still null) slips past the check, and once it
-          // finishes spawning it overwrites the freshly-rebound module
-          // state with its own (now-stale) assignments. Same race the
-          // /sessions/switch handler guards against.
-          if (shouldUseExternalRuntime()) {
-            await awaitExternalSessionStarting();
-            if (isExternalSessionActive()) {
-              await stopExternalSession();
-            }
-          }
-          await resetSession();
-          await materializeCurrentSessionMetadataForPublishedReset();
-          // External runtime: stopExternalSession only nulls activeProcess —
-          // module-level lastSessionId / lastRuntimeSessionId / allSessionMessages
-          // still point at the OLD conversation. Without an explicit re-bind,
-          // the next /api/im/enqueue hits the resume branch in sendExternalMessage,
-          // writes the new turn back into the old session_id, and leaves the
-          // freshly minted sessionId orphaned (no metadata, no IM tag, AI reply
-          // appears in the old chat instead of the new one). restoreExternalSessionState
-          // calls resetModuleState internally on sessionId-change, then sets
-          // lastSessionId to the fresh id — Case 1 (fresh start) on the next message.
-          // Scenario is set provisionally; the next /api/im/enqueue overwrites it.
-          if (shouldUseExternalRuntime()) {
-            const newSessionId = getSessionId();
-            if (newSessionId) {
-              restoreExternalSessionState(newSessionId, agentDir, { type: 'desktop' });
-            }
-          }
-          return jsonResponse({
-            sessionId: getSessionId(),
-          });
-        } catch (error) {
-          console.error('[im/session/new] Error:', error);
-          return jsonResponse(
-            { success: false, error: error instanceof Error ? error.message : 'Reset error' },
-            500,
-          );
         }
       }
 
@@ -9640,12 +8997,15 @@ description: >
       console.log('[startup] initializeAgent done');
       emitDeferredPhaseDone('sdk-init');
 
-      if (shouldUseExternalRuntime() && initialSessionId) {
-        currentInitPhase = 'external-runtime-restore';
-        setDeferredInitPhase(currentInitPhase);
-        initPhaseStarted = nowMs();
-        restoreExternalSessionState(initialSessionId, currentAgentDir, { type: 'desktop' });
-        emitDeferredPhaseDone('external-runtime-restore');
+      if (initialSessionId) {
+        const startupEngine = getSessionEngine();
+        if (startupEngine.kind === 'external') {
+          currentInitPhase = 'external-runtime-restore';
+          setDeferredInitPhase(currentInitPhase);
+          initPhaseStarted = nowMs();
+          startupEngine.restoreInitialSession(initialSessionId, currentAgentDir);
+          emitDeferredPhaseDone('external-runtime-restore');
+        }
       }
 
       // ── Sidecar Boot Banner: single-line for AI grep ──

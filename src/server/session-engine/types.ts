@@ -1,8 +1,11 @@
 import type { BackgroundAgentPermissionMode } from '../../shared/config-types';
 import type { RuntimeConfig } from '../../shared/types/runtime';
+import type { RuntimeType } from '../../shared/types/runtime';
+import type { McpServerDefinition } from '../../shared/config-types';
 import type { EnqueueResult, PermissionMode, ProviderEnv, QueueCancelResult } from '../agent-session';
 import type { InteractionScenario } from '../system-prompt';
 import type { SessionSource, TurnAnalyticsSource } from '../types/session';
+import type { SessionMessage } from '../types/session';
 import type { ExternalRuntimeConfigPatch, ImagePayload } from '../runtimes/types';
 import type { ExternalConfigSource } from '../runtimes/external-session';
 import type { InboxTurnMeta } from '../inbox/types';
@@ -10,6 +13,8 @@ import type { InboxTurnMeta } from '../inbox/types';
 export type SessionEngineKind = 'builtin' | 'external';
 
 export type RuntimeConfigPatch = ExternalRuntimeConfigPatch;
+
+export type { PermissionMode, ProviderEnv } from '../agent-session';
 
 export type DesktopMessageRequest = {
   text: string;
@@ -108,9 +113,93 @@ export type InjectedTurnResult = {
 
 export type QueueStatusItem = { id: string; messagePreview: string };
 
+export type SessionEngineRuntimeIdentity = {
+  kind: SessionEngineKind;
+  runtime: RuntimeType;
+  sessionId: string;
+  boundSessionId?: string;
+};
+
+export type SessionEngineLiveState = {
+  sessionState: string;
+  isBusy: boolean;
+};
+
+export type SessionEngineLatestResult = {
+  sessionId: string;
+  latestResult: string;
+};
+
+export type SessionEnginePendingInteractiveRequest = {
+  type: string;
+  data: unknown;
+};
+
+export type CapabilityOperationAttachment = {
+  id: string;
+  name: string;
+  size?: number;
+  mimeType: string;
+  path?: string;
+  savedPath?: string;
+  relativePath?: string;
+  previewUrl?: string;
+  isImage?: boolean;
+};
+
+export type SessionEngineReplayMessage = Omit<SessionMessage, 'content' | 'attachments'> & {
+  content: string | unknown[];
+  attachments?: CapabilityOperationAttachment[];
+};
+
+export type SessionEngineStreamReplaySnapshot = {
+  initState: Record<string, unknown>;
+  replayMessages: SessionEngineReplayMessage[];
+  systemInitPayload?: unknown;
+  pendingInteractiveRequests: SessionEnginePendingInteractiveRequest[];
+};
+
+export type SessionEngineConfigSnapshot = {
+  success: true;
+  runtime: RuntimeType;
+  model: string | null;
+  mcpServerIds: string[] | null;
+  agentNames: string[] | null;
+  permissionMode: string | null;
+  reasoningEffort: string | null;
+};
+
+export type SessionEngineLiveOverlay = {
+  isActive: boolean;
+  runtime?: RuntimeType;
+  liveStreamingMessage?: SessionMessage | null;
+  liveSessionState?: string;
+  inMemoryMessages?: SessionMessage[];
+};
+
+export type CapabilityOperationResult = {
+  success: boolean;
+  error?: string;
+  status?: number;
+  content?: string;
+  attachments?: CapabilityOperationAttachment[];
+  newSessionId?: string;
+  agentDir?: string;
+  title?: string;
+  sessionId?: string;
+  text?: string;
+  images?: ImagePayload[];
+};
+
 export interface SessionEngine {
   kind: SessionEngineKind;
   isBusy(): boolean;
+  getRuntimeIdentity(): SessionEngineRuntimeIdentity;
+  getLiveSessionState(): SessionEngineLiveState;
+  getLatestAssistantResult(): SessionEngineLatestResult;
+  getStreamReplaySnapshot(): SessionEngineStreamReplaySnapshot;
+  getSessionConfigSnapshot(): SessionEngineConfigSnapshot;
+  getLiveSessionOverlay(sessionId: string): SessionEngineLiveOverlay;
   sendDesktopMessage(request: DesktopMessageRequest): Promise<DesktopAdmissionResult>;
   enqueueImMessage(request: ImMessageRequest): Promise<ImAdmissionResult>;
   cancelImRequest(requestId: string, reason?: string): Promise<ImCancelResult>;
@@ -135,10 +224,27 @@ export interface SessionEngine {
     model?: string;
     permissionMode?: string;
   }): Promise<Record<string, unknown>>;
+  restoreInitialSession(sessionId: string, workspacePath: string): boolean;
   respondPermission(
     requestId: string,
     decision: 'deny' | 'allow_once' | 'always_allow',
     reason?: string,
   ): Promise<boolean>;
   respondAskUserQuestion(requestId: string, answers: Record<string, string> | null): Promise<boolean>;
+  rewindToUserMessage(userMessageId: string): Promise<CapabilityOperationResult>;
+  retryLastExternalUserMessage(userMessageId: string): Promise<CapabilityOperationResult>;
+  forkAtAssistantMessage(messageId: string): Promise<CapabilityOperationResult>;
+  updateProviderEnv(providerEnv: ProviderEnv | undefined): Promise<{ success: boolean; skipped?: string; error?: string }>;
+  updateMcpServers(servers: McpServerDefinition[]): Promise<{ success: boolean; servers?: string[]; skipped?: string; error?: string }>;
+  updateAgents(agents: Record<string, unknown>): Promise<{ success: boolean; skipped?: string; error?: string }>;
+  updateDesktopInteractionScenario(
+    scenario: Extract<InteractionScenario, { type: 'desktop' }>,
+  ): Promise<{ success: boolean; skipped?: string; error?: string }>;
+  switchToExistingSession(
+    sessionId: string,
+    workspacePath: string,
+    getSessionMetadata: (sessionId: string) => { runtime?: RuntimeType } | null | undefined,
+  ): Promise<{ success: boolean; sessionId?: string; error?: string; status?: number }>;
+  resetForNewDesktopSession(workspacePath: string): Promise<{ success: boolean; sessionId?: string; error?: string }>;
+  resetForNewImSession(workspacePath: string): Promise<{ success: boolean; sessionId?: string; error?: string }>;
 }
