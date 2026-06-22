@@ -37,6 +37,7 @@ describe('tabContentKind', () => {
         expect(tabContentKind(tab({ view: 'launcher' }), false)).toBe('launcher');
         expect(tabContentKind(tab({ view: 'settings' }), false)).toBe('settings');
         expect(tabContentKind(tab({ view: 'taskcenter' }), false)).toBe('taskcenter');
+        expect(tabContentKind(tab({ view: 'space' }), false)).toBe('space');
     });
 
     it('once restoreState is cleared, the tab becomes a live chat tab', () => {

@@ -46,6 +46,7 @@ import Launcher from '@/pages/Launcher'; // eager: default first view → no col
 const Chat = lazy(() => import('@/pages/Chat'));
 const Settings = lazy(() => import('@/pages/Settings'));
 const TaskCenter = lazy(() => import('@/pages/TaskCenter'));
+const Space = lazy(() => import('@/pages/Space'));
 
 /** Layout-compatible Suspense fallback for a lazy page chunk — same paper fill
  *  as the deferred-mount placeholder, so a chunk-load is never a jarring blank. */
@@ -237,6 +238,10 @@ export const MemoizedTabContent = memo(function TabContent({
       ) : kind === 'taskcenter' ? (
         <Suspense fallback={PAGE_FALLBACK}>
           <TaskCenter isActive={isActive} pendingIntent={taskCenterPendingIntent} />
+        </Suspense>
+      ) : kind === 'space' ? (
+        <Suspense fallback={PAGE_FALLBACK}>
+          <Space isActive={isActive} />
         </Suspense>
       ) : kind === 'cold' ? (
         // Restored-but-not-yet-activated chat tab (Issue #232). Render only a
@@ -2756,6 +2761,33 @@ export default function App() {
     window.addEventListener(CUSTOM_EVENTS.OPEN_TASK_CENTER, handler);
     return () => window.removeEventListener(CUSTOM_EVENTS.OPEN_TASK_CENTER, handler);
   }, [handleOpenTaskCenter]);
+
+  const handleOpenSpace = useCallback(() => {
+    const currentTabs = tabsRef.current;
+    const existing = currentTabs.find((t) => t.view === 'space');
+    if (existing) {
+      setActiveTabId(existing.id);
+      return;
+    }
+    if (currentTabs.length >= MAX_TABS) {
+      console.warn(`[App] Max tabs (${MAX_TABS}) reached`);
+      return;
+    }
+    const newTab: Tab = {
+      id: `tab-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      agentDir: null,
+      sessionId: null,
+      view: 'space',
+      title: '云空间',
+      sidecarConfigDisposition: 'push',
+    };
+    openNewTabDeferred(newTab);
+  }, [openNewTabDeferred, setActiveTabId]);
+
+  useEffect(() => {
+    window.addEventListener(CUSTOM_EVENTS.OPEN_SPACE, handleOpenSpace);
+    return () => window.removeEventListener(CUSTOM_EVENTS.OPEN_SPACE, handleOpenSpace);
+  }, [handleOpenSpace]);
 
   // One-shot legacy CronTask → Task sweep at app startup (PRD §11.4,
   // v0.1.69 UX round). The Launcher's 「我的任务」 tab reads new-model

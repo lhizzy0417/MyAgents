@@ -127,6 +127,16 @@ pub async fn start_management_api() -> Result<u16, String> {
         .route("/api/task/write-doc", post(task_write_doc_handler))
         .route("/api/thought/list", get(thought_list_handler))
         .route("/api/thought/create", post(thought_create_handler))
+        .route("/api/space/issue-get", post(space_issue_get_handler))
+        .route(
+            "/api/space/issue-comment",
+            post(space_issue_comment_handler),
+        )
+        .route("/api/space/issue-status", post(space_issue_status_handler))
+        .route(
+            "/api/space/attachment-download",
+            post(space_attachment_download_handler),
+        )
         // Session Inbox cross-sidecar delivery (PRD 0.2.18)
         .route("/api/inbox/deliver", post(inbox_deliver_handler))
         // Session Event watch registration (PRD 0.2.37)
@@ -1513,6 +1523,40 @@ async fn thought_create_handler(
     }
 }
 
+fn space_result(result: Result<serde_json::Value, String>) -> Json<serde_json::Value> {
+    match result {
+        Ok(data) => Json(serde_json::json!({ "ok": true, "data": data })),
+        Err(error) => Json(serde_json::json!({ "ok": false, "error": error })),
+    }
+}
+
+async fn space_issue_get_handler(
+    Json(input): Json<crate::space_cloud::SpaceCliIssueGetInput>,
+) -> Json<serde_json::Value> {
+    space_result(crate::space_cloud::space_cli_issue_get(input).await)
+}
+
+async fn space_issue_comment_handler(
+    Json(input): Json<crate::space_cloud::SpaceCliIssueCommentInput>,
+) -> Json<serde_json::Value> {
+    space_result(crate::space_cloud::space_cli_issue_comment(input).await)
+}
+
+async fn space_issue_status_handler(
+    Json(input): Json<crate::space_cloud::SpaceCliIssueStatusInput>,
+) -> Json<serde_json::Value> {
+    space_result(crate::space_cloud::space_cli_issue_status(input).await)
+}
+
+async fn space_attachment_download_handler(
+    Json(input): Json<crate::space_cloud::SpaceCliAttachmentDownloadInput>,
+) -> Json<serde_json::Value> {
+    match crate::space_cloud::space_cli_attachment_download(input).await {
+        Ok(data) => Json(serde_json::json!({ "ok": true, "data": data })),
+        Err(error) => Json(serde_json::json!({ "ok": false, "error": error })),
+    }
+}
+
 // ========================================================================
 // Task Center execution handlers (v0.1.69)
 // ========================================================================
@@ -1557,53 +1601,46 @@ async fn task_create_from_alignment_handler(
 ///   once and stays stopped after.
 /// - For scheduled/recurring/loop the CronTask schedule mirrors the Task.
 async fn task_run_handler(Json(req): Json<TaskIdApiRequest>) -> Json<serde_json::Value> {
-    let Some(task_store) = task::get_task_store() else {
-        return Json(serde_json::json!({ "ok": false, "error": "task store not initialized" }));
-    };
-    let Some(ta) = task_store.get(&req.id).await else {
-        return Json(serde_json::json!({ "ok": false, "error": "task not found" }));
-    };
-
-    // Legal-transition guard: `run` is only meaningful from `todo`. Other
-    // states require the user to hit `rerun` (which resets first).
-    if ta.status != task::TaskStatus::Todo {
-        return Json(serde_json::json!({
-            "ok": false,
-            "error": format!("task is in state '{}'; use 'myagents task rerun {}' to re-dispatch it", ta.status.as_str(), ta.id)
-        }));
-    }
-
-    match ensure_cron_for_task(&ta).await {
-        Ok(cron_id) => {
-            // Write back the CronTask back-pointer so the detail Overlay
-            // can show "下次触发时间" derived from CronTask.next_execution_at.
-            let _ = task_store
-                .set_cron_task_id(&ta.id, Some(cron_id.clone()))
-                .await;
-
-            // Mark Task as running. `system / ui` — the invocation came from
-            // UI button or CLI `task run`, the actor-inference table treats
-            // both as system in this row.
-            match task_store
-                .update_status(task::TaskUpdateStatusInput {
-                    id: ta.id.clone(),
-                    status: task::TaskStatus::Running,
-                    message: Some("dispatched".to_string()),
-                    actor: task::TransitionActor::System,
-                    source: Some(task::TransitionSource::Scheduler),
-                })
-                .await
-            {
-                Ok((t, _)) => Json(serde_json::json!({
-                    "ok": true,
-                    "task": t,
-                    "cronTaskId": cron_id,
-                })),
-                Err(e) => Json(serde_json::json!({ "ok": false, "error": e })),
-            }
-        }
+    match run_task_by_id(&req.id).await {
+        Ok((task, cron_id)) => Json(serde_json::json!({
+            "ok": true,
+            "task": task,
+            "cronTaskId": cron_id,
+        })),
         Err(e) => Json(serde_json::json!({ "ok": false, "error": e })),
     }
+}
+
+pub(crate) async fn run_task_by_id(id: &str) -> Result<(task::Task, String), String> {
+    let Some(task_store) = task::get_task_store() else {
+        return Err("task store not initialized".to_string());
+    };
+    let Some(ta) = task_store.get(id).await else {
+        return Err("task not found".to_string());
+    };
+
+    if ta.status != task::TaskStatus::Todo {
+        return Err(format!(
+            "task is in state '{}'; use 'myagents task rerun {}' to re-dispatch it",
+            ta.status.as_str(),
+            ta.id
+        ));
+    }
+
+    let cron_id = ensure_cron_for_task(&ta).await?;
+    let _ = task_store
+        .set_cron_task_id(&ta.id, Some(cron_id.clone()))
+        .await;
+    let (task, _) = task_store
+        .update_status(task::TaskUpdateStatusInput {
+            id: ta.id.clone(),
+            status: task::TaskStatus::Running,
+            message: Some("dispatched".to_string()),
+            actor: task::TransitionActor::System,
+            source: Some(task::TransitionSource::Scheduler),
+        })
+        .await?;
+    Ok((task, cron_id))
 }
 
 /// PRD §10.2.2 `POST /api/task/rerun` — reset the status back to `todo` (via

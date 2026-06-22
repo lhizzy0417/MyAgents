@@ -1465,6 +1465,12 @@ async function routeAdminApi(pathname: string, payload: Record<string, unknown>)
   if (route === 'thought/list') return await api.handleThoughtList(payload as Parameters<typeof api.handleThoughtList>[0]);
   if (route === 'thought/create') return await api.handleThoughtCreate(payload as Parameters<typeof api.handleThoughtCreate>[0]);
 
+  // MyAgents Cloud Space — Registered Agent CLI bridge.
+  if (route === 'space/issue-get') return await api.handleSpaceIssueGet(payload as Parameters<typeof api.handleSpaceIssueGet>[0]);
+  if (route === 'space/issue-comment') return await api.handleSpaceIssueComment(payload as Parameters<typeof api.handleSpaceIssueComment>[0]);
+  if (route === 'space/issue-status') return await api.handleSpaceIssueStatus(payload as Parameters<typeof api.handleSpaceIssueStatus>[0]);
+  if (route === 'space/attachment-download') return await api.handleSpaceAttachmentDownload(payload as Parameters<typeof api.handleSpaceAttachmentDownload>[0]);
+
   // Session Inbox (PRD 0.2.18) — `myagents session send`
   if (route === 'session/send') {
     const { handleAdminInbox } = await import('./inbox/admin-handler');

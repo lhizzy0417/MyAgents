@@ -15,6 +15,7 @@ export type TabContentKind =
     | 'launcher'
     | 'settings'
     | 'taskcenter'
+    | 'space'
     | 'cold' // restored chat tab not yet activated → placeholder, NO TabProvider
     | 'chat'; // live chat tab → mounts TabProvider
 
@@ -32,6 +33,7 @@ export function tabContentKind(tab: Tab, isDeferredMount: boolean): TabContentKi
     if (tab.view === 'launcher') return 'launcher';
     if (tab.view === 'settings') return 'settings';
     if (tab.view === 'taskcenter') return 'taskcenter';
+    if (tab.view === 'space') return 'space';
     if (tab.restoreState === 'cold') return 'cold';
     return 'chat';
 }

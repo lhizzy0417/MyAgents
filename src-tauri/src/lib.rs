@@ -29,6 +29,7 @@ pub mod process_cmd;
 mod proxy_config;
 pub mod search;
 mod sidecar;
+pub mod space_cloud;
 mod sse_proxy;
 pub mod system_binary;
 pub mod task;
@@ -559,6 +560,22 @@ pub fn run() {
             task::cmd_task_open_docs_dir,
             task::cmd_task_get_run_stats,
             legacy_upgrade::cmd_task_upgrade_legacy_cron,
+            // MyAgents Cloud Space
+            space_cloud::cmd_space_get_session,
+            space_cloud::cmd_space_auth_start,
+            space_cloud::cmd_space_auth_poll,
+            space_cloud::cmd_space_logout,
+            space_cloud::cmd_space_api_request,
+            space_cloud::cmd_space_register_agent,
+            space_cloud::cmd_space_list_local_agents,
+            space_cloud::cmd_space_poll_dispatches,
+            space_cloud::cmd_space_mark_dispatch_delivered,
+            space_cloud::cmd_space_process_dispatches_once,
+            space_cloud::cmd_space_install_skill,
+            space_cloud::cmd_space_upload_skill,
+            space_cloud::cmd_space_upload_issue_attachments,
+            space_cloud::cmd_space_download_attachment,
+            space_cloud::cmd_space_download_skill_zip,
             // PRD 0.2.35 — global "always-on" wake-lock toggle
             wake_lock::cmd_set_force_wake_lock,
         ])
@@ -590,6 +607,7 @@ pub fn run() {
             // calls (extremely early startup) fall back to a synchronous
             // append protected by a mutex.
             logger::init_buffered_writer();
+            space_cloud::start_space_connector();
 
             // Main window: programmatic creation so we can attach
             // `on_navigation` to block external top-frame navigation. The

@@ -281,7 +281,9 @@ export default memo(function TabBar({
                                       ? '设置'
                                       : tab.view === 'taskcenter'
                                         ? '任务中心'
-                                        : '启动页';
+                                        : tab.view === 'space'
+                                          ? '云空间'
+                                          : '启动页';
                                 const isActive = tab.id === activeTabId;
                                 return (
                                     <button
