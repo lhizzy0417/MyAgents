@@ -89,7 +89,7 @@ has enabled "Allow AI to exit".
 
 ```typescript
 setCronTaskContext(taskId, canExit, sessionId?)  // 任务执行前设置
-clearCronTaskContext(sessionId?)                  // 任务执行后清理（handleMessageComplete 中自动调用）
+clearCronTaskContext(sessionId?)                  // 任务 terminal cleanup 后清理（turn-lifecycle owner 自动调用）
 ```
 
 ### 执行流程
@@ -171,7 +171,7 @@ The task runs independently in a new AI session. Results are delivered to this c
 
 ```typescript
 setImCronContext({ botId, chatId, platform, workspacePath, model?, permissionMode?, providerEnv? })
-// 每次 IM 消息到达时在 index.ts 的 /api/im/chat handler 中设置
+// 每次 IM 消息到达时在 index.ts 的 /api/im/enqueue handler 中设置
 ```
 
 ### 执行流程
@@ -234,7 +234,7 @@ Do NOT use this tool for intermediate work files — only for files the user exp
 
 ```typescript
 setImMediaContext({ botId, chatId, platform })
-// 每次 IM 消息到达时在 index.ts 的 /api/im/chat handler 中设置（紧随 setImCronContext 之后）
+// 每次 IM 消息到达时在 index.ts 的 /api/im/enqueue handler 中设置（紧随 setImCronContext 之后）
 ```
 
 ### 执行流程
@@ -437,8 +437,8 @@ export function clearContext(): void { context = null; }
 ```
 
 **上下文设置时机**：
-- `exit_cron_task`：定时任务执行前由 `agent-session.ts` 调用 `setCronTaskContext()`，执行后 `handleMessageComplete()` 自动调用 `clearCronTaskContext()`
-- `cron` 和 `send_media`：每次 IM 消息到达时在 `index.ts` 的 `/api/im/chat` handler 中设置（`setImCronContext()` 和 `setImMediaContext()`）
+- `exit_cron_task`：定时任务执行前由 `agent-session.ts` 调用 `setCronTaskContext()`，执行后由 `builtin-session/turn-lifecycle.ts` 的 terminal cleanup 自动调用 `clearCronTaskContext()`
+- `cron` 和 `send_media`：每次 IM 消息到达时在 `index.ts` 的 `/api/im/enqueue` handler 中设置（`setImCronContext()` 和 `setImMediaContext()`）
 
 **注意**：IM 工具的上下文是在消息到达时覆写的模块级单例。在多群聊并发场景下存在理论上的竞态风险（与 im-cron 相同的已知模式）。
 

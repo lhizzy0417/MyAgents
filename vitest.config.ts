@@ -11,23 +11,25 @@ const alias = [
   { find: /^lucide-umd-source(?=$|\?)/, replacement: resolve(__dirname, 'node_modules/lucide/dist/umd/lucide.min.js') },
 ];
 
-// Two test projects, split by what a test TOUCHES — so the dev loop gets a
-// fast, parallel pure-logic pool while the stateful integration-ish tests keep
-// their (required) serial isolation.
+// Test projects are split by what a test TOUCHES — so the dev loop gets a
+// fast, parallel pure-logic pool while stateful integration tests keep their
+// required serial isolation without mixing in credentialed real-network smoke.
 //
 //  - `unit`     : pure logic. No module-level singletons, no fixed ports, no
 //                 real SDK, no shared disk path → safe to run in PARALLEL forks.
 //                 Target: < 5s, run on every save (`npm run test:unit`).
-//  - `stateful` : touches `agent-session.ts` / `index.ts` / `external-session.ts`
-//                 module-level globals, binds a sidecar port, writes under
-//                 ~/.myagents, or runs the real SDK. MUST stay singleFork serial
-//                 (the original reason vitest was configured singleFork).
+//  - `integration`: credential-free stateful server tests. May touch module
+//                 globals, loopback ports, scratch HOME, or SessionStore, but
+//                 MUST NOT talk to real upstream network. Runs singleFork serial.
+//  - `credentialed`: real SDK/provider/network smoke. Explicit only; not part
+//                 of default npm test or public CI.
 //
 // Routing rule: shared/* and renderer/* are pure today (DOM-free util/service
-// tests under node env) → `unit`. Server tests default to `stateful`; a NEW
-// pure server test opts INTO the fast pool by naming itself `*.unit.test.ts`.
+// tests under node env) → `unit`. Server tests MUST use an explicit suffix:
+// `*.unit.test.ts`, `*.integration.test.ts`, or `*.credentialed.test.ts`.
+// `npm run test:classification` enforces this; do not add bare `*.test.ts`.
 // If a `unit` test ever flakes under parallelism (turns out to import a stateful
-// module), move it to `stateful` — correctness over speed.
+// module), move it to `integration` — correctness over speed.
 //
 // The `dom` project runs `*.test.tsx` in jsdom with @testing-library/react for
 // component / hook behaviour (focus, events, rendering). Component tests that
@@ -56,6 +58,7 @@ export default defineConfig({
             'src/renderer/**/*.test.ts',
             'src/server/**/*.unit.test.ts',
           ],
+          setupFiles: ['src/test/setup-no-egress.ts'],
           // Fast pure tests — a tight timeout surfaces accidental real I/O.
           testTimeout: 10_000,
           hookTimeout: 10_000,
@@ -66,10 +69,24 @@ export default defineConfig({
       {
         resolve: { alias },
         test: {
-          name: 'stateful',
+          name: 'integration',
           environment: 'node',
-          include: ['src/server/**/*.test.ts'],
-          exclude: ['src/server/**/*.unit.test.ts', '**/node_modules/**'],
+          include: ['src/server/**/*.integration.test.ts'],
+          exclude: ['**/node_modules/**'],
+          setupFiles: ['src/test/setup-integration.ts'],
+          testTimeout: 120_000,
+          hookTimeout: 120_000,
+          pool: 'forks',
+          poolOptions: { forks: { singleFork: true } },
+        },
+      },
+      {
+        resolve: { alias },
+        test: {
+          name: 'credentialed',
+          environment: 'node',
+          include: ['src/server/**/*.credentialed.test.ts'],
+          exclude: ['**/node_modules/**'],
           testTimeout: 120_000,
           hookTimeout: 120_000,
           pool: 'forks',

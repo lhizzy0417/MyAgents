@@ -3,16 +3,50 @@ import { shouldQueueExternalSend, canDrainExternalQueue } from './external-queue
 
 describe('shouldQueueExternalSend (defer mid-turn sends into the queue)', () => {
   it('running → defer (a turn is in flight; Codex would otherwise start a 2nd turn)', () => {
-    expect(shouldQueueExternalSend('running', 0)).toBe(true);
+    expect(shouldQueueExternalSend({
+      state: 'running',
+      queueLength: 0,
+      responseMode: 'turn',
+      canSteerActiveTurn: true,
+    })).toBe(true);
+    expect(shouldQueueExternalSend({
+      state: 'running',
+      queueLength: 0,
+      responseMode: 'realtime',
+      canSteerActiveTurn: false,
+    })).toBe(true);
+  });
+  it('running + realtime + steer capability → send immediately', () => {
+    expect(shouldQueueExternalSend({
+      state: 'running',
+      queueLength: 0,
+      responseMode: 'realtime',
+      canSteerActiveTurn: true,
+    })).toBe(false);
   });
   it('idle + empty queue → send immediately', () => {
-    expect(shouldQueueExternalSend('idle', 0)).toBe(false);
+    expect(shouldQueueExternalSend({
+      state: 'idle',
+      queueLength: 0,
+      responseMode: 'turn',
+      canSteerActiveTurn: false,
+    })).toBe(false);
   });
   it('idle + non-empty queue → defer (preserve FIFO behind the pending item)', () => {
-    expect(shouldQueueExternalSend('idle', 1)).toBe(true);
+    expect(shouldQueueExternalSend({
+      state: 'idle',
+      queueLength: 1,
+      responseMode: 'realtime',
+      canSteerActiveTurn: true,
+    })).toBe(true);
   });
   it('error + empty → send immediately (start fresh)', () => {
-    expect(shouldQueueExternalSend('error', 0)).toBe(false);
+    expect(shouldQueueExternalSend({
+      state: 'error',
+      queueLength: 0,
+      responseMode: 'turn',
+      canSteerActiveTurn: false,
+    })).toBe(false);
   });
 });
 

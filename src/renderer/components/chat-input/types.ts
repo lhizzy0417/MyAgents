@@ -1,0 +1,121 @@
+import type React from 'react';
+
+import type { SessionState } from '@/context/TabContext';
+import type {
+  PermissionMode,
+  Provider,
+  ProviderVerifyStatus,
+} from '@/config/types';
+import type { QueuedMessageInfo } from '@/types/queue';
+import type { SlashCommand } from '../SlashCommandMenu';
+import type {
+  RuntimeDetections,
+  RuntimeModelInfo,
+  RuntimePermissionMode,
+  RuntimeType,
+} from '../../../shared/types/runtime';
+
+export interface ImageAttachment {
+  id: string;
+  file: File;
+  preview: string;
+  source?: 'inline_base64' | 'attachment_ref';
+  name?: string;
+  mimeType?: string;
+  sizeBytes?: number;
+  relativePath?: string;
+}
+
+export interface SimpleChatInputProps {
+  value?: string;
+  onChange?: (value: string) => void;
+  onSend: (
+    text: string,
+    images?: ImageAttachment[],
+    permissionMode?: PermissionMode,
+  ) => boolean | void | Promise<boolean | void>;
+  active?: boolean;
+  onStop?: () => void;
+  isLoading: boolean;
+  workspacePath?: string | null;
+  sessionId?: string | null;
+  sessionState?: SessionState;
+  systemStatus?: string | null;
+  agentDir?: string;
+  provider?: Provider | null;
+  providers?: Provider[];
+  onProviderChange?: (providerId: string, targetModel?: string) => void;
+  selectedModel?: string;
+  onModelChange?: (modelId: string) => void;
+  reasoningEffort?: string;
+  onReasoningEffortChange?: (effort: string) => void;
+  sessionUnlocked?: boolean;
+  permissionMode?: PermissionMode;
+  onPermissionModeChange?: (mode: PermissionMode) => void;
+  apiKeys?: Record<string, string>;
+  providerVerifyStatus?: Record<string, ProviderVerifyStatus>;
+  inputRef?: React.RefObject<HTMLTextAreaElement | null>;
+  workspaceMcpEnabled?: string[];
+  globalMcpEnabled?: string[];
+  mcpServers?: Array<{ id: string; name: string; description?: string }>;
+  onWorkspaceMcpToggle?: (serverId: string, enabled: boolean) => void;
+  globallyVisiblePlugins?: Array<{
+    id: string;
+    name: string;
+    description?: string;
+    mcpServerNames?: string[];
+  }>;
+  workspaceEnabledPlugins?: string[];
+  onWorkspacePluginToggle?: (pluginId: string, enabled: boolean) => void;
+  onRefreshProviders?: () => void;
+  onOpenAgentSettings?: () => void;
+  onWorkspaceRefresh?: () => void;
+  cronModeEnabled?: boolean;
+  cronConfig?: {
+    intervalMinutes: number;
+    schedule?: import('@/types/cronTask').CronSchedule;
+  } | null;
+  cronTask?: {
+    status: 'running' | 'paused' | 'stopped' | 'completed';
+    intervalMinutes: number;
+    schedule?: import('@/types/cronTask').CronSchedule;
+    executionCount: number;
+    lastExecutedAt?: string;
+    endConditions?: {
+      maxExecutions?: number;
+    };
+    runMode?: import('@/types/cronTask').CronRunMode;
+  } | null;
+  onCronButtonClick?: () => void;
+  onCronSettings?: () => void;
+  onCronCancel?: () => void;
+  onCronStop?: () => void;
+  onSlashAction?: (name: string) => void;
+  sdkSlashCommands?: SlashCommand[];
+  mode?: 'chat' | 'launcher';
+  toolbarPrefix?: React.ReactNode;
+  contextIndicator?: React.ReactNode;
+  runtime?: RuntimeType;
+  runtimeDetections?: RuntimeDetections;
+  onRuntimeChange?: (runtime: RuntimeType) => void;
+  runtimeModels?: RuntimeModelInfo[];
+  runtimePermissionModes?: RuntimePermissionMode[];
+  queuedMessages?: QueuedMessageInfo[];
+  onCancelQueued?: (queueId: string) => void;
+  onForceExecuteQueued?: (queueId: string) => void;
+  agentStatusSlot?: React.ReactNode;
+  onOverlayHeightChange?: (height: number) => void;
+}
+
+export interface SimpleChatInputHandle {
+  processDroppedFiles: (files: File[]) => Promise<void>;
+  processDroppedFilePaths?: (paths: string[]) => Promise<void>;
+  insertReferences: (paths: string[]) => void;
+  appendReferenceToken: (token: string) => void;
+  insertSlashCommand: (command: string) => void;
+  setValue: (value: string) => void;
+  setImages: (images: ImageAttachment[]) => void;
+  focus: () => void;
+  clearWorkspaceBoundDraft: () => { strippedReferences: number; clearedImages: number };
+  getCurrentValue: () => string;
+}

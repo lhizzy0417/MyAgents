@@ -1,0 +1,184 @@
+#!/usr/bin/env node
+
+import { execFileSync } from 'node:child_process';
+import { readdirSync, readFileSync, statSync } from 'node:fs';
+import { join, relative } from 'node:path';
+
+const ROOT = process.cwd();
+const SERVER_ROOT = join(ROOT, 'src', 'server');
+const VITEST_BIN = join(ROOT, 'node_modules', 'vitest', 'vitest.mjs');
+const ALLOWED_SUFFIXES = [
+  '.unit.test.ts',
+  '.integration.test.ts',
+  '.credentialed.test.ts',
+];
+const CHILD_PROCESS_ALLOWLIST = new Set([
+  // This regression intentionally verifies config lock serialization across
+  // separate Node processes. Keep the exception narrow so future integration
+  // tests cannot spawn arbitrary network-capable subprocesses unnoticed.
+  'src/server/__tests__/admin-config-lock.integration.test.ts',
+]);
+const ANSI_ESCAPE_RE = new RegExp(`${String.fromCharCode(27)}\\[[0-?]*[ -/]*[@-~]`, 'g');
+
+function walk(dir, out = []) {
+  for (const entry of readdirSync(dir)) {
+    if (entry === 'node_modules') continue;
+    const path = join(dir, entry);
+    const stat = statSync(path);
+    if (stat.isDirectory()) {
+      walk(path, out);
+      continue;
+    }
+    if (entry.endsWith('.test.ts')) out.push(path);
+  }
+  return out;
+}
+
+function rel(path) {
+  return relative(ROOT, path).replace(/\\/g, '/');
+}
+
+const files = walk(SERVER_ROOT).map(rel).sort();
+const bareServerTests = files.filter((file) => (
+  !ALLOWED_SUFFIXES.some((suffix) => file.endsWith(suffix))
+));
+
+const unit = files.filter((file) => file.endsWith('.unit.test.ts'));
+const integration = files.filter((file) => file.endsWith('.integration.test.ts'));
+const credentialed = files.filter((file) => file.endsWith('.credentialed.test.ts'));
+const overlap = integration.filter((file) => credentialed.includes(file));
+
+function stripAnsi(text) {
+  return text.replace(ANSI_ESCAPE_RE, '');
+}
+
+function listProjectFiles(project) {
+  const stdout = execFileSync(
+    process.execPath,
+    [VITEST_BIN, 'list', '--project', project],
+    { cwd: ROOT, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] },
+  );
+  const prefix = `[${project}] `;
+  const found = new Set();
+  for (const rawLine of stripAnsi(stdout).split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line.startsWith(prefix)) continue;
+    const file = line.slice(prefix.length).split(' > ')[0];
+    if (file) found.add(file.replace(/\\/g, '/'));
+  }
+  return [...found].sort();
+}
+
+function diffSets(expected, actual) {
+  const expectedSet = new Set(expected);
+  const actualSet = new Set(actual);
+  return {
+    missing: expected.filter((file) => !actualSet.has(file)),
+    extra: actual.filter((file) => !expectedSet.has(file)),
+  };
+}
+
+const actualUnitServer = listProjectFiles('unit').filter((file) => file.startsWith('src/server/'));
+const actualIntegration = listProjectFiles('integration');
+const actualCredentialed = listProjectFiles('credentialed');
+const unitDiff = diffSets(unit, actualUnitServer);
+const integrationDiff = diffSets(integration, actualIntegration);
+const credentialedDiff = diffSets(credentialed, actualCredentialed);
+
+const packageJson = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf-8'));
+const scripts = packageJson.scripts ?? {};
+const workflowText = readFileSync(join(ROOT, '.github', 'workflows', 'test.yml'), 'utf-8');
+
+function scriptIncludes(scriptName, parts) {
+  const value = String(scripts[scriptName] ?? '');
+  return parts.every((part) => value.includes(part));
+}
+
+function findDirectChildProcessUsage() {
+  const offenders = [];
+  const nonCredentialed = files.filter((file) => !file.endsWith('.credentialed.test.ts'));
+  for (const file of nonCredentialed) {
+    if (CHILD_PROCESS_ALLOWLIST.has(file)) continue;
+    const text = readFileSync(join(ROOT, file), 'utf-8');
+    if (
+      /^\s*import\s+.*['"]node:child_process['"]/m.test(text)
+      || /^\s*import\s+.*['"]child_process['"]/m.test(text)
+      || /^\s*(?:const|let|var)\s+.*=\s*require\(['"]node:child_process['"]\)/m.test(text)
+      || /^\s*(?:const|let|var)\s+.*=\s*require\(['"]child_process['"]\)/m.test(text)
+    ) {
+      offenders.push(file);
+    }
+  }
+  return offenders;
+}
+
+const childProcessOffenders = findDirectChildProcessUsage();
+
+const errors = [];
+if (bareServerTests.length > 0) {
+  errors.push([
+    'Server tests must use an explicit classification suffix:',
+    ...bareServerTests.map((file) => `  - ${file}`),
+    `Allowed suffixes: ${ALLOWED_SUFFIXES.join(', ')}`,
+  ].join('\n'));
+}
+if (overlap.length > 0) {
+  errors.push([
+    'Integration and credentialed test sets overlap:',
+    ...overlap.map((file) => `  - ${file}`),
+  ].join('\n'));
+}
+if (integration.length === 0) {
+  errors.push('No integration tests were found; CI would not exercise stateful server coverage.');
+}
+if (credentialed.length === 0) {
+  errors.push('No credentialed tests were found; real-provider smoke tests may have been misclassified.');
+}
+for (const [project, diff] of [
+  ['unit', unitDiff],
+  ['integration', integrationDiff],
+  ['credentialed', credentialedDiff],
+]) {
+  if (diff.missing.length > 0 || diff.extra.length > 0) {
+    errors.push([
+      `Vitest project '${project}' does not match the server test classification:`,
+      ...diff.missing.map((file) => `  missing from project: ${file}`),
+      ...diff.extra.map((file) => `  extra in project: ${file}`),
+    ].join('\n'));
+  }
+}
+if (childProcessOffenders.length > 0) {
+  errors.push([
+    'Non-credentialed tests must not directly import child_process:',
+    ...childProcessOffenders.map((file) => `  - ${file}`),
+    'Move the test to credentialed, mock the subprocess, or add a narrow allowlist entry with a comment.',
+  ].join('\n'));
+}
+if (!scriptIncludes('test', ['test:classification', 'test:unit', 'test:dom', 'test:integration'])) {
+  errors.push('package.json script "test" must run classification + unit + dom + integration.');
+}
+for (const scriptName of ['test:changed', 'test:watch', 'coverage']) {
+  if (!scriptIncludes(scriptName, ['--project unit', '--project dom', '--project integration'])) {
+    errors.push(`package.json script "${scriptName}" must explicitly scope to unit/dom/integration and exclude credentialed.`);
+  }
+}
+for (const command of [
+  'npm run test:classification',
+  'npm run test:integration',
+  'npm run build:server',
+  'npm run build:bridge',
+  'npm run build:cli',
+  'npm run build:web',
+  'cargo clippy --manifest-path src-tauri/Cargo.toml --locked --all-targets -- -D clippy::disallowed_methods -D clippy::disallowed_macros',
+]) {
+  if (!workflowText.includes(command)) {
+    errors.push(`.github/workflows/test.yml must run: ${command}`);
+  }
+}
+
+if (errors.length > 0) {
+  console.error(errors.join('\n\n'));
+  process.exit(1);
+}
+
+console.log(`test classification ok: ${files.length} server tests (${integration.length} integration, ${credentialed.length} credentialed)`);

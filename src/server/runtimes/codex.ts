@@ -237,6 +237,20 @@ export function buildCodexTurnStartParams(args: {
   };
 }
 
+export function buildCodexTurnSteerParams(args: {
+  threadId: string;
+  input: unknown[];
+  expectedTurnId: string;
+  clientUserMessageId?: string | null;
+}): Record<string, unknown> {
+  return {
+    threadId: args.threadId,
+    input: args.input,
+    expectedTurnId: args.expectedTurnId,
+    ...(args.clientUserMessageId ? { clientUserMessageId: args.clientUserMessageId } : {}),
+  };
+}
+
 function isKnownCodexServerRequestMethod(method: string): method is KnownCodexServerRequestMethod {
   return (KNOWN_CODEX_SERVER_REQUEST_METHODS as readonly string[]).includes(method);
 }
@@ -1627,7 +1641,8 @@ export class CodexRuntime implements AgentRuntime {
 
   async detect(): Promise<RuntimeDetection> {
     try {
-      const proc = spawn([resolveCommand('codex'), '--version'], {
+      const command = resolveCommand('codex');
+      const proc = spawn([command, '--version'], {
         stdout: 'pipe',
         stderr: 'pipe',
         stdin: 'ignore',
@@ -1639,7 +1654,7 @@ export class CodexRuntime implements AgentRuntime {
         return {
           installed: true,
           version: text.trim().replace(/^codex-cli\s*/i, ''),
-          path: 'codex',
+          path: command,
         };
       }
     } catch { /* not installed */ }
@@ -2124,6 +2139,30 @@ export class CodexRuntime implements AgentRuntime {
       reasoningEffort: codexProc.reasoningEffort || null,
     }), 15_000) as { turn: { id: string } };
     codexProc.currentTurnId = turnResult.turn.id;
+  }
+
+  async steerMessage(
+    process: RuntimeProcess,
+    message: string,
+    images?: ResolvedImagePayload[],
+    options?: { clientUserMessageId?: string },
+  ): Promise<void> {
+    const codexProc = process as CodexProcess;
+    if (codexProc.exited) throw new Error('Codex process has exited');
+    if (!codexProc.currentTurnId) {
+      throw new Error('Codex has no active turn to steer');
+    }
+
+    const input = buildCodexInput(message, images);
+    const result = await codexProc.rpc.call('turn/steer', buildCodexTurnSteerParams({
+      threadId: codexProc.threadId,
+      input,
+      expectedTurnId: codexProc.currentTurnId,
+      clientUserMessageId: options?.clientUserMessageId,
+    }), 15_000) as { turnId?: string };
+    if (result.turnId && result.turnId !== codexProc.currentTurnId) {
+      codexProc.currentTurnId = result.turnId;
+    }
   }
 
   /**

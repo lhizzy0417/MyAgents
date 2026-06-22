@@ -199,19 +199,17 @@ function isValidAskUserQuestionInput(input: unknown): boolean {
 
 ## IM Bot 权限审批转发
 
-Desktop 端的权限请求通过 SSE `broadcast()` 发送到前端。IM Bot 端无法接收 SSE 广播，因此 `checkToolPermission()` 额外通过 `imStreamCallback('permission-request')` 将请求注入 IM SSE 流。
+Desktop 端的权限请求通过 SSE `broadcast()` 发送到前端。IM Bot 端无法接收 renderer SSE 广播，因此 `checkToolPermission()` 额外把 permission-request 写入 IM event bus；Rust `ImEventConsumer` 通过 `/api/im/events` 收到事件，再由 `ReplyRouter` 分发到对应 requestId 的回复 slot。
 
 ```typescript
 // agent-session.ts: checkToolPermission()
 broadcast('permission:request', { requestId, toolName, input: inputPreview });
 
-// 同时转发给 IM 流（如果活跃）
-if (imStreamCallback) {
-  imStreamCallback('permission-request', JSON.stringify({ requestId, toolName, input: inputPreview }));
-}
+// 同时转发给 IM event bus（如果当前 turn 来自 IM requestId）
+emitImEvent('permission-request', JSON.stringify({ requestId, toolName, input: inputPreview }));
 ```
 
-Rust 侧 `stream_to_im()` 解析 `permission-request` 事件后，通过 `adapter.send_approval_card()` 发送飞书交互卡片或 Telegram Inline Keyboard。用户审批结果通过 `POST /api/im/permission-response` 回传到 `handlePermissionResponse()`，复用与 Desktop 端相同的 Promise 解除机制。
+Rust 侧 `ReplyRouter` 解析 `permission-request` 事件后，通过 `adapter.send_approval_card()` 发送飞书交互卡片或 Telegram Inline Keyboard。用户审批结果通过 `POST /api/im/permission-response` 回传到 `handlePermissionResponse()`，复用与 Desktop 端相同的 Promise 解除机制。
 
 详见 [IM 集成架构 §2.11](./im_integration_architecture.md)。
 

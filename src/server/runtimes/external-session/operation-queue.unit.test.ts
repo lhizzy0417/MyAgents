@@ -1,0 +1,262 @@
+import { describe, expect, it, vi } from 'vitest';
+
+import type { ExternalRuntimeConfigSnapshot } from '../types';
+import type { ExternalSendContext } from './types';
+
+async function loadFreshQueueOwner() {
+  vi.resetModules();
+  return await import('./operation-queue');
+}
+
+function context(overrides: Partial<ExternalSendContext> = {}): ExternalSendContext {
+  return {
+    sessionId: 'session-1',
+    workspacePath: '/workspace',
+    scenario: { type: 'desktop' },
+    ...overrides,
+  };
+}
+
+function snapshot(overrides: Partial<ExternalRuntimeConfigSnapshot> = {}): ExternalRuntimeConfigSnapshot {
+  return {
+    model: 'model-a',
+    permissionMode: 'default',
+    reasoningEffort: undefined,
+    ...overrides,
+  };
+}
+
+describe('external operation queue owner', () => {
+  it('coalesces adjacent config operations and lets later fields win', async () => {
+    const queue = await loadFreshQueueOwner();
+
+    expect(queue.enqueueExternalConfigOperation({ model: 'model-a' }, 'desktop')).toBe(1);
+    expect(queue.enqueueExternalConfigOperation({ permissionMode: 'full-auto' }, 'runtime-config')).toBe(1);
+    expect(queue.enqueueExternalConfigOperation({ model: 'model-b' }, 'im-sync')).toBe(1);
+
+    expect(queue.consumeLeadingExternalConfigOps()).toEqual({
+      patch: {
+        model: 'model-b',
+        permissionMode: 'full-auto',
+      },
+      source: 'im-sync',
+    });
+    expect(queue.hasExternalQueuedOperations()).toBe(false);
+  });
+
+  it('does not coalesce config operations across a queued message', async () => {
+    const queue = await loadFreshQueueOwner();
+
+    queue.enqueueExternalConfigOperation({ model: 'model-a' }, 'desktop');
+    const queued = queue.enqueueExternalMessageOperation({
+      text: 'hello',
+      context: context(),
+      runtimeConfig: snapshot({ model: 'model-a' }),
+    });
+    expect(queued.queued).toBe(true);
+    queue.enqueueExternalConfigOperation({ permissionMode: 'plan' }, 'runtime-config');
+
+    expect(queue.consumeLeadingExternalConfigOps()).toEqual({
+      patch: { model: 'model-a' },
+      source: 'desktop',
+    });
+    expect(queue.shiftExternalOperation()).toMatchObject({
+      kind: 'message',
+      text: 'hello',
+      runtimeConfig: { model: 'model-a' },
+    });
+    expect(queue.consumeLeadingExternalConfigOps()).toEqual({
+      patch: { permissionMode: 'plan' },
+      source: 'runtime-config',
+    });
+  });
+
+  it('keeps each queued message bound to its enqueue-time runtime config snapshot', async () => {
+    const queue = await loadFreshQueueOwner();
+    const firstConfig = snapshot({ model: 'model-a', permissionMode: 'default' });
+    const secondConfig = snapshot({ model: 'model-b', permissionMode: 'full-auto' });
+
+    const first = queue.enqueueExternalMessageOperation({
+      text: 'first',
+      context: context({ model: firstConfig.model, permissionMode: firstConfig.permissionMode }),
+      runtimeConfig: firstConfig,
+    });
+    const second = queue.enqueueExternalMessageOperation({
+      text: 'second',
+      context: context({ model: secondConfig.model, permissionMode: secondConfig.permissionMode }),
+      runtimeConfig: secondConfig,
+    });
+
+    expect(first.queued).toBe(true);
+    expect(second.queued).toBe(true);
+    expect(queue.shiftExternalOperation()).toMatchObject({
+      kind: 'message',
+      text: 'first',
+      runtimeConfig: {
+        model: 'model-a',
+        permissionMode: 'default',
+      },
+    });
+    expect(queue.shiftExternalOperation()).toMatchObject({
+      kind: 'message',
+      text: 'second',
+      runtimeConfig: {
+        model: 'model-b',
+        permissionMode: 'full-auto',
+      },
+    });
+  });
+
+  it('blocks immediate sends while a drain reservation is in flight', async () => {
+    const queue = await loadFreshQueueOwner();
+
+    expect(queue.shouldQueueExternalDesktopSend('idle', {
+      responseMode: 'realtime',
+      canSteerActiveTurn: true,
+    })).toBe(false);
+    queue.setExternalOperationDrainInFlight(true);
+    expect(queue.shouldQueueExternalDesktopSend('idle', {
+      responseMode: 'realtime',
+      canSteerActiveTurn: true,
+    })).toBe(true);
+    expect(queue.canDrainExternalOperations('idle')).toBe(false);
+
+    queue.setExternalOperationDrainInFlight(false);
+    expect(queue.shouldQueueExternalDesktopSend('idle', {
+      responseMode: 'realtime',
+      canSteerActiveTurn: true,
+    })).toBe(false);
+  });
+
+  it('allows realtime active-turn steering only before queued work exists', async () => {
+    const queue = await loadFreshQueueOwner();
+
+    expect(queue.shouldQueueExternalDesktopSend('running', {
+      responseMode: 'realtime',
+      canSteerActiveTurn: true,
+    })).toBe(false);
+    queue.enqueueExternalMessageOperation({
+      text: 'already queued',
+      context: context(),
+      runtimeConfig: snapshot(),
+    });
+    expect(queue.shouldQueueExternalDesktopSend('running', {
+      responseMode: 'realtime',
+      canSteerActiveTurn: true,
+    })).toBe(true);
+    expect(queue.shouldQueueExternalDesktopSend('running', {
+      responseMode: 'turn',
+      canSteerActiveTurn: true,
+    })).toBe(true);
+  });
+
+  it('moves queued messages to the front, cancels them, and reports message status only', async () => {
+    const queue = await loadFreshQueueOwner();
+
+    queue.enqueueExternalConfigOperation({ model: 'model-a' }, 'desktop');
+    const first = queue.enqueueExternalMessageOperation({
+      text: 'first-message',
+      context: context(),
+      runtimeConfig: snapshot({ model: 'model-a' }),
+    });
+    const second = queue.enqueueExternalMessageOperation({
+      text: 'second-message',
+      context: context(),
+      runtimeConfig: snapshot({ model: 'model-b' }),
+    });
+    if (!first.queued || !second.queued) throw new Error('test queue setup failed');
+
+    expect(queue.getExternalQueueStatusSnapshot()).toEqual([
+      { id: first.queueId, messagePreview: 'first-message' },
+      { id: second.queueId, messagePreview: 'second-message' },
+    ]);
+    expect(queue.moveExternalQueuedMessageToFront(second.queueId)).toBe(true);
+    expect(queue.cancelExternalQueuedMessage(second.queueId)).toBe('second-message');
+    expect(queue.getExternalQueueStatusSnapshot()).toEqual([
+      { id: first.queueId, messagePreview: 'first-message' },
+    ]);
+  });
+
+  it('returns cancelled message ids when clearing the queue', async () => {
+    const queue = await loadFreshQueueOwner();
+
+    queue.enqueueExternalConfigOperation({ model: 'model-a' }, 'desktop');
+    const first = queue.enqueueExternalMessageOperation({
+      text: 'first',
+      context: context(),
+      runtimeConfig: snapshot(),
+    });
+    const second = queue.enqueueExternalMessageOperation({
+      text: 'second',
+      context: context(),
+      runtimeConfig: snapshot(),
+    });
+    if (!first.queued || !second.queued) throw new Error('test queue setup failed');
+
+    expect(queue.clearExternalQueueWithCancellation()).toEqual([first.queueId, second.queueId]);
+    expect(queue.hasExternalQueuedOperations()).toBe(false);
+  });
+
+  it('cancels a reserved drain message when clearing the queue', async () => {
+    const queue = await loadFreshQueueOwner();
+    const first = queue.enqueueExternalMessageOperation({
+      text: 'reserved',
+      context: context(),
+      runtimeConfig: snapshot(),
+    });
+    if (!first.queued) throw new Error('test queue setup failed');
+
+    const reserved = queue.reserveExternalOperationForDrain();
+    expect(reserved).toMatchObject({ kind: 'message', queueId: first.queueId });
+
+    expect(queue.clearExternalQueueWithCancellation()).toEqual([first.queueId]);
+    queue.releaseExternalDrainReservation(reserved);
+  });
+
+  it('resets stale desktop send tails without running old queued closures', async () => {
+    const queue = await loadFreshQueueOwner();
+    let releaseFirst!: () => void;
+    const first = queue.chainExternalDesktopSend(() => new Promise<string>((resolve) => {
+      releaseFirst = () => resolve('first');
+    }));
+    const staleDispatch = vi.fn(async () => 'stale');
+    const stale = queue.chainExternalDesktopSend(staleDispatch);
+
+    await Promise.resolve();
+    expect(releaseFirst).toBeTypeOf('function');
+    queue.clearExternalQueueWithCancellation();
+
+    const freshDispatch = vi.fn(async () => 'fresh');
+    await expect(queue.chainExternalDesktopSend(freshDispatch)).resolves.toBe('fresh');
+    expect(freshDispatch).toHaveBeenCalledTimes(1);
+
+    releaseFirst();
+    await expect(first).resolves.toBe('first');
+    await expect(stale).rejects.toBeInstanceOf(queue.ExternalQueueGenerationStaleError);
+    expect(staleDispatch).not.toHaveBeenCalled();
+  });
+
+  it('enforces the queued message cap without counting config operations', async () => {
+    const queue = await loadFreshQueueOwner();
+
+    for (let i = 0; i < 50; i += 1) {
+      queue.enqueueExternalConfigOperation({ model: `model-${i}` }, 'desktop');
+      const result = queue.enqueueExternalMessageOperation({
+        text: `message-${i}`,
+        context: context(),
+        runtimeConfig: snapshot({ model: `model-${i}` }),
+      });
+      expect(result.queued).toBe(true);
+    }
+
+    const overflow = queue.enqueueExternalMessageOperation({
+      text: 'overflow',
+      context: context(),
+      runtimeConfig: snapshot(),
+    });
+    expect(overflow).toEqual({
+      queued: false,
+      error: '排队消息已达上限，请稍后再发',
+    });
+  });
+});

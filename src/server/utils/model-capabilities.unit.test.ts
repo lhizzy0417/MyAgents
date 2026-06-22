@@ -28,22 +28,25 @@ describe('applyContextWindowSuffix — registry-independent guards', () => {
   it('leaves an already-[1m]-tagged id untouched (case-insensitive, no double-wrap)', () => {
     expect(applyContextWindowSuffix('foo[1m]')).toBe('foo[1m]');
     expect(applyContextWindowSuffix('claude-opus-4-7[1m]')).toBe('claude-opus-4-7[1m]');
+    expect(applyContextWindowSuffix('claude-opus-4-6[1m]')).toBe('claude-opus-4-6[1m]');
+    expect(applyContextWindowSuffix('claude-sonnet-4-6[1m]')).toBe('claude-sonnet-4-6[1m]');
     expect(applyContextWindowSuffix('FOO[1M]')).toBe('FOO[1M]'); // matches SDK has1mContext regex
   });
 
   it('leaves an unregistered model unchanged (no entry → no suffix)', () => {
     expect(applyContextWindowSuffix('totally-made-up-model-xyz')).toBe('totally-made-up-model-xyz');
   });
+
 });
 
 describe('applyContextWindowSuffix — threshold via preset registry', () => {
-  it('tags a >=1M preset model with [1m]', () => {
+  it('tags default-1M preset models with [1m]', () => {
     expect(applyContextWindowSuffix('claude-opus-4-8')).toBe('claude-opus-4-8[1m]');
     expect(applyContextWindowSuffix('claude-opus-4-7')).toBe('claude-opus-4-7[1m]');
-    expect(applyContextWindowSuffix('claude-opus-4-6')).toBe('claude-opus-4-6[1m]');
   });
 
-  it('does NOT tag a 200K preset model (claude-sonnet-4-6 wire-default is 200K)', () => {
+  it('does NOT auto-tag 200K wire-default Claude 4.6 models (#392)', () => {
+    expect(applyContextWindowSuffix('claude-opus-4-6')).toBe('claude-opus-4-6');
     expect(applyContextWindowSuffix('claude-sonnet-4-6')).toBe('claude-sonnet-4-6');
     expect(applyContextWindowSuffix('claude-haiku-4-5')).toBe('claude-haiku-4-5');
   });
@@ -167,15 +170,18 @@ describe('capability-suffix tolerance + per-field merge (#338)', () => {
   // Mechanism #1: a [1m] / " 1m" suffixed active model id must resolve to its
   // BARE registry contextLength (pre-fix: lookup missed → undefined → 200K).
   it('resolves a [1m] / " 1m" suffixed id to the bare preset contextLength', () => {
-    expect(lookupModelContextLength('claude-opus-4-6[1m]')).toBe(1_000_000);
-    expect(lookupModelContextLength('claude-opus-4-6 1m')).toBe(1_000_000);
+    expect(lookupModelContextLength('claude-opus-4-7[1m]')).toBe(1_000_000);
+    expect(lookupModelContextLength('claude-opus-4-7 1m')).toBe(1_000_000);
+    expect(lookupModelContextLength('claude-opus-4-6[1m]')).toBe(200_000);
+    expect(lookupModelContextLength('claude-opus-4-6 1m')).toBe(200_000);
     expect(lookupModelContextLength('claude-sonnet-4-6[1m]')).toBe(200_000);
     expect(lookupModelContextLength('claude-sonnet-4-6 1m')).toBe(200_000);
   });
 
   it('canonicalizes a hand-typed " 1m" id (#338): append [1m] >200K, strip it off otherwise', () => {
-    expect(applyContextWindowSuffix('claude-opus-4-6 1m')).toBe('claude-opus-4-6[1m]');
+    expect(applyContextWindowSuffix('claude-opus-4-7 1m')).toBe('claude-opus-4-7[1m]');
     // ≤200K: drop the malformed " 1m" so it never leaks to the upstream wire.
+    expect(applyContextWindowSuffix('claude-opus-4-6 1m')).toBe('claude-opus-4-6');
     expect(applyContextWindowSuffix('claude-sonnet-4-6 1m')).toBe('claude-sonnet-4-6');
   });
 
@@ -228,6 +234,8 @@ describe('capability-suffix tolerance + per-field merge (#338)', () => {
   // from whitespace-/suffix-only input (Codex review edge case).
   it('applyContextWindowSuffix returns undefined for whitespace-/suffix-only input', () => {
     expect(applyContextWindowSuffix(' 1m')).toBeUndefined();
+    expect(applyContextWindowSuffix('[1m]')).toBeUndefined();
+    expect(applyContextWindowSuffix('[1M]   ')).toBeUndefined();
     expect(applyContextWindowSuffix('   ')).toBeUndefined();
   });
 });

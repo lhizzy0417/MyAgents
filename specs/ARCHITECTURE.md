@@ -220,9 +220,24 @@ Tab2 apiPost() ──► getSessionPort(session_456) ──► Rust proxy ──
 
 每个模块：一段简介 + 关键文件 + 跳转。
 
-### 1. Sidecar Manager (`src-tauri/src/sidecar.rs`)
+### 1. Sidecar Manager (`src-tauri/src/sidecar.rs` facade + `src-tauri/src/sidecar/*`)
 
 Tauri State `ManagedSidecars` 管理 `HashMap<sessionId, SessionSidecar>`。Owner 释放规则保证生命周期收敛。
+
+`src-tauri/src/sidecar.rs` 是兼容导出与少量共享常量的 facade。真实 owner 在 `src-tauri/src/sidecar/`：
+
+| Owner module | 职责 |
+|------|------|
+| `manager.rs` / `types.rs` | `ManagedSidecarManager`、owner model、端口分配、runtime drift 判定 |
+| `session_lifecycle.rs` | `ensure_session_sidecar` / release / upgrade / activation lifecycle |
+| `instances.rs` | global/tab sidecar spawn、monitor、wake lock、terminal event forward |
+| `spawn.rs` | Node/script 定位、`normalize_external_path`、spawn diagnostic、kill helper |
+| `health.rs` | TCP health / readiness / reusable sidecar HTTP health check |
+| `cleanup.rs` | startup stale-process cleanup barrier、global port file、child cleanup patterns |
+| `cron_execute.rs` | Rust → Node `/cron/execute` payload/response bridge |
+| `runtime_identity.rs` | session/agent runtime identity resolve 与 restore guard |
+| `background.rs` | background completion lifecycle |
+| `proxy.rs` / `commands.rs` / `legacy.rs` / `shutdown.rs` / `stdio.rs` | proxy propagation、IPC glue、legacy global sidecar、shutdown、stderr classification |
 
 **IPC 命令：**
 
@@ -246,6 +261,14 @@ Tauri State `ManagedSidecars` 管理 `HashMap<sessionId, SessionSidecar>`。Owne
 | `TabProvider.tsx` | 状态容器，管理 messages / logs / SSE / Session |
 
 Tab 内 MUST 用 `useTabState()` 的 `apiGet` / `apiPost`，禁止全局 `apiPostJson` / `apiGetJson`（会发到 Global Sidecar）。
+
+Phase4 后，几个历史大型 UI 入口保留原路径作为兼容 facade，真实实现按 owner 目录维护：
+
+| Facade | 当前 owner |
+|------|------|
+| `src/renderer/pages/Settings.tsx` | re-export `pages/settings/SettingsPage.tsx`；section/sidebar/navigation/provider form 拆到 `pages/settings/*` |
+| `src/renderer/components/SimpleChatInput.tsx` | re-export `components/chat-input/SimpleChatInput.tsx`；附件处理、mention/thought row、常量/types 拆到 `components/chat-input/*` |
+| `src/renderer/components/DirectoryPanel.tsx` | re-export `components/directory-panel/DirectoryPanel.tsx`；搜索 hook、path display、types 拆到 `components/directory-panel/*`，树 viewport 仍在 `components/workspace-tree/*` |
 
 ### 3. 系统提示词组装 (`src/server/system-prompt.ts`)
 
@@ -284,11 +307,15 @@ type InteractionScenario =
 
 ### 5. 定时任务系统
 
-**Rust 层**（`src-tauri/src/cron_task.rs`）：
-- `CronTaskManager` 单例，管理任务 CRUD、tokio 调度循环、持久化、崩溃恢复
-- 三种 `CronSchedule`：`Every { minutes, start_at? }` / `Cron { expr, tz? }` / `At { at }`
-- 调度器使用 wall-clock polling（`sleep_until_wallclock`），系统休眠后能正确唤醒
-- 持久化：`~/.myagents/cron_tasks.json`（原子写入），执行记录 `~/.myagents/cron_runs/<taskId>.jsonl`
+**Rust 层**（`src-tauri/src/cron_task.rs` facade + `src-tauri/src/cron_task/*`）：
+- `manager.rs` 的 `CronTaskManager` 单例管理任务 CRUD、tokio 调度循环、崩溃恢复
+- `types.rs` 定义 `CronTask` / `CronSchedule` / run mode / delivery / provider intent
+- `execution.rs` 拥有 `execute_task_directly`，负责 ensure sidecar、构造执行 payload、结束条件与 stop
+- `commands.rs` 是 Tauri command glue
+- `store.rs` 原子写入 `~/.myagents/cron_tasks.json`
+- `run_records.rs` 管理 `~/.myagents/cron_runs/<taskId>.jsonl`
+- `schedule.rs` 提供 wall-clock polling（`sleep_until_wallclock`），系统休眠后能正确唤醒
+- `delivery.rs` / `init_recovery.rs` / `validation.rs` 分别拥有 IM delivery、启动恢复、字段与路径校验
 
 **Node.js 层**（`src/server/tools/im-cron-tool.ts`）：
 - `im-cron` MCP server —— **所有 Session 可用**（不仅 IM Bot）
@@ -316,6 +343,19 @@ Project (工作区)
 | `BridgeAdapter` | HTTP 双向转发 | OpenClaw 社区插件，Rust → 独立 Node.js Bridge 进程 |
 
 详见 `tech_docs/im_integration_architecture.md`。
+
+`src-tauri/src/im/mod.rs` 是 facade 与少量共享 helper。当前主要 owner：
+
+| Owner module | 职责 |
+|------|------|
+| `agent_channel.rs` | channel lifecycle、消息入口、Sidecar ensure/enqueue 编排 |
+| `enqueue.rs` | Rust → Node `/api/im/enqueue` 同步 ACK 请求 |
+| `event_consumer.rs` / `reply_router.rs` | `/api/im/events` long-poll SSE consumer 与 requestId → draft/reply slot 路由 |
+| `state.rs` | `ManagedAgents` / `ManagedImBots` / runtime config sync / channel state |
+| `config_store.rs` | Agent/Bot config 读写、auto-start、missing config reporting |
+| `commands.rs` | Tauri IM/Agent command glue |
+| `adapter.rs` + `telegram.rs` / `dingtalk.rs` / `feishu.rs` / `bridge.rs` | 平台适配器 |
+| `buffer.rs` / `group_history.rs` / `handover.rs` / `heartbeat.rs` / `memory_update.rs` / `runtime_change.rs` | 消息缓冲、群历史、session handover、heartbeat、记忆更新、runtime 切换 |
 
 ### 7. Plugin Bridge (`src/server/plugin-bridge/`)
 
@@ -350,7 +390,36 @@ SDK subprocess → ANTHROPIC_BASE_URL=127.0.0.1:${sidecarPort}
 
 除内置 Claude Agent SDK（builtin）外，支持 Claude Code CLI、OpenAI Codex CLI、Google Gemini CLI 作为外部 Runtime。功能门控：`config.multiAgentRuntime`（默认关闭，设置 → 关于 → 实验室）。
 
-**抽象层**（`src/server/runtimes/`）：
+**抽象层**：
+
+`src/server/session-engine/` 是 Sidecar HTTP route 面向“当前会话运行时”的门面层：
+
+| 文件 | 职责 |
+|------|------|
+| `selector.ts` | `shouldUseExternalRuntime()` 的 route 分流 owner；选择 builtin/external `SessionEngine` |
+| `builtin-adapter.ts` | 委托 `agent-session.ts`，保持内置 Claude Agent SDK 会话语义 |
+| `external-adapter.ts` | 委托 `external-session.ts`，保持 Claude Code / Codex / Gemini 会话语义 |
+| `types.ts` | `SessionEngine` 接口：desktop send、IM enqueue、injected turn、queue、runtime config、session read/config/operation 等 route-facing 能力 |
+| `route-contracts.ts` | high-risk route → engine method 的可测试契约清单；route modules 只做 payload/response shaping |
+
+`src/server/session-core/` 是 builtin / external 会话内核共享的 pure policy 层。它不拥有 SDK/CLI 进程、副作用或 SSE，只承载可单测的决策：turn result 判定、runtime config snapshot/source guard、desktop/turn-boundary queue admission、MCP authority/fingerprint/restart 决策。
+
+`src/server/agent-session.ts` 仍是 builtin SDK 的 public facade，供 `session-engine/builtin-adapter.ts` 委托。Phase6 后，主要 mutable state 不再由 facade 顶层变量直接拥有；Phase7 后，最重的 turn terminal 与 transcript persistence 行为也有独立 owner。真实维护入口在 `src/server/builtin-session/`：
+
+| Owner module | 职责 |
+|------|------|
+| `lifecycle.ts` | SDK `Query` 进程、abort flag、termination promise、generator wakeup、pre-warm readiness |
+| `queue.ts` | realtime queue、mid-turn buffer、turn-boundary queue、in-flight slot、admission ticket |
+| `turn.ts` | current turn usage/output/error state、IM pending request FIFO、injected turn outcome |
+| `turn-lifecycle.ts` | SDK `result` / stopped / error terminal 解释、usage stamping、queue/IM/inbox/watch/analytics/title hook 顺序 |
+| `config.ts` | MCP/agents/plugins/model/permission/provider state、deferred restart latch |
+| `transcript.ts` | live messages、message sequence、persist cursor/cache、SDK UUID freshness sets |
+| `transcript-persistence.ts` | SessionStore mapping、incremental persist chain、load seeding、cursor/cache reset、rewind/fork/retraction persistence consistency |
+| `types.ts` | builtin owner 间共享的结构类型 |
+
+约束：route modules 与 `session-engine/*` 不直接 import `builtin-session/*`；它们只看 `agent-session.ts` facade。`builtin-session/*` 也不 import route 或 SessionEngine。`session-core/*` 继续保持 pure policy，不引入 SDK/SSE/文件系统副作用。`runtime-boundary.unit.test.ts` 会目录级扫描这些边界，并拦截 `agent-session.ts` 对 owner state 的 direct write 回退，以及 turn terminal / transcript persistence 行为回流到 facade；新增写入或 terminal/persist 规则应先在对应 owner 中加命名 API。
+
+`src/server/runtimes/` 只表示外部 runtime adapter：
 
 | 文件 | 职责 |
 |------|------|
@@ -359,11 +428,26 @@ SDK subprocess → ANTHROPIC_BASE_URL=127.0.0.1:${sidecarPort}
 | `claude-code.ts` | CC Runtime：NDJSON over stdio，`-p` 模式 |
 | `codex.ts` | Codex Runtime：JSON-RPC 2.0 over stdio，`app-server` 持久进程 |
 | `gemini.ts` | Gemini Runtime：ACP JSON-RPC 2.0 over stdio，`gemini --acp` |
-| `external-session.ts` | 统一会话管理：内容块持久化、配置变更、并发守卫、看门狗、Token 用量 |
+| `external-session.ts` | 外部 runtime public facade：start/send/prewarm/stop、UnifiedEvent shell、SessionEngine-facing exports |
+| `external-session/*` | 外部 runtime owner modules：lifecycle、runtime config、operation queue、turn lifecycle、content blocks、transcript persistence、interactive requests |
 
-**门控链路：** Rust `sidecar.rs` 启动 Sidecar 时读取 `config.multiAgentRuntime` + `agent.runtime` → 注入 `MYAGENTS_RUNTIME` 环境变量 → Node.js `factory.ts` 读取 → `shouldUseExternalRuntime()` 分流。前端 `Chat.tsx` 用同样门控决定 `currentRuntime`。
+`external-session.ts` 不再是 external runtime 的 state owner。真实 mutable state 归 `src/server/runtimes/external-session/`：
 
-新增 config 同步端点时，MUST 检查 `shouldUseExternalRuntime()` 并分流到 `external-session.ts`。
+| Owner module | 职责 |
+|------|------|
+| `lifecycle.ts` | active runtime/process、starting guard、session binding、prewarm/system-init、user-stop flag |
+| `runtime-config.ts` | desired/live model、permission、reasoning effort state；snapshot/source guard integration |
+| `operation-queue.ts` | desktop queued message/config FIFO、drain reservation、generation-based stale dispatch rejection、desktop send tail reset、force/cancel/status bookkeeping |
+| `turn-lifecycle.ts` | turn completed/success、finalization gate、turn start time、usage/context usage state；`turn_complete` / `session_complete` terminal plan 分类 |
+| `content-blocks.ts` | streaming text/thinking/tool/subagent content state、tool result/attachment mutation、live/turn snapshot backing state |
+| `transcript-persistence.ts` | in-memory session messages、persisted runtime usage totals、user/assistant append、retry truncate、last assistant read、SessionStore save + metadata preview/context update |
+| `interactive.ts` | permission/AskUserQuestion pending state、active IM request id、IM registry cleanup、inbox/watch reply metadata与错误推送；permission response 成功 delivery 后才 consume pending state |
+
+**门控链路：** Rust `sidecar/runtime_identity.rs` 读取 `config.multiAgentRuntime` + `agent.runtime`，`sidecar/session_lifecycle.rs` / `sidecar/instances.rs` 在 spawn Sidecar 时注入 `MYAGENTS_RUNTIME` 环境变量 → Node.js `factory.ts` 读取 → `session-engine/selector.ts` 通过 `shouldUseExternalRuntime()` 选择 builtin/external `SessionEngine`。前端 `Chat.tsx` 用同样门控决定 `currentRuntime`。
+
+新增“config 同步 / 注入 user 消息 / 等待 turn 完成 / session read / session operation”的 Sidecar endpoint 时，MUST 走 `SessionEngine` facade；不要在 route handler 里直接手写 builtin/external 分流。Phase5 已迁移的代表路径包括 `/api/session-state`、`/api/session-latest-result`、`/chat/stream`、`GET /sessions/:id`、`/chat/rewind`、`/chat/external-retry`、`/sessions/fork`、`/sessions/switch`、`/api/im/session/new`、`/api/mcp/set`、`/api/agents/set`、`/api/provider/set`、`/api/session/config`。仅 external-only legacy/diagnostic endpoint 可直接调用 `external-session.ts`，并需在代码注释说明兼容原因。
+
+**测试防线：** server 测试必须显式后缀分层：`*.unit.test.ts`（pure policy / parser / boundary）、`*.integration.test.ts`（credential-free stateful server 集成，singleFork）、`*.credentialed.test.ts`（真实 Provider / SDK / upstream smoke，显式本地跑）。`unit` / `integration` 都加载 `src/test/setup-no-egress.ts`，阻断 fetch / undici / http(s) / net / tls / dns 非 loopback 出站；`npm run test:classification` 用实际 Vitest project list 扫描并禁止裸 `src/server/**/*.test.ts`。External runtime 的回归主路径通过 `external-session-mock.integration.test.ts` 在测试层 mock `runtimes/factory.ts`，fake runtime 伪装为真实 `RuntimeType`（如 `codex`），穿过 `SessionEngine` 覆盖正常 turn、failed turn、queue、permission response，不在生产代码里增加 mock runtime 类型。
 
 详见 `tech_docs/multi_agent_runtime.md`。
 

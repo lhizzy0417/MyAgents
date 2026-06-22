@@ -116,6 +116,7 @@ export const SSE_EVENT_PRIORITIES: Readonly<Record<string, SseEventPriority>> = 
   'chat:subagent-tool-result-start': 'critical',
   'chat:subagent-tool-result-complete': 'critical',
   'chat:permission-mode-changed': 'critical',
+  'chat:session-title-changed': 'critical',
   'chat:task-notification': 'critical',
   'chat:task-started': 'critical',
   'permission:request': 'critical',

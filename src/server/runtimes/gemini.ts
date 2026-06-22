@@ -620,7 +620,8 @@ export class GeminiRuntime implements AgentRuntime {
 
   async detect(): Promise<RuntimeDetection> {
     try {
-      const proc = spawn([resolveCommand('gemini'), '--version'], {
+      const command = resolveCommand('gemini');
+      const proc = spawn([command, '--version'], {
         stdout: 'pipe',
         stderr: 'pipe',
         stdin: 'ignore',
@@ -629,7 +630,7 @@ export class GeminiRuntime implements AgentRuntime {
       const text = await new Response(proc.stdout).text();
       const code = await proc.exited;
       if (code === 0) {
-        return { installed: true, version: text.trim(), path: 'gemini' };
+        return { installed: true, version: text.trim(), path: command };
       }
     } catch {
       /* not installed */

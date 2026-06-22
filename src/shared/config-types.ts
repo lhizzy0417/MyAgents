@@ -553,9 +553,11 @@ export interface AppConfig {
    *  'modEnter' 则 ⌘/Ctrl+Enter 发送、Enter 换行。统一作用于全部"和 AI 对话"的
    *  输入：主对话框 / AI 小助理 / 问题反馈（见 utils/chatSendKey.ts）。 */
   chatSendShortcut?: 'enter' | 'modEnter';
-  /** 桌面 Chat 连续发送 query 时的 builtin AgentSDK 队列投递策略。
-   *  'realtime'（默认）= busy 时尽快交给 SDK async queue；
+  /** 桌面 Chat 连续发送 query 时的队列投递策略。
+   *  'realtime'（默认）= busy 时尽快交给可实时响应的 runtime
+   *  （builtin SDK async queue；Codex app-server turn/steer）；
    *  'turn' = busy 时留在 turn-boundary queue，上一轮结束后再作为下一轮发送。
+   *  不支持实时 steering 的 external runtime 自动 fallback 到 'turn' 行为。
    *  仅桌面交互发送读取；IM/Cron/Inbox 等非桌面来源保持既有语义。 */
   chatQueueResponseMode?: ChatQueueResponseMode;
   showDevTools: boolean; // 显示开发者工具 (Logs/System Info)
@@ -743,18 +745,18 @@ export interface ProjectSettings {
  *  inputModalities：来源 OpenRouter `architecture.input_modalities` (2026-04 验证)
  *  Sonnet/Opus 4.x 系列支持 1M 上下文（带 [1m] suffix / context-1m beta header 时启用） */
 const ANTHROPIC_MODELS: ModelEntity[] = [
-  // contextLength: Anthropic Sonnet 4.6 wire-default is 200K. The 1M tier requires
-  // the `context-1m-2025-08-07` beta header AND either Tier-4 API spend OR a paid
-  // "extra usage" toggle on subscription plans. Defaulting to 1M here forced the
-  // SDK's `[1m]` 1M code path for everyone, and subscription users hit
+  // contextLength: Anthropic Sonnet 4.6 / Opus 4.6 wire-default is 200K. The 1M
+  // tier requires the `context-1m-2025-08-07` beta header AND either Tier-4 API
+  // spend or a paid "extra usage" toggle on subscription plans. Defaulting to 1M
+  // here forced the SDK's `[1m]` 1M code path for everyone, and subscription users hit
   // `Extra usage is required for 1M context · enable extra usage at
   // claude.ai/settings/usage, or use --model to switch to standard context`
-  // on every turn (reproduced 2026-05-07). Opus 4.x stays at 1M because
-  // Anthropic enables 1M-by-default on Opus subscription tiers.
+  // on every turn (reproduced 2026-05-07 / #392). Opus 4.7+ stays at 1M because
+  // Anthropic enables those newer Opus variants on the 1M path by default.
   { model: 'claude-sonnet-4-6', modelName: 'Claude Sonnet 4.6', modelSeries: 'claude', contextLength: 200_000, maxOutputTokens: 64_000, inputModalities: ['text', 'image'] },
   { model: 'claude-opus-4-8', modelName: 'Claude Opus 4.8', modelSeries: 'claude', contextLength: 1_000_000, maxOutputTokens: 128_000, inputModalities: ['text', 'image'] },
   { model: 'claude-opus-4-7', modelName: 'Claude Opus 4.7', modelSeries: 'claude', contextLength: 1_000_000, maxOutputTokens: 128_000, inputModalities: ['text', 'image'] },
-  { model: 'claude-opus-4-6', modelName: 'Claude Opus 4.6', modelSeries: 'claude', contextLength: 1_000_000, maxOutputTokens: 128_000, inputModalities: ['text', 'image'] },
+  { model: 'claude-opus-4-6', modelName: 'Claude Opus 4.6', modelSeries: 'claude', contextLength: 200_000, maxOutputTokens: 128_000, inputModalities: ['text', 'image'] },
   { model: 'claude-haiku-4-5', modelName: 'Claude Haiku 4.5', modelSeries: 'claude', contextLength: 200_000, maxOutputTokens: 64_000, inputModalities: ['text', 'image'] },
 ];
 

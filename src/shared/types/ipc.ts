@@ -35,6 +35,7 @@ export interface SendMessagePayload {
   /** Provider environment variables (baseUrl, apiKey, authType) for third-party providers */
   providerEnv?: {
     providerId?: string;
+    providerName?: string;
     baseUrl?: string;
     apiKey?: string;
     authType?: 'auth_token' | 'api_key' | 'both' | 'auth_token_clear_api_key';
@@ -45,6 +46,7 @@ export interface SendMessagePayload {
     maxOutputTokensParamName?: 'max_tokens' | 'max_completion_tokens' | 'max_output_tokens';
     /** Upstream API format for OpenAI bridge (only used when apiProtocol === 'openai') */
     upstreamFormat?: 'chat_completions' | 'responses';
+    modelAliases?: { sonnet?: string; opus?: string; haiku?: string };
   };
 }
 

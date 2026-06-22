@@ -489,7 +489,10 @@ const Markdown = memo(function Markdown({ children, compact = false, preserveNew
   // Virtuoso measurement. A view-layer typewriter inside this component animated item height
   // on its own rAF, decoupled from scroll/measurement → the streaming-phantom-thinking-rows
   // regressions. `streaming` here only swaps in the rehypeStreamTail plugin (leading-edge fade).
-  const processedContent = raw ? convertFrontmatter(children) : preprocessMarkdownContent(children);
+  const processedContent = useMemo(
+    () => raw ? convertFrontmatter(children) : preprocessMarkdownContent(children),
+    [children, raw],
+  );
 
   // Phase D.5: image loading goes through Rust workspace_files. Renderer threads
   // `workspacePath` (absolute) and `basePath` (workspace-relative dir of the

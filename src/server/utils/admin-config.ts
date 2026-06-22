@@ -435,6 +435,8 @@ export function isProviderDisabled(providerId: string, config?: AdminAppConfig):
 export interface ResolvedProviderEnv {
   /** Provider registry id. Metadata only: not forwarded as an SDK env var. */
   providerId?: string;
+  /** Provider display name. Analytics metadata only: not forwarded as an SDK env var. */
+  providerName?: string;
   baseUrl?: string;
   apiKey?: string;
   authType?: 'auth_token' | 'api_key' | 'both' | 'auth_token_clear_api_key';
@@ -476,6 +478,7 @@ export function resolveProviderEnv(
   const providerConfig = (provider.config ?? {}) as Record<string, unknown>;
   const result: ResolvedProviderEnv = {
     providerId,
+    providerName: typeof provider.name === 'string' ? provider.name : providerId,
     baseUrl: providerConfig.baseUrl ? String(providerConfig.baseUrl) : undefined,
     apiKey,
     authType: (provider.authType as ResolvedProviderEnv['authType']) ?? 'both',
@@ -639,7 +642,12 @@ export function decodeProviderEnvSnapshot(
   if (!snapshotJson) return undefined;
   if (providerId && isProviderDisabled(providerId, config)) return undefined;
   try {
-    return JSON.parse(snapshotJson) as ResolvedProviderEnv;
+    const parsed = JSON.parse(snapshotJson) as ResolvedProviderEnv;
+    if (!parsed.providerName && providerId) {
+      const provider = findEffectiveProvider(providerId, config);
+      if (typeof provider?.name === 'string') parsed.providerName = provider.name;
+    }
+    return parsed;
   } catch {
     return undefined;
   }

@@ -151,14 +151,27 @@ function phaseCount(phaseName: string): number {
 
 describe('useTabSwipeGesture Phase 0 trace', () => {
   beforeEach(() => {
+    localStorage.setItem('myagents:tab-swipe-trace', '1');
     vi.spyOn(console, 'debug').mockImplementation(() => {});
   });
 
   afterEach(() => {
+    localStorage.removeItem('myagents:tab-swipe-trace');
     cleanup();
     restoreFrontendLogger();
     clearFrontendLogs();
     vi.restoreAllMocks();
+  });
+
+  it('keeps high-frequency swipe tracing disabled unless explicitly enabled', () => {
+    localStorage.removeItem('myagents:tab-swipe-trace');
+    render(<Harness />);
+    const content = screen.getByTestId('tab-content');
+    setContainerWidth(content, 1000);
+
+    dispatchWheel(content, { deltaX: 120, deltaY: 2 });
+
+    expect(phases()).toEqual([]);
   });
 
   it('emits unified-log perf phases for a horizontal swipe sample', () => {

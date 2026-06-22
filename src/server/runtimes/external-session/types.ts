@@ -1,0 +1,170 @@
+import type { InteractionScenario } from '../../system-prompt';
+import type { ImagePayload } from '../types';
+import type { ToolAttachment } from '../../../shared/types/tool-attachment';
+import type { LargeValueRef } from '../../utils/large-value-store';
+import type { AskUserQuestionInput } from '../../../shared/types/askUserQuestion';
+import type { RuntimeType } from '../../../shared/types/runtime';
+import type { ExternalRuntimeConfigPatch, ExternalRuntimeConfigSnapshot } from '../types';
+import type { MessageUsage, TurnAnalyticsSource } from '../../types/session';
+import type { SystemInitInfo } from '../../../shared/types/system';
+import type { ToolDisplayPayload } from '../../../shared/toolDisplay/filePatch';
+
+export interface PersistContentBlock {
+  type: 'text' | 'tool_use' | 'thinking';
+  text?: string;
+  tool?: {
+    id: string;
+    name: string;
+    input: Record<string, unknown>;
+    inputJson?: string;
+    isLoading?: boolean;
+    result?: string;
+    isError?: boolean;
+    resultMeta?: {
+      exitCode?: number | null;
+      durationMs?: number | null;
+      cwd?: string;
+      processId?: string | null;
+      status?: string;
+      largeValueRef?: LargeValueRef;
+    };
+    streamIndex: number;
+    attachments?: ToolAttachment[];
+    display?: ToolDisplayPayload;
+    subagentCalls?: Array<{
+      id: string;
+      name: string;
+      input: Record<string, unknown>;
+      inputJson?: string;
+      result?: string;
+      isLoading?: boolean;
+      isError?: boolean;
+      attachments?: ToolAttachment[];
+    }>;
+  };
+  thinking?: string;
+  thinkingStartedAt?: number;
+  thinkingDurationMs?: number;
+  thinkingStreamIndex?: number;
+  isComplete?: boolean;
+}
+
+export type PersistSubagentCall = NonNullable<NonNullable<PersistContentBlock['tool']>['subagentCalls']>[number];
+
+export type ExternalSessionState = 'idle' | 'running' | 'error';
+
+export type ExternalPendingInteractiveRequest =
+  | {
+    type: 'permission:request';
+    data: {
+      requestId: string;
+      toolName: string;
+      toolUseId: string;
+      input: string;
+    };
+  }
+  | {
+    type: 'ask-user-question:request';
+    data: {
+      requestId: string;
+      questions: AskUserQuestionInput['questions'];
+      previewFormat: 'html' | 'markdown';
+    };
+  };
+
+export type ExternalConfigSource =
+  | 'runtime-config'
+  | 'message-snapshot'
+  | 'legacy-model-set'
+  | 'legacy-permission-mode-set'
+  | 'legacy-reasoning-effort-set'
+  | 'desktop'
+  | 'im-sync'
+  | 'cron-sync'
+  | 'adopt-sync';
+
+export interface ExternalConfigUpdateResult {
+  success: boolean;
+  runtime: RuntimeType;
+  status: 'applied' | 'queued' | 'noop';
+  warnings: string[];
+  error?: string;
+}
+
+export interface ExternalConfigApplyResult {
+  warnings: string[];
+  error?: string;
+}
+
+export interface ExternalQueuedMessageOperation {
+  kind: 'message';
+  queueId: string;
+  text: string;
+  images?: ImagePayload[];
+  context: ExternalSendContext;
+  runtimeConfig: ExternalRuntimeConfigSnapshot;
+}
+
+export interface ExternalQueuedConfigOperation {
+  kind: 'config';
+  opId: string;
+  patch: ExternalRuntimeConfigPatch;
+  source: ExternalConfigSource;
+}
+
+export type ExternalTurnOperation = ExternalQueuedMessageOperation | ExternalQueuedConfigOperation;
+
+export interface PendingExternalSessionBirth {
+  sessionId: string;
+  workspacePath: string;
+  scenario: InteractionScenario;
+  runtimeSessionId?: string;
+}
+
+export type ExternalMetadataTurnPath = 'fresh-start' | 'resume-start' | 'active-process';
+
+export type ExternalTurnUsage = MessageUsage & { semantics?: 'delta' | 'running_total' };
+
+export interface ExternalAssistantSnapshotState {
+  contentBlocks: readonly PersistContentBlock[];
+  pendingTextBuffer: string;
+  pendingThinkingBlock: PersistContentBlock | null;
+  pendingToolInputs: ReadonlyMap<string, { name: string; inputJson: string }>;
+  childToolToParent: ReadonlyMap<string, string>;
+  pendingSubagentCallsByParent: ReadonlyMap<string, readonly PersistSubagentCall[]>;
+  currentAssistantText: string;
+}
+
+export interface ExternalSendContext {
+  sessionId: string;
+  workspacePath: string;
+  scenario: InteractionScenario;
+  /** Per-turn analytics attribution. Does not alter prompt assembly or session materialization. */
+  analyticsSource?: TurnAnalyticsSource;
+  permissionMode?: string;
+  model?: string;
+  /** Raw effort setting from caller. PRESENT = authoritative; absent = unmanaged desktop state. */
+  reasoningEffort?: string;
+  /** Pattern B — IM trace ID. */
+  requestId?: string;
+  /** PRD 0.2.18 Session Inbox metadata for cross-session messages. */
+  inboxMeta?: import('../../inbox/types').InboxTurnMeta;
+}
+
+export interface ExternalSystemInitPayload {
+  info: SystemInitInfo;
+  sessionId: string;
+  prewarm?: boolean;
+  runtime: RuntimeType;
+}
+
+export interface ExternalTurnPersistenceSnapshot {
+  inboxMeta: import('../../inbox/types').InboxTurnMeta | null;
+  attachmentHints: string[];
+  contextUsage: import('../../../shared/types/context-usage').ContextUsage | null;
+  contentBlocks: PersistContentBlock[];
+  assistantText: string;
+  usage: ExternalTurnUsage | null;
+  startedAt: number;
+  analyticsSource: TurnAnalyticsSource;
+}

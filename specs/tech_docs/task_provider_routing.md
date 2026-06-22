@@ -167,9 +167,11 @@ PRD 0.2.9 在此之上：
 ## 12. 相关文件
 
 - `src-tauri/src/task.rs` — Task 持久层 + validation
-- `src-tauri/src/cron_task.rs` — CronTask 持久层 + execute_task_directly
+- `src-tauri/src/cron_task.rs` — CronTask facade / public re-exports
+- `src-tauri/src/cron_task/store.rs` — CronTask 持久层
+- `src-tauri/src/cron_task/execution.rs` — `execute_task_directly`
 - `src-tauri/src/management_api.rs` — ensure_cron_for_task / /api/cron/create
-- `src-tauri/src/sidecar.rs` — CronExecutePayload struct
+- `src-tauri/src/sidecar/cron_execute.rs` — `CronExecutePayload` / Rust → Node `/cron/execute` bridge
 - `src/server/index.ts` — /cron/execute(-sync) handlers + resolveCronProviderRouting helper
 - `src/server/utils/admin-config.ts` — resolveProviderEnv（sidecar 唯一 resolver）
 - `src/server/agent-session.ts` — enqueueUserMessage 'subscription' sentinel 语义

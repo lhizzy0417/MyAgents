@@ -1,0 +1,388 @@
+import { findQueueLocation, moveQueueIndexToFront } from '../session-core/turn-queue';
+import type {
+  InFlightMetadata,
+  MessageWire,
+  MessageQueueItem,
+  TurnAdmissionTicket,
+  TurnBoundaryQueueItem,
+} from './types';
+
+type PendingMidTurnQueueItem = {
+  queueId: string;
+  userMessage: Pick<MessageWire, 'id' | 'role' | 'content' | 'timestamp' | 'attachments'>;
+  sourceItem: MessageQueueItem;
+};
+
+const messageQueue: MessageQueueItem[] = [];
+const pendingMidTurnQueue: PendingMidTurnQueueItem[] = [];
+const turnBoundaryQueue: TurnBoundaryQueueItem[] = [];
+let turnAdmissionTicket: TurnAdmissionTicket | null = null;
+let committingTurnAdmissionQueueId: string | null = null;
+let promotedItemInFlight = false;
+let inFlightToCliId: string | null = null;
+let forceSurfaceInFlightId: string | null = null;
+let awaitingAssistantStartAckQueueId: string | null = null;
+let interruptingInFlightQueueId: string | null = null;
+let inFlightMetadata: InFlightMetadata | null = null;
+let forceTurnBoundaryQueueId: string | null = null;
+
+export const queueState = {
+  messageQueue,
+  pendingMidTurnQueue,
+  turnBoundaryQueue,
+  get turnAdmissionTicket(): TurnAdmissionTicket | null {
+    return turnAdmissionTicket;
+  },
+  set turnAdmissionTicket(ticket: TurnAdmissionTicket | null) {
+    turnAdmissionTicket = ticket;
+  },
+  get committingTurnAdmissionQueueId(): string | null {
+    return committingTurnAdmissionQueueId;
+  },
+  set committingTurnAdmissionQueueId(queueId: string | null) {
+    committingTurnAdmissionQueueId = queueId;
+  },
+  get promotedItemInFlight(): boolean {
+    return promotedItemInFlight;
+  },
+  set promotedItemInFlight(value: boolean) {
+    promotedItemInFlight = value;
+  },
+  get inFlightToCliId(): string | null {
+    return inFlightToCliId;
+  },
+  set inFlightToCliId(queueId: string | null) {
+    inFlightToCliId = queueId;
+  },
+  get forceSurfaceInFlightId(): string | null {
+    return forceSurfaceInFlightId;
+  },
+  set forceSurfaceInFlightId(queueId: string | null) {
+    forceSurfaceInFlightId = queueId;
+  },
+  get awaitingAssistantStartAckQueueId(): string | null {
+    return awaitingAssistantStartAckQueueId;
+  },
+  set awaitingAssistantStartAckQueueId(queueId: string | null) {
+    awaitingAssistantStartAckQueueId = queueId;
+  },
+  get interruptingInFlightQueueId(): string | null {
+    return interruptingInFlightQueueId;
+  },
+  set interruptingInFlightQueueId(queueId: string | null) {
+    interruptingInFlightQueueId = queueId;
+  },
+  get inFlightMetadata(): InFlightMetadata | null {
+    return inFlightMetadata;
+  },
+  set inFlightMetadata(metadata: InFlightMetadata | null) {
+    inFlightMetadata = metadata;
+  },
+  get forceTurnBoundaryQueueId(): string | null {
+    return forceTurnBoundaryQueueId;
+  },
+  set forceTurnBoundaryQueueId(queueId: string | null) {
+    forceTurnBoundaryQueueId = queueId;
+  },
+};
+
+export function dequeueMessage(): MessageQueueItem | undefined {
+  return messageQueue.shift();
+}
+
+export function pushMessage(item: MessageQueueItem): void {
+  messageQueue.push(item);
+}
+
+export function unshiftMessage(item: MessageQueueItem): void {
+  messageQueue.unshift(item);
+}
+
+export function getMessageQueue(): readonly MessageQueueItem[] {
+  return messageQueue;
+}
+
+export function getMutableMessageQueueForOwner(): MessageQueueItem[] {
+  return messageQueue;
+}
+
+export function getPendingMidTurnQueue(): readonly PendingMidTurnQueueItem[] {
+  return pendingMidTurnQueue;
+}
+
+export function getMutablePendingMidTurnQueueForOwner(): PendingMidTurnQueueItem[] {
+  return pendingMidTurnQueue;
+}
+
+export function pushPendingMidTurn(item: PendingMidTurnQueueItem): void {
+  pendingMidTurnQueue.push(item);
+}
+
+export function shiftPendingMidTurn(): PendingMidTurnQueueItem | undefined {
+  return pendingMidTurnQueue.shift();
+}
+
+export function clearPendingMidTurn(): PendingMidTurnQueueItem[] {
+  return pendingMidTurnQueue.splice(0, pendingMidTurnQueue.length);
+}
+
+export function rescuePendingMidTurnToMessageFront(): number {
+  const count = pendingMidTurnQueue.length;
+  for (let i = pendingMidTurnQueue.length - 1; i >= 0; i--) {
+    messageQueue.unshift(pendingMidTurnQueue[i].sourceItem);
+  }
+  pendingMidTurnQueue.length = 0;
+  return count;
+}
+
+export function getTurnBoundaryQueue(): readonly TurnBoundaryQueueItem[] {
+  return turnBoundaryQueue;
+}
+
+export function getMutableTurnBoundaryQueueForOwner(): TurnBoundaryQueueItem[] {
+  return turnBoundaryQueue;
+}
+
+export function pushTurnBoundary(item: TurnBoundaryQueueItem): void {
+  turnBoundaryQueue.push(item);
+}
+
+export function spliceTurnBoundary(index: number, deleteCount: number): TurnBoundaryQueueItem[] {
+  return turnBoundaryQueue.splice(index, deleteCount);
+}
+
+export function setForceTurnBoundaryQueueId(queueId: string | null): void {
+  forceTurnBoundaryQueueId = queueId;
+}
+
+export function getForceTurnBoundaryQueueId(): string | null {
+  return forceTurnBoundaryQueueId;
+}
+
+export function releaseTurnAdmissionTicket(queueId?: string): void {
+  if (!turnAdmissionTicket) return;
+  if (queueId && turnAdmissionTicket.queueId !== queueId) return;
+  turnAdmissionTicket = null;
+}
+
+export function setTurnAdmissionTicket(ticket: TurnAdmissionTicket | null): void {
+  turnAdmissionTicket = ticket;
+}
+
+export function getTurnAdmissionTicket(): TurnAdmissionTicket | null {
+  return turnAdmissionTicket;
+}
+
+export function setCommittingTurnAdmissionQueueId(queueId: string | null): void {
+  committingTurnAdmissionQueueId = queueId;
+}
+
+export function getCommittingTurnAdmissionQueueId(): string | null {
+  return committingTurnAdmissionQueueId;
+}
+
+export function queuedWorkCount(): number {
+  return messageQueue.length + pendingMidTurnQueue.length + turnBoundaryQueue.length + (inFlightToCliId !== null ? 1 : 0);
+}
+
+export function hasQueuedOrInFlightWork(excludeAdmissionTicketId?: string): boolean {
+  const hasAdmissionTicket = turnAdmissionTicket !== null
+    && turnAdmissionTicket.queueId !== excludeAdmissionTicketId;
+  return messageQueue.length > 0
+    || pendingMidTurnQueue.length > 0
+    || turnBoundaryQueue.length > 0
+    || inFlightToCliId !== null
+    || hasAdmissionTicket;
+}
+
+export function isPromotedItemInFlight(): boolean {
+  return promotedItemInFlight;
+}
+
+export function setPromotedItemInFlight(value: boolean): void {
+  promotedItemInFlight = value;
+}
+
+export function getInFlightQueueId(): string | null {
+  return inFlightToCliId;
+}
+
+export function hasInFlightQueueItem(): boolean {
+  return inFlightToCliId !== null;
+}
+
+export function getInFlightMetadata(): InFlightMetadata | null {
+  return inFlightMetadata;
+}
+
+export function setInFlightQueueItem(queueId: string | null, metadata: InFlightMetadata | null): void {
+  inFlightToCliId = queueId;
+  inFlightMetadata = metadata;
+  awaitingAssistantStartAckQueueId = null;
+}
+
+export function clearInFlightSlot(): void {
+  inFlightToCliId = null;
+  inFlightMetadata = null;
+  forceSurfaceInFlightId = null;
+  awaitingAssistantStartAckQueueId = null;
+}
+
+export function getForceSurfaceInFlightId(): string | null {
+  return forceSurfaceInFlightId;
+}
+
+export function setForceSurfaceInFlightId(queueId: string | null): void {
+  forceSurfaceInFlightId = queueId;
+}
+
+export function getAwaitingAssistantStartAckQueueId(): string | null {
+  return awaitingAssistantStartAckQueueId;
+}
+
+export function setAwaitingAssistantStartAckQueueId(queueId: string | null): void {
+  awaitingAssistantStartAckQueueId = queueId;
+}
+
+export function getInterruptingInFlightQueueId(): string | null {
+  return interruptingInFlightQueueId;
+}
+
+export function setInterruptingInFlightQueueId(queueId: string | null): void {
+  interruptingInFlightQueueId = queueId;
+}
+
+export function findQueuedItemLocation(queueId: string): ReturnType<typeof findQueueLocation> {
+  return findQueueLocation({
+    messageIndex: messageQueue.findIndex(item => item.id === queueId),
+    pendingMidTurnIndex: pendingMidTurnQueue.findIndex(p => p.queueId === queueId),
+    turnBoundaryIndex: turnBoundaryQueue.findIndex(item => item.queueId === queueId),
+    inFlight: inFlightToCliId === queueId,
+  });
+}
+
+export function moveQueuedItemToFront(queueId: string): {
+  found: boolean;
+  isInFlight: boolean;
+} {
+  const mqIdx = messageQueue.findIndex(item => item.id === queueId);
+  const pmIdx = mqIdx === -1
+    ? pendingMidTurnQueue.findIndex(p => p.queueId === queueId)
+    : -1;
+  const tbIdx = mqIdx === -1 && pmIdx === -1
+    ? turnBoundaryQueue.findIndex(item => item.queueId === queueId)
+    : -1;
+  const isInFlight = mqIdx === -1 && pmIdx === -1 && tbIdx === -1 && inFlightToCliId === queueId;
+
+  if (mqIdx >= 0) return { found: moveQueueIndexToFront(messageQueue, mqIdx), isInFlight: false };
+  if (pmIdx >= 0) return { found: moveQueueIndexToFront(pendingMidTurnQueue, pmIdx), isInFlight: false };
+  if (tbIdx >= 0) return { found: moveQueueIndexToFront(turnBoundaryQueue, tbIdx), isInFlight: false };
+  return { found: isInFlight, isInFlight };
+}
+
+export function removeQueuedItemByQueueId(queueId: string): {
+  location: 'message' | 'pending-mid-turn' | 'turn-boundary' | 'in-flight' | null;
+  item?: MessageQueueItem;
+  pending?: PendingMidTurnQueueItem;
+  turnBoundary?: TurnBoundaryQueueItem;
+} {
+  const location = findQueuedItemLocation(queueId);
+  if (!location) return { location: null };
+  switch (location.location) {
+    case 'message': {
+      const [item] = messageQueue.splice(location.index, 1);
+      return { location: 'message', item };
+    }
+    case 'pending-mid-turn': {
+      const [pending] = pendingMidTurnQueue.splice(location.index, 1);
+      return { location: 'pending-mid-turn', pending };
+    }
+    case 'turn-boundary': {
+      const [turnBoundary] = turnBoundaryQueue.splice(location.index, 1);
+      return { location: 'turn-boundary', turnBoundary };
+    }
+    case 'in-flight':
+      return { location: 'in-flight' };
+  }
+}
+
+export function removeQueuedItemByRequestId(requestId: string): {
+  location: 'message' | 'pending-mid-turn' | 'turn-boundary' | 'in-flight' | null;
+  item?: MessageQueueItem;
+  pending?: PendingMidTurnQueueItem;
+  turnBoundary?: TurnBoundaryQueueItem;
+} {
+  const qIdx = messageQueue.findIndex(item => item.requestId === requestId);
+  if (qIdx >= 0) {
+    const [item] = messageQueue.splice(qIdx, 1);
+    return { location: 'message', item };
+  }
+  const pmIdx = pendingMidTurnQueue.findIndex(p => p.sourceItem.requestId === requestId);
+  if (pmIdx >= 0) {
+    const [pending] = pendingMidTurnQueue.splice(pmIdx, 1);
+    return { location: 'pending-mid-turn', pending };
+  }
+  const tbIdx = turnBoundaryQueue.findIndex(item => item.requestId === requestId);
+  if (tbIdx >= 0) {
+    const [turnBoundary] = turnBoundaryQueue.splice(tbIdx, 1);
+    return { location: 'turn-boundary', turnBoundary };
+  }
+  if (inFlightMetadata?.requestId === requestId && inFlightToCliId !== null) {
+    return { location: 'in-flight' };
+  }
+  return { location: null };
+}
+
+export function drainQueuedItems(): {
+  messages: MessageQueueItem[];
+  turnBoundary: TurnBoundaryQueueItem[];
+} {
+  const messages = messageQueue.splice(0, messageQueue.length);
+  const turnBoundary = turnBoundaryQueue.splice(0, turnBoundaryQueue.length);
+  return { messages, turnBoundary };
+}
+
+export function getQueueStatus(): Array<{ id: string; messagePreview: string }> {
+  return [
+    ...messageQueue.map(item => ({
+      id: item.id,
+      messagePreview: item.messageText.slice(0, 100),
+    })),
+    ...turnBoundaryQueue.map(item => ({
+      id: item.queueId,
+      messagePreview: item.messageText.slice(0, 100),
+    })),
+  ];
+}
+
+export function snapshotQueue() {
+  return {
+    messageQueue: [...messageQueue],
+    pendingMidTurnQueue: [...pendingMidTurnQueue],
+    turnBoundaryQueue: [...turnBoundaryQueue],
+    turnAdmissionTicket,
+    committingTurnAdmissionQueueId,
+    promotedItemInFlight,
+    inFlightToCliId,
+    forceSurfaceInFlightId,
+    awaitingAssistantStartAckQueueId,
+    interruptingInFlightQueueId,
+    inFlightMetadata,
+    forceTurnBoundaryQueueId,
+  };
+}
+
+export function resetQueueForTest(): void {
+  messageQueue.length = 0;
+  pendingMidTurnQueue.length = 0;
+  turnBoundaryQueue.length = 0;
+  turnAdmissionTicket = null;
+  committingTurnAdmissionQueueId = null;
+  promotedItemInFlight = false;
+  inFlightToCliId = null;
+  forceSurfaceInFlightId = null;
+  awaitingAssistantStartAckQueueId = null;
+  interruptingInFlightQueueId = null;
+  inFlightMetadata = null;
+  forceTurnBoundaryQueueId = null;
+}

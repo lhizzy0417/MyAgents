@@ -1,0 +1,228 @@
+import type { Query, SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
+import type {
+  BackgroundAgentPermissionMode,
+  PermissionMode as SharedPermissionMode,
+} from '../../shared/config-types';
+import type { ToolDisplayPayload } from '../../shared/toolDisplay/filePatch';
+import type { ToolAttachment } from '../../shared/types/tool-attachment';
+import type { ToolInput } from '../../renderer/types/chat';
+import type { SystemInitInfo } from '../../shared/types/system';
+import type { InboxTurnMeta } from '../inbox/types';
+import type { ImagePayload } from '../runtimes/types';
+import type { MessageUsage, SessionSource, TurnAnalyticsSource } from '../types/session';
+import type { MirrorImage } from '../utils/im-mirror';
+import type { ModelAliases } from '../utils/model-aliases';
+
+export type BuiltinSessionState = 'idle' | 'starting' | 'running' | 'error';
+
+export type PermissionMode = SharedPermissionMode | 'custom';
+
+export type ProviderEnv = {
+  /** Provider registry id. Metadata only: not forwarded as an SDK env var. */
+  providerId?: string;
+  /** Provider display name. Analytics metadata only: not forwarded as an SDK env var. */
+  providerName?: string;
+  baseUrl?: string;
+  apiKey?: string;
+  authType?: 'auth_token' | 'api_key' | 'both' | 'auth_token_clear_api_key';
+  apiProtocol?: 'anthropic' | 'openai';
+  maxOutputTokens?: number;
+  maxOutputTokensParamName?: 'max_tokens' | 'max_completion_tokens' | 'max_output_tokens';
+  upstreamFormat?: 'chat_completions' | 'responses';
+  /** Model alias mapping: SDK sub-agents use "sonnet"/"opus"/"haiku" -> actual provider model IDs */
+  modelAliases?: ModelAliases;
+};
+
+export type ToolUseState = {
+  id: string;
+  name: string;
+  input: Record<string, unknown>;
+  streamIndex: number;
+  inputJson?: string;
+  parsedInput?: ToolInput;
+  result?: string;
+  isLoading?: boolean;
+  isError?: boolean;
+  subagentCalls?: SubagentToolCall[];
+  /** Gemini thinking models: opaque signature that must be round-tripped on tool calls */
+  thought_signature?: string;
+  /** Rich-media produced by builtin media tools, normalized into the same attachment channel as Codex runtime. */
+  attachments?: ToolAttachment[];
+  /** Compact display protocol. Large text bodies remain in input/result. */
+  display?: ToolDisplayPayload;
+};
+
+export type SubagentToolCall = {
+  id: string;
+  name: string;
+  input: Record<string, unknown>;
+  streamIndex?: number;
+  inputJson?: string;
+  parsedInput?: ToolInput;
+  result?: string;
+  isLoading?: boolean;
+  isError?: boolean;
+  /** Gemini thinking models: opaque signature that must be round-tripped on tool calls */
+  thought_signature?: string;
+};
+
+export type ContentBlock = {
+  type: 'text' | 'tool_use' | 'thinking' | 'server_tool_use';
+  text?: string;
+  tool?: ToolUseState;
+  thinking?: string;
+  thinkingStartedAt?: number;
+  thinkingDurationMs?: number;
+  thinkingStreamIndex?: number;
+  isComplete?: boolean;
+};
+
+export type MessageWireAttachment = {
+  id: string;
+  name: string;
+  size: number;
+  mimeType: string;
+  savedPath?: string;
+  relativePath?: string;
+  previewUrl?: string;
+  isImage?: boolean;
+};
+
+export type MessageWire = {
+  id: string;
+  role: 'user' | 'assistant';
+  content: string | ContentBlock[];
+  timestamp: string;
+  sdkUuid?: string;
+  attachments?: MessageWireAttachment[];
+  metadata?: {
+    source: SessionSource;
+    sourceId?: string;
+    senderName?: string;
+  };
+  usage?: MessageUsage;
+  toolCount?: number;
+  durationMs?: number;
+};
+
+export type BuiltinRestartReason =
+  | 'mcp'
+  | 'agents'
+  | 'provider'
+  | 'proxy'
+  | 'oauth'
+  | 'model-window'
+  | 'model-aliases'
+  | 'provider-history'
+  | 'plugins'
+  | 'reasoning-effort';
+
+export type QueueDeliveryMode = 'realtime' | 'turn';
+
+export type TurnProviderAnalytics = {
+  provider_name: string | null;
+  api_protocol: 'anthropic' | 'openai' | null;
+  provider_base_url: string | null;
+  provider_api_protocol: 'anthropic' | 'openai' | null;
+};
+
+export type MessageQueueItem = {
+  id: string;
+  message: SDKUserMessage['message'];
+  messageText: string;
+  wasQueued: boolean;
+  deliveryMode?: QueueDeliveryMode;
+  resolve: () => void;
+  attachments?: MessageWire['attachments'];
+  requestId?: string;
+  analyticsSource?: TurnAnalyticsSource;
+  providerAnalytics?: TurnProviderAnalytics;
+  inboxMeta?: InboxTurnMeta;
+  injectedTurnId?: string;
+};
+
+export type TurnBoundaryQueueItem = {
+  queueId: string;
+  ready: boolean;
+  sourceItem?: MessageQueueItem;
+  messageText: string;
+  attachments?: MessageWire['attachments'];
+  requestId?: string;
+  source?: SessionSource;
+  analyticsSource?: TurnAnalyticsSource;
+  mirrorImages?: MirrorImage[];
+};
+
+export type TurnAdmissionTicket = {
+  queueId: string;
+  requestId?: string;
+  createdAt: number;
+};
+
+export type InFlightMetadata = {
+  messageText: string;
+  attachments?: MessageWire['attachments'];
+  requestId?: string;
+  source?: SessionSource;
+  analyticsSource?: TurnAnalyticsSource;
+  mirrorImages?: MirrorImage[];
+};
+
+export type BuiltinTurnUsage = {
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheCreationTokens: number;
+  model?: string;
+  modelUsage?: MessageUsage['modelUsage'];
+};
+
+export type BuiltinInjectedTurnOutcome = {
+  status: 'complete' | 'stopped' | 'error';
+  text: string;
+  assistantMessagePresent: boolean;
+  error?: string;
+};
+
+export type BuiltinLifecycleSnapshot = {
+  querySession: Query | null;
+  isProcessing: boolean;
+  abortRequested: boolean;
+  sessionTerminationPromise: Promise<void> | null;
+  isPreWarming: boolean;
+  preWarmTimer: ReturnType<typeof setTimeout> | null;
+  preWarmFailCount: number;
+  preWarmDisabled: boolean;
+  systemInitInfo: SystemInitInfo | null;
+  sdkControlReady: boolean;
+  hasMessageResolver: boolean;
+};
+
+export type BuiltinConfigSnapshot = {
+  mcpServers: import('../../shared/config-types').McpServerDefinition[] | null;
+  enabledPluginIds: string[] | null;
+  agentDefinitions: Record<string, import('@anthropic-ai/claude-agent-sdk').AgentDefinition> | null;
+  permissionMode: PermissionMode;
+  prePlanPermissionMode: PermissionMode | null;
+  backgroundAgentPermissionMode: BackgroundAgentPermissionMode;
+  model: string | undefined;
+  reasoningEffort: string | undefined;
+  providerEnv: ProviderEnv | undefined;
+  pendingProviderHistoryBoundaryReset: boolean;
+  frozenSdkMcpFingerprint: string;
+  deferredRestartReasons: BuiltinRestartReason[];
+};
+
+export type BuiltinTurnStartContext = {
+  startedAt: number;
+  injectedTurnId?: string;
+  inboxMeta?: InboxTurnMeta;
+  providerAnalytics?: TurnProviderAnalytics;
+  images?: ImagePayload[];
+};
+
+export type TranscriptMessageSequence = {
+  next(): number;
+  reset(value?: number): void;
+  current(): number;
+};

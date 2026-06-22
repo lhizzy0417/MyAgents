@@ -63,23 +63,24 @@ pub fn augmented_path() -> std::ffi::OsString {
     #[allow(unused_mut)]
     let mut parts: Vec<String> = system_path.split(sep).map(|s| s.to_string()).collect();
 
+    append_app_local_runtime_dirs(&mut parts);
+
     #[cfg(not(target_os = "windows"))]
     {
         // Static system directories
         for dir in EXTRA_SEARCH_DIRS {
-            let d = dir.to_string();
-            if !parts.contains(&d) {
-                parts.push(d);
-            }
+            push_path_part(&mut parts, PathBuf::from(*dir));
         }
 
         // User-relative directories (expand $HOME)
         if let Some(home) = dirs::home_dir() {
+            push_path_part(
+                &mut parts,
+                home.join(".myagents").join("npm-global").join("bin"),
+            );
+            push_path_part(&mut parts, home.join(".myagents").join("bin"));
             for rel in USER_RELATIVE_DIRS {
-                let abs = home.join(rel).to_string_lossy().to_string();
-                if !parts.contains(&abs) {
-                    parts.push(abs);
-                }
+                push_path_part(&mut parts, home.join(rel));
             }
         }
 
@@ -87,15 +88,114 @@ pub fn augmented_path() -> std::ffi::OsString {
         // (NVM, fnm, Codex.app, custom PATHs, etc.) that the fixed list above misses.
         if let Some(shell_path) = detect_shell_path() {
             for dir in shell_path.split(':') {
-                let d = dir.to_string();
-                if !d.is_empty() && !parts.contains(&d) {
-                    parts.push(d);
-                }
+                push_path_string(&mut parts, dir.to_string());
             }
         }
     }
 
+    #[cfg(target_os = "windows")]
+    append_windows_runtime_dirs(&mut parts);
+
     std::env::join_paths(parts).unwrap_or_default()
+}
+
+fn normalize_external_path(path: PathBuf) -> PathBuf {
+    #[cfg(target_os = "windows")]
+    {
+        let s = path.to_string_lossy();
+        if let Some(stripped) = s.strip_prefix("\\\\?\\") {
+            return PathBuf::from(stripped);
+        }
+    }
+    path
+}
+
+fn push_path_string(parts: &mut Vec<String>, value: String) {
+    if value.is_empty() {
+        return;
+    }
+    #[cfg(target_os = "windows")]
+    let exists = parts.iter().any(|p| p.eq_ignore_ascii_case(&value));
+    #[cfg(not(target_os = "windows"))]
+    let exists = parts.iter().any(|p| p == &value);
+    if !exists {
+        parts.push(value);
+    }
+}
+
+fn push_path_part(parts: &mut Vec<String>, path: PathBuf) {
+    let normalized = normalize_external_path(path);
+    push_path_string(parts, normalized.to_string_lossy().to_string());
+}
+
+fn append_app_local_runtime_dirs(parts: &mut Vec<String>) {
+    let Ok(exe_path) = std::env::current_exe() else {
+        return;
+    };
+    let Some(exe_dir) = exe_path.parent() else {
+        return;
+    };
+
+    #[cfg(target_os = "macos")]
+    {
+        if let Some(contents_dir) = exe_dir.parent() {
+            push_path_part(
+                parts,
+                contents_dir.join("Resources").join("nodejs").join("bin"),
+            );
+        }
+        push_path_part(parts, exe_dir.join("nodejs").join("bin"));
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        push_path_part(parts, exe_dir.join("resources").join("nodejs"));
+        push_path_part(parts, exe_dir.join("nodejs"));
+    }
+
+    #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
+    {
+        push_path_part(parts, exe_dir.join("resources").join("nodejs").join("bin"));
+        push_path_part(parts, exe_dir.join("nodejs").join("bin"));
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn push_env_dir(parts: &mut Vec<String>, key: &str, rel: &[&str]) {
+    if let Some(value) = std::env::var_os(key) {
+        let mut path = PathBuf::from(value);
+        for segment in rel {
+            path.push(segment);
+        }
+        push_path_part(parts, path);
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn append_windows_runtime_dirs(parts: &mut Vec<String>) {
+    if let Some(home) = dirs::home_dir() {
+        push_path_part(parts, home.join(".myagents").join("npm-global"));
+        push_path_part(parts, home.join(".myagents").join("bin"));
+        push_path_part(parts, home.join(".bun").join("bin"));
+        push_path_part(parts, home.join("AppData").join("Roaming").join("npm"));
+    }
+
+    push_env_dir(parts, "LOCALAPPDATA", &["MyAgents", "nodejs"]);
+    push_env_dir(parts, "LOCALAPPDATA", &["Volta", "bin"]);
+    push_env_dir(parts, "LOCALAPPDATA", &["bun", "bin"]);
+    push_env_dir(parts, "LOCALAPPDATA", &["Programs", "Git", "cmd"]);
+    push_env_dir(parts, "APPDATA", &["npm"]);
+    push_env_dir(parts, "PROGRAMFILES", &["nodejs"]);
+    push_env_dir(parts, "PROGRAMFILES", &["Git", "cmd"]);
+    push_env_dir(parts, "PROGRAMFILES(X86)", &["nodejs"]);
+    push_env_dir(parts, "PROGRAMFILES(X86)", &["Git", "cmd"]);
+
+    if let Some(nvm_symlink) = std::env::var_os("NVM_SYMLINK") {
+        push_path_part(parts, PathBuf::from(nvm_symlink));
+    }
+    if let Some(fnm_path) = std::env::var_os("FNM_MULTISHELL_PATH") {
+        push_path_part(parts, PathBuf::from(fnm_path));
+    }
 }
 
 /// Detect the user's full shell PATH by spawning an interactive login shell.

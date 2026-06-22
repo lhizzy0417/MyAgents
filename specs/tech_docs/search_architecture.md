@@ -245,10 +245,10 @@ snippet 构建常见 "取匹配位置前后各 N 字符" 的近似切片。裸 `
 | 入口 | 文件 | 触发路径 |
 |------|------|---------|
 | **Session 搜索 Overlay** | `TaskCenterOverlay.tsx` | Launcher 搜索按钮 → `initialMode='search'` 自动聚焦输入框 |
-| **文件搜索模式** | `DirectoryPanel.tsx` | 侧边栏搜索按钮切换 mode → 用户输入 query → `searchWorkspaceFiles` 立即返回 → 后台 `refreshWorkspaceFileIndex` → 有变化时重搜 |
+| **文件搜索模式** | `components/DirectoryPanel.tsx` facade → `components/directory-panel/DirectoryPanel.tsx` + `hooks/useDirectorySearch.ts` | 侧边栏搜索按钮切换 mode → 用户输入 query → `searchWorkspaceFiles` 立即返回 → 后台 `refreshWorkspaceFileIndex` → 有变化时重搜 |
 | **结果项** | `search/SessionSearchItem.tsx`, `search/FileSearchResults.tsx` | 渲染 hit，点击跳转 session / 预览文件 / 在文件目录中展示 |
-| **文件跳转定位行** | `DirectoryPanel.tsx` + `FilePreviewModal.tsx` + `MonacoEditor.tsx` | `FileSearchResults` 触发 `FilePreviewFocusTarget` 事件，已打开 editor 也会重新 `revealLineInCenter()`；`initialLineNumber` 仅保留为兼容字段 |
-| **文件树定位** | `DirectoryPanel.tsx` + `WorkspaceTreeViewport.tsx` | 搜索结果 path-based reveal，逐层展开祖先目录，通过 Virtuoso `scrollToIndex` 滚动并消费 `revealRequest` |
+| **文件跳转定位行** | `components/directory-panel/DirectoryPanel.tsx` + `FilePreviewModal.tsx` + `MonacoEditor.tsx` | `FileSearchResults` 触发 `FilePreviewFocusTarget` 事件，已打开 editor 也会重新 `revealLineInCenter()`；`initialLineNumber` 仅保留为兼容字段 |
+| **文件树定位** | `components/directory-panel/DirectoryPanel.tsx` + `workspace-tree/WorkspaceTreeViewport.tsx` | 搜索结果 path-based reveal，逐层展开祖先目录，通过 Virtuoso `scrollToIndex` 滚动并消费 `revealRequest` |
 | **高亮渲染** | `search/SearchHighlight.tsx` | 消费 `[start, end][]` UTF-16 offsets |
 
 ## 工作区文件搜索结果导航

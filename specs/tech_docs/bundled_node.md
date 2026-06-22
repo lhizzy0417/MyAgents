@@ -126,9 +126,9 @@ v0.2.0 之前这些步骤用 `bun build` + `bun install` — 完全切到 Node.j
 
 ## 运行时检测
 
-### Rust 侧 (`sidecar.rs` / `im/bridge.rs`)
+### Rust 侧 (`sidecar/spawn.rs` / `sidecar/session_lifecycle.rs` / `im/bridge.rs`)
 
-通过 `find_node_executable()` 按 platform triple 定位 bundled Node.js；spawn `.ts` 脚本时自动注入 `--import tsx/esm`。
+`sidecar.rs` 是 facade；Node 定位与路径 normalize 在 `src-tauri/src/sidecar/spawn.rs`，session/global sidecar spawn owner 在 `sidecar/session_lifecycle.rs` / `sidecar/instances.rs`，Plugin Bridge spawn 在 `src-tauri/src/im/bridge.rs`。这些路径按 platform triple 定位 bundled Node.js；spawn `.ts` 脚本时自动注入 `--import tsx/esm`。
 
 详见 `specs/ARCHITECTURE.md §Node.js v24 打包策略`。
 

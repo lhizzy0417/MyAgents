@@ -187,11 +187,11 @@ Per-Message Task:
  ↓
 2. 获取 global semaphore（GLOBAL_CONCURRENCY = 5）
  ↓
-3. 短暂锁 router（ensure_sidecar + record_response）
+3. 短暂锁 router（ensure sidecar/consumer + enqueue request）
  ↓
-4. SSE 流式读取 AI 响应（stream_to_telegram）
+4. `/api/im/events` consumer 按 requestId 接收事件并由 ReplyRouter 渲染回复
  ↓
-5. 重放缓冲消息（同一 peer lock 内）
+5. Sidecar 不可用时缓冲入站消息；恢复后重新入队，回复仍按 requestId 归属
 ```
 
 **命令分发（无需 Sidecar I/O）**：
@@ -206,7 +206,7 @@ Per-Message Task:
 | `/provider [id]` | 显示/切换 AI 供应商 |
 | `/status` | 显示 Session 信息 |
 
-**普通消息处理（SSE 流式）**：
+**普通消息处理（IM Pipeline v2：enqueue + event bus）**：
 
 ```
 收到普通消息
@@ -216,11 +216,16 @@ Per-Message Task:
  ├── ensure_sidecar()：获取/创建 Sidecar
  ├── 若新 Sidecar → 同步 AI 配置（model + MCP servers）
  │
- ├── POST /api/im/chat → SSE 流（含 botName 用于系统提示词）
- │ ├── "partial" 事件 → 节流编辑消息（≥1s 间隔，截断 4000 字符）
- │ ├── "block-end" 事件 → 定稿（>4096 字符则分片发送）
- │ ├── "complete" 事件 → 返回 sessionId
- │ └── "error" 事件 → 删除 draft，发送错误消息
+ ├── ensure_im_consumer()：每个 peer_session 保持一个 /api/im/events long-poll SSE consumer
+ ├── ReplyRouter 预注册 requestId → draft/reply slot
+ ├── POST /api/im/enqueue → 同步 ACK（含 requestId、runtime/config、群聊上下文）
+ │ └── Node Sidecar 通过 SessionEngine enqueue 到 builtin/external runtime，立即返回 accepted
+ │
+ ├── /api/im/events 推送带 requestId 的事件
+ │ ├── "partial" 事件 → ReplyRouter 节流编辑消息（≥1s 间隔，截断平台限制）
+ │ ├── "block-end" 事件 → 定稿（超长则分片发送）
+ │ ├── "complete" 事件 → 返回 sessionId，slot terminal
+ │ └── "error" / "cancelled" 事件 → 删除 draft，发送错误/取消反馈
  │
  ├── 清除 ACK：setMessageReaction("")
  ├── 更新 Session 状态：record_response(session_key, sessionId)
@@ -330,33 +335,30 @@ pub struct MessageBuffer {
 }
 ```
 
-Sidecar 不可用时消息进入缓冲队列，恢复后在同一 peer lock 内按序重放。
+Sidecar 不可用时入站消息进入缓冲队列；恢复后由 peer lock 保护入队顺序，回复生命周期仍由 `/api/im/events` 的 requestId 事件归属，而不是依赖同一 SSE 流内重放。
 
-### 2.9 Draft Stream（流式输出到 Telegram）
+### 2.9 Draft / Reply 渲染（`/api/im/events` → ReplyRouter）
 
-已实现的 SSE 流式输出机制：
+当前实现是 Sidecar 事件总线 + Rust consumer：
 
 ```
-Rust 调用 Node /api/im/chat (SSE stream)
+Rust ImEventConsumer 连接 Node /api/im/events?since=<seq>
  │
- ├── 收到 "partial" 事件
- │ ├── 首次 → sendMessage() 创建 draft
- │ └── 后续 → editMessageText(draft_id, text)
- │ └── 节流：距上次编辑 ≥ 1s
- │ └── 截断：最多 4000 字符
+ ├── 收到 { requestId, type:"partial" }
+ │ └── ReplyRouter 找到 requestId slot，创建/编辑 draft（节流 + 平台长度限制）
  │
- ├── 收到 "block-end" 事件
- │ ├── 文本 ≤ 4096 → editMessageText 定稿
- │ └── 文本 > 4096 → deleteMessage(draft) → 分片发送
+ ├── 收到 { requestId, type:"block-end" }
+ │ ├── 文本在平台限制内 → editMessageText / finalize_message 定稿
+ │ └── 文本超限 → delete draft → 分片发送
  │
- ├── 收到 "complete" 事件
- │ └── 返回 sessionId，流结束
+ ├── 收到 { requestId, type:"complete" }
+ │ └── terminal outcome 携带 sessionId，移除 slot，record_response
  │
- └── 收到 "error" 事件
- └── deleteMessage(draft) → sendMessage(错误信息)
+ └── 收到 { requestId, type:"error"|"cancelled" }
+   └── delete draft / send error or cancelled feedback，移除 slot
 ```
 
-**多 Block 支持**：AI 回复可包含多个 text block，每个 block 独立创建/编辑 draft 消息。
+`ImEventConsumer` 拥有 SSE reconnect lifecycle，使用 `since=<lastSeq>` 恢复 ring-buffered events；`ReplyRouter` 拥有每个 requestId 的 draft/message slot。多 block 回复继续按 block 独立创建/编辑/定稿。
 
 ### 2.10 Tauri 事件
 
@@ -371,16 +373,16 @@ Rust 调用 Node /api/im/chat (SSE stream)
 #### 数据流
 
 ```
-canUseTool() 阻塞 → checkToolPermission() 注入 imStreamCallback('permission-request')
- → SSE 流发出 permission-request 事件
- → Rust stream_to_im() 解析 → adapter.send_approval_card()
+canUseTool() 阻塞 → checkToolPermission() 通过 IM event bus 发出 permission-request
+ → /api/im/events consumer 收到带 requestId 的事件
+ → ReplyRouter / adapter.send_approval_card()
  → 存储 PendingApproval{request_id, sidecar_port, chat_id, card_message_id}
- → SSE 流自然暂停（canUseTool 在等 Promise）
+ → runtime turn 自然暂停（canUseTool 在等 Promise）
 
 --- 用户点击按钮 / 回复文本 ---
 
  → approval_tx 通道 → POST /api/im/permission-response
- → handlePermissionResponse() 解除 Promise → SSE 流恢复
+ → handlePermissionResponse() 解除 Promise → runtime turn 恢复，后续回复事件继续从 /api/im/events 到达
  → 更新卡片/消息为"已允许"或"已拒绝"
 ```
 
@@ -468,7 +470,7 @@ SessionRouter → Sidecar(AI) 社区 IM 平台 (QQ/Matrix/…)
 1. 社区插件收到消息 → 调 `withReplyDispatcher({ run })` 或 `dispatchReplyFromConfig()`
 2. compat-runtime 拦截 → 提取 ctx 字段 → POST `/api/im-bridge/message` → Rust
 3. Rust 查 `BRIDGE_SENDERS` registry → `mpsc::Sender<ImMessage>` → 标准消息处理循环
-4. SessionRouter → ensure_sidecar → AI Sidecar → SSE 流式回复
+4. SessionRouter → ensure sidecar/consumer → `/api/im/enqueue` → `/api/im/events` → ReplyRouter/BridgeAdapter 回复
 
 **出站**（AI → 社区平台）：
 1. Rust `BridgeAdapter::send_message()` → POST `/send-text` 到 Bridge 进程
@@ -570,7 +572,7 @@ let group_name = group_permissions // 1. 用户在 UI 配置的群名
 
 #### 群聊 AI Prompt 模板
 
-Rust 构建 `GroupStreamContext` 后，Sidecar `/api/im/chat` 端点组装最终 prompt：
+Rust 构建 `GroupStreamContext` 后，Sidecar `/api/im/enqueue` 端点组装最终 prompt：
 
 ```
 [群聊信息] ← 仅 isFirstGroupTurn
@@ -620,116 +622,54 @@ pub struct ImMessage {
 
 ```
 src/renderer/components/ImSettings/
-├── ImSettings.tsx # 路由容器（list/detail/wizard/platform 多视图）
-├── ImBotList.tsx # Bot 列表页
-├── ImBotDetail.tsx # Bot 详情/配置页
-├── ImBotWizard.tsx # 2 步创建向导（内置平台）
-├── PlatformSelect.tsx # 平台选择页（内置 + 社区插件）
-├── OpenClawWizard.tsx # OpenClaw 社区插件安装/配置向导
+├── index.ts # re-export BotPlatformRegistry
+├── BotPlatformRegistry.tsx # Settings「聊天机器人 Bot」页：内置/插件平台卡、插件安装/更新/卸载、接入指南
+├── promotedPlugins.ts # 推荐 OpenClaw 插件列表
 ├── assets/
-│ ├── telegram.png # Telegram 平台图标
-│ └── telegram_bot_add.png # BotFather 教程截图
+│ ├── telegram.png / dingtalk.svg / qqbot.svg / weixin.svg # 平台图标
+│ └── Bot*.png / *_step*.png # 平台接入指南图片
 └── components/
- ├── BotTokenInput.tsx # Token 输入（密码型 + 验证状态）
- ├── BotStatusPanel.tsx # 运行状态单行面板
- ├── BindQrPanel.tsx # QR 码绑定面板
- ├── WhitelistManager.tsx # 白名单管理（添加/删除 + 药丸标签）
- ├── PermissionModeSelect.tsx # 权限模式单选卡片
- ├── AiConfigCard.tsx # 供应商 + 模型选择
- └── McpToolsCard.tsx # MCP 工具复选列表
+  ├── BotTokenInput.tsx / FeishuCredentialInput.tsx / DingtalkCredentialInput.tsx
+  ├── BindQrPanel.tsx / BindCodePanel.tsx / BotStatusPanel.tsx
+  ├── WhitelistManager.tsx / GroupPermissionList.tsx
+  ├── PermissionModeSelect.tsx / AiConfigCard.tsx / McpToolsCard.tsx
+  └── HeartbeatConfigCard.tsx
+
+src/renderer/components/AgentSettings/channels/
+├── ChannelWizard.tsx # per-Agent Channel 创建/编辑向导，复用 ImSettings/components
 ```
 
-### 3.2 路由模式（ImSettings.tsx）
+### 3.2 设置页入口与 Channel 向导
 
-```typescript
-type View =
- | { type: 'list' }
- | { type: 'detail'; botId: string }
- | { type: 'wizard' };
-```
+当前没有独立 `ImSettings.tsx` 路由容器。`pages/settings/SettingsPage.tsx` 在「聊天机器人 Bot」section 直接渲染 `BotPlatformRegistry`，用于展示可接入平台与社区插件；真正的 per-Agent Channel 创建/编辑在 `components/AgentSettings/channels/ChannelWizard.tsx`，它复用 `components/ImSettings/components/*` 的表单控件和平台素材。
 
-无 URL 路由，纯状态驱动的视图切换。
+### 3.3 BotPlatformRegistry
 
-### 3.3 Bot 列表页（ImBotList.tsx）
+`BotPlatformRegistry` 是 Settings 页「聊天机器人 Bot」section 的当前入口：
 
-- **数据源**：`config.imBotConfigs[]` 来自 `useConfig()`
-- **状态轮询**：每 5s 调用 `cmd_im_all_bots_status` 获取所有 Bot 状态
-- **卡片布局**：2 列 grid，每张卡片展示：
- - 平台图标（Telegram PNG icon）
- - Bot 名称（优先 `@username`，fallback 配置名）
- - 运行状态点 + 文本
- - 工作区路径 · 平台类型
- - 启动/停止胶囊按钮
-- **Toggle 操作**：
- - 构建启动参数（provider env、available providers、MCP servers）
- - 调用 `cmd_start_im_bot` / `cmd_stop_im_bot`
- - 乐观更新 `statuses` 状态（stop → 立即标记 stopped，start → 使用返回的 ImBotStatus）
- - 保存 `enabled` 字段
+- 读取 `cmd_list_openclaw_plugins` 展示已安装社区插件。
+- 展示内置 Telegram / Dingtalk 平台卡，以及 `promotedPlugins.ts` 声明的推荐 OpenClaw 插件。
+- 支持插件安装、更新、卸载；更新后调用 `cmd_restart_channels_using_plugin` 重启相关运行中 channel。
+- 展示接入指南图片，不直接创建 per-Agent channel。
 
-### 3.4 创建向导（ImBotWizard.tsx）
+### 3.4 ChannelWizard
 
-**步骤 1：Token 配置**
-- 教程图片 + 步骤说明（如何从 @BotFather 获取 Token）
-- Token 输入 + 验证
-- 重复 Token 检测
-- 保存初始配置（`setupCompleted: false`）
-- 调用 `cmd_start_im_bot` 验证 Token
-- 成功后自动同步 `@username` 为 Bot 名称
+per-Agent Channel 创建/编辑由 `components/AgentSettings/channels/ChannelWizard.tsx` 拥有。它复用 `components/ImSettings/components/*` 的输入组件和素材，负责：
 
-**步骤 2：用户绑定**
-- 轮询 Bot 状态获取 `bindUrl`（3s 间隔）
-- QR 码展示 + 步骤说明
-- 监听 `im:user-bound` 事件自动添加白名单
-- 手动白名单管理
-- 完成/跳过按钮 → 设置 `setupCompleted: true`
+- Telegram / Feishu / Dingtalk / OpenClaw platform credential 表单。
+- `patchAgentConfig` 写入 `agent.channels[]`。
+- `invokeStartAgentChannel` 启动 channel，并查询 `cmd_agent_channel_status`。
+- QR / bind code / whitelist / group permission / heartbeat / permission mode / AI config / MCP tools 等子配置。
 
-**取消**：停止 Bot + 删除配置。
+### 3.5 共享表单组件
 
-### 3.5 详情页（ImBotDetail.tsx）
+`components/ImSettings/components/*` 是 ChannelWizard 与 Bot 平台页共享的表单/状态组件：
 
-**核心 Hooks/Refs**：
-- `useConfig()` → config, providers, apiKeys, projects, refreshConfig
-- `toastRef` → 稳定 toast 引用
-- `isMountedRef` → 异步安全守卫
-- `nameSyncedRef` → 名称一次性同步标记
-- `botConfigRef` → effect 中使用，不触发重新执行
-
-**配置分区**（从上到下）：
-
-| 分区 | 组件 | 说明 |
-|------|------|------|
-| 标题栏 | — | `@username` 或配置名 + 启动/停止按钮 |
-| 运行状态 | BotStatusPanel | 状态点 + 标签 + 运行时间 + 会话数 + 错误 |
-| Telegram Bot | BotTokenInput | Token 输入 + 重复检测 + 验证状态 |
-| 用户绑定 | BindQrPanel + WhitelistManager | QR 码 + 手动管理 |
-| 默认工作区 | CustomSelect | 项目列表 + 文件夹选择 + 运行中自动重启 |
-| 权限模式 | PermissionModeSelect | 行动/规划/自主行动 三选一 |
-| AI 配置 | AiConfigCard | 供应商 + 模型（独立于客户端） |
-| MCP 工具 | McpToolsCard | 全局已启用的 MCP 服务勾选 |
-| 危险操作 | ConfirmDialog | 删除 Bot（二次确认） |
-
-**副作用**：
-- 状态轮询（5s）：更新状态 + 一次性同步 Bot 名称
-- MCP 加载：读取全局 MCP 服务列表
-- 事件监听：`im:user-bound` → 自动添加白名单
-- 工作区变更：若运行中 → 读最新配置 → 重启 Bot
-
-### 3.6 子组件
-
-**BotTokenInput**：
-- 密码输入 + 显示/隐藏切换
-- 验证状态图标（Loader2/Check/AlertCircle）
-- blur/Enter 时触发 onChange 回调
-- 验证成功展示 `@username`
-
-**BotStatusPanel**：
-- 单行紧凑展示：`● 运行中 · 4m · 0 个会话`
-- 仅运行中显示 uptime/sessions
-- 重启次数 > 0 时显示
-- 错误信息 inline truncate
-
-**BindQrPanel**：
-- QR 码 160×160（qrcode 库生成）
+- `BotTokenInput` / `FeishuCredentialInput` / `DingtalkCredentialInput`
+- `BindQrPanel` / `BindCodePanel` / `BotStatusPanel`
+- `WhitelistManager` / `GroupPermissionList`
+- `PermissionModeSelect` / `AiConfigCard` / `McpToolsCard`
+- `HeartbeatConfigCard`
 - Deep link URL + 复制按钮
 - 3 步说明
 - 无白名单用户时显示"推荐"标签
@@ -833,11 +773,15 @@ TelegramAdapter (getUpdates 长轮询)
  ├── ensure_sidecar()
  ├── 若新 Sidecar → 同步 AI config
  │
- ├── POST /api/im/chat (SSE stream)
- │ ├── partial → 编辑 draft（节流 ≥ 1s）
- │ ├── block-end → 定稿（分片如 > 4096）
+ ├── ensure_im_consumer() + ReplyRouter.register(requestId)
+ ├── POST /api/im/enqueue (sync ACK)
+ │ └── Node Sidecar SessionEngine enqueue 到当前 runtime
+ │
+ ├── /api/im/events → ReplyRouter
+ │ ├── partial → 编辑 draft（节流）
+ │ ├── block-end → 定稿（超长分片）
  │ ├── complete → 返回 sessionId
- │ └── error → 发送错误信息
+ │ └── error/cancelled → 发送错误或取消反馈
  │
  ├── 清除 ACK reaction
  ├── 更新 Session + 健康状态
@@ -918,15 +862,19 @@ ImBotList（读取 config.imBotConfigs + 轮询 statuses）
 ```
 src-tauri/src/
 ├── im/
-│ ├── mod.rs # 模块入口 + Commands + 消息处理循环 + Bot 生命周期 + 权限审批
-│ ├── adapter.rs # ImAdapter + ImStreamAdapter trait 定义 + AnyAdapter enum
-│ ├── telegram.rs # TelegramAdapter + MessageCoalescer + Inline Keyboard 审批
-│ ├── feishu.rs # FeishuAdapter + WebSocket + 交互卡片审批 + ACK 机制
-│ ├── dingtalk.rs # DingtalkAdapter + Stream 连接
+│ ├── mod.rs # facade / public re-exports / 少量共享 helper
+│ ├── agent_channel.rs # channel lifecycle、消息入口、ensure sidecar/consumer + enqueue 编排
+│ ├── enqueue.rs # Rust → Node /api/im/enqueue 同步 ACK 请求
+│ ├── event_consumer.rs # /api/im/events SSE consumer、since 恢复、事件分发
+│ ├── reply_router.rs # requestId → draft/reply slot、权限卡与终态归属
+│ ├── state.rs # ManagedAgents / ManagedImBots / runtime config sync / channel state
+│ ├── config_store.rs # Agent/Bot config 读写、auto-start、missing config reporting
+│ ├── commands.rs # Tauri IM/Agent command glue
+│ ├── adapter.rs # ImAdapter trait 定义 + AnyAdapter enum
+│ ├── telegram.rs / feishu.rs / dingtalk.rs # 内置平台适配器
 │ ├── bridge.rs # BridgeAdapter + Plugin Bridge 进程管理 + 插件安装/卸载 + sender registry
-│ ├── health.rs # HealthManager + 状态持久化
-│ ├── router.rs # SessionRouter: peer→Sidecar 映射
-│ ├── buffer.rs # MessageBuffer: 离线消息缓冲 + 磁盘持久化
+│ ├── health.rs / heartbeat.rs / memory_update.rs / runtime_change.rs # 健康、主动 Agent 周期任务、runtime 切换
+│ ├── router.rs / buffer.rs / group_history.rs / handover.rs # peer→session 映射、缓冲、群聊上下文、session handover
 │ └── types.rs # ImConfig, ImMessage, ImPlatform 等共享类型
 ├── management_api.rs # /api/im-bridge/message 端点（Bridge 入站消息路由）
 └── lib.rs # Command 注册
@@ -940,7 +888,7 @@ src/renderer/
 ├── config/configService.ts # IM config CRUD 函数
 ├── config/types.ts # PERMISSION_MODES + ImBotConfig 相关类型
 ├── hooks/useConfig.ts # refreshConfig 函数
-└── pages/Settings.tsx # "聊天机器人" 导航入口
+└── pages/settings/SettingsPage.tsx # "聊天机器人" 导航入口
 ```
 
 ### Plugin Bridge（Node.js 进程）

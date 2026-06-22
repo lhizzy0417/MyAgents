@@ -1,26 +1,33 @@
+import type { ChatQueueResponseMode } from '../../shared/config-types';
+
 /**
  * Pure policy for the external-runtime mid-turn message queue.
  *
- * External runtimes (Codex / Claude Code CLI / Gemini CLI) are TURN-LEVEL: each
- * `sendMessage` starts a NEW turn (Codex `turn/start`); there is no mid-tool-call
- * injection like the builtin SDK's `queued_command`. So a message typed while a turn is
- * running must NOT be sent immediately (that surfaces an out-of-order bubble + silently
- * runs after the turn). Instead it's held in a MyAgents-side queue (a pill) and, at turn
- * end, surfaced as a bubble + sent — mirroring the builtin SDK's queue model. Force-send
- * interrupts the current turn (turn/interrupt) so the same turn-end drain runs it now.
+ * Most external runtimes are turn-level: each `sendMessage` starts a NEW turn,
+ * so a message typed while a turn is running must wait in MyAgents' queue.
+ * Codex app-server is the exception: `turn/steer` can append user input to the
+ * active turn. The policy keeps that as an explicit capability instead of
+ * letting external-session infer protocol details from runtime names.
  *
- * Functional Core / Imperative Shell: these are the two decisions; the shell in
- * external-session.ts owns the queue array + broadcasts.
+ * Functional Core / Imperative Shell: these are the queue decisions; the shell
+ * in external-session.ts owns queue arrays, broadcasts, and runtime calls.
  */
 export type ExternalQueueState = 'idle' | 'running' | 'error';
 
 /**
  * Should a desktop send be DEFERRED into the queue instead of sent immediately?
- * Defer when a turn is running, OR items are already queued (preserve FIFO so a later
- * send can't jump ahead of an earlier still-pending one).
+ * Defer behind existing queued work to preserve FIFO. When a turn is running,
+ * only bypass the queue for realtime mode on a runtime with active-turn steering.
  */
-export function shouldQueueExternalSend(state: ExternalQueueState, queueLength: number): boolean {
-  return state === 'running' || queueLength > 0;
+export function shouldQueueExternalSend(params: {
+  state: ExternalQueueState;
+  queueLength: number;
+  responseMode: ChatQueueResponseMode;
+  canSteerActiveTurn: boolean;
+}): boolean {
+  if (params.queueLength > 0) return true;
+  if (params.state !== 'running') return false;
+  return !(params.responseMode === 'realtime' && params.canSteerActiveTurn);
 }
 
 /**

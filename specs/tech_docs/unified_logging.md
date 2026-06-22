@@ -260,7 +260,7 @@ for (const entry of entries) {
 |----|------|---------|
 | L1 | `sse.ts` SILENT_EVENTS | `chat:message-chunk`、`chat:thinking-delta`、`chat:tool-input-delta`、`chat:content-block-stop`、`chat:message-sdk-uuid`、`chat:log` |
 | L2 | `index.ts` SILENT_PATHS | `/health`、`/api/unified-log`、`/agent/dir`、`/sessions`、`/api/commands`、`/api/agents/enabled`、`/api/git/branch` |
-| L3 | `sidecar.rs` node-out 去重 | Node.js logger 初始化后停止 stdout 捕获（检测 `[Logger] Unified logging initialized`） |
+| L3 | `sidecar/stdio.rs` + `sidecar/session_lifecycle.rs` / `sidecar/instances.rs` node-out 去重 | Node.js logger 初始化后停止 stdout 捕获（检测 `[Logger] Unified logging initialized`） |
 | L4 | `bridge.rs` heartbeat 过滤 | `Heartbeat sent`、`Heartbeat ACK`、`Received op=11` |
 | L5 | `agent-session.ts` SDK message | 摘要替代完整 JSON（`type=assistant model=opus`） |
 

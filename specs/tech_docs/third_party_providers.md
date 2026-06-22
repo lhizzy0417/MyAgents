@@ -168,7 +168,7 @@ if (providerChanged && querySession) {
 
 - **应用层 session 保留**：`sessionId`、`messages` 不变
 - **SDK 层 session 重建**：`querySession` 通过 pre-warm 重新创建
-- **跨回合状态清理**：`streamIndexToToolId`、`toolResultIndexToId`、`childToolToParent` 在 `handleMessageComplete()` 中自动清理
+- **跨回合状态清理**：`streamIndexToToolId`、`toolResultIndexToId`、`childToolToParent` 由 `builtin-session/turn-lifecycle.ts` 的 terminal cleanup 触发清理（`agent-session.ts` 只组装清理回调）
 - **统一中止**：所有需要终止 session 的场景必须使用 `abortPersistentSession()`，它同时唤醒 generator 的 Promise 门控并调用 `interrupt()`
 
 ---

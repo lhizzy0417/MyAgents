@@ -303,6 +303,18 @@ export interface AgentRuntime {
   /** Send a follow-up user message to an active session */
   sendMessage(process: RuntimeProcess, message: string, images?: ResolvedImagePayload[]): Promise<void>;
 
+  /**
+   * Append a user message to the currently active turn instead of starting a
+   * new turn. Only runtimes whose protocol exposes same-turn steering should
+   * implement this; others fall back to MyAgents' turn-boundary queue.
+   */
+  steerMessage?(
+    process: RuntimeProcess,
+    message: string,
+    images?: ResolvedImagePayload[],
+    options?: { clientUserMessageId?: string },
+  ): Promise<void>;
+
   /** Respond to a permission request from the runtime */
   respondPermission(
     process: RuntimeProcess,

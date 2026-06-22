@@ -53,6 +53,7 @@ import { cancellableFetch } from './utils/cancellation';
 import { ensureShellPath } from './utils/shell';
 import { buildCronScope } from './utils/cron-scope';
 import { readLoopbackJson } from './utils/loopback-response';
+import { getCuseDiagnostics } from './utils/cuse-diagnostics';
 
 // Localhost loopback timeout for management / sidecar self-calls.
 // 10s is generous for an in-process Rust handler or a same-process Hono
@@ -310,7 +311,7 @@ export function handleMcpList(): AdminResponse {
  * whole list. Env values are redacted so an AI transcript never leaks API keys
  * (same redaction rule the model-list endpoint already uses).
  */
-export function handleMcpShow(payload: { id?: string }): AdminResponse {
+export async function handleMcpShow(payload: { id?: string }): Promise<AdminResponse> {
   const id = payload.id;
   if (!id) {
     return {
@@ -350,6 +351,10 @@ export function handleMcpShow(payload: { id?: string }): AdminResponse {
     Object.entries(server.env).map(([k, v]) => [k, redactSecret(v)]),
   ) : undefined;
 
+  const cuseDiagnostics = server.command === '__bundled_cuse__'
+    ? await getCuseDiagnostics({ workspacePath, includeR2Latest: false })
+    : undefined;
+
   return {
     success: true,
     data: {
@@ -361,6 +366,7 @@ export function handleMcpShow(payload: { id?: string }): AdminResponse {
       requiresConfig: !!server.requiresConfig,
       websiteUrl: server.websiteUrl,
       command: server.command,
+      resolvedCommand: cuseDiagnostics?.bundled.path,
       args: server.args,
       url: server.url,
       // Headers (for http/sse) and env (for stdio) — redacted values only.
@@ -374,6 +380,7 @@ export function handleMcpShow(payload: { id?: string }): AdminResponse {
         project: projectEnabled,
       },
       workspacePath: workspacePath ?? null,
+      diagnostics: cuseDiagnostics ? { cuse: cuseDiagnostics } : undefined,
     },
   };
 }
@@ -618,21 +625,38 @@ export async function handleMcpTest(payload: { id: string }): Promise<AdminRespo
     return { success: true, data: { id, type: 'builtin' }, hint: 'Built-in MCP validated.' };
   }
 
-  // Bundled cuse (computer-use) binary: resolve via runtime helper and
-  // check the resolved path exists. Skip the generic `which` preflight —
-  // __bundled_cuse__ is a sentinel, not a real PATH lookup. Response
-  // surface deliberately omits the resolved absolute path so the sentinel
-  // mapping never leaks to user-facing UI.
+  // Bundled cuse (computer-use) binary: resolve via runtime helper and skip
+  // the generic `which` preflight because __bundled_cuse__ is a sentinel, not
+  // a real PATH lookup. The diagnostic response intentionally exposes the
+  // resolved bundled path/version so `myagents mcp show/test cuse` can
+  // distinguish the app-owned binary from any stale skill-local cache.
   if (server.command === '__bundled_cuse__') {
-    const { getBundledCusePath } = await import('./utils/runtime');
-    const cusePath = getBundledCusePath();
-    if (!cusePath) {
+    const cuse = await getCuseDiagnostics({
+      workspacePath: getCurrentWorkspacePath(),
+      includeR2Latest: true,
+    });
+    if (!cuse.bundled.path) {
       return {
         success: false,
         error: `cuse 二进制未安装 (platform=${process.platform})。macOS/Windows 构建会自动包含；开发环境请运行 scripts/download_cuse.sh。`,
+        data: { id, type: 'stdio', cuse },
       };
     }
-    return { success: true, data: { id, type: 'stdio' }, hint: 'Bundled cuse validated.' };
+    if (!cuse.bundled.exists || cuse.bundled.error) {
+      return {
+        success: false,
+        error: `Bundled cuse validation failed: ${cuse.bundled.error ?? 'resolved path does not exist'}`,
+        data: { id, type: 'stdio', cuse },
+      };
+    }
+    const warningHint = cuse.warnings.length > 0
+      ? `\nWarnings:\n${cuse.warnings.map(w => `- ${w}`).join('\n')}`
+      : '';
+    return {
+      success: true,
+      data: { id, type: 'stdio', cuse },
+      hint: `Bundled cuse validated: ${cuse.bundled.rawVersion ?? cuse.bundled.version ?? 'version unknown'}.${warningHint}`,
+    };
   }
 
   // SSE/HTTP: test URL reachability
@@ -1363,12 +1387,12 @@ const HELP_TEXTS: Record<string, string> = {
 
 Commands:
   list                     List all MCP servers
-  show <id>                Show one MCP server's config + enable state (env/headers redacted)
+  show <id>                Show one MCP server's config + enable state (env/headers redacted; cuse includes resolved binary diagnostics)
   add                      Add a new MCP server
   remove <id>              Remove a custom MCP server
   enable <id>              Enable an MCP server
   disable <id>             Disable an MCP server
-  test <id>                Validate MCP server connectivity
+  test <id>                Validate MCP server connectivity (cuse also checks resolved binary version)
   env <id> <action>        Manage environment variables
   oauth <action> <id>      Manage OAuth for HTTP/SSE servers
 

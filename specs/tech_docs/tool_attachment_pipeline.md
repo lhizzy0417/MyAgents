@@ -69,11 +69,11 @@
            │   case 'tool_attachment_update':                 │
            │     patch matching pendingId in attachments[]    │
            │     broadcast 'chat:tool-attachment-update'      │
-           │     (saved to disk via same currentContentBlocks)│
+           │     (content state owned by content-blocks.ts)   │
            │                                                  │
            │ persistTurnResult():                             │
            │   await awaitInFlightSaves() ← drains async      │
-           │   JSON.stringify(currentContentBlocks) → 写盘    │
+           │   JSON.stringify(content-blocks snapshot) → 写盘 │
            └──────────────┬───────────────────────────────────┘
                           │ SSE
                           ▼
@@ -216,11 +216,11 @@ undici 自有 `fetch` + `withAbortSignal`，**不是**红线表里的 `cancellab
 1. parseNotification 同步返回 `tool_result` event，attachments = `[placeholder]`
 2. external-session 立即 broadcast `chat:tool-result-start/complete`，渲染器显示 loading 骨架
 3. 异步落盘成功 → `asyncEmit({ kind:'tool_attachment_update', pendingId, attachment: real })`
-4. external-session 更新 `currentContentBlocks` 中匹配 pendingId 的 entry，broadcast SSE update
+4. external-session 通过 `external-session/content-blocks.ts` 更新 content blocks 中匹配 pendingId 的 entry，broadcast SSE update
 5. TabProvider 在 streamingMessage 中按 pendingId 替换占位 → 骨架变成图片
 
 **关键守卫**：`persistTurnResult` 进入即 `await awaitInFlightSaves()`，保证所有 in-flight
-落盘完成后再 `JSON.stringify(currentContentBlocks)` 写盘——避免"placeholder 飞越 turn boundary
+落盘完成后再 `JSON.stringify(content-blocks snapshot)` 写盘——避免"placeholder 飞越 turn boundary
 落到磁盘永远 stranded"。session resume 时反查 PersistContentBlock attachments，调
 `rebuildAttachmentRegistryFromBlocks` 把 Codex savedPath 重新 register 进 in-process map。
 
@@ -301,7 +301,8 @@ attachment。任何触发这种路径的入口视为 bug。
 | `src/server/runtimes/tool-attachments.ts` | `saveToolAttachment` 三入口 + in-flight tracker + external-path registry |
 | `src/server/utils/path-safety.ts` | Node 镜像 Rust validate_file_path 黑名单 |
 | `src/server/runtimes/codex.ts` | parseNotification 9 case 改造 + scheduleAttachmentSave |
-| `src/server/runtimes/external-session.ts` | tool_result attachments 写持久化；tool_attachment_update SSE 转发；session resume 重 register |
+| `src/server/runtimes/external-session.ts` | tool_result / tool_attachment_update event shell；session resume 重 register |
+| `src/server/runtimes/external-session/content-blocks.ts` | tool_result attachments 的 streaming content state 与 pendingId patch target |
 | `src/server/index.ts` | `/api/attachment/tool/<sid>/<tid>/<file>` endpoint |
 | `src/renderer/utils/myagentsProtocol.ts` | Tauri custom-protocol URL 形态：macOS/Linux = `myagents://...`；Windows/WebView2 = `http://myagents.localhost/...` |
 | `src/renderer/utils/toolAttachment.ts` | `useAttachmentUrl` hook + `resolveToolAttachmentUrl` |

@@ -38,6 +38,9 @@ import { useFileDropZone } from '@/hooks/useFileDropZone';
 import { useTauriFileDrop } from '@/hooks/useTauriFileDrop';
 import { useCronTask } from '@/hooks/useCronTask';
 import { useWorkspaceFileService } from '@/hooks/useWorkspaceFileService';
+import { useWorkspaceChangeSignal } from '@/hooks/useWorkspaceChangeSignal';
+import { isIntroductionAbsentError, shouldShowIntroductionOverlay, useIntroductionContent } from '@/hooks/useIntroductionContent';
+import { resolveAdoptedBuiltinProviderId } from '@/utils/sessionConfigAdoption';
 import { getSessionCronTask, updateCronTaskTab, isTaskExecuting, createCronTask, startCronTask as startCronTaskIpc, startCronScheduler } from '@/api/cronTaskClient';
 import { updateSession as patchSessionMetadata } from '@/api/sessionClient';
 import { persistInputOptionChange } from '@/api/persistInputOption';
@@ -346,6 +349,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
     const aliases = getEffectiveModelAliases(provider, configRef.current.providerModelAliases);
     return {
       providerId: provider.id,
+      providerName: provider.name,
       baseUrl: provider.config.baseUrl,
       apiKey: apiKeysRef.current[provider.id],
       authType: provider.authType,
@@ -371,8 +375,28 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
   // In narrow mode, default workspace to hidden (overlay) — otherwise it blocks chat on startup
   const [showWorkspace, setShowWorkspace] = useState(() => typeof window === 'undefined' || window.innerWidth >= 768);
   const [showWorkspaceConfig, setShowWorkspaceConfig] = useState(false); // Workspace config panel
-  // Introduction overlay: INTRODUCTION.md content for empty session welcome
-  const [introductionContent, setIntroductionContent] = useState<string | null>(null);
+  // State to trigger workspace refresh
+  const [workspaceRefreshTrigger, setWorkspaceRefreshTrigger] = useState(0);
+  const [introductionRefreshTrigger, setIntroductionRefreshTrigger] = useState(0);
+  const workspaceChangeSignal = useWorkspaceChangeSignal(agentDir || null, fileService.isAvailable);
+  // Introduction overlay: INTRODUCTION.md content for empty session welcome.
+  // Workspace-scoped, not session-scoped: sidecar/session id transitions must not
+  // unmount and replay the welcome page while a fresh workspace is booting.
+  const readIntroductionContent = useCallback(async (path: string) => {
+    if (!fileService.isAvailable) return null;
+    try {
+      const preview = await fileService.readPreview({ path });
+      return preview.content;
+    } catch (err) {
+      if (isIntroductionAbsentError(err)) return null;
+      throw err;
+    }
+  }, [fileService]);
+  const introductionContent = useIntroductionContent(
+    agentDir,
+    introductionRefreshTrigger + workspaceChangeSignal,
+    readIntroductionContent,
+  );
   useEffect(() => {
     const breakpoint = parseInt(getComputedStyle(document.documentElement)
       .getPropertyValue('--breakpoint-mobile') || '768', 10);
@@ -431,26 +455,6 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
   const handleBrowserUrlChange = useCallback((u: string) => {
     setBrowserCurrentUrl(u);
   }, []);
-
-  // ── Introduction overlay: read INTRODUCTION.md per agentDir/sessionId ──
-  // sessionId in deps → re-reads when user creates a new session (so edits via settings are reflected)
-  useEffect(() => {
-    if (!agentDir || !isTauriEnvironment()) return;
-    setIntroductionContent(null); // Clear stale content before async read
-    let cancelled = false;
-    const sep = agentDir.includes('\\') ? '\\' : '/';
-    const filePath = `${agentDir}${sep}INTRODUCTION.md`;
-    import('@tauri-apps/api/core').then(({ invoke }) => {
-      invoke<string | null>('cmd_read_workspace_file', { path: filePath })
-        .then(content => {
-          if (!cancelled) setIntroductionContent(content && content.trim() ? content : null);
-        })
-        .catch(() => {
-          if (!cancelled) setIntroductionContent(null);
-        });
-    });
-    return () => { cancelled = true; };
-  }, [agentDir, sessionId]);
 
   // Derived: is the right split panel visible?
   const splitPanelVisible = splitFile !== null
@@ -923,9 +927,6 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
   // Ref for directory panel container (for Tauri drop zone)
   const directoryPanelContainerRef = useRef<HTMLDivElement>(null);
 
-  // State to trigger workspace refresh
-  const [workspaceRefreshTrigger, setWorkspaceRefreshTrigger] = useState(0);
-
   // Enabled sub-agents for sidebar display
   const [enabledAgents, setEnabledAgents] = useState<Record<string, { description: string; prompt?: string; model?: string; scope?: 'user' | 'project'; folderName?: string }> | undefined>();
   // Enabled skills/commands for sidebar display
@@ -1209,6 +1210,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
   // Callback to refresh workspace (exposed to SimpleChatInput)
   const triggerWorkspaceRefresh = useCallback(() => {
     setWorkspaceRefreshTrigger(prev => prev + 1);
+    setIntroductionRefreshTrigger(prev => prev + 1);
   }, []);
 
   // Stable callbacks for DirectoryPanel → AgentCapabilitiesPanel
@@ -2372,6 +2374,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
           model?: string | null;
           mcpServerIds?: string[] | null;
           permissionMode?: string | null;
+          providerId?: string | null;
           reasoningEffort?: string | null;
         }>('/api/session/config');
         if (config.success) {
@@ -2396,6 +2399,10 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
               setPermissionMode(config.permissionMode as PermissionMode);
             }
           }
+          const adoptedProviderId = resolveAdoptedBuiltinProviderId(sidecarIsExternal, config.providerId);
+          if (adoptedProviderId !== undefined) {
+            setSelectedProviderId(adoptedProviderId);
+          }
           if (Array.isArray(config.mcpServerIds)) {
             setWorkspaceMcpEnabled(config.mcpServerIds);
           }
@@ -2409,6 +2416,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
           console.log('[Chat] Adopted sidecar config:', {
             runtime: sidecarRuntime,
             model: config.model,
+            providerId: config.providerId,
             permissionMode: config.permissionMode,
             mcpServerIds: config.mcpServerIds,
           });
@@ -3670,6 +3678,16 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
     }
   }, [surfaces.channel, sessionId, resetSession, adoptMigratedSession]);
 
+  const showIntroductionOverlay = shouldShowIntroductionOverlay({
+    content: introductionContent,
+    historyMessageCount: historyMessages.length,
+    hasStreamingMessage: !!streamingMessage,
+    isSessionLoading,
+    isLoading,
+    sessionState,
+    showStartupOverlay,
+  });
+
   // Internal handler for starting a new session
   // If AI is running, App.tsx handles it via background completion (returns true).
   // If AI is idle, falls back to resetSession (reuses Sidecar).
@@ -4009,7 +4027,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
             />
 
             {/* Introduction overlay — shown in empty sessions when INTRODUCTION.md exists */}
-            {introductionContent && historyMessages.length === 0 && !streamingMessage && !isSessionLoading && (
+            {showIntroductionOverlay && introductionContent && (
               <Suspense fallback={null}>
                 <LazyIntroductionOverlay content={introductionContent} />
               </Suspense>
@@ -4464,6 +4482,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
             setWorkspaceConfigInitialSelect(undefined);
             // Refresh capabilities data in case settings were changed
             setWorkspaceRefreshTrigger(prev => prev + 1);
+            setIntroductionRefreshTrigger(prev => prev + 1);
           }}
           refreshKey={workspaceRefreshKey}
           initialTab={workspaceConfigInitialTab}

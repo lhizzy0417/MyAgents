@@ -2,7 +2,6 @@ import { useEffect, useRef, type RefObject } from 'react';
 import { flushSync } from 'react-dom';
 import type { Tab } from '@/types/tab';
 import { formatPerfLine, type PerfTraceDetail } from '../../shared/perfTrace';
-import { perfMark } from '@/utils/perfMark';
 
 interface UseTabSwipeGestureOptions {
   contentRef: RefObject<HTMLDivElement | null>;
@@ -128,23 +127,16 @@ function targetKind(target: EventTarget | null): string {
 }
 
 function traceTabSwipe(phase: string, detail?: PerfTraceDetail): void {
-  let explicitTrace: string | null = null;
+  let traceEnabled = false;
   try {
-    explicitTrace = typeof localStorage !== 'undefined'
-      ? localStorage.getItem('myagents:tab-swipe-trace')
-      : null;
-    if (explicitTrace === '0') {
-      return;
-    }
+    traceEnabled = typeof localStorage !== 'undefined'
+      && localStorage.getItem('myagents:tab-swipe-trace') === '1';
   } catch {
     // localStorage may be unavailable in tests or hardened WebViews; tracing
     // should remain best-effort and never affect gesture handling.
   }
+  if (!traceEnabled) return;
   const perfPhase = `tab_swipe_${phase}`;
-  if (explicitTrace !== '1') {
-    perfMark(perfPhase, detail);
-    return;
-  }
   try {
     console.debug(formatPerfLine({
       trace: 'renderer',

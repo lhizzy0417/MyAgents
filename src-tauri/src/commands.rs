@@ -1081,7 +1081,7 @@ pub fn cmd_sync_admin_agent<R: Runtime>(app_handle: AppHandle<R>) -> Result<bool
 
 // ============= CLI Sync =============
 
-const CLI_VERSION: &str = "22";
+const CLI_VERSION: &str = "23";
 
 /// Sync the CLI script from bundled resources to ~/.myagents/bin/.
 /// Version-gated: only runs when CLI_VERSION changes.

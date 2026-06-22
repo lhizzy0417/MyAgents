@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.2.38] - 2026-06-23
+
+> 本版聚焦外部 Runtime 的连续对话控制与会话稳定性：Codex 现在能跟随“实时响应 / 轮次响应”的连续发送设置，IM / 定时任务 / 后台注入回合对成功与失败的判断更可靠；同时收紧 Provider / 上下文身份、Runtime CLI 检测和 Chat 欢迎页启动体验。
+
+### Added
+
+- **Codex 连续发送实时响应**：设置里的“连续发送消息”现在同时作用于内置 SDK 与 Codex Runtime；实时响应模式下，Codex 可在工具调用间隙处理排队消息，轮次响应模式仍等当前 turn 完成后再继续。暂不支持该能力的外部 Runtime 会保持原有 turn 级行为。
+- **更完整的 Runtime 诊断能力**：内置工具 / Runtime 相关诊断信息更完整，排查本机运行环境与 CLI 发现问题时更有依据。
+
+### Changed
+
+- **会话运行时架构收敛**：内置 SDK 与外部 Runtime 的会话读取、配置同步、注入 turn、队列和会话操作统一到 Session Engine 路径，减少 IM、定时任务、后台任务和桌面会话之间的状态漂移。
+- **外部 Runtime CLI 检测更可靠**：应用内置或 MyAgents 管理的 Claude Code / Codex / Gemini CLI 能被更稳定地识别，不再过度依赖用户 shell 环境。
+- **产品说明与截图更新**：README 和产品截图刷新，便于新用户理解工作区、任务、模型供应商和悬浮入口等核心能力。
+
+### Fixed
+
+- **IM / 定时任务注入回合不再假成功**：同步注入 turn 只有在对应 Runtime 真正成功完成后才会被标记完成，减少 0 turn、空回复、读到上一轮结果或孤儿气泡的问题。
+- **Provider 与上下文身份更稳定**：会话会保留正确的 Provider 身份和上下文权限，减少供应商串线、模型不可用或大上下文能力被错误降级的情况。
+- **Claude 4.6 默认上下文更稳**：默认回到标准上下文，避免未开通额外用量时误触 1M context 相关错误。
+- **Chat 欢迎页不再启动闪烁**：打开带 `INTRODUCTION.md` 的工作区时，欢迎页不再因 sidecar / Codex session 初始化、pending session 升级或临时读取失败而反复卸载重播动画。
+- **触控板标签切换更安静**：普通使用中不再输出大量 tab swipe perf 调试日志，控制台噪音减少。
+- **会话标题更新顺序更可靠**：会话标题事件的优先级收紧，降低标题被较晚事件覆盖或恢复不及时的概率。
+- **Windows 开发构建更稳**：Windows 开发构建提高 Node heap，减少大规模前端构建时内存不足的问题。
+
+---
+
 ## [0.2.37] - 2026-06-20
 
 > 本版聚焦 Chat 会话事件协作、高频对话体验和大图片发送链路：新增 session watch 事件协议与连续发送响应模式，图片拖入改走文件 ref 以避免大 payload，启动页历史与收藏操作更完整，同时修复 external runtime 新会话从 pending session 升级到真实 session 后的附件与 watch owner 归属问题。

@@ -161,3 +161,18 @@ Floating ball:
 Server-side AI turn:
 
 - `ai_turn_complete`
+
+`ai_turn_complete` is the canonical per-turn usage event emitted from the
+Sidecar. In addition to source/session/runtime/model/token/duration fields, it
+reports the provider attribution for builtin turns:
+
+- `provider_name`: provider display name. Builtin subscription turns report
+  `Anthropic (订阅)`; external runtime turns report the current
+  `RUNTIME_DISPLAY_NAMES` value such as `Claude Code CLI`, `OpenAI Codex CLI`,
+  or `Google Gemini CLI (ACP)`.
+- `api_protocol`: effective provider protocol, currently `anthropic` or
+  `openai`; `null` for external runtime turns.
+- `provider_base_url`: effective provider base URL. Builtin subscription turns
+  report `https://api.anthropic.com`; external runtime turns report `null`.
+- `provider_api_protocol`: same protocol dimension as `api_protocol`, kept as a
+  provider-prefixed field for downstream schema compatibility.

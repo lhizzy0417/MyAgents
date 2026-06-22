@@ -259,7 +259,8 @@ export class ClaudeCodeRuntime implements AgentRuntime {
 
   async detect(): Promise<RuntimeDetection> {
     try {
-      const proc = spawn([resolveCommand('claude'), '--version'], {
+      const command = resolveCommand('claude');
+      const proc = spawn([command, '--version'], {
         stdout: 'pipe',
         stderr: 'pipe',
         stdin: 'ignore',
@@ -271,7 +272,7 @@ export class ClaudeCodeRuntime implements AgentRuntime {
         return {
           installed: true,
           version: text.trim(),
-          path: 'claude', // system_binary finds full path on Rust side
+          path: command,
         };
       }
     } catch { /* not installed */ }

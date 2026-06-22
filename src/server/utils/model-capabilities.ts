@@ -533,11 +533,11 @@ const CONTEXT_WINDOW_UNLOCK_THRESHOLD = 200_000;
  */
 export function applyContextWindowSuffix(model: string | undefined | null): string | undefined {
   if (!model) return undefined;
-  if (/\[1m\]/i.test(model)) return model;
   // Empty / whitespace-only / suffix-only (e.g. " 1m", "   ") strips to nothing
   // usable — return undefined rather than feed the SDK a garbage model option.
   const bare = stripModelSuffix(model);
   if (!bare) return undefined;
+  if (/\[1m\]/i.test(model)) return model;
   const ctx = lookupModelContextLength(bare);
   if (typeof ctx === 'number' && ctx > CONTEXT_WINDOW_UNLOCK_THRESHOLD) {
     return `${bare}[1m]`;

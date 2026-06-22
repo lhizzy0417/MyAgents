@@ -184,6 +184,13 @@ Write-Host ""
 Write-ColorOutput "[2/3] 构建前端和运行时资源..." "Blue"
 $env:VITE_DEBUG_MODE = "true"
 Write-ColorOutput "  VITE_DEBUG_MODE=$env:VITE_DEBUG_MODE" "Yellow"
+$nodeOptionsWithoutHeap = (($env:NODE_OPTIONS -replace '(^|\s)--max-old-space-size=\S+', '').Trim())
+$env:NODE_OPTIONS = if ([string]::IsNullOrWhiteSpace($nodeOptionsWithoutHeap)) {
+    "--max-old-space-size=4096"
+} else {
+    "$nodeOptionsWithoutHeap --max-old-space-size=4096"
+}
+Write-ColorOutput "  NODE_OPTIONS=$env:NODE_OPTIONS" "Yellow"
 & npm run build:web
 if ($LASTEXITCODE -ne 0) {
     Write-ColorOutput "✗ 前端构建失败" "Red"

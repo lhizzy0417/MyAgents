@@ -51,7 +51,7 @@
 |------|------|
 | `src/renderer/hooks/useUpdater.ts` | 监听 download-started / download-failed / ready-to-restart 三事件、维护 `preparing` 互斥标志、提供 `restartAndUpdate()` |
 | `src/renderer/components/CustomTitleBar.tsx` | 顶栏「重启更新」按钮（`preparing` 时隐藏） |
-| `src/renderer/pages/Settings.tsx` | 设置页同款按钮 |
+| `src/renderer/pages/Settings.tsx` → `pages/settings/SettingsPage.tsx` | 设置页同款按钮；旧路径是 re-export facade |
 | `src/renderer/App.tsx` | Windows 启动期 pending 更新对话框（在 `useUpdater.checkPendingUpdate()` 之上） |
 
 ### 核心流程

@@ -77,27 +77,19 @@ export function getPlatformPaths() {
 
 ### 进程清理
 
-**Windows**（使用 PowerShell + wmic fallback，通过 `process_cmd::new()` 避免黑色控制台窗口）：
+**Windows**（当前使用 `sysinfo` 原生枚举 + 进程树清理，避免旧 PowerShell/WMI 冷启动开销）：
 ```rust
-// src-tauri/src/sidecar.rs — kill_windows_processes_by_pattern()
-// 优先 PowerShell，fallback 到 wmic（兼容旧 Windows）
-let mut cmd = crate::process_cmd::new("powershell");
-cmd.args(["-NoProfile", "-Command",
-    &format!("Get-CimInstance Win32_Process | Where-Object {{ $_.CommandLine -like '*{}*' }} | ForEach-Object {{ Stop-Process -Id $_.ProcessId -Force }}", pattern)
-]);
+// src-tauri/src/sidecar/cleanup.rs -> src-tauri/src/process_cleanup.rs
+let report = crate::process_cleanup::kill_stale_processes(STARTUP_CLEANUP_PATTERNS);
 ```
 
-**macOS/Linux**（使用 `pgrep` + `kill`，通过 `system_binary::find()` 确保 PATH 可用）：
+**macOS/Linux**（同样走 `sysinfo` native process enumeration，不再 shell out 到 `pgrep`）：
 ```rust
-// src-tauri/src/sidecar.rs — cleanup_stale_sidecars()
-if let Some(pgrep) = crate::system_binary::find("pgrep") {
-    let mut cmd = crate::process_cmd::new(&pgrep);
-    cmd.args(["-f", "--myagents-sidecar"]);
-    // ...
-}
+// src-tauri/src/process_cleanup.rs
+pub fn kill_stale_processes(patterns: &[ProcessPattern]) -> CleanupReport;
 ```
 
-> **关键**：所有子进程 MUST 使用 `process_cmd::new()`（Windows CREATE_NO_WINDOW）和 `system_binary::find()`（PATH 补充），禁止裸 `std::process::Command::new()`。
+> **关键**：普通子进程 spawn 仍 MUST 使用 `process_cmd::new()`（Windows CREATE_NO_WINDOW）和 `system_binary::find()`（PATH 补充），禁止裸 `std::process::Command::new()`。stale cleanup 是例外：它由 `process_cleanup::kill_stale_processes()` 统一 owner，调用方不要再写 ad-hoc PowerShell / `pgrep`。
 
 ---
 
@@ -250,7 +242,7 @@ Remove-Item src-tauri\target\x86_64-pc-windows-msvc\release\resources -Recurse -
 
 ### system_binary (`src-tauri/src/system_binary.rs`)
 
-Tauri GUI 应用从 Finder/Explorer 启动时不继承 shell PATH（无 homebrew、无用户 PATH）。`system_binary::find(binary_name)` 自动补充常见路径（`/opt/homebrew/bin`、`/usr/local/bin`、`C:\Program Files\nodejs` 等），确保系统工具（npm、git、pgrep 等）可被发现。
+Tauri GUI 应用从 Finder/Explorer 启动时不继承 shell PATH（无 homebrew、无用户 PATH）。`system_binary::find(binary_name)` 自动补充常见路径（`/opt/homebrew/bin`、`/usr/local/bin`、`C:\Program Files\nodejs` 等），确保系统工具（npm、git、node、systemd-inhibit 等）可被发现。
 
 ### `cmd_fsync_path` Windows-specific quirks (`src-tauri/src/config_io.rs`)
 
