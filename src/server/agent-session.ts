@@ -116,7 +116,7 @@ import type { ToolAttachment } from '../shared/types/tool-attachment';
 import { imEventBus, type ImEventType } from './utils/im-event-bus';
 import { imRequestRegistry } from './utils/im-request-registry';
 import { mirrorIfChannelBound, type MirrorImage } from './utils/im-mirror';
-import { normalizeClaudeTranscriptCleanupPeriodDays } from '../shared/config-types';
+import { normalizeClaudeTranscriptCleanupPeriodDays, SUBSCRIPTION_PROVIDER_ID } from '../shared/config-types';
 import type {
   ContentBlock,
   MessageWire,
@@ -1997,14 +1997,16 @@ async function broadcastBuiltinContextUsage(): Promise<void> {
   // `resetTurnUsage()` 可能把 `turnState.currentTurnUsage.model`/`sessionId` 改掉，给本轮的 broadcast/
   // 持久化盖错头。`turnState.latestMainAssistantUsage` 在函数入口同步读，已经天然是快照。
   const occupiedFromPerCall = resolveContextOccupancyTokens(turnState.latestMainAssistantUsage);
+  const lookupEffectiveWindow = (model?: string) =>
+    lookupSdkEffectiveContextLength(model, configState.currentProviderEnv);
   const snapshotModel = chooseBuiltinContextUsageModel({
     sdkResultModel: turnState.currentTurnUsage.model,
     configuredModel: configState.currentModel,
-    lookupWindow: lookupModelContextLength,
+    lookupWindow: lookupEffectiveWindow,
   });
   const snapshotSessionId = sessionId;
   const snapshotQuerySession = lifecycleState.query;
-  const registryWindow = lookupModelContextLength(snapshotModel);
+  const registryWindow = lookupEffectiveWindow(snapshotModel);
   let runtimeWindow: number | null = registryWindow ? null : inferContextWindowFromSdkModelTag(snapshotModel);
 
   let occupied = occupiedFromPerCall;
@@ -2033,7 +2035,7 @@ async function broadcastBuiltinContextUsage(): Promise<void> {
     runtimeWindow,
     source: 'builtin',
     model: snapshotModel,
-    lookupWindow: lookupModelContextLength,
+    lookupWindow: lookupEffectiveWindow,
   });
   broadcast('chat:context-usage', { ...usage, sessionId: snapshotSessionId });
   // PRD 0.2.32 — 持久化**同一个**快照到 session 记录（单一数据源）。每轮末一次写盘，
@@ -2715,7 +2717,7 @@ let pendingSetModelPromise: Promise<void> | null = null;
 function dispatchSetModelToSdk(model: string): Promise<void> {
   if (!lifecycleState.query) return Promise.resolve();
   const session = lifecycleState.query;
-  const wrapped = applyContextWindowSuffix(model);
+  const wrapped = applySdkModelContextWindow(model);
   const promise = session.setModel(wrapped).catch(err => {
     console.error('[agent] failed to apply model to running session:', err);
   });
@@ -2801,8 +2803,8 @@ export function setSessionModel(model: string, opts?: { imConfigSync?: boolean }
   // respawn. Schedule a deferred restart so the fresh env reflects the new
   // model's real window. Same rationale as the `provider` reason in
   // `setSessionProviderEnv` — env-baked knobs need a respawn.
-  const oldCtx = lookupModelContextLength(oldModel);
-  const newCtx = lookupModelContextLength(model);
+  const oldCtx = lookupSdkEffectiveContextLength(oldModel);
+  const newCtx = lookupSdkEffectiveContextLength(model);
   if (oldCtx !== newCtx) {
     if (lifecycleState.query) {
       console.log(`[agent] model window changed (${oldCtx ?? 'SDK-default'} → ${newCtx ?? 'SDK-default'}) → schedule deferred restart to reinject CLAUDE_CODE_AUTO_COMPACT_WINDOW`);
@@ -2877,6 +2879,37 @@ export function getSessionReasoningEffort(): string | undefined {
 /** Get current provider env (used by heartbeat/memory-update to preserve provider across internal calls). */
 export function getSessionProviderEnv(): ProviderEnv | undefined {
   return configState.currentProviderEnv;
+}
+
+export function getSessionProviderId(): string | null {
+  return configState.currentProviderEnv?.providerId ?? SUBSCRIPTION_PROVIDER_ID;
+}
+
+const SDK_STANDARD_CONTEXT_WINDOW = 200_000;
+
+function shouldDisableSdk1mContext(providerEnv: ProviderEnv | undefined): boolean {
+  // No providerEnv means Anthropic subscription/OAuth/direct SDK auth. Claude Code's
+  // `[1m]` model variant is an entitlement choice there, not just a capability hint.
+  return providerEnv === undefined;
+}
+
+function applySdkModelContextWindow(
+  model: string | undefined | null,
+  providerEnv: ProviderEnv | undefined = configState.currentProviderEnv,
+): string | undefined {
+  return applyContextWindowSuffix(model, {
+    disable1mContext: shouldDisableSdk1mContext(providerEnv),
+  });
+}
+
+function lookupSdkEffectiveContextLength(
+  model: string | undefined | null,
+  providerEnv: ProviderEnv | undefined = configState.currentProviderEnv,
+): number | undefined {
+  if (!model) return undefined;
+  const registered = lookupModelContextLength(model);
+  if (!shouldDisableSdk1mContext(providerEnv)) return registered;
+  return registered ? Math.min(registered, SDK_STANDARD_CONTEXT_WINDOW) : SDK_STANDARD_CONTEXT_WINDOW;
 }
 
 function resetForProviderHistoryBoundary(): void {
@@ -4765,6 +4798,13 @@ export function buildClaudeSessionEnv(
 
   // Use provided providerEnv or fall back to configState.currentProviderEnv
   const effectiveProviderEnv = providerEnv ?? configState.currentProviderEnv;
+  const disableSdk1mContext = shouldDisableSdk1mContext(effectiveProviderEnv);
+  if (disableSdk1mContext) {
+    env.CLAUDE_CODE_DISABLE_1M_CONTEXT = '1';
+    delete env.CLAUDE_CODE_ENABLE_1M_CONTEXT;
+  } else {
+    delete env.CLAUDE_CODE_DISABLE_1M_CONTEXT;
+  }
 
   // ── Model alias mapping for sub-agents (applies to ALL protocol paths) ──
   // SDK sub-agents use aliases like "sonnet"/"opus"/"haiku" which resolve to claude-* model IDs.
@@ -4780,9 +4820,9 @@ export function buildClaudeSessionEnv(
     // SDK /model picker (modelOptions.ts:85) and would surface the suffix to
     // users. SDK strips [1m] before the wire (normalizeModelStringForAPI),
     // so the upstream API never sees it.
-    const sonnetWrapped = applyContextWindowSuffix(aliases.sonnet);
-    const opusWrapped = applyContextWindowSuffix(aliases.opus);
-    const haikuWrapped = applyContextWindowSuffix(aliases.haiku);
+    const sonnetWrapped = applyContextWindowSuffix(aliases.sonnet, { disable1mContext: disableSdk1mContext });
+    const opusWrapped = applyContextWindowSuffix(aliases.opus, { disable1mContext: disableSdk1mContext });
+    const haikuWrapped = applyContextWindowSuffix(aliases.haiku, { disable1mContext: disableSdk1mContext });
     if (aliases.sonnet) {
       env.ANTHROPIC_DEFAULT_SONNET_MODEL = sonnetWrapped!;
       env.ANTHROPIC_DEFAULT_SONNET_MODEL_NAME = aliases.sonnet;
@@ -4826,7 +4866,7 @@ export function buildClaudeSessionEnv(
   // case (primary model hits its own 128K ceiling) is what this fixes;
   // sub-agents on a smaller window would be further over-capped, not
   // under-capped.
-  const modelContextLength = lookupModelContextLength(resolvedModel);
+  const modelContextLength = lookupSdkEffectiveContextLength(resolvedModel, effectiveProviderEnv);
   if (modelContextLength && modelContextLength > 0) {
     env.CLAUDE_CODE_AUTO_COMPACT_WINDOW = String(modelContextLength);
     console.log(`[env] CLAUDE_CODE_AUTO_COMPACT_WINDOW=${modelContextLength} (model=${resolvedModel ?? '(unknown)'})`);
@@ -9112,7 +9152,7 @@ async function startStreamingSession(preWarm = false): Promise<void> {
       // ceiling; CLAUDE_CODE_AUTO_COMPACT_WINDOW then pulls the effective
       // window back to the registry value. SDK strips the suffix back out
       // before the wire (normalizeModelStringForAPI in model.ts:616).
-      model: applyContextWindowSuffix(configState.currentModel),
+      model: applySdkModelContextWindow(configState.currentModel),
       pathToClaudeCodeExecutable: resolveClaudeCodeCli(),
       env,
       stderr: (message: string) => {
@@ -9200,7 +9240,7 @@ async function startStreamingSession(preWarm = false): Promise<void> {
           : []),
       ],
       // Sub-agents: inject custom agent definitions if configured
-      // Each sub-agent's `model` runs through applyContextWindowSuffix so a sub-agent
+      // Each sub-agent's `model` runs through applySdkModelContextWindow so a sub-agent
       // pinned to a 1M model gets the [1m] tag independently of the main session's
       // model (the parent could be on a 200K model, the sub-agent on a 1M one,
       // or vice versa). The original configState.currentAgentDefinitions is left untouched
@@ -9210,7 +9250,7 @@ async function startStreamingSession(preWarm = false): Promise<void> {
             agents: Object.fromEntries(
               Object.entries(configState.currentAgentDefinitions).map(([name, a]) => [
                 name,
-                a.model ? { ...a, model: applyContextWindowSuffix(a.model) } : a,
+                a.model ? { ...a, model: applySdkModelContextWindow(a.model) } : a,
               ])
             ),
           }

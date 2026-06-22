@@ -77,3 +77,41 @@ describe('session model alias resolution', () => {
     expect(env.ANTHROPIC_DEFAULT_HAIKU_MODEL).toBe('provider-flash');
   });
 });
+
+describe('Claude Code SDK 1M context entitlement handling', () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it('keeps Anthropic subscription/OAuth sessions on the standard SDK context variant', () => {
+    vi.stubEnv('CLAUDE_CODE_ENABLE_1M_CONTEXT', '1');
+
+    const env = buildClaudeSessionEnv(undefined, 'claude-opus-4-6');
+
+    expect(env.CLAUDE_CODE_DISABLE_1M_CONTEXT).toBe('1');
+    expect(env.CLAUDE_CODE_ENABLE_1M_CONTEXT).toBeUndefined();
+    expect(env.CLAUDE_CODE_AUTO_COMPACT_WINDOW).toBe('200000');
+  });
+
+  it('keeps provider-routed sessions eligible for registry-backed SDK 1M unlocks', () => {
+    vi.stubEnv('CLAUDE_CODE_DISABLE_1M_CONTEXT', '1');
+
+    const env = buildClaudeSessionEnv(
+      {
+        providerId: 'minimax',
+        baseUrl: 'https://api.minimax.example',
+        apiKey: 'test-key',
+        modelAliases: {
+          sonnet: 'MiniMax-M2.7',
+          opus: 'MiniMax-M2.7',
+          haiku: 'MiniMax-M2.7',
+        },
+      },
+      'MiniMax-M2.5',
+    );
+
+    expect(env.CLAUDE_CODE_DISABLE_1M_CONTEXT).toBeUndefined();
+    expect(env.CLAUDE_CODE_AUTO_COMPACT_WINDOW).toBe('204800');
+    expect(env.ANTHROPIC_DEFAULT_SONNET_MODEL).toBe('MiniMax-M2.5[1m]');
+  });
+});

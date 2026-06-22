@@ -46,6 +46,7 @@ const mocks = vi.hoisted(() => {
     getSessionModel: vi.fn(() => 'claude-sonnet'),
     getSessionPermissionMode: vi.fn(() => 'auto'),
     getSessionProviderEnv: vi.fn(() => undefined),
+    getSessionProviderId: vi.fn(() => 'sensenova'),
     getSessionReasoningEffort: vi.fn(() => 'default'),
     getStreamingAssistantId: vi.fn<() => string | null>(() => null),
     getSystemInitInfo: vi.fn<() => unknown>(() => null),
@@ -127,6 +128,7 @@ vi.mock('../agent-session', () => ({
   getSessionModel: mocks.getSessionModel,
   getSessionPermissionMode: mocks.getSessionPermissionMode,
   getSessionProviderEnv: mocks.getSessionProviderEnv,
+  getSessionProviderId: mocks.getSessionProviderId,
   getSessionReasoningEffort: mocks.getSessionReasoningEffort,
   getStreamingAssistantId: mocks.getStreamingAssistantId,
   getSystemInitInfo: mocks.getSystemInitInfo,
@@ -283,6 +285,7 @@ describe('session-engine selector and adapters', () => {
       mcpServerIds: ['fs'],
       agentNames: ['helper'],
       permissionMode: 'auto',
+      providerId: 'sensenova',
       reasoningEffort: 'default',
     });
   });
@@ -312,6 +315,7 @@ describe('session-engine selector and adapters', () => {
       mcpServerIds: null,
       agentNames: null,
       permissionMode: 'no-restrictions',
+      providerId: null,
       reasoningEffort: 'medium',
     });
     expect(engine.getLiveSessionOverlay('external-session')).toMatchObject({

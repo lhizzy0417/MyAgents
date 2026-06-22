@@ -18,6 +18,7 @@ import {
   getSessionId,
   getSessionModel,
   getSessionPermissionMode,
+  getSessionProviderId,
   getSessionReasoningEffort,
   getStreamingAssistantId,
   getSystemInitInfo,
@@ -166,6 +167,7 @@ export function createBuiltinSessionEngine(): SessionEngine {
         mcpServerIds: mcpServers?.map(s => s.id) ?? null,
         agentNames: agents ? Object.keys(agents) : null,
         permissionMode: getSessionPermissionMode(),
+        providerId: getSessionProviderId(),
         reasoningEffort: getSessionReasoningEffort() ?? 'default',
       };
     },

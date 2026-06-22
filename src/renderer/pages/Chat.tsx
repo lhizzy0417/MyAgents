@@ -38,6 +38,7 @@ import { useFileDropZone } from '@/hooks/useFileDropZone';
 import { useTauriFileDrop } from '@/hooks/useTauriFileDrop';
 import { useCronTask } from '@/hooks/useCronTask';
 import { useWorkspaceFileService } from '@/hooks/useWorkspaceFileService';
+import { resolveAdoptedBuiltinProviderId } from '@/utils/sessionConfigAdoption';
 import { getSessionCronTask, updateCronTaskTab, isTaskExecuting, createCronTask, startCronTask as startCronTaskIpc, startCronScheduler } from '@/api/cronTaskClient';
 import { updateSession as patchSessionMetadata } from '@/api/sessionClient';
 import { persistInputOptionChange } from '@/api/persistInputOption';
@@ -2373,6 +2374,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
           model?: string | null;
           mcpServerIds?: string[] | null;
           permissionMode?: string | null;
+          providerId?: string | null;
           reasoningEffort?: string | null;
         }>('/api/session/config');
         if (config.success) {
@@ -2397,6 +2399,10 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
               setPermissionMode(config.permissionMode as PermissionMode);
             }
           }
+          const adoptedProviderId = resolveAdoptedBuiltinProviderId(sidecarIsExternal, config.providerId);
+          if (adoptedProviderId !== undefined) {
+            setSelectedProviderId(adoptedProviderId);
+          }
           if (Array.isArray(config.mcpServerIds)) {
             setWorkspaceMcpEnabled(config.mcpServerIds);
           }
@@ -2410,6 +2416,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
           console.log('[Chat] Adopted sidecar config:', {
             runtime: sidecarRuntime,
             model: config.model,
+            providerId: config.providerId,
             permissionMode: config.permissionMode,
             mcpServerIds: config.mcpServerIds,
           });

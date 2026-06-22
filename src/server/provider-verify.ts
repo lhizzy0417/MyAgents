@@ -216,8 +216,9 @@ async function verifyViaSdk(
         includePartialMessages: true,
         persistSession: false,
         mcpServers: {},
-        // Wrap with [1m] when contextLength >200K (#335); SDK strips the suffix before the wire.
-        ...(opts.model ? { model: applyContextWindowSuffix(opts.model) } : {}),
+        // Wrap with [1m] when contextLength >200K (#335); subscription/OAuth env
+        // explicitly disables that entitlement-sensitive SDK variant.
+        ...(opts.model ? { model: applyContextWindowSuffix(opts.model, { disable1mContext: env.CLAUDE_CODE_DISABLE_1M_CONTEXT === '1' }) } : {}),
       },
     });
     let timeoutId: ReturnType<typeof setTimeout> | undefined;

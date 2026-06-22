@@ -166,6 +166,7 @@ export type SessionEngineConfigSnapshot = {
   mcpServerIds: string[] | null;
   agentNames: string[] | null;
   permissionMode: string | null;
+  providerId: string | null;
   reasoningEffort: string | null;
 };
 

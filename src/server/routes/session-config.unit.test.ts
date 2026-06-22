@@ -17,6 +17,7 @@ const mocks = vi.hoisted(() => ({
       mcpServerIds: null,
       agentNames: null,
       permissionMode: 'no-restrictions',
+      providerId: null,
       reasoningEffort: 'medium',
     })),
   },
@@ -107,6 +108,7 @@ describe('handleSessionConfigRoute', () => {
       mcpServerIds: null,
       agentNames: null,
       permissionMode: 'no-restrictions',
+      providerId: null,
       reasoningEffort: 'medium',
     });
   });

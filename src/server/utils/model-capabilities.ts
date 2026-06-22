@@ -518,10 +518,13 @@ const CONTEXT_WINDOW_UNLOCK_THRESHOLD = 200_000;
  *   - input empty / undefined / null — or whitespace-/suffix-only (`" 1m"`,
  *     `"   "`) that strips to nothing — → returns `undefined` (avoids
  *     overwriting an existing SDK option with an empty / garbage model id)
- *   - already contains `[1m]` anywhere (case-insensitive) → returned VERBATIM —
- *     matches SDK's own `has1mContext` semantics, so user-typed pre-wrapped
- *     values are respected even if the registry has a lower ctx; also defends
- *     against pathological double-wrap on partially-tagged ids
+ *   - already contains `[1m]` anywhere (case-insensitive) → returned VERBATIM
+ *     by default — matches SDK's own `has1mContext` semantics, so user-typed
+ *     pre-wrapped values are respected even if the registry has a lower ctx;
+ *     also defends against pathological double-wrap on partially-tagged ids
+ *   - `disable1mContext` → strip any `[1m]` / ` 1m` decoration and return the
+ *     bare id. This is for Anthropic subscription/OAuth paths where model
+ *     capability and account entitlement are different axes.
  *   - otherwise the id is normalized to its BARE form first (dropping a
  *     malformed ` 1m` / trailing whitespace, #338) so BOTH the registry lookup
  *     and the emitted id are clean; then:
@@ -531,13 +534,24 @@ const CONTEXT_WINDOW_UNLOCK_THRESHOLD = 200_000;
  *       · otherwise (no entry, or ctx ≤ threshold; the strict `>` also rejects
  *         `undefined` / `NaN` / negative) → return the bare id
  */
-export function applyContextWindowSuffix(model: string | undefined | null): string | undefined {
+export interface ContextWindowSuffixOptions {
+  disable1mContext?: boolean;
+}
+
+export function applyContextWindowSuffix(
+  model: string | undefined | null,
+  options: ContextWindowSuffixOptions = {},
+): string | undefined {
   if (!model) return undefined;
-  if (/\[1m\]/i.test(model)) return model;
   // Empty / whitespace-only / suffix-only (e.g. " 1m", "   ") strips to nothing
   // usable — return undefined rather than feed the SDK a garbage model option.
   const bare = stripModelSuffix(model);
   if (!bare) return undefined;
+  if (options.disable1mContext) {
+    const standardContextId = stripModelSuffix(model.replace(/\[1m\]/ig, ''));
+    return standardContextId;
+  }
+  if (/\[1m\]/i.test(model)) return model;
   const ctx = lookupModelContextLength(bare);
   if (typeof ctx === 'number' && ctx > CONTEXT_WINDOW_UNLOCK_THRESHOLD) {
     return `${bare}[1m]`;

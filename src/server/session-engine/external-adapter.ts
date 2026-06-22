@@ -133,6 +133,7 @@ export function createExternalSessionEngine(): SessionEngine {
         mcpServerIds: null,
         agentNames: null,
         permissionMode: getExternalSessionPermissionMode(),
+        providerId: null,
         reasoningEffort: getExternalSessionReasoningEffort() ?? 'default',
       };
     },

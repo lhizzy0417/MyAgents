@@ -34,6 +34,14 @@ describe('applyContextWindowSuffix — registry-independent guards', () => {
   it('leaves an unregistered model unchanged (no entry → no suffix)', () => {
     expect(applyContextWindowSuffix('totally-made-up-model-xyz')).toBe('totally-made-up-model-xyz');
   });
+
+  it('strips 1M decorations when the caller disables SDK 1M variants', () => {
+    expect(applyContextWindowSuffix('claude-opus-4-6', { disable1mContext: true })).toBe('claude-opus-4-6');
+    expect(applyContextWindowSuffix('claude-opus-4-6[1m]', { disable1mContext: true })).toBe('claude-opus-4-6');
+    expect(applyContextWindowSuffix('claude-opus-4-6 1m', { disable1mContext: true })).toBe('claude-opus-4-6');
+    expect(applyContextWindowSuffix('claude-opus[1m]-custom', { disable1mContext: true })).toBe('claude-opus-custom');
+    expect(applyContextWindowSuffix(' 1m', { disable1mContext: true })).toBeUndefined();
+  });
 });
 
 describe('applyContextWindowSuffix — threshold via preset registry', () => {
