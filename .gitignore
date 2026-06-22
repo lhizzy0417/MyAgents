@@ -73,6 +73,7 @@ src-tauri/nsis/Git-Installer.exe
 coverage/
 
 # Misc
+/rclone.exe
 *.pem
 *.local
 
