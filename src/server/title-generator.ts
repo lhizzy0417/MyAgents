@@ -219,9 +219,8 @@ async function generateTitleInner(
         // produce the title text (tools are orthogonal to generation).
         tools: [],
         // Wrap with [1m] when contextLength >200K (#335) so SDK uses the 1M path even
-        // for a one-shot title-gen subprocess. Subscription/OAuth title generation
-        // deliberately strips that decoration; `[1m]` is an entitlement choice there.
-        ...(model ? { model: applyContextWindowSuffix(model, { disable1mContext: providerEnv === undefined }) } : {}),
+        // for a one-shot title-gen subprocess. SDK strips the suffix before the wire.
+        ...(model ? { model: applyContextWindowSuffix(model) } : {}),
       },
     });
 

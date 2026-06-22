@@ -78,24 +78,28 @@ describe('session model alias resolution', () => {
   });
 });
 
-describe('Claude Code SDK 1M context entitlement handling', () => {
+describe('Claude SDK context window env', () => {
   afterEach(() => {
     vi.unstubAllEnvs();
   });
 
-  it('keeps Anthropic subscription/OAuth sessions on the standard SDK context variant', () => {
+  it('keeps Claude 4.6 defaults at 200K without forcing SDK 1M disable flags (#392)', () => {
+    vi.stubEnv('CLAUDE_CODE_DISABLE_1M_CONTEXT', '');
     vi.stubEnv('CLAUDE_CODE_ENABLE_1M_CONTEXT', '1');
 
     const env = buildClaudeSessionEnv(undefined, 'claude-opus-4-6');
 
-    expect(env.CLAUDE_CODE_DISABLE_1M_CONTEXT).toBe('1');
-    expect(env.CLAUDE_CODE_ENABLE_1M_CONTEXT).toBeUndefined();
+    expect(env.CLAUDE_CODE_DISABLE_1M_CONTEXT).toBe('');
+    expect(env.CLAUDE_CODE_ENABLE_1M_CONTEXT).toBe('1');
     expect(env.CLAUDE_CODE_AUTO_COMPACT_WINDOW).toBe('200000');
   });
 
-  it('keeps provider-routed sessions eligible for registry-backed SDK 1M unlocks', () => {
-    vi.stubEnv('CLAUDE_CODE_DISABLE_1M_CONTEXT', '1');
+  it('keeps Opus 4.7 / 4.8 on the default 1M window', () => {
+    expect(buildClaudeSessionEnv(undefined, 'claude-opus-4-7').CLAUDE_CODE_AUTO_COMPACT_WINDOW).toBe('1000000');
+    expect(buildClaudeSessionEnv(undefined, 'claude-opus-4-8').CLAUDE_CODE_AUTO_COMPACT_WINDOW).toBe('1000000');
+  });
 
+  it('keeps provider-routed sessions eligible for registry-backed SDK 1M unlocks', () => {
     const env = buildClaudeSessionEnv(
       {
         providerId: 'minimax',

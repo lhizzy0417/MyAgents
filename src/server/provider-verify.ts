@@ -216,9 +216,8 @@ async function verifyViaSdk(
         includePartialMessages: true,
         persistSession: false,
         mcpServers: {},
-        // Wrap with [1m] when contextLength >200K (#335); subscription/OAuth env
-        // explicitly disables that entitlement-sensitive SDK variant.
-        ...(opts.model ? { model: applyContextWindowSuffix(opts.model, { disable1mContext: env.CLAUDE_CODE_DISABLE_1M_CONTEXT === '1' }) } : {}),
+        // Wrap with [1m] when contextLength >200K (#335) so SDK uses the 1M path.
+        ...(opts.model ? { model: applyContextWindowSuffix(opts.model) } : {}),
       },
     });
     let timeoutId: ReturnType<typeof setTimeout> | undefined;
