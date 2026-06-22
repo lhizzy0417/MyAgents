@@ -608,7 +608,7 @@ const LauncherHistoryRow = memo(function LauncherHistoryRow({
             onMouseDownCapture={handleMouseDownCapture}
             onContextMenu={handleContextMenu}
             onKeyDown={handleKeyDown}
-            className="group relative flex w-full cursor-pointer select-none items-center gap-2 overflow-hidden rounded-lg px-3 py-2 text-left transition-all hover:bg-[var(--hover-bg)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]"
+            className="group relative flex w-full cursor-pointer select-none items-center gap-1 overflow-hidden rounded-lg px-3 py-2 text-left transition-all hover:bg-[var(--hover-bg)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]"
         >
             <div className="flex w-16 shrink-0 items-center text-xs tabular-nums text-[var(--ink-muted)]/50">
                 <span className="min-w-0 truncate">{formatTime(session.lastActiveAt)}</span>
