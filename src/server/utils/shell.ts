@@ -1,70 +1,136 @@
 import { execFile } from 'child_process';
-import { join } from 'path';
+import { posix as pathPosix, win32 as pathWin32 } from 'path';
 import { readdirSync, existsSync } from 'fs';
+import { getMyAgentsNpmGlobalBinDir } from './npm-prefix-env';
+import { getBundledNodeDir } from './runtime';
 
 const isWindows = process.platform === 'win32';
 const PATH_SEPARATOR = isWindows ? ';' : ':';
 const PATH_KEY = isWindows ? 'Path' : 'PATH';
 
+type PathPlatform = NodeJS.Platform;
+type EnvLike = Record<string, string | undefined>;
+
+interface FallbackPathOptions {
+    platform?: PathPlatform;
+    env?: EnvLike;
+    bundledNodeDir?: string | null;
+    exists?: (path: string) => boolean;
+    readDir?: (path: string) => string[];
+}
+
+function joinForPlatform(platform: PathPlatform, ...parts: string[]): string {
+    return platform === 'win32' ? pathWin32.join(...parts) : pathPosix.join(...parts);
+}
+
+function normalizeForPlatform(platform: PathPlatform, value: string): string {
+    return platform === 'win32' ? pathWin32.normalize(value) : pathPosix.normalize(value);
+}
+
+function pathSeparatorFor(platform: PathPlatform): string {
+    return platform === 'win32' ? ';' : ':';
+}
+
+function pathKeyFor(platform: PathPlatform): 'Path' | 'PATH' {
+    return platform === 'win32' ? 'Path' : 'PATH';
+}
+
+function envValue(env: EnvLike, key: string): string {
+    return env[key] || '';
+}
+
+function pushPath(parts: string[], value: string | null | undefined, platform: PathPlatform): void {
+    if (!value) return;
+    const normalized = normalizeForPlatform(platform, value);
+    const comparable = platform === 'win32' ? normalized.toLowerCase() : normalized;
+    const existsAlready = parts.some((part) => {
+        const existing = normalizeForPlatform(platform, part);
+        return (platform === 'win32' ? existing.toLowerCase() : existing) === comparable;
+    });
+    if (!existsAlready) {
+        parts.push(normalized);
+    }
+}
+
 /**
  * Common binary paths for the current platform
  */
-function getFallbackPaths(): string[] {
-    if (isWindows) {
-        const userProfile = process.env.USERPROFILE || '';
-        const localAppData = process.env.LOCALAPPDATA || '';
-        const programFiles = process.env.PROGRAMFILES || '';
+export function getFallbackPaths(options: FallbackPathOptions = {}): string[] {
+    const platform = options.platform ?? process.platform;
+    const env = options.env ?? process.env;
+    const exists = options.exists ?? existsSync;
+    const readDir = options.readDir ?? readdirSync;
+    const bundledNodeDir = options.bundledNodeDir === undefined
+        ? getBundledNodeDir()
+        : options.bundledNodeDir;
 
-        return [
-            // ~/.myagents/bin — MUST be first so external runtime shell tools can find
-            // the `myagents` CLI (runtime shell subprocess inherits this PATH via
-            // augmentedProcessEnv → getShellEnv). Same reason as the Unix branch below.
-            userProfile ? join(userProfile, '.myagents', 'bin') : '',
-            userProfile ? join(userProfile, '.bun', 'bin') : '',
-            localAppData ? join(localAppData, 'bun', 'bin') : '',
-            programFiles ? join(programFiles, 'nodejs') : '',
-            userProfile ? join(userProfile, 'AppData', 'Roaming', 'npm') : '',
-            // Git for Windows — SDK requires git; PATH may be stale after NSIS install
-            programFiles ? join(programFiles, 'Git', 'cmd') : '',
-            join(process.env['PROGRAMFILES(X86)'] || '', 'Git', 'cmd'),
-            localAppData ? join(localAppData, 'Programs', 'Git', 'cmd') : '',
-        ].filter(Boolean);
+    if (platform === 'win32') {
+        const userProfile = envValue(env, 'USERPROFILE');
+        const localAppData = envValue(env, 'LOCALAPPDATA');
+        const appData = envValue(env, 'APPDATA');
+        const programFiles = envValue(env, 'PROGRAMFILES');
+        const programFilesX86 = envValue(env, 'PROGRAMFILES(X86)');
+        const nvmSymlink = envValue(env, 'NVM_SYMLINK');
+        const fnmPath = envValue(env, 'FNM_MULTISHELL_PATH');
+        const paths: string[] = [];
+
+        // Keep this in sync with buildClaudeSessionEnv(): system Node first,
+        // then bundled Node, MyAgents-managed npm installs, and MyAgents CLI.
+        pushPath(paths, programFiles ? joinForPlatform(platform, programFiles, 'nodejs') : '', platform);
+        pushPath(paths, programFilesX86 ? joinForPlatform(platform, programFilesX86, 'nodejs') : '', platform);
+        pushPath(paths, nvmSymlink, platform);
+        pushPath(paths, localAppData ? joinForPlatform(platform, localAppData, 'Volta', 'bin') : '', platform);
+        pushPath(paths, fnmPath, platform);
+        pushPath(paths, appData ? joinForPlatform(platform, appData, 'npm') : '', platform);
+        pushPath(paths, userProfile ? joinForPlatform(platform, userProfile, 'AppData', 'Roaming', 'npm') : '', platform);
+        pushPath(paths, bundledNodeDir, platform);
+        pushPath(paths, localAppData ? joinForPlatform(platform, localAppData, 'MyAgents', 'nodejs') : '', platform);
+        pushPath(paths, getMyAgentsNpmGlobalBinDir(userProfile, platform), platform);
+        pushPath(paths, userProfile ? joinForPlatform(platform, userProfile, '.myagents', 'bin') : '', platform);
+        pushPath(paths, userProfile ? joinForPlatform(platform, userProfile, '.bun', 'bin') : '', platform);
+        pushPath(paths, localAppData ? joinForPlatform(platform, localAppData, 'bun', 'bin') : '', platform);
+        // Git for Windows — SDK requires git; PATH may be stale after NSIS install
+        pushPath(paths, programFiles ? joinForPlatform(platform, programFiles, 'Git', 'cmd') : '', platform);
+        pushPath(paths, programFilesX86 ? joinForPlatform(platform, programFilesX86, 'Git', 'cmd') : '', platform);
+        pushPath(paths, localAppData ? joinForPlatform(platform, localAppData, 'Programs', 'Git', 'cmd') : '', platform);
+        return paths;
     }
 
     // macOS/Linux paths — cover common package managers and version managers.
     // GUI apps don't inherit shell PATH, so we enumerate known binary directories.
-    const home = process.env.HOME;
-    const paths = [
-        // ~/.myagents/bin — MUST be first so external runtime (Gemini/CC/Codex) shell
-        // tools can find the `myagents` CLI. The builtin SDK path has its own
-        // explicit injection in buildClaudeSessionEnv, but external runtimes rely
-        // on getFallbackPaths via augmentedProcessEnv → getShellEnv.
-        home ? `${home}/.myagents/bin` : '',
-        '/opt/homebrew/bin',        // macOS Apple Silicon homebrew
-        '/usr/local/bin',           // macOS Intel homebrew / Linux system
-        home ? `${home}/.local/bin` : '',          // Claude Code / pipx / XDG user-local
-        home ? `${home}/.bun/bin` : '',            // Bun global installs
-        home ? `${home}/.npm-global/bin` : '',     // npm custom global prefix
-        home ? `${home}/.cargo/bin` : '',          // Rust / cargo installs
-        home ? `${home}/.volta/bin` : '',          // Volta (Node version manager)
-        home ? `${home}/Library/pnpm` : '',        // pnpm (macOS)
-    ];
+    const home = envValue(env, 'HOME');
+    const paths: string[] = [];
+    pushPath(paths, '/opt/homebrew/bin', platform);        // macOS Apple Silicon homebrew
+    pushPath(paths, '/usr/local/bin', platform);           // macOS Intel homebrew / Linux system
+    pushPath(paths, '/usr/bin', platform);
+    pushPath(paths, '/bin', platform);
+    pushPath(paths, bundledNodeDir, platform);
+    pushPath(paths, getMyAgentsNpmGlobalBinDir(home, platform), platform);
+    // ~/.myagents/bin stays before generic user package-manager dirs so external
+    // runtime shell tools can still find the `myagents` CLI.
+    pushPath(paths, home ? `${home}/.myagents/bin` : '', platform);
+    pushPath(paths, home ? `${home}/.local/bin` : '', platform);          // Claude Code / pipx / XDG user-local
+    pushPath(paths, home ? `${home}/.bun/bin` : '', platform);            // Bun global installs
+    pushPath(paths, home ? `${home}/.npm-global/bin` : '', platform);     // npm custom global prefix
+    pushPath(paths, home ? `${home}/.cargo/bin` : '', platform);          // Rust / cargo installs
+    pushPath(paths, home ? `${home}/.volta/bin` : '', platform);          // Volta (Node version manager)
+    pushPath(paths, home ? `${home}/Library/pnpm` : '', platform);        // pnpm (macOS)
 
     // Attempt to resolve NVM paths manually if exists.
     // Add ALL installed versions (sorted highest-first so the newest takes PATH priority).
     // Why all versions: `zsh -l -c` doesn't source .zshrc (non-interactive), so shell PATH
     // detection misses NVM. If we only add the highest version but the user installed
     // claude/codex on a different version, detection fails.
-    if (process.env.HOME) {
-        const nvmDir = join(process.env.HOME, '.nvm', 'versions', 'node');
-        if (existsSync(nvmDir)) {
+    if (home) {
+        const nvmDir = joinForPlatform(platform, home, '.nvm', 'versions', 'node');
+        if (exists(nvmDir)) {
             try {
-                const versions = readdirSync(nvmDir)
+                const versions = readDir(nvmDir)
                     .filter(v => v.startsWith('v'))
                     .sort((a, b) => b.localeCompare(a, undefined, { numeric: true }));
 
                 for (const v of versions) {
-                    paths.push(join(nvmDir, v, 'bin'));
+                    pushPath(paths, joinForPlatform(platform, nvmDir, v, 'bin'), platform);
                 }
                 if (versions.length > 0) {
                     console.log('[shell] Found NVM node versions:', versions.join(', '));
@@ -74,22 +140,20 @@ function getFallbackPaths(): string[] {
             }
         }
 
-        const homeDir = process.env.HOME!; // narrowed by if-guard above
-
         // fnm (Fast Node Manager) — ~/.local/share/fnm/aliases/default/bin
-        const fnmDir = join(homeDir, '.local', 'share', 'fnm', 'aliases', 'default', 'bin');
-        if (existsSync(fnmDir)) paths.push(fnmDir);
+        const fnmDir = joinForPlatform(platform, home, '.local', 'share', 'fnm', 'aliases', 'default', 'bin');
+        if (exists(fnmDir)) pushPath(paths, fnmDir, platform);
 
         // asdf version manager — ~/.asdf/shims
-        const asdfDir = join(homeDir, '.asdf', 'shims');
-        if (existsSync(asdfDir)) paths.push(asdfDir);
+        const asdfDir = joinForPlatform(platform, home, '.asdf', 'shims');
+        if (exists(asdfDir)) pushPath(paths, asdfDir, platform);
 
         // mise (formerly rtx) — ~/.local/share/mise/shims
-        const miseDir = join(homeDir, '.local', 'share', 'mise', 'shims');
-        if (existsSync(miseDir)) paths.push(miseDir);
+        const miseDir = joinForPlatform(platform, home, '.local', 'share', 'mise', 'shims');
+        if (exists(miseDir)) pushPath(paths, miseDir, platform);
     }
 
-    return paths.filter(Boolean);
+    return paths;
 }
 
 /**
@@ -98,10 +162,14 @@ function getFallbackPaths(): string[] {
  * async shell-interactive detection completes) and as baseline prefix even
  * after detection — detected entries are appended, not replaced.
  */
-function buildFallbackPath(): string {
-    const fallback = getFallbackPaths().join(PATH_SEPARATOR);
-    const existing = process.env[PATH_KEY] || process.env.PATH || '';
-    return existing ? `${fallback}${PATH_SEPARATOR}${existing}` : fallback;
+export function buildFallbackPath(options: FallbackPathOptions = {}): string {
+    const platform = options.platform ?? process.platform;
+    const env = options.env ?? process.env;
+    const separator = pathSeparatorFor(platform);
+    const pathKey = pathKeyFor(platform);
+    const fallback = getFallbackPaths(options).join(separator);
+    const existing = env[pathKey] || env.PATH || '';
+    return existing ? `${fallback}${separator}${existing}` : fallback;
 }
 
 // Populated lazily with the fallback PATH on first sync read.

@@ -1627,7 +1627,8 @@ export class CodexRuntime implements AgentRuntime {
 
   async detect(): Promise<RuntimeDetection> {
     try {
-      const proc = spawn([resolveCommand('codex'), '--version'], {
+      const command = resolveCommand('codex');
+      const proc = spawn([command, '--version'], {
         stdout: 'pipe',
         stderr: 'pipe',
         stdin: 'ignore',
@@ -1639,7 +1640,7 @@ export class CodexRuntime implements AgentRuntime {
         return {
           installed: true,
           version: text.trim().replace(/^codex-cli\s*/i, ''),
-          path: 'codex',
+          path: command,
         };
       }
     } catch { /* not installed */ }

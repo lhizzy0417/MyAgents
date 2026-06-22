@@ -1,4 +1,4 @@
-import { normalize, resolve } from 'path';
+import { normalize, win32 as pathWin32 } from 'path';
 
 const NPM_PREFIX_ENV_KEYS = [
   'npm_config_prefix',
@@ -16,7 +16,7 @@ export function getMyAgentsNpmGlobalPrefix(
 ): string | null {
   if (!home) return null;
   return isWindowsPlatform(platform)
-    ? resolve(home, '.myagents', 'npm-global')
+    ? pathWin32.resolve(home, '.myagents', 'npm-global')
     : `${home}/.myagents/npm-global`;
 }
 
