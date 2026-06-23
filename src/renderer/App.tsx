@@ -410,6 +410,23 @@ export default function App() {
     setActiveTabIdState(next);
   }, [syncRendererCorrelationForTab]);
 
+  useEffect(() => {
+    if (configLoading || config.teamSpaceEnabled === true) return;
+
+    const currentTabs = tabsRef.current;
+    if (!currentTabs.some((tab) => tab.view === 'space')) return;
+
+    const remainingTabs = currentTabs.filter((tab) => tab.view !== 'space');
+    const nextTabs = remainingTabs.length > 0 ? remainingTabs : [createNewTab()];
+    const currentActiveId = activeTabIdRef.current;
+    const nextActiveId = nextTabs.some((tab) => tab.id === currentActiveId)
+      ? currentActiveId
+      : nextTabs[nextTabs.length - 1]?.id ?? null;
+
+    setTabs(nextTabs);
+    setActiveTabId(nextActiveId, nextTabs);
+  }, [configLoading, config.teamSpaceEnabled, setActiveTabId]);
+
   // Persist open chat tabs after every structural change (Issue #232). This is
   // a POST-COMMIT effect — it flushes shortly after each tabs/activeTabId change
   // (not synchronously inside the mutation). The payload is tiny (≤MAX_TABS × 4
@@ -2792,6 +2809,10 @@ export default function App() {
   }, [handleOpenTaskCenter]);
 
   const handleOpenSpace = useCallback(() => {
+    if (config.teamSpaceEnabled !== true) {
+      toastRef.current.info('团队功能尚未开放');
+      return;
+    }
     const currentTabs = tabsRef.current;
     const existing = currentTabs.find((t) => t.view === 'space');
     if (existing) {
@@ -2807,11 +2828,11 @@ export default function App() {
       agentDir: null,
       sessionId: null,
       view: 'space',
-      title: '云空间',
+      title: '团队',
       sidecarConfigDisposition: 'push',
     };
     openNewTabDeferred(newTab);
-  }, [openNewTabDeferred, setActiveTabId]);
+  }, [config.teamSpaceEnabled, openNewTabDeferred, setActiveTabId]);
 
   useEffect(() => {
     window.addEventListener(CUSTOM_EVENTS.OPEN_SPACE, handleOpenSpace);
@@ -3396,6 +3417,7 @@ export default function App() {
         updateInstalling={updateInstalling}
         updatePreparing={updatePreparing}
         onRestartAndUpdate={() => void handleRestartAndUpdate()}
+        teamSpaceEnabled={config.teamSpaceEnabled === true}
         restoreCount={restorePillCount}
         onRestoreSession={handleRestoreLastSession}
         onDismissRestore={handleDismissRestore}

@@ -282,7 +282,7 @@ export default memo(function TabBar({
                                       : tab.view === 'taskcenter'
                                         ? '任务中心'
                                         : tab.view === 'space'
-                                          ? '云空间'
+                                          ? '团队'
                                           : '启动页';
                                 const isActive = tab.id === activeTabId;
                                 return (

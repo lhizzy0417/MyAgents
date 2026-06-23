@@ -3546,6 +3546,29 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                             </div>
                                         </div>
 
+                                        {/* Team Space Gate */}
+                                        <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5">
+                                            <div className="flex items-center justify-between">
+                                                <div className="flex-1 pr-4">
+                                                    <h3 className="text-sm font-medium text-[var(--ink)]">团队入口</h3>
+                                                    <p className="mt-1 text-xs text-[var(--ink-muted)]">
+                                                        显示标题栏中的「团队」tab。该功能仍在开发中，默认关闭，关闭时已打开的团队页面也会被隐藏。
+                                                    </p>
+                                                </div>
+                                                <button
+                                                    onClick={() => updateConfig({ teamSpaceEnabled: config.teamSpaceEnabled !== true })}
+                                                    aria-pressed={config.teamSpaceEnabled === true}
+                                                    className={`relative h-6 w-11 shrink-0 cursor-pointer rounded-full transition-colors ${config.teamSpaceEnabled === true ? 'bg-[var(--accent)]' : 'bg-[var(--line-strong)]'
+                                                        }`}
+                                                >
+                                                    <span
+                                                        className={`absolute left-0.5 top-0.5 h-5 w-5 rounded-full bg-[var(--toggle-thumb)] shadow transition-transform ${config.teamSpaceEnabled === true ? 'translate-x-5' : 'translate-x-0'
+                                                            }`}
+                                                    />
+                                                </button>
+                                            </div>
+                                        </div>
+
                                         {/* Split View Toggle */}
                                         <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5">
                                             <div className="flex items-center justify-between">

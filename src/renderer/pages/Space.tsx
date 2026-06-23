@@ -393,7 +393,7 @@ export default function Space({ isActive }: { isActive: boolean }) {
     return (
       <div className="flex h-full items-center justify-center bg-[var(--paper)] text-sm text-[var(--ink-muted)]">
         <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-        加载云空间
+        加载团队
       </div>
     );
   }
