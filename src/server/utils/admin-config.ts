@@ -682,12 +682,10 @@ function asBuiltinPermissionMode(value: unknown): string | undefined {
  * For desktop Chat sessions, the frontend's /api/mcp/set and per-message providerEnv will
  * override the self-resolved values — so there is no conflict.
  *
- * v0.1.69 — `sessionMeta`: when provided, the session's snapshot fields take priority
- * over the agent's. This is the read-side complement of `snapshotForOwnedSession()` and
- * implements the layered Option-C semantics from PRD §6 (`session ?? agent`). The
- * fallback is field-by-field: a session may have captured `model` but not
- * `mcpEnabledServers`, in which case the unset fields lazily resolve via agent —
- * this is a *read-only* fallback (no write-back), per PRD §6.4.
+ * v0.1.69 / 0.2.39 — `sessionMeta`: when `configSnapshotAt` is present, the
+ * session owns its runtime config and missing fields must not fall back to
+ * Agent/Project defaults. Agent fallback is only for legacy sessions without a
+ * snapshot marker, and is still read-only.
  *
  * IM sessions deliberately don't snapshot model/permission/mcp (D4 live-follow), so
  * the session-meta merge is a no-op for them — `meta?.<field>` is undefined and we
@@ -721,13 +719,15 @@ export function resolveWorkspaceConfig(
   // globally still wins (security stays at the global lever, locked sessions just
   // pin their feature surface).
   let mcpServers: McpServerDefinition[] = [];
+  const snapshotOwnsConfig = Boolean(sessionMeta?.configSnapshotAt);
+
   if (includeMcp) {
     if (sessionMeta?.mcpEnabledServers) {
       const allServers = getAllMcpServers(config);
       const globalEnabled = new Set(getEnabledMcpServerIds(config));
       const sessionEnabled = new Set(sessionMeta.mcpEnabledServers);
       mcpServers = allServers.filter(s => globalEnabled.has(s.id) && sessionEnabled.has(s.id));
-    } else {
+    } else if (!snapshotOwnsConfig) {
       // Lazy fallback for legacy / IM sessions — uses project ∩ global as before.
       mcpServers = getEffectiveMcpServers(agentDir);
     }
@@ -736,9 +736,11 @@ export function resolveWorkspaceConfig(
   // --- Resolve Provider ---
   // Priority: session.providerId → agent.providerId → config.defaultProviderId → persisted snapshot
   let providerEnv: ResolvedProviderEnv | undefined;
-  const providerId = sessionMeta?.providerId
-    || (agent?.providerId as string | undefined)
-    || (config.defaultProviderId as string | undefined);
+  const providerId = snapshotOwnsConfig
+    ? sessionMeta?.providerId
+    : (sessionMeta?.providerId
+      || (agent?.providerId as string | undefined)
+      || (config.defaultProviderId as string | undefined));
   if (providerId) {
     providerEnv = resolveProviderEnv(providerId, config);
   }
@@ -758,7 +760,7 @@ export function resolveWorkspaceConfig(
   if (sessionMeta?.providerEnvJson) {
     const decoded = decodeProviderEnvSnapshot(sessionMeta.providerEnvJson, providerId, config);
     if (decoded) providerEnv = decoded;
-  } else if (!providerEnv && agent?.providerEnvJson) {
+  } else if (!snapshotOwnsConfig && !providerEnv && agent?.providerEnvJson) {
     // Backward-compat: legacy sessions without a snapshot fall back to agent's persisted env
     const decoded = decodeProviderEnvSnapshot(agent.providerEnvJson as string, providerId, config);
     if (decoded) providerEnv = decoded;
@@ -778,8 +780,8 @@ export function resolveWorkspaceConfig(
   // - builtin: session.model → agent.model → provider primary model
   // - external: session.model → agent.runtimeConfig.model → runtime default
   const rawModel = resolvedRuntime === 'builtin'
-    ? sessionMeta?.model ?? (agent?.model as string | undefined) ?? undefined
-    : sessionMeta?.model ?? agentRuntimeConfig?.model;
+    ? (snapshotOwnsConfig ? sessionMeta?.model : (sessionMeta?.model ?? (agent?.model as string | undefined) ?? undefined))
+    : (snapshotOwnsConfig ? sessionMeta?.model : (sessionMeta?.model ?? agentRuntimeConfig?.model));
   let model = coerceModelForRuntime(rawModel, resolvedRuntime);
   if (resolvedRuntime !== 'builtin'
       && typeof rawModel === 'string'
@@ -802,10 +804,12 @@ export function resolveWorkspaceConfig(
   // hold the literal 'default' — that is a meaningful value ("session reverted
   // to default") and must win over a non-default agent value, which the ??
   // chain handles naturally.
-  const rawReasoningEffort = sessionMeta?.reasoningEffort
-    ?? (resolvedRuntime === 'builtin'
-      ? (agent?.reasoningEffort as string | undefined)
-      : agentRuntimeConfig?.reasoningEffort);
+  const rawReasoningEffort = snapshotOwnsConfig
+    ? sessionMeta?.reasoningEffort
+    : (sessionMeta?.reasoningEffort
+      ?? (resolvedRuntime === 'builtin'
+        ? (agent?.reasoningEffort as string | undefined)
+        : agentRuntimeConfig?.reasoningEffort));
   const reasoningEffort = resolvedRuntime === 'builtin'
     ? rawReasoningEffort
     : coerceReasoningEffortSettingForRuntime(rawReasoningEffort, resolvedRuntime);
@@ -832,13 +836,17 @@ export function resolveWorkspaceConfig(
     // (read-only) — defaulting headless sessions to plan would make them refuse
     // every write before the first user message. Only reachable on a brand-new
     // empty config; once the UI has run, config.defaultPermissionMode is set.
-    permissionMode = asBuiltinPermissionMode(sessionMeta?.permissionMode)
-      ?? asBuiltinPermissionMode(agent?.permissionMode)
-      ?? asBuiltinPermissionMode(project?.permissionMode)
-      ?? asBuiltinPermissionMode(config.defaultPermissionMode)
-      ?? 'auto';
+    permissionMode = snapshotOwnsConfig
+      ? (asBuiltinPermissionMode(sessionMeta?.permissionMode) ?? 'auto')
+      : (asBuiltinPermissionMode(sessionMeta?.permissionMode)
+        ?? asBuiltinPermissionMode(agent?.permissionMode)
+        ?? asBuiltinPermissionMode(project?.permissionMode)
+        ?? asBuiltinPermissionMode(config.defaultPermissionMode)
+        ?? 'auto');
   } else {
-    const rawPermissionMode = sessionMeta?.permissionMode ?? agentRuntimeConfig?.permissionMode;
+    const rawPermissionMode = snapshotOwnsConfig
+      ? sessionMeta?.permissionMode
+      : (sessionMeta?.permissionMode ?? agentRuntimeConfig?.permissionMode);
     const coercedPermissionMode = coercePermissionModeForRuntime(rawPermissionMode, resolvedRuntime);
     if (typeof rawPermissionMode === 'string'
         && rawPermissionMode.trim().length > 0

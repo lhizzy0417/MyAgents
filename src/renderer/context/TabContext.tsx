@@ -28,6 +28,16 @@ import type { SessionMetadata } from '@/api/sessionClient';
 import type { ContextUsage } from '../../shared/types/context-usage';
 import type { SlashCommand } from '../../shared/slashCommands';
 
+export interface AdoptMigratedSessionOptions {
+    /**
+     * True when the backend/Rust side has already moved the live sidecar owner
+     * to `newSessionId` (for example IM binding migration). False/omitted means
+     * the renderer parent must first upgrade the Rust sidecar key before this
+     * Tab can safely adopt the id.
+     */
+    sidecarAlreadyMigrated?: boolean;
+}
+
 // (issue #174) 'starting' = SDK subprocess launched, awaiting system_init.
 // Distinct from 'running' (= AI actively processing a turn) so the UI can
 // surface a "AI 启动中" hint instead of the generic thinking spinner during
@@ -194,7 +204,7 @@ export interface TabContextValue extends TabState {
      * `onSessionIdChange` so the SSE auto-reconnect effect picks up the new
      * session. No backend call is made.
      */
-    adoptMigratedSession: (newSessionId: string) => void;
+    adoptMigratedSession: (newSessionId: string, options?: AdoptMigratedSessionOptions) => Promise<boolean>;
 
     // Tab-scoped API functions (use this Tab's Sidecar)
     // `opts.signal` cancels the call from the renderer side (e.g., useEffect
@@ -276,7 +286,7 @@ const defaultContextValue: TabContextValue = {
     loadSession: async () => false,
     loadOlderMessages: async () => { },
     resetSession: async () => false,
-    adoptMigratedSession: () => { },
+    adoptMigratedSession: async () => false,
     apiGet: async () => { throw new Error('Not in TabProvider'); },
     apiPost: async () => { throw new Error('Not in TabProvider'); },
     apiPut: async () => { throw new Error('Not in TabProvider'); },

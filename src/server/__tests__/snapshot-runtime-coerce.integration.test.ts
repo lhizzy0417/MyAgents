@@ -145,7 +145,7 @@ describe('resolveSessionConfig — runtime-aware coercion (issue #224)', () => {
     );
   });
 
-  it('owned/external: agent fallback reads runtimeConfig.model (not agent.model) when snapshot is empty', () => {
+  it('legacy external: agent fallback reads runtimeConfig.model (not agent.model) when snapshot is not locked', () => {
     const r = resolveSessionConfig(meta({
       runtime: 'codex',
       model: undefined,
@@ -155,6 +155,19 @@ describe('resolveSessionConfig — runtime-aware coercion (issue #224)', () => {
       runtimeConfig: { model: 'gpt-5.5-codex' },
     }), undefined, 'owned');
     expect(r.model).toBe('gpt-5.5-codex');
+  });
+
+  it('owned/external: missing snapshot model uses runtime default instead of agent fallback', () => {
+    const r = resolveSessionConfig(meta({
+      runtime: 'codex',
+      model: undefined,
+      configSnapshotAt: '2026-06-23T00:00:00.000Z',
+    }), makeAgent({
+      runtime: 'codex',
+      model: 'claude-opus-4-6',
+      runtimeConfig: { model: 'gpt-5.5-codex' },
+    }), undefined, 'owned');
+    expect(r.model).toBeUndefined();
   });
 
   it('owned/external: claude-opus-4-6[1m] (1M suffix) is still recognized as Claude → coerced on codex', () => {
@@ -203,7 +216,7 @@ describe('resolveSessionConfig — runtime-aware coercion (issue #224)', () => {
     );
   });
 
-  it('owned/external: agent fallback reads runtimeConfig.permissionMode when snapshot is empty', () => {
+  it('legacy external: agent fallback reads runtimeConfig.permissionMode when snapshot is not locked', () => {
     const r = resolveSessionConfig(meta({
       runtime: 'codex',
       permissionMode: undefined,
@@ -213,5 +226,33 @@ describe('resolveSessionConfig — runtime-aware coercion (issue #224)', () => {
       runtimeConfig: { permissionMode: 'no-restrictions' },
     }), undefined, 'owned');
     expect(r.permissionMode).toBe('no-restrictions');
+  });
+
+  it('owned/external: missing snapshot permission uses runtime default instead of agent fallback', () => {
+    const r = resolveSessionConfig(meta({
+      runtime: 'codex',
+      permissionMode: undefined,
+      configSnapshotAt: '2026-06-23T00:00:00.000Z',
+    }), makeAgent({
+      runtime: 'codex',
+      permissionMode: 'fullAgency',
+      runtimeConfig: { permissionMode: 'full-auto' },
+    }), undefined, 'owned');
+    expect(r.permissionMode).toBeUndefined();
+  });
+
+  it('owned/builtin: missing provider and MCP snapshot do not fall back to agent defaults', () => {
+    const r = resolveSessionConfig(meta({
+      runtime: 'builtin',
+      providerId: undefined,
+      mcpEnabledServers: undefined,
+      configSnapshotAt: '2026-06-23T00:00:00.000Z',
+    }), makeAgent({
+      runtime: 'builtin',
+      providerId: 'deepseek',
+      mcpEnabledServers: ['fs', 'git'],
+    }), undefined, 'owned');
+    expect(r.providerId).toBeUndefined();
+    expect(r.mcpEnabledServers).toBeUndefined();
   });
 });

@@ -6,11 +6,12 @@ import {
 } from './external-session';
 
 describe('external session metadata materialization policy', () => {
-  it('allows true fresh starts to create missing metadata', () => {
-    expect(shouldCreateMissingExternalMetadataForRealUserTurn('fresh-start', false)).toBe(true);
+  it('does not let fresh-start alone recreate missing metadata', () => {
+    expect(shouldCreateMissingExternalMetadataForRealUserTurn('fresh-start', false)).toBe(false);
   });
 
-  it('allows resume and active-process first turns only when a pre-warm birth exists', () => {
+  it('allows first turns only when a pre-warm or IM birth exists', () => {
+    expect(shouldCreateMissingExternalMetadataForRealUserTurn('fresh-start', true)).toBe(true);
     expect(shouldCreateMissingExternalMetadataForRealUserTurn('resume-start', true)).toBe(true);
     expect(shouldCreateMissingExternalMetadataForRealUserTurn('active-process', true)).toBe(true);
 

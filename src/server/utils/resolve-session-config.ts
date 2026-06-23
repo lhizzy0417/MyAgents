@@ -38,9 +38,10 @@ export type SessionOwnerKind = 'im' | 'owned';
  *   snapshot read. This keeps the D4 live-follow semantic; IM session fork on
  *   runtime drift happens at the Router layer, not here.
  *
- * - Owned (`'owned'`): read session snapshot first; fall back to agent for any
- *   field the snapshot hasn't captured yet (lazy migration for legacy sessions
- *   that predate v0.1.69).
+ * - Owned (`'owned'`): if `configSnapshotAt` is present, the session snapshot
+ *   owns the field set and missing fields resolve only to runtime/provider
+ *   product defaults. Agent fallback is reserved for legacy sessions that have
+ *   no snapshot marker yet.
  *
  * The lazy fallback is **only a read-path concern** — it does NOT write back
  * into SessionMetadata. Backfill happens only on active writes (user sends a
@@ -77,7 +78,12 @@ export function resolveSessionConfig(
     };
   }
 
-  // owned (Desktop + Cron): session snapshot first, agent fallback per field
+  // owned (Desktop + Cron): complete snapshots are session-owned. Legacy
+  // sessions without configSnapshotAt may still fall back to Agent for
+  // compatibility; snapshotted-but-partial sessions must not silently inherit
+  // Agent defaults (#395/#396), because that makes old conversations drift when
+  // the Agent template changes.
+  const snapshotOwnsConfig = Boolean(meta?.configSnapshotAt);
   const runtime = meta?.runtime ?? agent.runtime ?? 'builtin';
   // Snapshot vs agent-fallback for model. For external runtimes the snapshot
   // and agent fallback target different fields — snapshot holds the runtime
@@ -87,8 +93,8 @@ export function resolveSessionConfig(
   // unsnapshotted external session would read `agent.model` (Claude) and
   // hand it to Codex → 400 (issue #224).
   const rawModel = runtime === 'builtin'
-    ? (meta?.model ?? agent.model)
-    : (meta?.model ?? agent.runtimeConfig?.model);
+    ? (snapshotOwnsConfig ? meta?.model : (meta?.model ?? agent.model))
+    : (snapshotOwnsConfig ? meta?.model : (meta?.model ?? agent.runtimeConfig?.model));
   // Coerce obviously-foreign models out before they reach the runtime CLI.
   // Heals existing stale snapshots written by the pre-fix snapshot helper
   // (e.g. cron tasks created on App ≤ 0.2.19 with runtime=codex but
@@ -108,7 +114,9 @@ export function resolveSessionConfig(
     model = coercedModel;
   }
 
-  const rawPermissionMode = meta?.permissionMode ?? (runtime === 'builtin' ? agent.permissionMode : agent.runtimeConfig?.permissionMode);
+  const rawPermissionMode = snapshotOwnsConfig
+    ? meta?.permissionMode
+    : (meta?.permissionMode ?? (runtime === 'builtin' ? agent.permissionMode : agent.runtimeConfig?.permissionMode));
   const permissionMode = coercePermissionModeForRuntime(rawPermissionMode, runtime);
   if (typeof rawPermissionMode === 'string'
       && rawPermissionMode.trim().length > 0
@@ -122,8 +130,8 @@ export function resolveSessionConfig(
     runtime,
     model,
     permissionMode,
-    mcpEnabledServers: meta?.mcpEnabledServers ?? agent.mcpEnabledServers,
-    providerId: meta?.providerId ?? agent.providerId,
-    providerEnvJson: meta?.providerEnvJson ?? agent.providerEnvJson,
+    mcpEnabledServers: snapshotOwnsConfig ? meta?.mcpEnabledServers : (meta?.mcpEnabledServers ?? agent.mcpEnabledServers),
+    providerId: snapshotOwnsConfig ? meta?.providerId : (meta?.providerId ?? agent.providerId),
+    providerEnvJson: snapshotOwnsConfig ? meta?.providerEnvJson : (meta?.providerEnvJson ?? agent.providerEnvJson),
   };
 }

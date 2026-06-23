@@ -9,7 +9,7 @@
  * we use decorations: false on Windows for custom title bar styling.
  */
 
-import { Bot, Minus, Square, X, RefreshCw, RotateCcw, Settings, Copy, CheckSquare } from 'lucide-react';
+import { Bot, Cloud, Minus, Square, X, RefreshCw, RotateCcw, Settings, Copy, CheckSquare } from 'lucide-react';
 import { type CSSProperties, type ReactNode, useCallback, useEffect, useRef, useState } from 'react';
 import { isTauri } from '@/api/tauriClient';
 import { CUSTOM_EVENTS } from '@/../shared/constants';
@@ -33,6 +33,8 @@ interface CustomTitleBarProps {
     updatePreparing?: boolean;
     /** Callback when user clicks "Restart to Update" */
     onRestartAndUpdate?: () => void;
+    /** Whether the unfinished Team Space surface is exposed in the title bar. */
+    teamSpaceEnabled?: boolean;
     /** Number of restorable conversations from the previous session (Issue
      *  #309). `> 0` shows the "恢复对话" pill; surfaced by App only when the last
      *  exit was NOT a deliberate quit (crash / update-restart). */
@@ -70,6 +72,7 @@ export default function CustomTitleBar({
     updateInstalling,
     updatePreparing,
     onRestartAndUpdate,
+    teamSpaceEnabled = false,
     restoreCount = 0,
     onRestoreSession,
     onDismissRestore,
@@ -300,6 +303,20 @@ export default function CustomTitleBar({
 
                 {isTauri() && (
                     <>
+                        {teamSpaceEnabled && (
+                            <>
+                                <button
+                                    onClick={() => window.dispatchEvent(new CustomEvent(CUSTOM_EVENTS.OPEN_SPACE))}
+                                    className="flex h-7 items-center gap-1.5 rounded-md px-2.5 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
+                                    title="团队"
+                                    data-no-drag
+                                >
+                                    <Cloud className="h-4 w-4" />
+                                    <span className="text-sm font-medium">团队</span>
+                                </button>
+                                <TitlebarDragSpacer className="w-1" />
+                            </>
+                        )}
                         <button
                             onClick={() => window.dispatchEvent(new CustomEvent(CUSTOM_EVENTS.OPEN_TASK_CENTER))}
                             className="flex h-7 items-center gap-1.5 rounded-md px-2.5 text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"

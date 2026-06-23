@@ -33,7 +33,7 @@ import type { PermissionRequest } from '@/components/PermissionPrompt';
 import type { AskUserQuestionRequest, AskUserQuestion } from '../../shared/types/askUserQuestion';
 import type { ExitPlanModeRequest, EnterPlanModeRequest, ExitPlanModeAllowedPrompt } from '../../shared/types/planMode';
 import { CUSTOM_EVENTS, isPendingSessionId } from '../../shared/constants';
-import { TabContext, TabApiContext, TabActiveContext, type SessionState, type SystemNotice, type TabContextValue, type TabApiContextValue } from './TabContext';
+import { TabContext, TabApiContext, TabActiveContext, type AdoptMigratedSessionOptions, type SessionState, type SystemNotice, type TabContextValue, type TabApiContextValue } from './TabContext';
 import { shouldSkipHistoryReplay, shouldClearHistoryOnInit } from './sessionRestoreGuards';
 import {
     decidePersistedContextUsageSeed,
@@ -257,7 +257,7 @@ interface TabProviderProps {
     /** Callback when generating state changes (for close confirmation) */
     onGeneratingChange?: (isGenerating: boolean) => void;
     /** Callback when sessionId changes (e.g., backend creates real session from pending-xxx) */
-    onSessionIdChange?: (newSessionId: string) => void | Promise<void>;
+    onSessionIdChange?: (newSessionId: string, options?: AdoptMigratedSessionOptions) => boolean | void | Promise<boolean | void>;
     /** Callback when session title changes (auto-generated or renamed) */
     onTitleChange?: (title: string) => void;
     /** Callback when unread state changes (message completed on non-active tab) */
@@ -813,7 +813,11 @@ export default function TabProvider({
                     console.log(`[TabProvider ${tabId}] resetSession adopting backend sessionId: ${currentSessionIdRef.current ?? 'none'} -> ${response.sessionId}`);
                     currentSessionIdRef.current = response.sessionId;
                     setCurrentSessionId(response.sessionId);
-                    await onSessionIdChangeRef.current?.(response.sessionId);
+                    const changed = await onSessionIdChangeRef.current?.(response.sessionId);
+                    if (changed === false) {
+                        console.error(`[TabProvider ${tabId}] resetSession failed to upgrade parent session id to ${response.sessionId}`);
+                        return false;
+                    }
                 }
             }
             console.log(`[TabProvider ${tabId}] resetSession complete`);
@@ -851,8 +855,14 @@ export default function TabProvider({
      * notifies the parent to update Tab.sessionId. The session-aware SSE
      * useEffect picks up the new id and reconnects; no backend call is made.
      */
-    const adoptMigratedSession = useCallback((newSessionId: string) => {
+    const adoptMigratedSession = useCallback(async (newSessionId: string, options?: AdoptMigratedSessionOptions): Promise<boolean> => {
         console.log(`[TabProvider ${tabId}] adoptMigratedSession: ${currentSessionIdRef.current?.slice(0, 8) ?? 'none'} → ${newSessionId.slice(0, 8)}`);
+
+        const changed = await onSessionIdChangeRef.current?.(newSessionId, options);
+        if (changed === false) {
+            console.error(`[TabProvider ${tabId}] adoptMigratedSession aborted: parent refused session id change to ${newSessionId}`);
+            return false;
+        }
 
         // Suppress the chat:init that the migrate already broadcast on the
         // sidecar — we're treating the new session as "freshly created here"
@@ -907,7 +917,7 @@ export default function TabProvider({
         // will detect the prop change on next render and reconnect.
         currentSessionIdRef.current = newSessionId;
         setCurrentSessionId(newSessionId);
-        void onSessionIdChangeRef.current?.(newSessionId);
+        return true;
     }, [tabId, setStreamingMessage, clearInteractiveState, clearSessionActive, resetPaginationState]);
 
     const trackSessionNewForBirth = useCallback((
@@ -2419,7 +2429,15 @@ export default function TabProvider({
                         setCurrentSessionId(newSessionId);
                         // Notify parent (App.tsx) to update Tab.sessionId for Session singleton constraint
                         // This ensures history dropdown can detect if this session is already open
-                        void onSessionIdChangeRef.current?.(newSessionId);
+                        void Promise.resolve(onSessionIdChangeRef.current?.(newSessionId))
+                            .then((changed) => {
+                                if (changed === false) {
+                                    console.error(`[TabProvider ${tabId}] system_init session id sync was refused by parent for ${newSessionId}`);
+                                }
+                            })
+                            .catch((error) => {
+                                console.error(`[TabProvider ${tabId}] system_init session id sync failed:`, error);
+                            });
 
                         if (isSessionBirth) {
                             // Fallback policy:

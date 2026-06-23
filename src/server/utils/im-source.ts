@@ -14,20 +14,13 @@ export function isImSourcedSession(source: SessionSource | string | undefined | 
 }
 
 /**
- * #305 — PATCH /sessions/:id snapshot-write guard.
- *
- * Returns `true` ONLY for "pure IM" sessions that must remain live-follow:
- * IM-shaped source AND no `configSnapshotAt` (so the snapshot has never been
- * captured). Returns `false` for desktop-to-IM handover sessions (IM source +
- * `configSnapshotAt` set, PRD 0.2.14) — those keep being snapshot-writeable
- * because the IM bridge reads "snapshot wins on delivery" for them.
- *
- * Mirrors the renderer's `shouldSkipSnapshotWrite` so server / client agree.
+ * Deprecated guard retained for old call sites/tests. v0.2.39 changed the
+ * ownership rule: an explicit desktop PATCH is allowed to promote even a pure
+ * IM-sourced session to a self-contained snapshot, so no IM-shaped source is
+ * dropped at the server boundary anymore.
  */
 export function shouldDropSnapshotPatchOnImSession(
-  existingMeta: { source?: SessionSource | string | null; configSnapshotAt?: string | null } | null | undefined,
+  _existingMeta: { source?: SessionSource | string | null; configSnapshotAt?: string | null } | null | undefined,
 ): boolean {
-  if (!existingMeta) return false;
-  if (existingMeta.configSnapshotAt) return false;
-  return isImSourcedSession(existingMeta.source);
+  return false;
 }

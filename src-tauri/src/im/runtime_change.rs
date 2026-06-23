@@ -91,6 +91,21 @@ impl OwnedSessionSnapshot {
     }
 }
 
+fn enabled_mcp_ids_from_servers_json(raw: Option<&str>) -> Option<Vec<String>> {
+    raw.and_then(|raw| serde_json::from_str::<Vec<Value>>(raw).ok())
+        .map(|servers| {
+            servers
+                .iter()
+                // Renderer/runtime `mcpServersJson` is already the enabled
+                // definition list and does not carry an `enabled` field.
+                // Older/full-list writers that explicitly set enabled=false
+                // still opt out here.
+                .filter(|s| s.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true))
+                .filter_map(|s| s.get("id").and_then(|v| v.as_str()).map(String::from))
+                .collect::<Vec<_>>()
+        })
+}
+
 /// Build the OwnedSessionSnapshot from the agent's CURRENT in-memory config.
 ///
 /// MUST be called BEFORE the patched fields (runtime / model / mcp / provider)
@@ -102,25 +117,15 @@ impl OwnedSessionSnapshot {
 /// snapshot at function entry (before any `patch.*` is applied to the agent's
 /// RwLocks) and pass it to `freeze_and_rotate_for_runtime_change`.
 pub async fn build_snapshot_from_agent_state(agent: &AgentInstance) -> OwnedSessionSnapshot {
+    let mcp_servers_json = agent.mcp_servers_json.read().await.clone();
     OwnedSessionSnapshot {
         runtime: agent.runtime.read().await.clone(),
         model: agent.current_model.read().await.clone(),
         permission_mode: Some(agent.permission_mode.read().await.clone()),
-        // mcp_servers_json is the FULL list-of-servers JSON; we only want
-        // the enabled ids (matches `snapshotForOwnedSession.mcpEnabledServers`).
-        mcp_enabled_servers: agent
-            .mcp_servers_json
-            .read()
-            .await
-            .as_ref()
-            .and_then(|raw| serde_json::from_str::<Vec<Value>>(raw).ok())
-            .map(|servers| {
-                servers
-                    .iter()
-                    .filter(|s| s.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false))
-                    .filter_map(|s| s.get("id").and_then(|v| v.as_str()).map(String::from))
-                    .collect::<Vec<_>>()
-            }),
+        // mcp_servers_json is the runtime payload: the selected server
+        // definitions already filtered by the global safety gate. Snapshot only
+        // stores ids, matching `snapshotForOwnedSession.mcpEnabledServers`.
+        mcp_enabled_servers: enabled_mcp_ids_from_servers_json(mcp_servers_json.as_deref()),
         // provider_id / provider_env_json — see module-level note: provider_id
         // is currently NOT hot-reloaded into AgentInstance (no Arc<RwLock>),
         // so we use the boot-time value from agent.config. provider_env IS
@@ -132,6 +137,41 @@ pub async fn build_snapshot_from_agent_state(agent: &AgentInstance) -> OwnedSess
             .await
             .as_ref()
             .map(|v| v.to_string()),
+    }
+}
+
+/// Build the OwnedSessionSnapshot from one channel's CURRENT live-follow state.
+///
+/// Used by `/new` when the peer session has already released its sidecar
+/// (`sidecar_port == 0`): there is no Node process to ask for held/live state,
+/// so the router freezes the old session with the channel's current live
+/// Agent/Channel config before rotating the binding.
+pub async fn build_snapshot_from_channel_state(
+    runtime: &tokio::sync::RwLock<String>,
+    current_model: &tokio::sync::RwLock<Option<String>>,
+    permission_mode: &tokio::sync::RwLock<String>,
+    mcp_servers_json: &tokio::sync::RwLock<Option<String>>,
+    provider_id: Option<String>,
+    current_provider_env: &tokio::sync::RwLock<Option<Value>>,
+) -> OwnedSessionSnapshot {
+    let runtime_value = runtime.read().await.clone();
+    let mcp_servers_json_value = mcp_servers_json.read().await.clone();
+    let is_external = runtime_value != "builtin";
+    OwnedSessionSnapshot {
+        runtime: runtime_value,
+        model: current_model.read().await.clone(),
+        permission_mode: Some(permission_mode.read().await.clone()),
+        mcp_enabled_servers: enabled_mcp_ids_from_servers_json(mcp_servers_json_value.as_deref()),
+        provider_id: if is_external { None } else { provider_id },
+        provider_env_json: if is_external {
+            None
+        } else {
+            current_provider_env
+                .read()
+                .await
+                .as_ref()
+                .map(|v| v.to_string())
+        },
     }
 }
 
@@ -172,7 +212,7 @@ async fn freeze_via_sidecar(
 /// Uses the SAME on-disk `~/.myagents/sessions.lock` that the Node sidecar's
 /// `withSessionsLock` uses (`SessionStore.ts:32`). This is a cross-process
 /// writer pair, so the lock convention MUST match exactly.
-async fn freeze_via_file_lock(
+pub async fn freeze_via_file_lock(
     session_id: &str,
     snapshot: &OwnedSessionSnapshot,
 ) -> Result<(), String> {
@@ -439,6 +479,7 @@ pub async fn freeze_and_rotate_for_runtime_change(
                 new_peer.session_id = new_session_id.clone();
                 new_peer.sidecar_port = 0; // next IM message spawns a fresh sidecar with NEW runtime
                 new_peer.message_count = 0;
+                new_peer.metadata_birth_pending = true;
                 new_peer.last_active = Instant::now();
                 router.upsert_peer_session(new_peer);
                 rotated += 1;
@@ -628,5 +669,19 @@ mod tests {
 
         assert!(should_replace_notification_candidate(&existing, &newer));
         assert!(!should_replace_notification_candidate(&newer, &existing));
+    }
+
+    #[test]
+    fn mcp_snapshot_treats_runtime_json_as_enabled_definition_list() {
+        let raw = serde_json::json!([
+            { "id": "remote-http", "type": "http", "url": "https://example.test/mcp" },
+            { "id": "disabled-legacy", "enabled": false }
+        ])
+        .to_string();
+
+        assert_eq!(
+            enabled_mcp_ids_from_servers_json(Some(&raw)),
+            Some(vec!["remote-http".to_string()])
+        );
     }
 }

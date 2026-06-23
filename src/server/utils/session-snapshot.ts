@@ -36,6 +36,11 @@ import type { SessionMetadata } from '../types/session';
  * `/api/session/freeze` and Rust file-lock fallback) at write time, not
  * passed through the snapshot payload. Mixing it into the payload caused
  * TS↔Rust drift in the v0.2.14 first-cut review. (review-by-codex F2.)
+ *
+ * `enabledPluginIds` is optional and currently only Node/desktop paths can
+ * populate it; Rust IM freeze does not track Claude cc-plugin state and may
+ * omit it. Omission means "freeze with no session plugin override", never
+ * "fall back to Agent" once `configSnapshotAt` exists.
  */
 export type OwnedSessionSnapshot = Pick<
   SessionMetadata,
@@ -44,6 +49,7 @@ export type OwnedSessionSnapshot = Pick<
   | 'reasoningEffort'
   | 'permissionMode'
   | 'mcpEnabledServers'
+  | 'enabledPluginIds'
   | 'providerId'
   | 'providerEnvJson'
 >;
@@ -150,6 +156,7 @@ export function snapshotForOwnedSession(
       ? coercePermissionModeForRuntime(snapshotAgent.runtimeConfig?.permissionMode, runtime)
       : snapshotAgent.permissionMode,
     mcpEnabledServers: snapshotAgent.mcpEnabledServers ? [...snapshotAgent.mcpEnabledServers] : undefined,
+    enabledPluginIds: snapshotAgent.enabledPluginIds ? [...snapshotAgent.enabledPluginIds] : undefined,
     providerId: snapshotAgent.providerId,
     providerEnvJson: snapshotAgent.providerEnvJson,
     configSnapshotAt: new Date().toISOString(),

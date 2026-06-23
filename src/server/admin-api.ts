@@ -65,7 +65,7 @@ const ADMIN_LOOPBACK_TIMEOUT_MS = 10_000;
 // sidecar's internal `FETCH_TIMEOUT_MS` (300s for tarball download) plus a
 // 30s buffer so the inner timeout always wins. Used by skill install routes.
 const SKILL_INSTALL_LOOPBACK_TIMEOUT_MS = 330_000;
-import { existsSync , writeFileSync, unlinkSync } from 'fs';
+import { existsSync, writeFileSync, unlinkSync } from 'fs';
 import { ensureDirSync } from './utils/fs-utils';
 import { resolve } from 'path';
 import { setMcpServers, setAgents, getMcpServers, getAgentState, getSidecarPort, forceReloadActiveSession } from './agent-session';
@@ -2869,6 +2869,28 @@ WHEN TO CALL
   Only when the user explicitly asks to record / save / note specific
   content for later ("记一下", "帮我记", "记下来", "remember this", etc.).
   Do not file FYI remarks, brainstorming, or unsolicited ideas.`;
+
+async function spaceManagementResponse(path: string, payload: Record<string, unknown>, hint?: string): Promise<AdminResponse> {
+  const resp = await managementApi(path, 'POST', payload);
+  if (!resp.ok) return mgmtError(resp, 'Space command failed');
+  return { success: true, data: resp.data, ...(hint ? { hint } : {}) };
+}
+
+export async function handleSpaceIssueGet(payload: Record<string, unknown>): Promise<AdminResponse> {
+  return spaceManagementResponse('/api/space/issue-get', payload);
+}
+
+export async function handleSpaceIssueComment(payload: Record<string, unknown>): Promise<AdminResponse> {
+  return spaceManagementResponse('/api/space/issue-comment', payload, 'Comment posted to MyAgents Space.');
+}
+
+export async function handleSpaceIssueStatus(payload: Record<string, unknown>): Promise<AdminResponse> {
+  return spaceManagementResponse('/api/space/issue-status', payload, 'Issue status updated.');
+}
+
+export async function handleSpaceAttachmentDownload(payload: Record<string, unknown>): Promise<AdminResponse> {
+  return spaceManagementResponse('/api/space/attachment-download', payload);
+}
 
 export function handleReadme(payload: { topic?: string; modules?: string[] }): AdminResponse {
   const topic = (payload.topic ?? '').toLowerCase();

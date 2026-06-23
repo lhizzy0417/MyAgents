@@ -7,7 +7,6 @@ import { ToastProvider } from './Toast';
 const mocks = vi.hoisted(() => ({
   deleteSession: vi.fn(),
   updateSession: vi.fn(),
-  deactivateSession: vi.fn(),
   handoverSessionToChannel: vi.fn(),
   exportSessionAsMarkdown: vi.fn(),
 }));
@@ -15,10 +14,6 @@ const mocks = vi.hoisted(() => ({
 vi.mock('@/api/sessionClient', () => ({
   deleteSession: mocks.deleteSession,
   updateSession: mocks.updateSession,
-}));
-
-vi.mock('@/api/tauriClient', () => ({
-  deactivateSession: mocks.deactivateSession,
 }));
 
 vi.mock('@/api/sessionHandoverClient', () => ({
@@ -48,7 +43,7 @@ function renderMenu(overrides: Partial<ComponentProps<typeof SessionMenuButton>>
         canRename
         onOpenRename={vi.fn()}
         onFavoriteChanged={vi.fn()}
-        onDeleted={vi.fn()}
+        prepareCurrentSessionForDelete={vi.fn().mockResolvedValue(true)}
         {...overrides}
       />
     </ToastProvider>,
@@ -126,5 +121,37 @@ describe('SessionMenuButton', () => {
         workspacePath: '/Users/zhihu/Documents/project/MyAgents',
       });
     });
+  });
+
+  it('moves the current tab off the session before deleting storage', async () => {
+    const prepareCurrentSessionForDelete = vi.fn().mockResolvedValue(true);
+    mocks.deleteSession.mockResolvedValue(true);
+    renderMenu({ prepareCurrentSessionForDelete });
+
+    fireEvent.click(screen.getByRole('button', { name: '对话操作' }));
+    fireEvent.click(screen.getByText('删除对话'));
+    fireEvent.click(screen.getByRole('button', { name: '删除' }));
+
+    await waitFor(() => {
+      expect(prepareCurrentSessionForDelete).toHaveBeenCalledTimes(1);
+      expect(mocks.deleteSession).toHaveBeenCalledWith(SESSION_ID);
+    });
+    expect(prepareCurrentSessionForDelete.mock.invocationCallOrder[0]).toBeLessThan(
+      mocks.deleteSession.mock.invocationCallOrder[0],
+    );
+  });
+
+  it('does not delete storage when the current tab cannot move away from the session', async () => {
+    const prepareCurrentSessionForDelete = vi.fn().mockResolvedValue(false);
+    renderMenu({ prepareCurrentSessionForDelete });
+
+    fireEvent.click(screen.getByRole('button', { name: '对话操作' }));
+    fireEvent.click(screen.getByText('删除对话'));
+    fireEvent.click(screen.getByRole('button', { name: '删除' }));
+
+    await waitFor(() => {
+      expect(prepareCurrentSessionForDelete).toHaveBeenCalledTimes(1);
+    });
+    expect(mocks.deleteSession).not.toHaveBeenCalled();
   });
 });

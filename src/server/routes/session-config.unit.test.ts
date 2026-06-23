@@ -10,6 +10,11 @@ const mocks = vi.hoisted(() => ({
     updateAgents: vi.fn(async () => ({ success: true })),
     updateProviderEnv: vi.fn(async () => ({ success: true, skipped: 'external-runtime' })),
     updatePermissionMode: vi.fn(async () => ({ success: true })),
+    materializePendingDesktopSession: vi.fn(async () => ({
+      success: true,
+      sessionId: 'real-session',
+      metadata: { id: 'real-session', providerEnvJson: '{"apiKey":"secret"}' },
+    })),
     getSessionConfigSnapshot: vi.fn(() => ({
       success: true,
       runtime: 'codex',
@@ -44,6 +49,11 @@ describe('handleSessionConfigRoute', () => {
     mocks.engine.updateAgents.mockResolvedValue({ success: true });
     mocks.engine.updateProviderEnv.mockResolvedValue({ success: true, skipped: 'external-runtime' });
     mocks.engine.updatePermissionMode.mockResolvedValue({ success: true });
+    mocks.engine.materializePendingDesktopSession.mockResolvedValue({
+      success: true,
+      sessionId: 'real-session',
+      metadata: { id: 'real-session', providerEnvJson: '{"apiKey":"secret"}' },
+    });
   });
 
   it('validates desktop interaction scenario before calling the engine', async () => {
@@ -110,6 +120,54 @@ describe('handleSessionConfigRoute', () => {
       permissionMode: 'no-restrictions',
       providerId: null,
       reasoningEffort: 'medium',
+    });
+  });
+
+  it('materializes a pending desktop session through the active engine', async () => {
+    const response = await handleSessionConfigRoute(
+      '/api/session/materialize',
+      new Request('http://local/api/session/materialize', {
+        method: 'POST',
+        body: JSON.stringify({
+          workspacePath: '/tmp/workspace',
+          snapshotPatch: { permissionMode: 'plan' },
+        }),
+      }),
+    );
+
+    expect(response?.status).toBe(200);
+    expect(await readJson(response as Response)).toEqual({
+      success: true,
+      sessionId: 'real-session',
+      metadata: { id: 'real-session', providerEnvJson: '[redacted]' },
+    });
+    expect(mocks.engine.materializePendingDesktopSession).toHaveBeenCalledWith({
+      workspacePath: '/tmp/workspace',
+      phase: undefined,
+      preparedSessionId: undefined,
+      snapshotPatch: { permissionMode: 'plan' },
+    });
+  });
+
+  it('passes pending materialize phase and prepared id through to the active engine', async () => {
+    const response = await handleSessionConfigRoute(
+      '/api/session/materialize',
+      new Request('http://local/api/session/materialize', {
+        method: 'POST',
+        body: JSON.stringify({
+          workspacePath: '/tmp/workspace',
+          phase: 'commit',
+          preparedSessionId: 'prepared-session',
+        }),
+      }),
+    );
+
+    expect(response?.status).toBe(200);
+    expect(mocks.engine.materializePendingDesktopSession).toHaveBeenCalledWith({
+      workspacePath: '/tmp/workspace',
+      phase: 'commit',
+      preparedSessionId: 'prepared-session',
+      snapshotPatch: undefined,
     });
   });
 });

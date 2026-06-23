@@ -55,6 +55,7 @@ import {
     rebuildAndPersistAvailableProviders,
 } from '@/config/configService';
 import { useConfig } from '@/hooks/useConfig';
+import { useSpaceBuildCapability } from '@/hooks/useSpaceBuildCapability';
 import { useHelperAgentModelDefaults } from '@/hooks/useHelperAgentModelDefaults';
 import { useAutostart } from '@/hooks/useAutostart';
 import { getBuildVersions } from '@/utils/debug';
@@ -137,6 +138,7 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
         saveProviderModelAliases,
         refreshConfig,
     } = useConfig();
+    const spaceBuildCapability = useSpaceBuildCapability();
     const toast = useToast();
     // Stabilize toast reference to avoid unnecessary effect re-runs
     const toastRef = useRef(toast);
@@ -3540,6 +3542,37 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
                                                 >
                                                     <span
                                                         className={`absolute left-0.5 top-0.5 h-5 w-5 rounded-full bg-[var(--toggle-thumb)] shadow transition-transform ${config.showDevTools ? 'translate-x-5' : 'translate-x-0'
+                                                            }`}
+                                                    />
+                                                </button>
+                                            </div>
+                                        </div>
+
+                                        {/* Team Space Gate */}
+                                        <div className="rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-5">
+                                            <div className="flex items-center justify-between">
+                                                <div className="flex-1 pr-4">
+                                                    <h3 className="text-sm font-medium text-[var(--ink)]">团队入口</h3>
+                                                    <p className="mt-1 text-xs text-[var(--ink-muted)]">
+                                                        {spaceBuildCapability.isLoading
+                                                            ? '正在读取团队服务构建状态...'
+                                                            : spaceBuildCapability.available
+                                                            ? '显示标题栏中的「团队」tab。该功能仍在开发中，默认关闭，关闭时已打开的团队页面也会被隐藏。'
+                                                            : `当前构建未包含团队服务。构建时设置 MYAGENTS_SPACE_ENABLED=true 与 MYAGENTS_SPACE_BASE_URL 后才可开启。${spaceBuildCapability.reason ? ` (${spaceBuildCapability.reason})` : ''}`}
+                                                    </p>
+                                                </div>
+                                                <button
+                                                    onClick={() => {
+                                                        if (spaceBuildCapability.isLoading || !spaceBuildCapability.available) return;
+                                                        updateConfig({ teamSpaceEnabled: config.teamSpaceEnabled !== true });
+                                                    }}
+                                                    disabled={spaceBuildCapability.isLoading || !spaceBuildCapability.available}
+                                                    aria-pressed={config.teamSpaceEnabled === true && spaceBuildCapability.available}
+                                                    className={`relative h-6 w-11 shrink-0 rounded-full transition-colors disabled:cursor-not-allowed disabled:opacity-60 ${config.teamSpaceEnabled === true && spaceBuildCapability.available ? 'bg-[var(--accent)]' : 'bg-[var(--line-strong)]'
+                                                        }`}
+                                                >
+                                                    <span
+                                                        className={`absolute left-0.5 top-0.5 h-5 w-5 rounded-full bg-[var(--toggle-thumb)] shadow transition-transform ${config.teamSpaceEnabled === true && spaceBuildCapability.available ? 'translate-x-5' : 'translate-x-0'
                                                             }`}
                                                     />
                                                 </button>

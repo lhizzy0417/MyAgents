@@ -369,6 +369,22 @@ mod lifecycle_contract_tests {
     }
 
     #[test]
+    fn session_has_tab_owner_tracks_desktop_owner_presence() {
+        let mut manager = SidecarManager::new();
+        insert_test_sidecar(&mut manager, "session-a", SidecarState::Healthy);
+
+        assert!(manager.session_has_tab_owner("session-a"));
+
+        manager
+            .get_session_sidecar_mut("session-a")
+            .expect("session sidecar")
+            .owners = owners(vec![SidecarOwner::Agent("agent-a".to_string())]);
+
+        assert!(!manager.session_has_tab_owner("session-a"));
+        assert!(!manager.session_has_tab_owner("missing-session"));
+    }
+
+    #[test]
     fn generation_for_requires_current_sidecar_entry() {
         let mut manager = SidecarManager::new();
         insert_test_sidecar(&mut manager, "session-a", SidecarState::Healthy);

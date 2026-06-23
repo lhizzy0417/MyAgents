@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import type { AppConfig } from '../types';
-import { normalizeStringifiedJsonFields } from './configNormalize';
+import { normalizeStringifiedJsonFields, promoteAgentMcpJsonToGlobal } from './configNormalize';
 import dirtyConfig from '../../../shared/__fixtures__/dirtyConfig301.json';
 
 // Issue #301: a legacy/hand-edited config can persist `providerEnvJson` /
@@ -77,5 +77,84 @@ describe('normalizeStringifiedJsonFields (issue #301)', () => {
     const cfg = { agents: [{ id: 'x', providerEnvJson: 42 }] } as unknown as AppConfig;
     expect(normalizeStringifiedJsonFields(cfg)).toBe(true);
     expect(agentsOf(cfg)[0].providerEnvJson).toBeUndefined();
+  });
+});
+
+describe('promoteAgentMcpJsonToGlobal (issue #398)', () => {
+  it('promotes selected custom HTTP MCP definitions stranded in Agent JSON', () => {
+    const remote = {
+      id: 'remote-http',
+      name: 'Remote HTTP',
+      type: 'http' as const,
+      url: 'https://mcp.example.com/mcp',
+      headers: { Authorization: 'Bearer token' },
+      isBuiltin: false,
+    };
+    const cfg = {
+      agents: [{
+        id: 'agent-1',
+        mcpEnabledServers: ['remote-http'],
+        mcpServersJson: JSON.stringify([remote]),
+      }],
+      mcpServers: [],
+      mcpEnabledServers: [],
+    } as unknown as AppConfig;
+
+    expect(promoteAgentMcpJsonToGlobal(cfg)).toBe(true);
+    expect(cfg.mcpServers).toEqual([remote]);
+    expect(cfg.mcpEnabledServers).toEqual(['remote-http']);
+  });
+
+  it('does not re-enable a known global server that the user disabled globally', () => {
+    const remote = {
+      id: 'remote-sse',
+      name: 'Remote SSE',
+      type: 'sse' as const,
+      url: 'https://mcp.example.com/sse',
+      isBuiltin: false,
+    };
+    const cfg = {
+      agents: [{
+        id: 'agent-1',
+        mcpEnabledServers: ['remote-sse'],
+        mcpServersJson: JSON.stringify([remote]),
+      }],
+      mcpServers: [remote],
+      mcpEnabledServers: [],
+    } as unknown as AppConfig;
+
+    expect(promoteAgentMcpJsonToGlobal(cfg)).toBe(false);
+    expect(cfg.mcpServers).toEqual([remote]);
+    expect(cfg.mcpEnabledServers).toEqual([]);
+  });
+
+  it('does not promote malformed or non-remote definitions from Agent JSON', () => {
+    const cfg = {
+      agents: [{
+        id: 'agent-1',
+        mcpEnabledServers: ['remote-without-url', 'agent-stdio'],
+        mcpServersJson: JSON.stringify([
+          {
+            id: 'remote-without-url',
+            name: 'Remote Missing URL',
+            type: 'http',
+            isBuiltin: false,
+          },
+          {
+            id: 'agent-stdio',
+            name: 'Agent Stdio',
+            type: 'stdio',
+            command: 'node',
+            isBuiltin: false,
+          },
+        ]),
+      }],
+      mcpServers: [],
+      mcpEnabledServers: [],
+    } as unknown as AppConfig;
+
+    expect(promoteAgentMcpJsonToGlobal(cfg)).toBe(false);
+    expect(cfg.mcpServers).toEqual([]);
+    expect(cfg.mcpEnabledServers).toEqual([]);
   });
 });

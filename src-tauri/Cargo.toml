@@ -1,6 +1,6 @@
 [package]
 name = "myagents"
-version = "0.2.38"
+version = "0.2.39"
 description = "MyAgents - Desktop Claude Code for everyone"
 authors = ["MyAgents Team <myagents.io@gmail.com>"]
 license = "Apache-2.0"
@@ -23,6 +23,7 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
 tauri-build = { version = "2.5.3", features = [] }
+url = "2"
 
 [dependencies]
 serde_json = "1.0"

@@ -45,6 +45,48 @@ describe('persistInputOptionChange — disk write fanout', () => {
     });
   });
 
+  it('required snapshot mode stops before project/agent writes when the session snapshot fails', async () => {
+    const m = makeMocks();
+    m.patchSnapshot.mockRejectedValue(new Error('session not materialized'));
+
+    const res = await persistInputOptionChange({
+      workspaceId: 'ws-1',
+      agentId: 'agent-1',
+      isExternalRuntime: false,
+      fields: { permissionMode: 'plan' },
+      patchProject: m.patchProject,
+      patchAgentConfig: m.patchAgentConfig,
+      patchSnapshot: m.patchSnapshot,
+      snapshotWriteMode: 'required',
+    });
+
+    expect(res.ok).toBe(false);
+    expect(res.snapshotWriteFailed).toBe(true);
+    expect(res.errors[0]).toContain('session snapshot: session not materialized');
+    expect(m.patchProject).not.toHaveBeenCalled();
+    expect(m.patchAgentConfig).not.toHaveBeenCalled();
+  });
+
+  it('optional snapshot mode keeps launcher-style project/agent writes after snapshot failure', async () => {
+    const m = makeMocks();
+    m.patchSnapshot.mockRejectedValue(new Error('snapshot unavailable'));
+
+    const res = await persistInputOptionChange({
+      workspaceId: 'ws-1',
+      agentId: 'agent-1',
+      isExternalRuntime: false,
+      fields: { permissionMode: 'plan' },
+      patchProject: m.patchProject,
+      patchAgentConfig: m.patchAgentConfig,
+      patchSnapshot: m.patchSnapshot,
+    });
+
+    expect(res.ok).toBe(false);
+    expect(res.snapshotWriteFailed).toBe(true);
+    expect(m.patchProject).toHaveBeenCalledWith('ws-1', { permissionMode: 'plan' });
+    expect(m.patchAgentConfig).toHaveBeenCalledWith('agent-1', { permissionMode: 'plan' });
+  });
+
   it('#300: clears snapshot providerEnvJson when providerId changes', async () => {
     const m = makeMocks();
     await persistInputOptionChange({
@@ -210,6 +252,28 @@ describe('persistInputOptionChange — disk write fanout', () => {
     });
   });
 
+  it('writes Claude plugin enabled ids to project + agent + snapshot', async () => {
+    const m = makeMocks();
+    await persistInputOptionChange({
+      workspaceId: 'ws-1',
+      agentId: 'agent-1',
+      isExternalRuntime: false,
+      fields: { enabledPluginIds: ['planner@local', 'reviewer@local'] },
+      patchProject: m.patchProject,
+      patchAgentConfig: m.patchAgentConfig,
+      patchSnapshot: m.patchSnapshot,
+    });
+    expect(m.patchProject).toHaveBeenCalledWith('ws-1', {
+      enabledPluginIds: ['planner@local', 'reviewer@local'],
+    });
+    expect(m.patchAgentConfig).toHaveBeenCalledWith('agent-1', {
+      enabledPluginIds: ['planner@local', 'reviewer@local'],
+    });
+    expect(m.patchSnapshot).toHaveBeenCalledWith({
+      enabledPluginIds: ['planner@local', 'reviewer@local'],
+    });
+  });
+
   it('skips snapshot write when patchSnapshot is omitted (launcher mode)', async () => {
     const m = makeMocks();
     await persistInputOptionChange({
@@ -251,6 +315,7 @@ describe('persistInputOptionChange — disk write fanout', () => {
       patchAgentConfig: m.patchAgentConfig,
     });
     expect(res.ok).toBe(false);
+    expect(res.snapshotWriteFailed).toBe(false);
     expect(res.errors[0]).toContain('disk full');
     // Other writers still run — failure isolated.
     expect(m.patchAgentConfig).toHaveBeenCalled();

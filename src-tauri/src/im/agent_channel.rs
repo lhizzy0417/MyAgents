@@ -509,6 +509,7 @@ pub(super) async fn create_bot_instance<R: Runtime>(
     let current_provider_env = Arc::new(tokio::sync::RwLock::new(provider_env));
     // MCP servers JSON — hot-reloadable
     let mcp_servers_json = Arc::new(tokio::sync::RwLock::new(config.mcp_servers_json.clone()));
+    let provider_id_for_loop = config.provider_id.clone();
     let bot_name_for_loop = config.name.clone();
     let bind_code_for_loop = bind_code.clone();
     let bot_id_for_loop = bot_id.clone();
@@ -930,10 +931,18 @@ pub(super) async fn create_bot_instance<R: Runtime>(
                         adapter_for_reply.ack_processing(&chat_id, &message_id).await;
                         // Clear pending group history so the fresh session doesn't get stale context
                         group_history_for_loop.lock().await.clear(&session_key);
+                        let fallback_snapshot = runtime_change::build_snapshot_from_channel_state(
+                            &runtime_for_loop,
+                            &current_model_for_loop,
+                            &permission_mode_for_loop,
+                            &mcp_servers_json_for_loop,
+                            provider_id_for_loop.clone(),
+                            &current_provider_env_for_loop,
+                        ).await;
                         let result = router_clone
                             .lock()
                             .await
-                            .reset_session(&session_key, &app_clone, &manager_clone)
+                            .reset_session(&session_key, &app_clone, &manager_clone, Some(&fallback_snapshot))
                             .await;
                         adapter_for_reply.ack_clear(&chat_id, &message_id).await;
                         match result {
@@ -2027,6 +2036,14 @@ pub(super) async fn create_bot_instance<R: Runtime>(
 
                                 let buf_penv = task_provider_env.read().await.clone();
                                 let buf_model = task_model.read().await.clone();
+                                let buf_metadata_birth_pending = task_router
+                                    .lock()
+                                    .await
+                                    .metadata_birth_pending(&session_key);
+                                let buf_config_held_by_tab = task_manager
+                                    .lock()
+                                    .unwrap()
+                                    .session_has_tab_owner(&sidecar_session_id_initial);
                                 let result = enqueue_to_sidecar(
                                     &task_stream_client,
                                     port,
@@ -2040,24 +2057,34 @@ pub(super) async fn create_bot_instance<R: Runtime>(
                                     Some(&task_bot_id),
                                     task_bot_name.as_deref(),
                                     None,
+                                    buf_metadata_birth_pending,
+                                    buf_config_held_by_tab,
                                     Some(&allowed_snapshot_buf),
                                     bridge_ctx_buf,
-                                ).await;
-                                if let Err(e) = result {
-                                    ulog_warn!(
-                                        "[im] Buffer replay failed requestId={} session_key={} err={}",
-                                        buf_request_id, session_key, e,
-                                    );
-                                    reply_router_arc.lock().await.unregister(&buf_request_id);
-                                    if e.should_buffer() {
-                                        task_buffer.lock().await.push(&buf_msg);
+                                )
+                                .await;
+                                match result {
+                                    Ok(_) => {
+                                        task_router
+                                            .lock()
+                                            .await
+                                            .mark_metadata_birth_consumed(&session_key);
+                                        ulog_info!(
+                                            "[im] Replayed buffered requestId={} session_key={}",
+                                            buf_request_id, session_key,
+                                        );
                                     }
-                                    break;
-                                } else {
-                                    ulog_info!(
-                                        "[im] Replayed buffered requestId={} session_key={}",
-                                        buf_request_id, session_key,
-                                    );
+                                    Err(e) => {
+                                        ulog_warn!(
+                                            "[im] Buffer replay failed requestId={} session_key={} err={}",
+                                            buf_request_id, session_key, e,
+                                        );
+                                        reply_router_arc.lock().await.unregister(&buf_request_id);
+                                        if e.should_buffer() {
+                                            task_buffer.lock().await.push(&buf_msg);
+                                        }
+                                        break;
+                                    }
                                 }
                             }
                         }
@@ -2137,6 +2164,14 @@ pub(super) async fn create_bot_instance<R: Runtime>(
                         } else {
                             Some(&image_payloads)
                         };
+                        let metadata_birth_pending = task_router
+                            .lock()
+                            .await
+                            .metadata_birth_pending(&session_key);
+                        let config_held_by_tab = task_manager
+                            .lock()
+                            .unwrap()
+                            .session_has_tab_owner(&sidecar_session_id_initial);
                         let allowed_snapshot = task_allowed_users.read().await.clone();
                         let bridge_ctx = task_adapter.bridge_context();
                         match enqueue_to_sidecar(
@@ -2152,12 +2187,18 @@ pub(super) async fn create_bot_instance<R: Runtime>(
                             Some(&task_bot_id),
                             task_bot_name.as_deref(),
                             group_ctx.as_ref(),
+                            metadata_birth_pending,
+                            config_held_by_tab,
                             Some(&allowed_snapshot),
                             bridge_ctx,
                         )
                         .await
                         {
                             Ok(_session_hint) => {
+                                task_router
+                                    .lock()
+                                    .await
+                                    .mark_metadata_birth_consumed(&session_key);
                                 ulog_info!(
                                     "[im] Enqueued requestId={} session_key={}",
                                     request_id, session_key,

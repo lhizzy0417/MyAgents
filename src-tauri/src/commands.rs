@@ -1081,7 +1081,7 @@ pub fn cmd_sync_admin_agent<R: Runtime>(app_handle: AppHandle<R>) -> Result<bool
 
 // ============= CLI Sync =============
 
-const CLI_VERSION: &str = "23";
+const CLI_VERSION: &str = "24";
 
 /// Sync the CLI script from bundled resources to ~/.myagents/bin/.
 /// Version-gated: only runs when CLI_VERSION changes.
@@ -1243,7 +1243,7 @@ pub fn cmd_sync_cli<R: Runtime>(app_handle: AppHandle<R>) -> Result<bool, String
 // matching exclusion list in src/server/index.ts::seedBundledSkills
 // MUST be kept in sync (comment there points back here).
 
-const SYSTEM_SKILLS_VERSION: &str = "20";
+const SYSTEM_SKILLS_VERSION: &str = "21";
 
 /// Skills that ship with the app and MUST stay at the bundled version —
 /// the app's flows depend on them, users are not meant to customise.
@@ -1268,7 +1268,7 @@ const SYSTEM_SKILLS: &[&str] = &[
     // global system skill. Every AI session inside MyAgents — Chat / IM Bot
     // / Cron / Helper — should be able to drive the product's own
     // capabilities (cron, task center, MCP, Provider, channels, plugins,
-    // skills, widgets) through the CLI. SKILL.md changes track CLI surface
+    // skills, Cloud Space, widgets) through the CLI. SKILL.md changes track CLI surface
     // changes, so it must force-overwrite on version bumps.
     "myagents-cli",
     // v18: tool-creator — meta-skill for the CLI tool registry (PRD 0.2.36

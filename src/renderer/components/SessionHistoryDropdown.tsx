@@ -4,7 +4,6 @@ import { BarChart2, Clock, Download, Loader2, MoreHorizontal, SquareArrowOutUpRi
 
 import { deleteSession, getSessions, updateSession, type SessionMetadata } from '@/api/sessionClient';
 import { exportSessionAsMarkdown } from '@/utils/sessionExport';
-import { deactivateSession } from '@/api/tauriClient';
 import { CUSTOM_EVENTS } from '../../shared/constants';
 import { getWorkspaceCronTasks, getBackgroundSessions } from '@/api/cronTaskClient';
 import type { CronTask } from '@/types/cronTask';
@@ -36,8 +35,12 @@ interface SessionHistoryDropdownProps {
      * tab context), the per-row "在新 tab 打开" action is hidden.
      */
     onOpenInNewTab?: (sessionId: string, title: string) => void;
-    /** Called when the current session is deleted - should reset to "new conversation" state */
-    onDeleteCurrentSession: () => void;
+    /**
+     * Move the current Chat tab off its session before storage deletion.
+     * Non-current rows skip this; current-session deletion must reset/switch
+     * first so the storage client sees an ownerless session.
+     */
+    prepareCurrentSessionForDelete: () => Promise<boolean>;
     isOpen: boolean;
     onClose: () => void;
     /** Trigger button ref — anchors the dropdown via the Popover primitive. */
@@ -53,7 +56,7 @@ export default function SessionHistoryDropdown({
     currentSessionId,
     onSelectSession,
     onOpenInNewTab,
-    onDeleteCurrentSession,
+    prepareCurrentSessionForDelete,
     isOpen,
     onClose,
     triggerRef,
@@ -272,19 +275,17 @@ export default function SessionHistoryDropdown({
         setDeleteError(null);
 
         try {
+            if (isDeletingCurrentSession) {
+                const prepared = await prepareCurrentSessionForDelete();
+                if (!prepared) {
+                    setDeleteError('删除失败，请重试');
+                    return;
+                }
+            }
+
             const success = await deleteSession(sessionId);
             if (success) {
-                // Clean up Rust layer session activation state
-                // This prevents stale entries in session_activations HashMap
-                await deactivateSession(sessionId);
-
                 setSessions((prev) => prev?.filter((s) => s.id !== sessionId) ?? null);
-
-                // If we deleted the current session, trigger "new conversation" behavior
-                // Don't close the dropdown - keep it open so user can continue browsing history
-                if (isDeletingCurrentSession) {
-                    onDeleteCurrentSession(); // Reset to new conversation state
-                }
             } else {
                 setDeleteError('删除失败，请重试');
                 console.error(`[SessionHistoryDropdown] Failed to delete session ${sessionId}`);

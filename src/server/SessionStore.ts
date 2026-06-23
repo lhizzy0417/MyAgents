@@ -44,6 +44,29 @@ const LOCK_STALE_MS = 30000;
  */
 const lineCountCache = new Map<string, number>();
 
+class CorruptSessionsIndexError extends Error {
+    constructor(message: string) {
+        super(message);
+        this.name = 'CorruptSessionsIndexError';
+    }
+}
+
+function isSessionMetadataLike(entry: unknown): entry is SessionMetadata {
+    return Boolean(
+        entry &&
+        typeof entry === 'object' &&
+        typeof (entry as { id?: unknown }).id === 'string'
+    );
+}
+
+function dedupeSessionMetadata(sessions: SessionMetadata[]): SessionMetadata[] {
+    const byId = new Map<string, SessionMetadata>();
+    for (const session of sessions) {
+        byId.set(session.id, session);
+    }
+    return [...byId.values()];
+}
+
 /**
  * Get cached line count, reading from file only on cache miss
  */
@@ -151,6 +174,180 @@ function atomicWriteSessionsFile(content: string): void {
         sizeBytes: Buffer.byteLength(content, 'utf-8'),
         status: 'ok',
     });
+}
+
+function parseSessionsIndex(content: string): SessionMetadata[] {
+    let parsed: unknown;
+    try {
+        parsed = JSON.parse(stripBom(content));
+    } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        throw new CorruptSessionsIndexError(`sessions.json is not valid JSON: ${detail}`);
+    }
+
+    if (!Array.isArray(parsed)) {
+        throw new CorruptSessionsIndexError('sessions.json must contain a SessionMetadata array.');
+    }
+
+    const malformedIndex = parsed.findIndex(entry => !isSessionMetadataLike(entry));
+    if (malformedIndex >= 0) {
+        throw new CorruptSessionsIndexError(`sessions.json entry at index ${malformedIndex} is not valid SessionMetadata.`);
+    }
+
+    return parsed as SessionMetadata[];
+}
+
+function extractCompleteSessionMetadataObjects(content: string): SessionMetadata[] {
+    const sessions: SessionMetadata[] = [];
+    const text = stripBom(content);
+    let depth = 0;
+    let objectStart = -1;
+    let inString = false;
+    let escaped = false;
+
+    for (let i = 0; i < text.length; i++) {
+        const char = text[i];
+
+        if (inString) {
+            if (escaped) {
+                escaped = false;
+            } else if (char === '\\') {
+                escaped = true;
+            } else if (char === '"') {
+                inString = false;
+            }
+            continue;
+        }
+
+        if (char === '"') {
+            inString = true;
+            continue;
+        }
+
+        if (char === '{') {
+            if (depth === 0) {
+                objectStart = i;
+            }
+            depth++;
+            continue;
+        }
+
+        if (char === '}' && depth > 0) {
+            depth--;
+            if (depth === 0 && objectStart >= 0) {
+                const candidate = text.slice(objectStart, i + 1);
+                objectStart = -1;
+                try {
+                    const parsed = JSON.parse(candidate) as unknown;
+                    if (isSessionMetadataLike(parsed)) {
+                        sessions.push(parsed);
+                    }
+                } catch {
+                    // Ignore this object; recovery is best-effort and never
+                    // mutates the original corrupt file before it is backed up.
+                }
+            }
+        }
+    }
+
+    return sessions;
+}
+
+function recoverSessionsIndexFromContent(content: string): SessionMetadata[] {
+    try {
+        const parsed = JSON.parse(stripBom(content)) as unknown;
+        if (Array.isArray(parsed)) {
+            return dedupeSessionMetadata(parsed.filter(isSessionMetadataLike));
+        }
+    } catch {
+        // Fall through to structural scan for truncated or partially written JSON.
+    }
+
+    return dedupeSessionMetadata(extractCompleteSessionMetadataObjects(content));
+}
+
+function readTmpSessionsIndexStrict(): SessionMetadata[] | null {
+    if (!existsSync(SESSIONS_TMP_FILE)) {
+        return null;
+    }
+
+    try {
+        if (existsSync(SESSIONS_FILE)) {
+            const tmpStat = statSync(SESSIONS_TMP_FILE);
+            const mainStat = statSync(SESSIONS_FILE);
+            if (tmpStat.mtimeMs < mainStat.mtimeMs) {
+                console.warn('[SessionStore] Ignoring stale sessions.json.tmp during corrupt-index recovery.');
+                return null;
+            }
+        }
+        return parseSessionsIndex(readFileSync(SESSIONS_TMP_FILE, 'utf-8'));
+    } catch (error) {
+        console.warn('[SessionStore] Ignoring invalid sessions.json.tmp during corrupt-index recovery:', error);
+        return null;
+    }
+}
+
+function recoverSessionsIndexCandidates(): SessionMetadata[] {
+    const corruptContent = existsSync(SESSIONS_FILE) ? readFileSync(SESSIONS_FILE, 'utf-8') : '';
+    let recovered = recoverSessionsIndexFromContent(corruptContent);
+    const tmpSessions = readTmpSessionsIndexStrict();
+    if (tmpSessions && tmpSessions.length > 0) {
+        recovered = tmpSessions;
+    }
+    return recovered;
+}
+
+function createCorruptBackupPath(): string {
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const base = join(MYAGENTS_DIR, `sessions.json.corrupt-${stamp}`);
+    if (!existsSync(base)) {
+        return base;
+    }
+
+    for (let i = 1; i < 1000; i++) {
+        const candidate = `${base}-${i}`;
+        if (!existsSync(candidate)) {
+            return candidate;
+        }
+    }
+
+    throw new Error('[SessionStore] Cannot allocate a unique sessions.json corrupt backup path.');
+}
+
+function readSessionsIndexStrict(): SessionMetadata[] {
+    if (!existsSync(SESSIONS_FILE)) {
+        return [];
+    }
+
+    return parseSessionsIndex(readFileSync(SESSIONS_FILE, 'utf-8'));
+}
+
+function backupCorruptSessionsIndex(error: CorruptSessionsIndexError): string {
+    const backupPath = createCorruptBackupPath();
+    try {
+        renameSync(SESSIONS_FILE, backupPath);
+    } catch (renameError) {
+        const detail = renameError instanceof Error ? renameError.message : String(renameError);
+        throw new Error(`[SessionStore] Cannot recover corrupt sessions.json (${error.message}); failed to move it aside: ${detail}`);
+    }
+    console.error(`[SessionStore] sessions.json was corrupt and has been moved to ${backupPath}. Cause: ${error.message}`);
+    return backupPath;
+}
+
+function readSessionsIndexForWrite(): SessionMetadata[] {
+    try {
+        return readSessionsIndexStrict();
+    } catch (error) {
+        if (error instanceof CorruptSessionsIndexError) {
+            const recovered = recoverSessionsIndexCandidates();
+            const backupPath = backupCorruptSessionsIndex(error);
+            atomicWriteSessionsFile(JSON.stringify(recovered, null, 2));
+            console.error(`[SessionStore] Recovered ${recovered.length} session metadata entries while repairing sessions.json. Backup: ${backupPath}`);
+            return recovered;
+        }
+        const detail = error instanceof Error ? error.message : String(error);
+        throw new Error(`[SessionStore] Failed to read sessions.json for write: ${detail}`);
+    }
 }
 
 /**
@@ -286,14 +483,14 @@ function migrateToJsonl(sessionId: string): SessionMessage[] {
 export function getAllSessionMetadata(): SessionMetadata[] {
     ensureStorageDir();
 
-    if (!existsSync(SESSIONS_FILE)) {
-        return [];
-    }
-
     try {
-        const content = readFileSync(SESSIONS_FILE, 'utf-8');
-        return JSON.parse(stripBom(content)) as SessionMetadata[];
+        return readSessionsIndexStrict();
     } catch (error) {
+        if (error instanceof CorruptSessionsIndexError) {
+            const recovered = recoverSessionsIndexCandidates();
+            console.error(`[SessionStore] sessions.json is corrupt; returning ${recovered.length} recoverable session metadata entries. Next metadata write will move the corrupt file aside and rewrite a repaired index. Cause: ${error.message}`);
+            return recovered;
+        }
         console.error('[SessionStore] Failed to read sessions.json:', error);
         return [];
     }
@@ -328,20 +525,7 @@ export async function saveSessionMetadata(session: SessionMetadata): Promise<voi
     ensureStorageDir();
 
     await withSessionsLock(async () => {
-        const all = getAllSessionMetadata();
-
-        // Safety check: if the file exists on disk but getAllSessionMetadata returned [],
-        // a read error (corrupt file, partial write) occurred. Refuse to write to avoid
-        // wiping all existing entries. The current session will be retried on next persist.
-        if (all.length === 0 && existsSync(SESSIONS_FILE)) {
-            try {
-                const size = statSync(SESSIONS_FILE).size;
-                if (size > 2) { // >2 bytes = not just "[]"
-                    console.error(`[SessionStore] Refusing to write: sessions.json has ${size} bytes on disk but read returned []. Possible corruption.`);
-                    return;
-                }
-            } catch { /* stat failed, proceed normally */ }
-        }
+        const all = readSessionsIndexForWrite();
 
         const index = all.findIndex(s => s.id === session.id);
 
@@ -355,14 +539,21 @@ export async function saveSessionMetadata(session: SessionMetadata): Promise<voi
             atomicWriteSessionsFile(JSON.stringify(all, null, 2));
         } catch (error) {
             console.error('[SessionStore] Failed to write sessions.json:', error);
+            throw error;
         }
     });
 }
 
 /**
- * Delete session metadata and data
+ * Delete session metadata and data.
+ *
+ * `precondition`, when provided, is evaluated inside the sessions lock against
+ * the current metadata row before any files or index entries are removed.
  */
-export async function deleteSession(sessionId: string): Promise<boolean> {
+export async function deleteSession(
+    sessionId: string,
+    precondition?: (current: SessionMetadata) => boolean,
+): Promise<boolean> {
     ensureStorageDir();
 
     // Lock order matches saveSessionMessages: per-session file lock OUTER,
@@ -372,12 +563,17 @@ export async function deleteSession(sessionId: string): Promise<boolean> {
     // interleave with an append and leave either a half-deleted file or a
     // just-recreated one.
     return withSessionFileLock(sessionId, async () => withSessionsLock(async () => {
-        const all = getAllSessionMetadata();
-        const filtered = all.filter(s => s.id !== sessionId);
+        const all = readSessionsIndexForWrite();
+        const index = all.findIndex(s => s.id === sessionId);
 
-        if (filtered.length === all.length) {
+        if (index < 0) {
             return false; // Not found
         }
+        if (precondition && !precondition(all[index])) {
+            return false;
+        }
+
+        const filtered = all.filter(s => s.id !== sessionId);
 
         try {
             // Remove the data files FIRST, then the index entry. If we crash
@@ -603,10 +799,10 @@ export async function saveSessionMessages(
                 // Recalculate full stats after rewrite
                 const fullStats = calculateSessionStats(messages);
                 await withSessionsLock(async () => {
-                    const session = getSessionMetadata(sessionId);
-                    if (!session) return;
-                    const all = getAllSessionMetadata();
+                    const all = readSessionsIndexForWrite();
                     const index = all.findIndex(s => s.id === sessionId);
+                    if (index < 0) return;
+                    const session = all[index];
                     if (index >= 0) {
                         all[index] = { ...session, stats: fullStats };
                         atomicWriteSessionsFile(JSON.stringify(all, null, 2));
@@ -639,8 +835,9 @@ export async function saveSessionMessages(
                 const incrementalStats = calculateSessionStats(newMessages);
                 await withSessionsLock(async () => {
                     // Read metadata inside the lock to prevent TOCTOU race
-                    const session = getSessionMetadata(sessionId);
-                    if (!session) {
+                    const all = readSessionsIndexForWrite();
+                    const index = all.findIndex(s => s.id === sessionId);
+                    if (index < 0) {
                         // Appended to an EXISTING file whose index entry is gone
                         // (legacy orphan / deleted mid-append). Data is preserved but
                         // invisible to every session list — say so instead of silently
@@ -648,6 +845,7 @@ export async function saveSessionMessages(
                         console.warn(`[SessionStore] appended ${newMessages.length} message(s) to unindexed session ${sessionId} — sessions.json has no entry; stats not updated`);
                         return;
                     }
+                    const session = all[index];
 
                     const existingStats = session.stats ?? {
                         messageCount: 0,
@@ -663,8 +861,6 @@ export async function saveSessionMessages(
                     };
 
                     // Write directly (we already hold the lock — don't call saveSessionMetadata which would deadlock)
-                    const all = getAllSessionMetadata();
-                    const index = all.findIndex(s => s.id === sessionId);
                     if (index >= 0) {
                         all[index] = { ...session, stats: updatedStats };
                         atomicWriteSessionsFile(JSON.stringify(all, null, 2));
@@ -714,9 +910,12 @@ export async function updateSessionMetadata(
         | 'reasoningEffort'
         | 'permissionMode'
         | 'mcpEnabledServers'
+        | 'enabledPluginIds'
         | 'providerId'
         | 'providerEnvJson'
         | 'configSnapshotAt'
+        | 'materializationState'
+        | 'materializationSourceSessionId'
         | 'pendingContinueAfterAbort'
     >>,
     /**
@@ -744,7 +943,7 @@ export async function updateSessionMetadata(
     ensureStorageDir();
     let result: SessionMetadata | null = null;
     await withSessionsLock(async () => {
-        const all = getAllSessionMetadata();
+        const all = readSessionsIndexForWrite();
         const idx = all.findIndex(s => s.id === sessionId);
         if (idx < 0) {
             // session not found — leave result=null

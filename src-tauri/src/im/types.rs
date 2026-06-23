@@ -439,6 +439,7 @@ pub struct PeerSession {
     pub source_display_name: Option<String>,
     pub last_sender_name: Option<String>,
     pub message_count: u32,
+    pub metadata_birth_pending: bool,
     pub last_active: Instant,
 }
 

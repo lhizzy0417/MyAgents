@@ -451,6 +451,44 @@ export function lookupModelContextLength(modelId: string | undefined | null): nu
   return buildRegistry().get(bare)?.contextLength;
 }
 
+/**
+ * Provider-scoped context lookup for duplicate model ids.
+ *
+ * The flat registry is intentionally model-keyed for SDK env injection, but
+ * custom providers can reuse the same model id with a tighter account/proxy
+ * limit. In UI context usage, the active provider is known, so prefer that
+ * provider's own model row before falling back to the global registry.
+ */
+export function lookupProviderModelContextLength(
+  modelId: string | undefined | null,
+  providerId: string | undefined | null,
+): number | undefined {
+  const bare = stripModelSuffix(modelId);
+  if (!bare || !providerId) return lookupModelContextLength(bare);
+  const home = getHomeDirOrNull();
+  if (!home) return lookupModelContextLength(bare);
+
+  const providerCandidates: unknown[] = [];
+  const custom = loadCustomProvidersFromDisk(home).find(p => p.id === providerId);
+  if (custom) providerCandidates.push(custom);
+
+  const presetCustomModels = loadPresetCustomModels(home);
+  const discovered = presetCustomModels && typeof presetCustomModels === 'object'
+    ? (presetCustomModels as Record<string, unknown>)[providerId]
+    : undefined;
+  if (Array.isArray(discovered)) {
+    providerCandidates.push({ id: providerId, models: discovered });
+  }
+
+  const preset = (PRESET_PROVIDERS as unknown as Array<Record<string, unknown>>)
+    .find(p => p.id === providerId);
+  if (preset) providerCandidates.push(preset);
+
+  const providerMap = new Map<string, ModelCapability>();
+  ingestProviderList(providerCandidates, providerMap, custom ? 'custom' : 'discovered');
+  return providerMap.get(bare)?.contextLength ?? lookupModelContextLength(bare);
+}
+
 /** Full capability record (contextLength + maxOutputTokens + inputModalities). */
 export function lookupModelCapability(modelId: string | undefined | null): ModelCapability | undefined {
   const bare = stripModelSuffix(modelId); // registry is bare-keyed (#338)

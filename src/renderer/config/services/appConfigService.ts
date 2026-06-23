@@ -23,7 +23,7 @@ import {
     mockLoadConfig,
     mockSaveConfig,
 } from '@/utils/browserMock';
-import { normalizeStringifiedJsonFields } from './configNormalize';
+import { normalizeStringifiedJsonFields, promoteAgentMcpJsonToGlobal } from './configNormalize';
 import { workspacePathsEqual } from '../../../shared/workspacePath';
 import { type ImBotConfig, DEFAULT_IM_BOT_CONFIG } from '../../../shared/types/im';
 // Agent migration is triggered from ConfigProvider after both config + projects are loaded
@@ -113,6 +113,12 @@ function normalizeDeveloperSettings(config: AppConfig): AppConfig {
     return config;
 }
 
+function normalizeLoadedConfig(config: AppConfig): AppConfig {
+    normalizeStringifiedJsonFields(config);
+    promoteAgentMcpJsonToGlobal(config);
+    return normalizeDeveloperSettings(config);
+}
+
 // ============= Load / Save =============
 
 export async function loadAppConfig(): Promise<AppConfig> {
@@ -124,7 +130,7 @@ export async function loadAppConfig(): Promise<AppConfig> {
     if (isBrowserDevMode()) {
         console.log('[configService] Browser mode: loading from localStorage');
         const loaded = mockLoadConfig();
-        return normalizeDeveloperSettings({ ...dynamicDefault, ...loaded });
+        return normalizeLoadedConfig({ ...dynamicDefault, ...loaded });
     }
 
     try {
@@ -139,11 +145,12 @@ export async function loadAppConfig(): Promise<AppConfig> {
             // legacy field is masked and we can no longer distinguish "user
             // had cron on" from "user had cron off".
             const migrated = migrateOsNotificationsField(loaded);
-            // Heal any agent `providerEnvJson`/`mcpServersJson` that was persisted
-            // as a raw object instead of a stringified JSON (issue #301), so no
-            // consumer — the renderer's `cmd_start_agent_channel` payload or the
-            // merged config — ever sees the wrong shape. Done before the
-            // dynamicDefault merge (agents live in `loaded`).
+            // Heal agent config load-boundary drift before any consumer sees it:
+            // - issue #301: `providerEnvJson`/`mcpServersJson` persisted as raw
+            //   objects instead of stringified JSON;
+            // - issue #398: selected custom MCP definitions stranded only in
+            //   `agents[].mcpServersJson`, missing from global `mcpServers`.
+            // Done before the dynamicDefault merge (agents live in `loaded`).
             //
             // Deliberately IN-MEMORY ONLY — we do NOT persist here. A
             // fire-and-forget `saveAppConfig` from `loadAppConfig` races with
@@ -153,13 +160,14 @@ export async function loadAppConfig(): Promise<AppConfig> {
             // real config write (its `before` snapshot is taken post-normalize),
             // and the independent Rust reader normalizes the same way at boot.
             normalizeStringifiedJsonFields(migrated);
+            promoteAgentMcpJsonToGlobal(migrated);
             const merged = normalizeDeveloperSettings({ ...dynamicDefault, ...migrated });
             return migrateImBotConfig(merged);
         }
-        return normalizeDeveloperSettings(dynamicDefault);
+        return normalizeLoadedConfig(dynamicDefault);
     } catch (error) {
         console.error('[configService] Failed to load app config:', error);
-        return normalizeDeveloperSettings(dynamicDefault);
+        return normalizeLoadedConfig(dynamicDefault);
     }
 }
 

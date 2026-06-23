@@ -34,11 +34,10 @@ describe('isImSourcedSession (#305 PATCH guard)', () => {
 });
 
 describe('shouldDropSnapshotPatchOnImSession (#305 PATCH /sessions/:id guard)', () => {
-  // The server guard: drop snapshot field writes ONLY for live-follow PURE-IM
-  // sessions (IM source + no configSnapshotAt). Desktop-to-IM handover sessions
-  // (IM source + configSnapshotAt set, PRD 0.2.14) keep being writeable —
-  // their IM turn delivery reads "snapshot wins" so a Tab edit MUST land in
-  // the snapshot for the next IM message to pick it up.
+  // v0.2.39 retires the old pure-IM drop guard. A desktop PATCH means the
+  // desktop Tab is now an owner, so even an IM-sourced session can acquire a
+  // snapshot. Keep this test around to prevent future edits from restoring the
+  // old "source suffix implies drop" behavior.
 
   it('returns false when no existing metadata (PATCH will 404 anyway)', () => {
     expect(shouldDropSnapshotPatchOnImSession(null)).toBe(false);
@@ -56,15 +55,15 @@ describe('shouldDropSnapshotPatchOnImSession (#305 PATCH /sessions/:id guard)', 
     })).toBe(false);
   });
 
-  it('returns true for PURE-IM sessions: IM source + no configSnapshotAt', () => {
+  it('returns false for PURE-IM sessions: desktop PATCH promotes them to owned', () => {
     expect(shouldDropSnapshotPatchOnImSession({
       source: 'feishu_private',
       configSnapshotAt: null,
-    })).toBe(true);
+    })).toBe(false);
     expect(shouldDropSnapshotPatchOnImSession({
       source: 'telegram_group',
       configSnapshotAt: undefined,
-    })).toBe(true);
+    })).toBe(false);
   });
 
   it('returns false for desktop-to-IM HANDOVER sessions (IM source + configSnapshotAt set, PRD 0.2.14)', () => {

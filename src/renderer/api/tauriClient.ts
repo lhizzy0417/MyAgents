@@ -1347,6 +1347,21 @@ export async function hasSessionSidecar(sessionId: string): Promise<boolean> {
 }
 
 /**
+ * Strict sidecar presence check for destructive operations.
+ *
+ * Unlike hasSessionSidecar(), this does not convert IPC failures to "absent":
+ * callers such as session deletion must fail closed when Rust cannot confirm
+ * that no ownerful sidecar is still alive.
+ */
+export async function hasSessionSidecarOrThrow(sessionId: string): Promise<boolean> {
+    if (!isTauri()) {
+        return true;
+    }
+
+    return invoke<boolean>('cmd_has_session_sidecar', { sessionId });
+}
+
+/**
  * Get Rust's current sidecar generation for a session.
  *
  * Generation identifies a concrete sidecar instance. It remains the safest

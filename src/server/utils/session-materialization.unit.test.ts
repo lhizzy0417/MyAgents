@@ -47,7 +47,7 @@ describe('createMaterializedSessionMetadata', () => {
       agentDir: '/tmp/workspace',
       sessionId: 'desktop-session-id',
       scenario: 'desktop',
-      agent: makeAgent(),
+      agent: makeAgent({ enabledPluginIds: ['planner@local'] }),
       title: 'First prompt',
     });
 
@@ -56,6 +56,7 @@ describe('createMaterializedSessionMetadata', () => {
     expect(meta.runtime).toBe('codex');
     expect(meta.model).toBe('gpt-5.1-codex');
     expect(meta.permissionMode).toBe('full-auto');
+    expect(meta.enabledPluginIds).toEqual(['planner@local']);
     expect(meta.configSnapshotAt).toBeTruthy();
   });
 

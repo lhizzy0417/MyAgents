@@ -28,10 +28,11 @@ import RuntimeDiagnosticsBanner from '@/components/RuntimeDiagnosticsBanner';
 import { UnifiedLogsPanel } from '@/components/UnifiedLogsPanel';
 import WorkspaceConfigPanel, { type Tab as WorkspaceTab } from '@/components/WorkspaceConfigPanel';
 import CronTaskSettingsModal from '@/components/cron/CronTaskSettingsModal';
+import { transitionChannelBoundSession } from '@/pages/chatChannelSession';
 import { useTabState, useTabActive } from '@/context/TabContext';
 import { useVirtuosoScroll } from '@/hooks/useVirtuosoScroll';
 import { useAgentStatuses } from '@/hooks/useAgentStatuses';
-import { useSessionSurfaces } from '@/hooks/useSessionSurfaces';
+import { useSessionSurfaces, type ChannelSurface } from '@/hooks/useSessionSurfaces';
 import { resolveFloatingBallBoundSession } from '@/hooks/taskCenterStore';
 import { useConfig } from '@/hooks/useConfig';
 import { useFileDropZone } from '@/hooks/useFileDropZone';
@@ -44,6 +45,7 @@ import { resolveAdoptedBuiltinProviderId } from '@/utils/sessionConfigAdoption';
 import { getSessionCronTask, updateCronTaskTab, isTaskExecuting, createCronTask, startCronTask as startCronTaskIpc, startCronScheduler } from '@/api/cronTaskClient';
 import { updateSession as patchSessionMetadata } from '@/api/sessionClient';
 import { persistInputOptionChange } from '@/api/persistInputOption';
+import { materializePendingSessionConfig } from '@/api/sessionMaterialize';
 import type { CronTask } from '@/types/cronTask';
 import { formatScheduleDescription } from '@/types/cronTask';
 import CronTaskCard from '@/components/scheduled-tasks/CronTaskCard';
@@ -235,7 +237,7 @@ interface ChatProps {
   /** Called when user renames the session */
   onRenameSession?: (newTitle: string) => void;
   /** Called when user forks session at a specific assistant message — App creates new tab */
-  onForkSession?: (newSessionId: string, agentDir: string, title: string, initialMessage?: string) => void;
+  onForkSession?: (newSessionId: string, agentDir: string, title: string, initialMessage?: string) => Promise<boolean>;
   /** Runtime-only request from App/floating-ball to open a file preview once. */
   pendingFilePreview?: FilePreviewIntent;
   onFilePreviewIntentConsumed?: (intentId: string) => void;
@@ -336,6 +338,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
   // which would defeat SimpleChatInput's memo.
   const toastRef = useRef(toast);
   toastRef.current = toast;
+  const channelSurfaceRef = useRef<ChannelSurface | null>(null);
   const currentProviderRef = useRef(currentProvider);
   currentProviderRef.current = currentProvider;
   const apiKeysRef = useRef(apiKeys);
@@ -1799,6 +1802,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
         // (setMcpServers etc.) above is display-only, intentionally NOT gated.
         // (#300/#301 config-stomping class.)
         if (!isConnected) return;
+        if (isSessionLoading) return;
 
         // Launcher-handoff tabs: autoSend owns the INITIAL push (the user's
         // per-session launcher MCP selection, which may differ from the workspace
@@ -1810,7 +1814,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
         // CRITICAL: Always sync effective MCP servers to backend on initial load
         // This ensures the Agent SDK has correct MCP config (including empty = no MCP)
         // Without this, backend currentMcpServers stays null and falls back to file config
-        const workspaceEnabled = currentAgent?.mcpEnabledServers ?? currentProject?.mcpEnabledServers ?? [];
+        const workspaceEnabled = workspaceMcpEnabled;
         const effectiveServers = servers.filter(s =>
           enabledIds.includes(s.id) && workspaceEnabled.includes(s.id)
         );
@@ -1828,7 +1832,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
     };
     loadMcpConfig();
     // Re-fires on:
-    //  - workspace MCP toggles (currentAgent/currentProject.mcpEnabledServers)
+    //  - workspace MCP toggles / session snapshot sync (workspaceMcpEnabled)
     //  - global enable/disable (config.mcpEnabledServers) — covers Settings
     //    toggling a server on/off globally
     //  - env / args / server-definition edits (config.mcpServerEnv /
@@ -1843,8 +1847,8 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
   }, [
     configPending, // re-run when the instant-flip disposition resolves (pending→push)
     isConnected, // re-push MCP when the sidecar becomes reachable (re)connect — see guard above
-    currentAgent?.mcpEnabledServers,
-    currentProject?.mcpEnabledServers,
+    isSessionLoading,
+    workspaceMcpEnabled,
     config?.mcpEnabledServers,
     config?.mcpServerEnv,
     config?.mcpServerArgs,
@@ -1925,32 +1929,24 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
 
   // Sync workspace MCP to project config when it changes
   useEffect(() => {
+    if (sessionMeta?.configSnapshotAt) return;
     if (currentProject?.mcpEnabledServers) {
       setWorkspaceMcpEnabled(currentProject.mcpEnabledServers);
     }
-  }, [currentProject?.mcpEnabledServers]);
+  }, [currentProject?.mcpEnabledServers, sessionMeta?.configSnapshotAt]);
 
   // v0.1.69 — owned (Desktop/Cron) sessions lock config via SessionMetadata snapshot
   // (configSnapshotAt stamped at creation per `snapshotForOwnedSession`). Tab-level UI
-  // changes on a locked session MUST go only to the session snapshot, not the agent
-  // — agent is the template for *future* sessions. IM / unlocked sessions have no
-  // snapshot and live-follow the agent; UI changes there patch the agent as before.
+  // changes in a desktop Tab MUST first land in the session snapshot. Agent is
+  // still updated as the template for future sessions, but the current Tab's
+  // session authority is the snapshot once the user touches a config knob.
   const isOwnedSession = !!sessionMeta?.configSnapshotAt;
 
-  // #305 — gate for *whether to write the session snapshot* on UI config changes.
-  // Distinct from `isOwnedSession`, which is "is the session currently locked":
-  //   - sessionMeta loaded as IM → live-follow, NEVER touch snapshot.
-  //   - sessionMeta loaded as owned/legacy → write snapshot (legacy auto-migrates).
-  //   - sessionMeta still loading (null) → assume Desktop/owned (the overwhelmingly
-  //     common case for Tab) and write snapshot. The PATCH endpoint stamps
-  //     configSnapshotAt on first snapshot write so subsequent reads see "owned".
-  //     This closes the loadSession race where any model/permission change made
-  //     before sessionMeta hydrates (50–500ms+ on Windows / slow disks) silently
-  //     bypassed the snapshot write — leaving sessions.json at its creation-time
-  //     values and reverting the user's choice on tab reopen.
-  // Server PATCH /sessions/:id has a defensive IM-source guard that ignores
-  // snapshot field writes if the existing session is IM-sourced, in case the
-  // sessionMeta-null window catches an IM-origin tab.
+  // v0.2.39 — desktop Tab config edits always snapshot first. Even if the
+  // session originated from IM and is currently live-following, a user edit in
+  // the Tab promotes it to a self-contained snapshot until the channel creates a
+  // new session. The resolver remains as the single policy hook and currently
+  // returns false for every Tab edit.
   const skipSnapshotWrite = shouldSkipSnapshotWrite({
     sessionMetaSource: sessionMeta?.source ?? null,
     sessionMetaConfigSnapshotAt: sessionMeta?.configSnapshotAt ?? null,
@@ -1988,9 +1984,32 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
    */
   const patchSnapshot = useCallback(async (patch: Parameters<typeof patchSessionMetadata>[1]) => {
     if (!sessionId) return;
+    if (isPendingSessionId(sessionId)) {
+      if (!agentDir) {
+        throw new Error('Cannot materialize pending session without workspace path.');
+      }
+
+      const result = await materializePendingSessionConfig({
+        pendingSessionId: sessionId,
+        workspacePath: agentDir,
+        snapshotPatch: patch,
+        transport: {
+          postCurrent: (body) => apiPost('/api/session/materialize', body),
+        },
+      });
+      const adopted = await adoptMigratedSession(result.sessionId, { sidecarAlreadyMigrated: true });
+      if (!adopted) {
+        throw new Error(`Failed to adopt materialized session ${result.sessionId}.`);
+      }
+      setSessionMeta(result.metadata);
+      return;
+    }
     const updated = await patchSessionMetadata(sessionId, patch);
-    if (updated) setSessionMeta(updated);
-  }, [sessionId, setSessionMeta]);
+    if (!updated) {
+      throw new Error(`Session ${sessionId} not found.`);
+    }
+    setSessionMeta(updated);
+  }, [sessionId, agentDir, apiPost, adoptMigratedSession, setSessionMeta]);
 
   // Persist a Tab-UI config change to session snapshot (owned) + project + agent.
   // See PRD v0.1.69 §4.3 rule 2. Toasts on persistence failure without rolling
@@ -2018,7 +2037,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
     mcpEnabledServers?: string[];
     enabledPluginIds?: string[];
   }) => {
-    if (!currentProject) return;
+    if (!currentProject) return false;
     const result = await persistInputOptionChange({
       workspaceId: currentProject.id,
       agentId: currentProject.agentId ?? null,
@@ -2035,11 +2054,10 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
       },
       patchProject,
       patchAgentConfig,
-      // #305: skip snapshot writes only when sessionMeta is loaded as IM-sourced.
-      // For owned / legacy / sessionMeta-still-loading sessions, write the snapshot
-      // so the user's in-Tab change actually persists across tab reopen. (See
-      // `skipSnapshotWrite` comment above for the loadSession-race rationale.)
+      // v0.2.39: desktop Tab user intent always snapshots first; the helper is
+      // still wired with a policy hook so future non-Tab surfaces cannot drift.
       patchSnapshot: skipSnapshotWrite ? undefined : patchSnapshot,
+      snapshotWriteMode: skipSnapshotWrite ? 'disabled' : 'required',
       // Cross-review: Chat's MCP toggle previously did its own
       // `apiPost('/api/mcp/set')` AFTER the helper, leaving the helper's
       // `pushMcpToSidecar` plumbing dead-code. Wire it through so the
@@ -2075,6 +2093,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
       console.error('[chat] tab config dual-write failed:', result.errors);
       toastRef.current.warning('配置未能完全保存，重启后可能恢复旧值');
     }
+    return !result.snapshotWriteFailed;
   // eslint-disable-next-line react-hooks/exhaustive-deps -- narrowed deps; persistInputOptionChange is a pure import, runtimeConfig accessed via currentAgent ref, apiPost is stable from TabContext
   }, [skipSnapshotWrite, currentProject?.id, currentProject?.agentId, isExternalRuntime, currentRuntime, currentAgent?.runtimeConfig, patchSnapshot, patchProject]);
 
@@ -2096,7 +2115,10 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
     // single delegate call — disk dual-write + live MCP swap on the running
     // session in one transaction. Pre-PRD-0.2.7 the duplicate `apiPost`
     // here ran AFTER persist and left the helper's plumbing as dead code.
-    void persistTabConfigChange({ mcpEnabledServers: newEnabled });
+    const persisted = await persistTabConfigChange({ mcpEnabledServers: newEnabled });
+    if (!persisted) {
+      setWorkspaceMcpEnabled(workspaceMcpEnabled);
+    }
   }, [workspaceMcpEnabled, persistTabConfigChange]);
 
   // PRD 0.2.17 — Claude plugin per-workspace toggle. Mirrors MCP exactly:
@@ -2108,7 +2130,10 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
       ? [...workspaceEnabledPlugins, pluginId]
       : workspaceEnabledPlugins.filter(id => id !== pluginId);
     setWorkspaceEnabledPlugins(newEnabled);
-    void persistTabConfigChange({ enabledPluginIds: newEnabled });
+    const persisted = await persistTabConfigChange({ enabledPluginIds: newEnabled });
+    if (!persisted) {
+      setWorkspaceEnabledPlugins(workspaceEnabledPlugins);
+    }
   }, [workspaceEnabledPlugins, persistTabConfigChange]);
 
   // Sync selectedModel when provider changes (skip initial mount to preserve project-stored model)
@@ -2190,33 +2215,42 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
     // /api/session/config returns). Re-applying persisted snapshot here would
     // overwrite the just-adopted live sidecar config.
     if (adoptedSessionRef.current && adoptedSessionRef.current === sessionMeta.id) return;
-    // Field-by-field merge: `session ?? agent` (Option C). Missing snapshot fields
-    // re-derive from the agent — this is the write-read symmetry of IM live-follow.
+    // Field-by-field merge remains for unlocked / live-follow sessions. Owned
+    // sessions are source-owned by SessionMetadata: falling back to the current
+    // Agent during the async metadata window reintroduces cross-session config
+    // stomp (#395/#396).
     const snapshotRuntime = (sessionMeta.runtime as RuntimeType | undefined) ?? agentRuntime;
     const snapshotIsExternal = snapshotRuntime !== 'builtin';
-    const rawModel = sessionMeta.model ?? (snapshotIsExternal
+    const snapshotOwnsConfig = Boolean(sessionMeta.configSnapshotAt);
+    const fallbackModel = snapshotIsExternal
       ? (currentAgent?.runtimeConfig as RuntimeConfig | undefined)?.model
-      : currentAgent?.model);
+      : currentAgent?.model;
+    const rawModel = snapshotOwnsConfig ? sessionMeta.model : (sessionMeta.model ?? fallbackModel);
     const model = snapshotIsExternal
       ? coerceExternalRuntimeModelForUi(rawModel, snapshotRuntime)
       : rawModel;
-    const rawMode = sessionMeta.permissionMode ?? (snapshotIsExternal
+    const fallbackMode = snapshotIsExternal
       ? (currentAgent?.runtimeConfig as RuntimeConfig | undefined)?.permissionMode
-      : (currentAgent?.permissionMode as string | undefined));
+      : (currentAgent?.permissionMode as string | undefined);
+    const rawMode = snapshotOwnsConfig ? sessionMeta.permissionMode : (sessionMeta.permissionMode ?? fallbackMode);
     const mode = snapshotIsExternal
       ? coerceExternalRuntimePermissionForUi(rawMode, snapshotRuntime)
       : rawMode;
-    const providerId = sessionMeta.providerId ?? currentAgent?.providerId;
-    const mcp = sessionMeta.mcpEnabledServers ?? currentAgent?.mcpEnabledServers;
+    const providerId = snapshotOwnsConfig ? sessionMeta.providerId : (sessionMeta.providerId ?? currentAgent?.providerId);
+    const mcp = snapshotOwnsConfig ? sessionMeta.mcpEnabledServers : (sessionMeta.mcpEnabledServers ?? currentAgent?.mcpEnabledServers);
+    const plugins = snapshotOwnsConfig
+      ? (sessionMeta.enabledPluginIds ?? [])
+      : (sessionMeta.enabledPluginIds ?? currentAgent?.enabledPluginIds ?? currentProject?.enabledPluginIds ?? []);
     // #324 — snapshot effort wins over agent default; a persisted 'default'
     // is meaningful (session explicitly reverted) and flows through as-is.
     // UNCONDITIONAL set (`?? 'default'`, unlike model's `if (model)`): effort's
     // undefined has a defined meaning (= default), so a session without the
     // field must reset the picker — keeping the previous session's value here
     // is a cross-session leak (cross-review Critical).
-    const snapEffort = sessionMeta.reasoningEffort ?? (snapshotIsExternal
+    const fallbackEffort = snapshotIsExternal
       ? (currentAgent?.runtimeConfig as RuntimeConfig | undefined)?.reasoningEffort
-      : currentAgent?.reasoningEffort);
+      : currentAgent?.reasoningEffort;
+    const snapEffort = snapshotOwnsConfig ? sessionMeta.reasoningEffort : (sessionMeta.reasoningEffort ?? fallbackEffort);
     if (snapshotIsExternal) {
       setRuntimeModel(model);
     } else if (model) {
@@ -2235,6 +2269,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
     }
     if (providerId) setSelectedProviderId(providerId);
     if (mcp) setWorkspaceMcpEnabled(mcp);
+    setWorkspaceEnabledPlugins(plugins);
   // eslint-disable-next-line react-hooks/exhaustive-deps -- currentAgent derived from config, listening to its identity would re-fire on unrelated agent changes
   }, [sessionMeta, configPending]);
 
@@ -2324,6 +2359,11 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
     // adoption clears the flag, the user's later edits SHOULD reach the
     // sidecar — applying a sticky guard here would silently swallow them.
     if (configDispositionRef.current !== 'push') return;
+    // Existing-session restore: wait for REST metadata before pushing model
+    // state. The local picker may still contain Agent defaults until
+    // `sessionMeta` hydrates; pushing in that window overwrites the session's
+    // owned sidecar config (#396).
+    if (isSessionLoading) return;
 
     const modelToPush = isExternalRuntime ? runtimeModel : selectedModel;
     // External + no explicit pick → defer to runtime's built-in default.
@@ -2338,7 +2378,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
       lastPushedModelKeyRef.current = null; // allow retry
     });
   }, [isConnected, sessionRuntime, currentAgent, isExternalRuntime,
-      runtimeModel, selectedModel, sessionId, apiPost, configPending]);
+      runtimeModel, selectedModel, sessionId, apiPost, configPending, isSessionLoading]);
 
   // #324 — NO mount-time effort-push effect, deliberately diverging from the
   // model-push effect above. The sidecar self-resolves effort at boot from the
@@ -2529,9 +2569,10 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
           }
           return;
         }
+        if (isSessionLoading) return;
 
         // 3. Sync effective MCP servers to backend for next message
-        const workspaceEnabled = currentAgent?.mcpEnabledServers ?? currentProject?.mcpEnabledServers ?? [];
+        const workspaceEnabled = workspaceMcpEnabled;
         const effectiveServers = servers.filter(s =>
           enabledIds.includes(s.id) && workspaceEnabled.includes(s.id)
         );
@@ -2558,7 +2599,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
     // 5. Refresh file tree
     setWorkspaceRefreshTrigger(prev => prev + 1);
     // eslint-disable-next-line react-hooks/exhaustive-deps -- providers.length is only used for debug logging
-  }, [isActive, refreshProviderData, currentProject?.mcpEnabledServers, apiPost]);
+  }, [isActive, refreshProviderData, workspaceMcpEnabled, isSessionLoading, apiPost]);
 
   // Listen for skill copy events to refresh DirectoryPanel (file tree shows .claude/skills/)
   // Note: WorkspaceConfigPanel has its own event listener for internalRefreshKey
@@ -2588,7 +2629,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
   // Handle provider change with analytics tracking.
   // targetModel: when provided, use this model instead of the provider's primaryModel
   // (avoids useEffect race when user picks a specific model from a different provider).
-  const handleProviderChange = useCallback((providerId: string, targetModel?: string) => {
+  const handleProviderChange = useCallback(async (providerId: string, targetModel?: string) => {
     // Skip if selecting the same provider (compare against local state, not shared project)
     if (selectedProviderId === providerId) {
       // Provider unchanged but caller passed a specific model — treat as model change.
@@ -2602,8 +2643,9 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
           setPendingProviderSwitch({ providerId, model: targetModel });
           return;
         }
+        const persisted = await persistTabConfigChange({ model: targetModel });
+        if (!persisted) return;
         setSelectedModel(targetModel);
-        void persistTabConfigChange({ model: targetModel });
       }
       return;
     }
@@ -2626,9 +2668,15 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
       return;  // Don't update state — dialog will handle it
     }
 
-    // Update local state — explicitly set both provider and model.
-    // Don't rely on the provider-change effect for model cascade, because
-    // providerInitRef may be stale (re-armed by one-time sync) and suppress it.
+    // Write back: owned session snapshots this choice locally so the current session
+    // keeps using it; agent/project always gets written so FUTURE new sessions inherit
+    // the user's latest preference (PRD v0.1.69 §4.3 rule 2 dual-write).
+    const persisted = await persistTabConfigChange({ providerId, model: model ?? null });
+    if (!persisted) return;
+
+    // Update local state only after the snapshot write succeeds. The model-push
+    // effect is state-driven, so this prevents pushing a model that failed to
+    // persist as the session authority.
     setSelectedProviderId(providerId);
     if (model) {
       setSelectedModel(model);
@@ -2636,11 +2684,6 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
 
     // Suppress the deferred provider-change useEffect — we've already set the correct model
     providerInitRef.current = true;
-
-    // Write back: owned session snapshots this choice locally so the current session
-    // keeps using it; agent/project always gets written so FUTURE new sessions inherit
-    // the user's latest preference (PRD v0.1.69 §4.3 rule 2 dual-write).
-    void persistTabConfigChange({ providerId, model: model ?? null });
   // eslint-disable-next-line react-hooks/exhaustive-deps -- narrowed deps; messagesRef avoids dep on messages array
   }, [selectedProviderId, selectedModel, providers, currentProvider?.id, currentProvider?.type, currentProvider?.config.baseUrl, currentProvider?.apiProtocol, persistTabConfigChange]);
 
@@ -2648,7 +2691,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
   // Dual-write per PRD v0.1.69 §4.3 rule 2 "写 Session + 向上写 Agent": owned sessions
   // snapshot the new model locally so this session persists the choice; project + agent
   // also get written so FUTURE new sessions / Bots / Crons inherit the latest preference.
-  const handleModelChange = useCallback((model: string) => {
+  const handleModelChange = useCallback(async (model: string) => {
     // Skip if selecting the same model
     if (selectedModel === model) {
       return;
@@ -2667,8 +2710,9 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
       return;
     }
 
+    const persisted = await persistTabConfigChange({ model });
+    if (!persisted) return;
     setSelectedModel(model);
-    void persistTabConfigChange({ model });
   // eslint-disable-next-line react-hooks/exhaustive-deps -- narrowed deps; currentProvider fields cover toProviderHistoryEnv inputs
   }, [selectedModel, currentProvider?.id, currentProvider?.type, currentProvider?.config.baseUrl, currentProvider?.apiProtocol, selectedProviderId, persistTabConfigChange]);
 
@@ -2678,10 +2722,11 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
   // chat would only call `setRuntimeModel` (UI state), so the user's choice
   // was lost on next session — matching launcher's persist behavior closes
   // that gap.
-  const handleRuntimeModelChange = useCallback((model: string) => {
+  const handleRuntimeModelChange = useCallback(async (model: string) => {
     if (runtimeModel === model) return;
+    const persisted = await persistTabConfigChange({ runtimeModel: model });
+    if (!persisted) return;
     setRuntimeModel(model);
-    void persistTabConfigChange({ runtimeModel: model });
   }, [runtimeModel, persistTabConfigChange]);
 
   // #324 — reasoning effort change. Same dual-write policy as handleModelChange
@@ -2707,11 +2752,12 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
     pushReasoningEffort(deferred);
   }, [configPending, pushReasoningEffort]);
 
-  const handleReasoningEffortChange = useCallback((effort: string) => {
+  const handleReasoningEffortChange = useCallback(async (effort: string) => {
     if (reasoningEffort === effort) return;
     track('reasoning_effort_switch', { effort });
+    const persisted = await persistTabConfigChange({ reasoningEffort: effort });
+    if (!persisted) return;
     setReasoningEffort(effort);
-    void persistTabConfigChange({ reasoningEffort: effort });
     // Live push on explicit user intent only (see the no-mount-push note by
     // the model-push effect). defer-while-pending: while the sidecar
     // disposition is unresolved we queue the push (flushed by the effect
@@ -2734,24 +2780,25 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
     if (reasoningEffort === 'default') return;
     const choices = reasoningEffortChoices('builtin', currentProvider.apiProtocol);
     if (choices && !choices.includes(reasoningEffort)) {
-      handleReasoningEffortChange('default');
+      void handleReasoningEffortChange('default');
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps -- narrowed to protocol-relevant provider fields
   }, [isExternalRuntime, currentProvider?.id, currentProvider?.apiProtocol, reasoningEffort, handleReasoningEffortChange]);
 
   // Handle permission mode change — same dual-write policy as handleModelChange.
-  const handlePermissionModeChange = useCallback((mode: PermissionMode) => {
+  const handlePermissionModeChange = useCallback(async (mode: PermissionMode) => {
     // Lock in the user's explicit choice: mark the project as synced so
     // `effectivePermissionMode` (#244) trusts `permissionMode` from here on
     // instead of re-deriving from config — even if the one-time project-sync
     // effect hasn't fired yet (user toggled before config finished loading).
+    const persisted = await persistTabConfigChange({ permissionMode: mode });
+    if (!persisted) return;
     projectSyncedRef.current = true;
     if (isExternalRuntime) {
       setRuntimePermissionMode(mode);
     } else {
       setPermissionMode(mode);
     }
-    void persistTabConfigChange({ permissionMode: mode });
   }, [isExternalRuntime, persistTabConfigChange]);
 
   // Cross-runtime SDK protection: only fires when the multiAgentRuntime feature
@@ -2977,6 +3024,35 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
     setPendingRuntimeChange(runtime);
   }, [currentAgent, currentRuntime]);
 
+  const transferBindingToForkedSession = useCallback(async (channel: ChannelSurface, targetSessionId: string) => {
+    if (!agentDir) {
+      throw new Error('Missing workspace path for channel binding transfer');
+    }
+    const { handoverSessionToChannel } = await import('@/api/sessionHandoverClient');
+    const result = await handoverSessionToChannel({
+      sessionId: targetSessionId,
+      agentId: channel.agentId,
+      channelId: channel.channelId,
+      sessionKey: channel.sessionKey,
+      workspacePath: agentDir,
+    });
+    if (!result.ok) {
+      throw new Error('Channel binding transfer failed');
+    }
+    if (!result.notified) {
+      toastRef.current.warning('新会话已接管 Channel，但 IM 通知发送失败');
+    }
+  }, [agentDir]);
+
+  const deleteUnopenedForkSession = useCallback(async (targetSessionId: string) => {
+    try {
+      const { deleteSession } = await import('@/api/sessionClient');
+      await deleteSession(targetSessionId);
+    } catch (err) {
+      console.warn('[chat] Failed to delete unopened fork session:', err);
+    }
+  }, []);
+
   const confirmRuntimeChange = useCallback(async () => {
     const runtime = pendingRuntimeChange;
     setPendingRuntimeChange(null);
@@ -3004,6 +3080,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
     // "future Tabs silently inherit new runtime even though user's fork
     // failed" leak.
     if (!onForkSession || !agentDir) return;
+    const boundChannel = channelSurfaceRef.current;
     let session: { id: string } | undefined;
     try {
       const { createSession } = await import('@/api/sessionClient');
@@ -3013,26 +3090,67 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
       toastRef.current.error('切换 Runtime 失败：无法创建新会话');
       return;
     }
-    // Fork succeeded — now persist workspace default. Agent patch failure
-    // is non-fatal (fork is done, user already sees the new Tab opening);
-    // we surface a secondary toast so the inconsistency isn't silent.
+    // Fork metadata succeeded — now persist workspace default before opening
+    // the tab. For ordinary desktop forks an agent patch failure is non-fatal:
+    // the new session snapshot is still usable. For channel-bound forks, the
+    // binding migration depends on the live Agent template being updated, so
+    // the failure stays blocking and the hidden target session is deleted.
     //
     // buildRuntimeChangePatch centralizes the "drop non-portable
     // runtimeConfig fields (model / permissionMode / additionalArgs), keep
     // envPolicy" policy — see its doc comment for the bug-class rationale.
     // All 4 runtime-change callsites (here / Settings / Launcher / agent
     // set CLI) MUST go through this helper.
+    let agentTemplateUpdated = false;
     if (currentAgent.id) {
       try {
         await patchAgentConfig(currentAgent.id, buildRuntimeChangePatch(currentAgent.runtimeConfig, runtime));
+        agentTemplateUpdated = true;
       } catch (err) {
         console.warn('[chat] Runtime fork succeeded but agent template update failed:', err);
-        toastRef.current.warning('新 Tab 已打开，但工作区默认 Runtime 未能更新');
+        if (boundChannel) {
+          await deleteUnopenedForkSession(session.id);
+          toastRef.current.error('切换 Runtime 失败：工作区默认 Runtime 未能更新');
+          return;
+        }
+        toastRef.current.warning('新会话将继续打开，但工作区默认 Runtime 未能更新');
       }
     }
     const runtimeLabel = getRuntimeDisplayLabel(runtime);
-    onForkSession(session.id, agentDir, `${runtimeLabel} Session`);
-  }, [pendingRuntimeChange, currentAgent, onForkSession, agentDir]);
+    const opened = await onForkSession(session.id, agentDir, `${runtimeLabel} Session`);
+    if (!opened) {
+      await deleteUnopenedForkSession(session.id);
+      if (agentTemplateUpdated) {
+        try {
+          await patchAgentConfig(currentAgent.id, {
+            runtime: currentAgent.runtime ?? 'builtin',
+            runtimeConfig: currentAgent.runtimeConfig,
+          });
+        } catch (rollbackErr) {
+          console.warn('[chat] Runtime rollback after fork tab open failure also failed:', rollbackErr);
+        }
+      }
+      toastRef.current.error('切换 Runtime 失败：新 Tab 未能打开');
+      return;
+    }
+    if (boundChannel && session) {
+      try {
+        await transferBindingToForkedSession(boundChannel, session.id);
+      } catch (err) {
+        console.error('[chat] Runtime fork channel binding transfer failed:', err);
+        try {
+          await patchAgentConfig(currentAgent.id, {
+            runtime: currentAgent.runtime ?? 'builtin',
+            runtimeConfig: currentAgent.runtimeConfig,
+          });
+        } catch (rollbackErr) {
+          console.warn('[chat] Runtime rollback after failed channel transfer also failed:', rollbackErr);
+        }
+        toastRef.current.error('新会话已打开，但 Channel 绑定未迁移，工作区 Runtime 已恢复');
+        return;
+      }
+    }
+  }, [pendingRuntimeChange, currentAgent, onForkSession, agentDir, transferBindingToForkedSession, deleteUnopenedForkSession]);
 
   // Provider/model history-boundary confirm: save the requested selection to
   // project, create a new session in a new tab, and leave the current tab on
@@ -3041,6 +3159,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
     const pending = pendingProviderSwitch;
     setPendingProviderSwitch(null);
     if (!pending || !agentDir || !onForkSession) return;
+    const boundChannel = channelSurfaceRef.current;
 
     // Ordering constraint (cross-review Codex Warning): session snapshot
     // captures `providerId` at creation time via `snapshotForOwnedSession`
@@ -3055,6 +3174,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
     const priorModel = currentProject?.model;
     const priorAgentProviderId = currentAgent?.providerId;
     const priorAgentModel = currentAgent?.model;
+    let forkTabOpened = false;
 
     try {
       // 1. Save provider + model to project config so the new tab picks it up
@@ -3069,7 +3189,15 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
       const { createSession } = await import('@/api/sessionClient');
       const session = await createSession(agentDir, currentRuntime);
       const newProvider = providers.find(p => p.id === pending.providerId);
-      onForkSession(session.id, agentDir, `${newProvider?.name ?? 'Claude'} 会话`);
+      const opened = await onForkSession(session.id, agentDir, `${newProvider?.name ?? 'Claude'} 会话`);
+      if (!opened) {
+        await deleteUnopenedForkSession(session.id);
+        throw new Error('Fork tab failed to open');
+      }
+      forkTabOpened = true;
+      if (boundChannel) {
+        await transferBindingToForkedSession(boundChannel, session.id);
+      }
     } catch (err) {
       console.error('[chat] Failed to create cross-provider session:', err);
       // Roll back the agent / project config so workspace default stays on
@@ -3088,10 +3216,14 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
       } catch (rollbackErr) {
         console.warn('[chat] Provider rollback after failed fork also failed:', rollbackErr);
       }
-      toastRef.current.error('创建新会话失败，工作区 Provider 已恢复');
+      toastRef.current.error(
+        forkTabOpened
+          ? '新会话已打开，但 Channel 绑定未迁移，工作区 Provider 已恢复'
+          : '创建新会话失败，工作区 Provider 已恢复',
+      );
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps -- narrowed to .id/.agentId
-  }, [pendingProviderSwitch, agentDir, onForkSession, currentProject?.id, currentProject?.agentId, patchProject, refreshConfig, providers, currentRuntime, currentProject?.providerId, currentProject?.model, currentAgent?.providerId, currentAgent?.model]);
+  }, [pendingProviderSwitch, agentDir, onForkSession, currentProject?.id, currentProject?.agentId, patchProject, refreshConfig, providers, currentRuntime, currentProject?.providerId, currentProject?.model, currentAgent?.providerId, currentAgent?.model, transferBindingToForkedSession, deleteUnopenedForkSession]);
 
   // Cross-runtime confirm: create new session in new tab and send the pending message
   const confirmCrossRuntimeSend = useCallback(async () => {
@@ -3107,13 +3239,16 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
       if (pending.images.length > 0) {
         toastRef.current.warning('图片附件无法带入新会话，请重新添加');
       }
-      onForkSession(session.id, agentDir, pending.text.slice(0, 40) || '新会话', pending.text);
+      const opened = await onForkSession(session.id, agentDir, pending.text.slice(0, 40) || '新会话', pending.text);
+      if (!opened) {
+        await deleteUnopenedForkSession(session.id);
+      }
     } catch (err) {
       setPendingCrossRuntimeMessage(null);  // Clear on error too (dialog dismissed)
       console.error('[chat] Failed to create cross-runtime session:', err);
       toastRef.current.error('创建新会话失败');
     }
-  }, [pendingCrossRuntimeMessage, agentDir, onForkSession, currentRuntime]);
+  }, [pendingCrossRuntimeMessage, agentDir, onForkSession, currentRuntime, deleteUnopenedForkSession]);
 
   const handleCollapseWorkspace = useCallback(() => setShowWorkspace(false), []);
   // Issue #231: snapshot the current input value at the moment the user opens
@@ -3553,10 +3688,19 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
 
     track('session_fork', {});
     apiPost('/sessions/fork', { messageId })
-      .then(res => {
+      .then(async res => {
         const r = res as { success?: boolean; newSessionId?: string; agentDir?: string; title?: string; error?: string } | undefined;
         if (r?.success && r.newSessionId && r.agentDir) {
-          onForkSession?.(r.newSessionId, r.agentDir, r.title || 'Fork');
+          if (!onForkSession) {
+            await deleteUnopenedForkSession(r.newSessionId);
+            toastRef.current.error('创建分支失败：无法打开新会话');
+            return;
+          }
+          const opened = await onForkSession(r.newSessionId, r.agentDir, r.title || 'Fork');
+          if (!opened) {
+            await deleteUnopenedForkSession(r.newSessionId);
+            toastRef.current.error('创建分支失败：无法打开新会话');
+          }
         } else {
           toastRef.current.error('创建分支失败：' + (r?.error || '未知错误'));
         }
@@ -3565,7 +3709,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
         console.error('[Chat] Fork failed:', err);
         toastRef.current.error('创建分支失败');
       });
-  }, [forkTarget, apiPost, onForkSession]);
+  }, [forkTarget, apiPost, onForkSession, deleteUnopenedForkSession]);
 
   // Handler for selecting a session from history dropdown
   const handleSelectSession = useCallback((id: string, historyEntrySource: HistoryEntrySource = 'chat_dropdown') => {
@@ -3590,6 +3734,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
   // its own (only mounted when open) so they don't share, but the cost is low.
   const { statuses: agentStatuses } = useAgentStatuses(true);
   const surfaces = useSessionSurfaces(sessionId, agentStatuses, cronState.task);
+  channelSurfaceRef.current = surfaces.channel;
 
   // Handover-button visibility predicate (Q10 lockdown):
   //   - session is currently NOT bound to any channel
@@ -3641,41 +3786,22 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
    * SessionMenuButton's "新会话（保留绑定）" submenu item can drive the
    * exact same flow without re-running the unbound fallback paths.
    */
-  const newSessionKeepingBinding = useCallback(async () => {
+  const newSessionKeepingBinding = useCallback(async (
+    options: { allowPlainResetFallback?: boolean } = {},
+  ): Promise<boolean> => {
+    const allowPlainResetFallback = options.allowPlainResetFallback ?? true;
     const boundChannel = surfaces.channel;
-    if (!boundChannel || !sessionId) return;
-    try {
-      const { migrateChannelToNewSession } = await import('@/api/sessionHandoverClient');
-      const newSessionId = await migrateChannelToNewSession({
-        oldSessionId: sessionId,
-        sessionKey: boundChannel.sessionKey,
-      });
-      if (newSessionId) {
-        console.log(`[Chat] Channel-bound new conversation: ${sessionId.slice(0, 8)} → ${newSessionId.slice(0, 8)}`);
-        // CRITICAL: do NOT call resetSession() here.
-        //
-        // The Rust migrate already minted `newSessionId` on the running
-        // sidecar via /api/im/session/new AND rotated peer_sessions[*].session_id
-        // to it. If we additionally POST /chat/reset, the sidecar mints a
-        // SECOND id and the tab adopts the second mint — leaving the channel
-        // binding pointing at `newSessionId` while the tab is on a third id.
-        // Net effect: BOTH the old and new session lose the channel tag in
-        // the UI (peer_session never matches what the tab is showing). The
-        // dedicated soft-swap helper avoids the second mint.
-        adoptMigratedSession(newSessionId);
-        return;
-      }
-      // Migration returned null (handled error inside the client) — surface
-      // the failure to the user instead of silently no-op'ing, then still
-      // give them a fresh session so the menu click feels responsive.
-      console.warn('[Chat] migrateChannelToNewSession returned null; resetting without rebind');
-      toastRef.current.error('Channel 重绑失败，已就地重置');
-      await resetSession();
-    } catch (err) {
-      console.error('[Chat] Channel surface migration failed, falling back to plain reset:', err);
-      toastRef.current.error('Channel 重绑失败，已就地重置');
-      await resetSession();
-    }
+    if (!boundChannel || !sessionId) return false;
+    const { migrateChannelToNewSession } = await import('@/api/sessionHandoverClient');
+    return await transitionChannelBoundSession({
+      sessionId,
+      boundChannel,
+      migrateChannelToNewSession,
+      adoptMigratedSession,
+      resetSession,
+      reportError: (message) => toastRef.current.error(message),
+      allowPlainResetFallback,
+    });
   }, [surfaces.channel, sessionId, resetSession, adoptMigratedSession]);
 
   const showIntroductionOverlay = shouldShowIntroductionOverlay({
@@ -3693,10 +3819,9 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
   // If AI is idle, falls back to resetSession (reuses Sidecar).
   // PRD 0.2.14: when current session is IM-channel-bound, migrate the binding
   // to the new session so the IM channel keeps routing here (matches IM `/new`).
-  const handleNewSession = useCallback(async () => {
+  const handleNewSession = useCallback(async (): Promise<boolean> => {
     if (surfaces.channel && sessionId) {
-      await newSessionKeepingBinding();
-      return;
+      return await newSessionKeepingBinding();
     }
 
     if (onNewSession) {
@@ -3704,7 +3829,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
       if (handled) {
         // App.tsx started background completion and created new Sidecar
         // TabProvider will detect sessionId change and reconnect
-        return;
+        return true;
       }
     }
 
@@ -3716,7 +3841,15 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
     } else {
       console.error('[Chat] Failed to start new session');
     }
+    return success;
   }, [onNewSession, resetSession, surfaces.channel, sessionId, newSessionKeepingBinding]);
+
+  const prepareCurrentSessionForDelete = useCallback(async (): Promise<boolean> => {
+    if (surfaces.channel && sessionId) {
+      return await newSessionKeepingBinding({ allowPlainResetFallback: false });
+    }
+    return await handleNewSession();
+  }, [handleNewSession, newSessionKeepingBinding, surfaces.channel, sessionId]);
 
   return (
     <div className="relative flex h-full flex-row overflow-hidden overscroll-none bg-[var(--paper-elevated)] text-[var(--ink)]">
@@ -3784,7 +3917,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
                 onShowContext={isExternalRuntime ? undefined : () => { void handleSendMessageRef.current('/context'); }}
                 onOpenRename={() => titleEditorRef.current?.openRename()}
                 onFavoriteChanged={(_, updated) => { if (updated) setSessionMeta(updated); }}
-                onDeleted={handleNewSession}
+                prepareCurrentSessionForDelete={prepareCurrentSessionForDelete}
               />
             )}
           </div>
@@ -3818,7 +3951,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
               currentSessionId={sessionId}
               onSelectSession={(id) => handleSelectSession(id, 'chat_dropdown')}
               onOpenInNewTab={onOpenSessionInNewTab}
-              onDeleteCurrentSession={handleNewSession}
+              prepareCurrentSessionForDelete={prepareCurrentSessionForDelete}
               isOpen={showHistory}
               onClose={() => setShowHistory(false)}
               triggerRef={historyBtnRef}

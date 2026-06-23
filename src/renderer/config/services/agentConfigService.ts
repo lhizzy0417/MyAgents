@@ -1,9 +1,10 @@
 // Agent config service — CRUD helpers, migration from ImBotConfigs
-import type { AppConfig, Project, WorkspaceTemplate, WorkspaceTemplateAgentDefaults } from '../types';
+import type { AppConfig, McpServerDefinition, Project, WorkspaceTemplate, WorkspaceTemplateAgentDefaults } from '../types';
 import { getEffectiveModelAliases, PRESET_TEMPLATES } from '../types';
 import type { AgentConfig, ChannelConfig, ChannelOverrides } from '../../../shared/types/agent';
 import type { ImBotConfig } from '../../../shared/types/im';
 import { atomicModifyConfig, loadAppConfig } from './appConfigService';
+import { getAllMcpServersFromConfig } from './mcpService';
 import { workspacePathsEqual } from '../../../shared/workspacePath';
 
 // ============= Query Helpers =============
@@ -281,6 +282,103 @@ export async function persistAgents(agents: AgentConfig[]): Promise<void> {
   }));
 }
 
+function parseAgentMcpServersJson(raw: string | undefined): McpServerDefinition[] {
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter(isPromotableRemoteMcpDefinition);
+  } catch {
+    return [];
+  }
+}
+
+function isPromotableRemoteMcpDefinition(server: unknown): server is McpServerDefinition {
+  if (!server || typeof server !== 'object' || Array.isArray(server)) return false;
+  const candidate = server as { id?: unknown; name?: unknown; type?: unknown; url?: unknown };
+  return typeof candidate.id === 'string'
+    && typeof candidate.name === 'string'
+    && (candidate.type === 'http' || candidate.type === 'sse')
+    && typeof candidate.url === 'string'
+    && candidate.url.length > 0;
+}
+
+/**
+ * Agent MCP selection has two layers:
+ * - AppConfig.mcpServers / mcpEnabledServers are the global catalogue + safety gate.
+ * - AgentConfig.mcpEnabledServers is the per-Agent subset.
+ *
+ * Older UI flows could leave HTTP/SSE definitions only in agent.mcpServersJson.
+ * When the Agent subset is saved again, heal that legacy shape by promoting
+ * selected custom definitions into the global catalogue and global enabled list
+ * before rebuilding the runtime mcpServersJson payload. Known-but-globally
+ * disabled servers stay disabled; the global enabled list remains the safety
+ * gate outside the legacy-heal path.
+ */
+export function resolveAgentMcpSelectionForConfig(
+  config: AppConfig,
+  agent: AgentConfig | undefined,
+  enabledServerIds: readonly string[],
+): { config: AppConfig; mcpServersJson?: string } {
+  const requestedIds = [...new Set(enabledServerIds.filter(Boolean))];
+  if (requestedIds.length === 0) {
+    return { config, mcpServersJson: undefined };
+  }
+
+  const requested = new Set(requestedIds);
+  let nextConfig = config;
+  let knownIds = new Set(getAllMcpServersFromConfig(nextConfig).map(server => server.id));
+  const legacyDefinitions = parseAgentMcpServersJson(agent?.mcpServersJson)
+    .filter(server => requested.has(server.id) && !server.isBuiltin && !knownIds.has(server.id));
+
+  if (legacyDefinitions.length > 0) {
+    const customServers = [...(Array.isArray(nextConfig.mcpServers) ? nextConfig.mcpServers : [])];
+    for (const server of legacyDefinitions) {
+      const normalized: McpServerDefinition = { ...server, isBuiltin: false };
+      const existingIndex = customServers.findIndex(s => s.id === normalized.id);
+      if (existingIndex >= 0) {
+        customServers[existingIndex] = normalized;
+      } else {
+        customServers.push(normalized);
+      }
+    }
+    nextConfig = { ...nextConfig, mcpServers: customServers };
+    knownIds = new Set(getAllMcpServersFromConfig(nextConfig).map(server => server.id));
+  }
+
+  const globalEnabled = new Set(Array.isArray(nextConfig.mcpEnabledServers) ? nextConfig.mcpEnabledServers : []);
+  let enabledChanged = false;
+  for (const server of legacyDefinitions) {
+    if (!globalEnabled.has(server.id)) {
+      globalEnabled.add(server.id);
+      enabledChanged = true;
+    }
+  }
+  if (enabledChanged) {
+    nextConfig = { ...nextConfig, mcpEnabledServers: Array.from(globalEnabled) };
+  }
+
+  const allServers = getAllMcpServersFromConfig(nextConfig);
+  const enabledDefs = allServers.filter(server => globalEnabled.has(server.id) && requested.has(server.id));
+  return {
+    config: nextConfig,
+    mcpServersJson: enabledDefs.length > 0 ? JSON.stringify(enabledDefs) : undefined,
+  };
+}
+
+export function resolveAgentRuntimeMcpServersJson(
+  allServers: readonly McpServerDefinition[],
+  globalEnabledServerIds: readonly string[],
+  agentEnabledServerIds: readonly string[] | undefined,
+): string | null {
+  const globalEnabled = new Set(globalEnabledServerIds);
+  const agentEnabled = new Set(agentEnabledServerIds ?? []);
+  const enabledMcpDefs = allServers.filter(
+    server => globalEnabled.has(server.id) && agentEnabled.has(server.id),
+  );
+  return enabledMcpDefs.length > 0 ? JSON.stringify(enabledMcpDefs) : null;
+}
+
 /**
  * Patch a single agent's config (atomic read-modify-write).
  * After disk write, hot-reloads runtime state of running agent instances via Tauri command.
@@ -291,23 +389,10 @@ export async function patchAgentConfig(
 ): Promise<AgentConfig | undefined> {
   let updated: AgentConfig | undefined;
 
-  // If mcpEnabledServers changed, resolve mcpServersJson before disk write
-  // so both fields are persisted atomically in a single transaction
+  // If mcpEnabledServers changed, resolve mcpServersJson inside the config
+  // transaction so the Agent subset, global MCP registry, and runtime payload
+  // are all derived from the same disk-latest config.
   let resolvedMcpJson: string | undefined;
-  if ('mcpEnabledServers' in patch) {
-    try {
-      const { getAllMcpServers, getEnabledMcpServerIds } = await import('@/config/configService');
-      const allServers = await getAllMcpServers();
-      const globalEnabled = await getEnabledMcpServerIds();
-      const agentMcpIds = patch.mcpEnabledServers ?? [];
-      const enabledMcpDefs = allServers.filter(
-        s => globalEnabled.includes(s.id) && agentMcpIds.includes(s.id),
-      );
-      resolvedMcpJson = enabledMcpDefs.length > 0 ? JSON.stringify(enabledMcpDefs) : undefined;
-    } catch (e) {
-      console.warn('[agentConfigService] Failed to resolve MCP servers:', e);
-    }
-  }
 
   // If providerId changed but providerEnvJson was NOT explicitly provided,
   // auto-resolve from provider registry + stored API keys.
@@ -347,9 +432,20 @@ export async function patchAgentConfig(
   }
 
   await atomicModifyConfig(config => {
-    const agents = [...(config.agents || [])];
+    let nextConfig = config;
+    let agents = [...(nextConfig.agents || [])];
     const idx = agents.findIndex(a => a.id === agentId);
-    if (idx < 0) return config;
+    if (idx < 0) return nextConfig;
+    if ('mcpEnabledServers' in patch) {
+      const mcpResolution = resolveAgentMcpSelectionForConfig(
+        nextConfig,
+        agents[idx],
+        patch.mcpEnabledServers ?? [],
+      );
+      nextConfig = mcpResolution.config;
+      resolvedMcpJson = mcpResolution.mcpServersJson;
+      agents = [...(nextConfig.agents || [])];
+    }
     agents[idx] = {
       ...agents[idx],
       ...patch,
@@ -365,7 +461,7 @@ export async function patchAgentConfig(
     };
     updated = agents[idx];
     return {
-      ...config,
+      ...nextConfig,
       agents,
     };
   });
@@ -498,9 +594,7 @@ export async function invokeStartAgentChannel(
   const allServers = await getAllMcpServers();
   const globalEnabled = await getEnabledMcpServerIds();
   const agentMcpIds = agent.mcpEnabledServers ?? [];
-  const enabledMcpDefs = allServers.filter(
-    s => globalEnabled.includes(s.id) && agentMcpIds.includes(s.id),
-  );
+  const mcpServersJson = resolveAgentRuntimeMcpServersJson(allServers, globalEnabled, agentMcpIds);
 
   // Resolve effective config (agent defaults + channel overrides)
   const effective = resolveEffectiveConfig(agent, channel);
@@ -520,7 +614,7 @@ export async function invokeStartAgentChannel(
       runtime: effective.runtime,
       runtimeConfig: effective.runtimeConfig,
       mcpEnabledServers: agent.mcpEnabledServers,
-      mcpServersJson: enabledMcpDefs.length > 0 ? JSON.stringify(enabledMcpDefs) : null,
+      mcpServersJson,
       heartbeat: agent.heartbeat,
       memoryAutoUpdate: agent.memoryAutoUpdate,
       channels: [],

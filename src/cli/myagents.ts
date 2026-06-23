@@ -72,7 +72,8 @@ function parseArgs(args: string[]): { positional: string[]; flags: Record<string
         key === 'no-reply' ||
         key === 'clear-provider-override' ||
         key === 'clear-runtime-override' ||
-        key === 'purge'
+        key === 'purge' ||
+        key === 'stdin'
       ) {
         flags[camelCase(key)] = true;
         i++;
@@ -201,6 +202,7 @@ Commands:
   cron      Manage scheduled tasks (list/add/runs/exit ...)
   task      Manage Task Center tasks (list/get/update-status/run/rerun ...)
   thought   Manage Task Center thoughts (list/create)
+  space     MyAgents Cloud Space issue/attachment bridge
   im        IM runtime actions for current chat (send-media)
   session   Session-to-session messaging (send prompts, watch completion/result events)
   widget    Generative UI widget design guidelines (readme)
@@ -263,6 +265,10 @@ Examples:
     # Pass --run to dispatch immediately in the same call.
     # Pass --json for machine-readable output (task_id + docs_path).
     # Same per-task override flags as create-direct apply here.
+  myagents space issue get <issueId> --json
+  myagents space issue comment <issueId> --body-file result.md
+  myagents space issue status <issueId> resolved
+  myagents space attachment download <attachmentId> --output myagents_files/space/file.bin
   myagents thought list
   myagents plugin list
   myagents cc-plugin list
@@ -1843,7 +1849,86 @@ function buildRoute(group: string, action: string, rest: string[]): string {
   if (group === 'task' && action === 'remove') {
     return 'task/delete';
   }
+  if (group === 'space' && action === 'issue') {
+    const issueAction = rest[0] || 'get';
+    if (issueAction === 'get') return 'space/issue-get';
+    if (issueAction === 'comments') return 'space/issue-get';
+    if (issueAction === 'comment') return 'space/issue-comment';
+    if (issueAction === 'status') return 'space/issue-status';
+  }
+  if (group === 'space' && action === 'attachment') {
+    const attachmentAction = rest[0] || 'download';
+    if (attachmentAction === 'download') return 'space/attachment-download';
+  }
   return `${group}/${action}`;
+}
+
+function resolveSpaceWorkspacePath(flags: Record<string, unknown>): string {
+  const explicit = typeof flags.workspacePath === 'string'
+    ? flags.workspacePath
+    : typeof flags.workspace === 'string'
+      ? flags.workspace
+      : undefined;
+  return explicit && explicit.trim() ? explicit : process.cwd();
+}
+
+function optionalNumberFlag(value: unknown): number | undefined {
+  if (typeof value === 'number') return value;
+  if (typeof value !== 'string' || !value.trim()) return undefined;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+function readTextFileFlag(path: string, flagName: string, workspacePath?: string): string {
+  try {
+    const fs = require('fs') as typeof import('fs');
+    const pathMod = require('path') as typeof import('path');
+    const MAX_BYTES = 1024 * 1024;
+    const target = pathMod.resolve(workspacePath ?? process.cwd(), path);
+    if (workspacePath) {
+      const workspaceReal = fs.realpathSync(pathMod.resolve(workspacePath));
+      const targetReal = fs.realpathSync(target);
+      const rel = pathMod.relative(workspaceReal, targetReal);
+      if (rel === '' || rel.startsWith('..') || pathMod.isAbsolute(rel)) {
+        console.error(`Error: --${flagName} must stay inside workspace "${workspacePath}"`);
+        process.exit(1);
+      }
+      const leaf = fs.lstatSync(target);
+      if (leaf.isSymbolicLink()) {
+        console.error(`Error: --${flagName} must not be a symlink`);
+        process.exit(1);
+      }
+    }
+    const stat = fs.statSync(target);
+    if (stat.size > MAX_BYTES) {
+      console.error(`Error: --${flagName} "${target}" exceeds ${MAX_BYTES} bytes`);
+      process.exit(1);
+    }
+    const body = fs.readFileSync(target, 'utf-8');
+    if (body.includes('\0')) {
+      console.error(`Error: --${flagName} "${target}" contains NUL bytes`);
+      process.exit(1);
+    }
+    return body;
+  } catch (err) {
+    console.error(`Error: failed to read --${flagName} "${path}": ${err instanceof Error ? err.message : String(err)}`);
+    process.exit(1);
+  }
+}
+
+function resolveSpaceCommentBody(flags: Record<string, unknown>, workspacePath: string): string {
+  if (typeof flags.body === 'string') return flags.body;
+  if (typeof flags.bodyFile === 'string') return readTextFileFlag(flags.bodyFile, 'body-file', workspacePath);
+  if (flags.stdin) {
+    try {
+      const fs = require('fs') as typeof import('fs');
+      return fs.readFileSync(0, 'utf-8');
+    } catch (err) {
+      console.error(`Error: failed to read stdin: ${err instanceof Error ? err.message : String(err)}`);
+      process.exit(1);
+    }
+  }
+  return '';
 }
 
 function buildRequestBody(
@@ -1877,6 +1962,52 @@ function buildRequestBody(
     }
     // list / info / enable / disable / readme — single positional name (or none)
     return rest[0] ? { name: rest[0] } : {};
+  }
+
+  if (group === 'space') {
+    const workspacePath = resolveSpaceWorkspacePath(flags);
+    if (action === 'issue') {
+      const issueAction = rest[0] || 'get';
+      const issueId = rest[1] || flags.issueId;
+      if (issueAction === 'get' || issueAction === 'comments') {
+        return {
+          issueId,
+          agentId: flags.agentId,
+          workspacePath,
+          commentsLimit: optionalNumberFlag(flags.commentsLimit),
+          commentsCursor: flags.commentsCursor ?? flags.cursor,
+        };
+      }
+      if (issueAction === 'comment') {
+        return {
+          issueId,
+          body: resolveSpaceCommentBody(flags, workspacePath),
+          agentId: flags.agentId,
+          workspacePath,
+        };
+      }
+      if (issueAction === 'status') {
+        return {
+          issueId,
+          status: rest[2] || flags.status,
+          agentId: flags.agentId,
+          workspacePath,
+        };
+      }
+    }
+    if (action === 'attachment') {
+      const attachmentAction = rest[0] || 'download';
+      if (attachmentAction === 'download') {
+        return {
+          attachmentId: rest[1] || flags.attachmentId,
+          issueId: flags.issueId,
+          output: flags.output,
+          agentId: flags.agentId,
+          workspacePath,
+        };
+      }
+    }
+    return {};
   }
 
   // MCP commands

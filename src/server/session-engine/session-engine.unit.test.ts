@@ -55,6 +55,7 @@ const mocks = vi.hoisted(() => {
     interruptCurrentResponse: vi.fn(async () => false),
     isSessionBusy: vi.fn(() => false),
     forkSession: vi.fn(async () => ({ success: true, newSessionId: 'forked' })),
+    freezeCurrentSessionMetadataForImDetach: vi.fn(async () => ({ success: true, sessionId: 'old-im-session' })),
     materializeCurrentSessionMetadataForPublishedReset: vi.fn(async () => undefined),
     resetSession: vi.fn(async () => undefined),
     rewindSession: vi.fn(async () => ({ success: true, content: 'rewound' })),
@@ -137,6 +138,7 @@ vi.mock('../agent-session', () => ({
   interruptCurrentResponse: mocks.interruptCurrentResponse,
   isSessionBusy: mocks.isSessionBusy,
   forkSession: mocks.forkSession,
+  freezeCurrentSessionMetadataForImDetach: mocks.freezeCurrentSessionMetadataForImDetach,
   materializeCurrentSessionMetadataForPublishedReset: mocks.materializeCurrentSessionMetadataForPublishedReset,
   resetSession: mocks.resetSession,
   rewindSession: mocks.rewindSession,
@@ -288,6 +290,12 @@ describe('session-engine selector and adapters', () => {
       providerId: 'sensenova',
       reasoningEffort: 'default',
     });
+    expect(engine.getHeldImConfigSnapshot()).toEqual({
+      model: 'claude-sonnet',
+      permissionMode: 'auto',
+      providerEnv: undefined,
+      reasoningEffort: 'default',
+    });
   });
 
   it('exposes external read, config, and restore surfaces behind the external adapter', () => {
@@ -316,6 +324,11 @@ describe('session-engine selector and adapters', () => {
       agentNames: null,
       permissionMode: 'no-restrictions',
       providerId: null,
+      reasoningEffort: 'medium',
+    });
+    expect(engine.getHeldImConfigSnapshot()).toEqual({
+      model: 'gpt-5',
+      permissionMode: 'no-restrictions',
       reasoningEffort: 'medium',
     });
     expect(engine.getLiveSessionOverlay('external-session')).toMatchObject({
@@ -543,6 +556,32 @@ describe('session-engine selector and adapters', () => {
     expect(mocks.setExternalModel).toHaveBeenCalledWith('channel-model', { imConfigSync: true });
   });
 
+  it('passes metadataBirthPending into external IM sends', async () => {
+    mocks.state.useExternal = true;
+
+    await getSessionEngine().enqueueImMessage({
+      message: 'hello from im',
+      requestId: 'req-1',
+      sessionId: 'sid',
+      workspacePath: '/workspace',
+      scenario: { type: 'agent-channel', platform: 'feishu', sourceType: 'private' },
+      metadataBirthPending: true,
+    });
+
+    expect(mocks.sendExternalMessage).toHaveBeenCalledWith(
+      'hello from im',
+      undefined,
+      undefined,
+      undefined,
+      expect.objectContaining({
+        sessionId: 'sid',
+        workspacePath: '/workspace',
+        requestId: 'req-1',
+        metadataBirthPending: true,
+      }),
+    );
+  });
+
   it('stops the external runtime when an injected turn times out', async () => {
     mocks.state.useExternal = true;
     mocks.sendExternalMessage.mockResolvedValueOnce({ queued: true });
@@ -583,6 +622,58 @@ describe('session-engine selector and adapters', () => {
     expect(mocks.stopExternalSession.mock.invocationCallOrder[0])
       .toBeLessThan(mocks.resetSession.mock.invocationCallOrder[0]);
     expect(mocks.restoreExternalSessionState).toHaveBeenCalledWith('builtin-session', '/workspace', { type: 'desktop' });
+  });
+
+  it('freezes the current builtin IM session before resetting to a new IM session', async () => {
+    const result = await getSessionEngine().resetForNewImSession('/workspace');
+
+    expect(result).toEqual({ success: true, sessionId: 'builtin-session' });
+    expect(mocks.freezeCurrentSessionMetadataForImDetach).toHaveBeenCalledTimes(1);
+    expect(mocks.resetSession).toHaveBeenCalledTimes(1);
+    expect(mocks.materializeCurrentSessionMetadataForPublishedReset).toHaveBeenCalledTimes(1);
+    expect(mocks.freezeCurrentSessionMetadataForImDetach.mock.invocationCallOrder[0])
+      .toBeLessThan(mocks.resetSession.mock.invocationCallOrder[0]);
+    expect(mocks.resetSession.mock.invocationCallOrder[0])
+      .toBeLessThan(mocks.materializeCurrentSessionMetadataForPublishedReset.mock.invocationCallOrder[0]);
+  });
+
+  it('freezes the current external IM session with external runtime config before reset', async () => {
+    mocks.state.useExternal = true;
+    mocks.state.externalActive = true;
+    mocks.getActiveRuntimeType.mockReturnValueOnce('codex');
+    mocks.getExternalSessionModel.mockReturnValueOnce('gpt-5');
+    mocks.getExternalSessionPermissionMode.mockReturnValueOnce('no-restrictions');
+    mocks.getExternalSessionReasoningEffort.mockReturnValueOnce('medium');
+
+    const result = await getSessionEngine().resetForNewImSession('/workspace');
+
+    expect(result).toEqual({ success: true, sessionId: 'builtin-session' });
+    expect(mocks.awaitExternalSessionStarting).toHaveBeenCalledTimes(1);
+    expect(mocks.freezeCurrentSessionMetadataForImDetach).toHaveBeenCalledWith({
+      runtime: 'codex',
+      model: 'gpt-5',
+      permissionMode: 'no-restrictions',
+      reasoningEffort: 'medium',
+    });
+    expect(mocks.freezeCurrentSessionMetadataForImDetach.mock.invocationCallOrder[0])
+      .toBeLessThan(mocks.stopExternalSession.mock.invocationCallOrder[0]);
+    expect(mocks.stopExternalSession.mock.invocationCallOrder[0])
+      .toBeLessThan(mocks.resetSession.mock.invocationCallOrder[0]);
+    expect(mocks.restoreExternalSessionState).toHaveBeenCalledWith('builtin-session', '/workspace', { type: 'desktop' });
+  });
+
+  it('freezes the current external IM session through the engine facade', async () => {
+    mocks.state.useExternal = true;
+
+    const result = await getSessionEngine().freezeCurrentSessionForImDetach();
+
+    expect(result).toEqual({ success: true, sessionId: 'old-im-session' });
+    expect(mocks.freezeCurrentSessionMetadataForImDetach).toHaveBeenCalledWith({
+      runtime: 'codex',
+      model: 'gpt-5',
+      permissionMode: 'no-restrictions',
+      reasoningEffort: 'medium',
+    });
   });
 
   it('routes permission responses by external liveness compatibility', () => {

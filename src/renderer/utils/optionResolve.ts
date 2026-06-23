@@ -223,44 +223,23 @@ export function isExistingSessionSwitch(args: {
 }
 
 /**
- * #305 — should `persistInputOptionChange` skip the session snapshot write?
+ * Desktop Tab config writes always go to the session snapshot first.
  *
- * Returns `true` ONLY for a PURE-IM session: loaded sessionMeta has IM-shaped
- * source AND no `configSnapshotAt`. Those are live-follow by design (D4) and
- * must NOT acquire a snapshot.
+ * Earlier #305 logic skipped snapshot writes for pure IM sessions. That matched
+ * the old "IM owns the session forever" model, but not the v0.2.39 owner rule:
+ * once a desktop Tab opens an IM session and the user changes model / permission
+ * / MCP / plugins, the Tab becomes an owner and the session must be promoted to
+ * a self-contained snapshot. IM live-follow resumes only after that channel
+ * creates a new session (`/new` or desktop "new conversation").
  *
- * Returns `false` (write the snapshot) for:
- *   - loaded as Desktop / cron / owned (`configSnapshotAt` set, any source)
- *     — including the PRD 0.2.14 desktop-to-IM handover shape: source flips
- *     to `feishu_private` etc. but `configSnapshotAt` stays. Server then
- *     reads "desktop-handover snapshot wins" on IM turn delivery.
- *   - loaded as legacy unlocked (`configSnapshotAt` absent, source absent /
- *     'desktop') — first UI change here lazily migrates to owned via PATCH
- *     stamping `configSnapshotAt`.
- *   - sessionMeta still null (TabProvider.loadSession in-flight) — overwhelming
- *     common case is Desktop; defer to the server's defensive guard for the
- *     rare IM-as-Tab race.
- *
- * The pre-#305 gate `isOwnedSession = !!sessionMeta?.configSnapshotAt` returned
- * "skip" for both IM AND for the sessionMeta-loading window, so users who
- * touched the model picker before loadSession completed (Windows 50-500ms+ disk
- * latency) had their change silently dropped from sessions.json.
- *
- * Codex-review-caught (review of dual-investigation fix): an earlier draft of
- * this helper checked source only, which would have broken desktop-to-IM
- * handover sessions — they have IM-shaped source but a snapshot the user
- * legitimately wants to update from Tab. Always honor configSnapshotAt.
+ * Keep this as a named resolver because Chat still centralizes the policy here,
+ * and the tests document the product invariant that prevents future regressions
+ * back to "skip pure IM".
  */
-export function shouldSkipSnapshotWrite(args: {
+export function shouldSkipSnapshotWrite(_args: {
   sessionMetaSource: string | null | undefined;
   sessionMetaConfigSnapshotAt: string | null | undefined;
   sessionMetaLoaded: boolean;
 }): boolean {
-  if (!args.sessionMetaLoaded) return false;
-  // configSnapshotAt set → owned (desktop-created or desktop-handover-to-IM).
-  // Snapshot writes always allowed; IM bridge reads "snapshot wins" on delivery.
-  if (args.sessionMetaConfigSnapshotAt) return false;
-  const source = args.sessionMetaSource;
-  if (!source || source === 'desktop') return false;
-  return source.endsWith('_private') || source.endsWith('_group');
+  return false;
 }

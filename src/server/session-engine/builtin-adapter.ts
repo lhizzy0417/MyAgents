@@ -18,6 +18,7 @@ import {
   getSessionId,
   getSessionModel,
   getSessionPermissionMode,
+  getSessionProviderEnv,
   getSessionProviderId,
   getSessionReasoningEffort,
   getStreamingAssistantId,
@@ -26,7 +27,9 @@ import {
   handlePermissionResponse,
   interruptCurrentResponse,
   isSessionBusy,
+  freezeCurrentSessionMetadataForImDetach,
   materializeCurrentSessionMetadataForPublishedReset,
+  materializePendingDesktopSession as materializeBuiltinPendingDesktopSession,
   resetSession,
   rewindSession,
   setAgents,
@@ -172,6 +175,15 @@ export function createBuiltinSessionEngine(): SessionEngine {
       };
     },
 
+    getHeldImConfigSnapshot() {
+      return {
+        model: getSessionModel() ?? undefined,
+        permissionMode: getSessionPermissionMode(),
+        providerEnv: getSessionProviderEnv(),
+        reasoningEffort: getSessionReasoningEffort(),
+      };
+    },
+
     getLiveSessionOverlay(sessionId: string) {
       if (sessionId !== getSessionId()) {
         return { isActive: false };
@@ -224,6 +236,9 @@ export function createBuiltinSessionEngine(): SessionEngine {
         request.reasoningEffort,
         request.metadata,
         request.requestId,
+        undefined,
+        undefined,
+        { allowLazySessionMaterialization: request.metadataBirthPending === true },
       );
       if (result.error) {
         return { success: false, error: result.error, status: 503 };
@@ -334,6 +349,18 @@ export function createBuiltinSessionEngine(): SessionEngine {
       return { success: true };
     },
 
+    materializePendingDesktopSession(request) {
+      return materializeBuiltinPendingDesktopSession({
+        phase: request.phase,
+        preparedSessionId: request.preparedSessionId,
+        snapshotPatch: request.snapshotPatch,
+      });
+    },
+
+    freezeCurrentSessionForImDetach() {
+      return freezeCurrentSessionMetadataForImDetach();
+    },
+
     async updateRuntimeConfig() {
       return {
         success: false,
@@ -406,6 +433,10 @@ export function createBuiltinSessionEngine(): SessionEngine {
     },
 
     async resetForNewImSession() {
+      const freeze = await freezeCurrentSessionMetadataForImDetach();
+      if (!freeze.success) {
+        return { success: false, error: freeze.error ?? 'Failed to freeze current IM session before reset' };
+      }
       await resetSession();
       await materializeCurrentSessionMetadataForPublishedReset();
       return { success: true, sessionId: getSessionId() };

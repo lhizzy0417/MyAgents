@@ -14,7 +14,7 @@ import { getScriptDir, getBundledNodeDir, getSystemNodeDirs, getBundledRuntimePa
 import { getCrossPlatformEnv, isSkillBlockedOnPlatform } from './utils/platform';
 import { ensureDirSync, isDirEntry } from './utils/fs-utils';
 import { getMyAgentsNpmGlobalBinDir, getMyAgentsNpmGlobalPrefix, scrubMyAgentsNpmPrefixEnv } from './utils/npm-prefix-env';
-import { applyContextWindowSuffix, lookupModelContextLength, modelSupportsModality } from './utils/model-capabilities';
+import { applyContextWindowSuffix, lookupModelContextLength, lookupProviderModelContextLength, modelSupportsModality } from './utils/model-capabilities';
 import { modelAliasEnvChangesForModel, resolveSessionModelAliases } from './utils/model-aliases';
 import { resolveEffectiveResumeAt } from './utils/rewind-anchor';
 import { buildForkUuidRemap, remapStoredSdkUuids } from './utils/fork-remap';
@@ -64,6 +64,7 @@ import {
 } from '../shared/toolDisplay/filePatch';
 import { parsePartialJson } from '../shared/parsePartialJson';
 import { deriveSessionTitle } from '../shared/sessionTitle';
+import { isPendingSessionId } from '../shared/constants';
 import { workspacePathsEqual } from '../shared/workspacePath';
 import { normalizeReasoningEffort, isSdkEffortLevel } from '../shared/reasoningEffort';
 import { computeContextUsage } from '../shared/contextUsage';
@@ -76,9 +77,9 @@ import {
 } from './utils/context-occupancy';
 import type { SystemInitInfo } from '../shared/types/system';
 import type { SlashCommand as UiSlashCommand } from '../shared/slashCommands';
-import { saveSessionMetadata, updateSessionTitleFromMessage, updateSessionMetadata, getSessionMetadata, getSessionData } from './SessionStore';
+import { deleteSession, saveSessionMetadata, updateSessionTitleFromMessage, updateSessionMetadata, getSessionMetadata, getSessionData } from './SessionStore';
 import { firePostTurnTitleHook } from './turn-hooks';
-import { createSessionMetadata, type SessionMessage, type MessageAttachment, type SessionSource, type TurnAnalyticsSource } from './types/session';
+import { createSessionMetadata, type SessionMetadata, type SessionMessage, type MessageAttachment, type SessionSource, type TurnAnalyticsSource } from './types/session';
 import { extractAssistantTextFromStoredContent } from './inbox/latest-result';
 import {
   createMaterializedSessionMetadata,
@@ -100,6 +101,15 @@ import { localTimestamp } from '../shared/logTime';
 import { trackServer } from './analytics';
 import { getCurrentRuntimeType, isExternalRuntime } from './runtimes/factory';
 import { decideBuiltinSessionResume } from './utils/builtin-session-resume';
+import {
+  clearPendingDesktopMaterialization,
+  getPendingDesktopMaterialization,
+  isLazySessionMaterializationAllowed,
+  type PendingDesktopMaterialization,
+  resetSessionMaterializationState,
+  setLazySessionMaterializationAllowed,
+  setPendingDesktopMaterialization,
+} from './builtin-session/materialization';
 import { decideQueueAdmission, findQueueLocation, resolveChatQueueResponseMode, shouldClearAdmissionTicketOnAbort, shouldStartTurnBoundaryItem, type QueueAdmissionAction } from './session-core/turn-queue';
 import { getMcpAuthorityForScenario, mcpConfigFingerprint } from './session-core/mcp-sync-policy';
 import { elapsedMs, emitPerfTrace, nowMs } from './utils/perf-trace';
@@ -1202,7 +1212,6 @@ const imTextBlockIndices = new Set<number>();
 
 const childToolToParent: Map<string, string> = new Map();
 let sessionId = randomUUID();
-
 // Reset guard: prevents enqueueUserMessage from racing with async resetSession()/switchToSession()
 // Single promise — non-null means a reset is in progress; enqueueUserMessage awaits it.
 let resetPromise: Promise<void> | null = null;
@@ -1997,14 +2006,16 @@ async function broadcastBuiltinContextUsage(): Promise<void> {
   // `resetTurnUsage()` 可能把 `turnState.currentTurnUsage.model`/`sessionId` 改掉，给本轮的 broadcast/
   // 持久化盖错头。`turnState.latestMainAssistantUsage` 在函数入口同步读，已经天然是快照。
   const occupiedFromPerCall = resolveContextOccupancyTokens(turnState.latestMainAssistantUsage);
+  const providerScopedLookup = (model?: string | null) =>
+    lookupProviderModelContextLength(model, configState.currentProviderEnv?.providerId);
   const snapshotModel = chooseBuiltinContextUsageModel({
     sdkResultModel: turnState.currentTurnUsage.model,
     configuredModel: configState.currentModel,
-    lookupWindow: lookupModelContextLength,
+    lookupWindow: providerScopedLookup,
   });
   const snapshotSessionId = sessionId;
   const snapshotQuerySession = lifecycleState.query;
-  const registryWindow = lookupModelContextLength(snapshotModel);
+  const registryWindow = providerScopedLookup(snapshotModel);
   let runtimeWindow: number | null = registryWindow ? null : inferContextWindowFromSdkModelTag(snapshotModel);
 
   let occupied = occupiedFromPerCall;
@@ -2033,7 +2044,7 @@ async function broadcastBuiltinContextUsage(): Promise<void> {
     runtimeWindow,
     source: 'builtin',
     model: snapshotModel,
-    lookupWindow: lookupModelContextLength,
+    lookupWindow: providerScopedLookup,
   });
   broadcast('chat:context-usage', { ...usage, sessionId: snapshotSessionId });
   // PRD 0.2.32 — 持久化**同一个**快照到 session 记录（单一数据源）。每轮末一次写盘，
@@ -2889,6 +2900,7 @@ function resetForProviderHistoryBoundary(): void {
   sessionRegistered = false;
   sessionId = randomUUID();
   hasInitialPrompt = false;
+  resetSessionMaterializationState({ allowLazySessionMaterialization: true });
   clearMessages();
   resetTranscriptPersistenceForSession(previousSessionId);
   clearCurrentSessionUuids();
@@ -4303,9 +4315,469 @@ function createMetadataForSessionId(
   };
 }
 
+async function materializeInitialPromptSessionMetadata(initialPromptText: string): Promise<void> {
+  if (getSessionMetadata(sessionId)) {
+    setLazySessionMaterializationAllowed(false);
+    return;
+  }
+  const title = deriveSessionTitle(initialPromptText, 40) || 'New Chat';
+  const { meta, snapshotKind } = createMetadataForSessionId(
+    sessionId,
+    title,
+    currentScenario.type,
+  );
+  await saveSessionMetadata(meta);
+  if (!getSessionMetadata(sessionId)) {
+    throw new Error(`[agent] failed to materialize session metadata for initial prompt session ${sessionId}`);
+  }
+  setLazySessionMaterializationAllowed(false);
+  console.log(`[agent] session ${sessionId} persisted to SessionStore (initialPrompt, scenario=${currentScenario.type}, snapshot=${snapshotKind})`);
+}
+
+type DesktopSnapshotPatch = Pick<
+  SessionMetadata,
+  'model' | 'reasoningEffort' | 'permissionMode' | 'mcpEnabledServers' | 'enabledPluginIds' | 'providerId' | 'providerEnvJson'
+>;
+type OwnedFreezeSnapshotPatch = Partial<Pick<
+  SessionMetadata,
+  'runtime' | keyof DesktopSnapshotPatch
+>>;
+
+function applyDesktopSnapshotPatch(
+  meta: SessionMetadata,
+  patch: Partial<{ [K in keyof DesktopSnapshotPatch]: DesktopSnapshotPatch[K] | null }> | undefined,
+): void {
+  if (!patch) return;
+  let wroteSnapshot = false;
+  const apply = <K extends keyof DesktopSnapshotPatch>(key: K, value: DesktopSnapshotPatch[K] | null | undefined) => {
+    if (value === undefined) return;
+    if (value === null) {
+      delete meta[key];
+    } else {
+      meta[key] = value as never;
+    }
+    wroteSnapshot = true;
+  };
+  apply('model', patch.model);
+  apply('reasoningEffort', patch.reasoningEffort);
+  apply('permissionMode', patch.permissionMode);
+  apply('mcpEnabledServers', patch.mcpEnabledServers);
+  apply('enabledPluginIds', patch.enabledPluginIds);
+  apply('providerId', patch.providerId);
+  apply('providerEnvJson', patch.providerEnvJson);
+  if (wroteSnapshot) {
+    meta.configSnapshotAt = new Date().toISOString();
+  }
+}
+
+function buildDesktopSnapshotMetadataPatch(
+  patch: Partial<{ [K in keyof DesktopSnapshotPatch]: DesktopSnapshotPatch[K] | null }> | undefined,
+): Partial<DesktopSnapshotPatch> & Pick<SessionMetadata, 'configSnapshotAt'> | null {
+  if (!patch) return null;
+  const updates: Partial<DesktopSnapshotPatch> & Partial<Pick<SessionMetadata, 'configSnapshotAt'>> = {};
+  let wroteSnapshot = false;
+  const apply = <K extends keyof DesktopSnapshotPatch>(key: K, value: DesktopSnapshotPatch[K] | null | undefined) => {
+    if (value === undefined) return;
+    if (value === null) {
+      updates[key] = undefined as never;
+    } else {
+      updates[key] = value as never;
+    }
+    wroteSnapshot = true;
+  };
+  apply('model', patch.model);
+  apply('reasoningEffort', patch.reasoningEffort);
+  apply('permissionMode', patch.permissionMode);
+  apply('mcpEnabledServers', patch.mcpEnabledServers);
+  apply('enabledPluginIds', patch.enabledPluginIds);
+  apply('providerId', patch.providerId);
+  apply('providerEnvJson', patch.providerEnvJson);
+  if (!wroteSnapshot) return null;
+  updates.configSnapshotAt = new Date().toISOString();
+  return updates as Partial<DesktopSnapshotPatch> & Pick<SessionMetadata, 'configSnapshotAt'>;
+}
+
+async function restoreBuiltinConfigFromOwnedMetadata(meta: SessionMetadata): Promise<void> {
+  if (!agentDir || isExternalRuntime(getCurrentRuntimeType())) return;
+  const { resolveWorkspaceConfig } = await import('./utils/admin-config');
+  const resolved = resolveWorkspaceConfig(agentDir, meta, { includeMcp: false });
+  configSetModel(resolved.model);
+  configSetProviderEnv(resolved.providerEnv);
+  configSetReasoningEffort(normalizeReasoningEffort(resolved.reasoningEffort));
+  configSetSessionEnabledPluginIds(meta.enabledPluginIds ? [...meta.enabledPluginIds] : []);
+  if (resolved.permissionMode) {
+    const restored = computeRestoredPlanState(resolved.permissionMode as PermissionMode);
+    setPermissionPlanState(restored);
+  }
+  console.log(`[agent] restored owned metadata config: model=${resolved.model ?? 'default'}, provider=${resolved.providerEnv?.baseUrl ?? 'subscription/none'}, effort=${configState.currentReasoningEffort ?? 'default'}, permission=${resolved.permissionMode ?? 'default'}`);
+}
+
+function serializeProviderEnvSnapshot(providerEnv: ProviderEnv | undefined): string | undefined {
+  if (!providerEnv) return undefined;
+  try {
+    return JSON.stringify(providerEnv);
+  } catch (error) {
+    console.warn('[agent] failed to serialize provider env while freezing session:', error);
+    return undefined;
+  }
+}
+
+function buildOwnedFreezeSnapshotPatch(overrides?: OwnedFreezeSnapshotPatch): OwnedFreezeSnapshotPatch & Pick<SessionMetadata, 'configSnapshotAt'> {
+  const currentMcpServers = configState.currentMcpServers;
+  const currentProviderEnv = configState.currentProviderEnv;
+  const patch: OwnedFreezeSnapshotPatch & Pick<SessionMetadata, 'configSnapshotAt'> = {
+    runtime: getCurrentRuntimeType(),
+    ...(configState.currentModel ? { model: configState.currentModel } : {}),
+    ...(configState.currentReasoningEffort !== undefined ? { reasoningEffort: configState.currentReasoningEffort } : {}),
+    ...(configState.currentPermissionMode ? { permissionMode: configState.currentPermissionMode } : {}),
+    ...(currentMcpServers !== null ? { mcpEnabledServers: currentMcpServers.map(server => server.id) } : {}),
+    ...(configState.currentEnabledPluginIds !== null ? { enabledPluginIds: [...configState.currentEnabledPluginIds] } : {}),
+    ...(currentProviderEnv?.providerId ? { providerId: currentProviderEnv.providerId } : {}),
+    ...(currentProviderEnv ? { providerEnvJson: serializeProviderEnvSnapshot(currentProviderEnv) } : {}),
+    ...overrides,
+    configSnapshotAt: new Date().toISOString(),
+  };
+  if (patch.runtime && isExternalRuntime(patch.runtime)) {
+    delete patch.providerId;
+    delete patch.providerEnvJson;
+    delete patch.enabledPluginIds;
+  } else if (patch.enabledPluginIds === undefined) {
+    patch.enabledPluginIds = getDefaultEnabledPluginIdsForWorkspace(agentDir ?? '');
+  }
+  return patch;
+}
+
+export async function freezeCurrentSessionMetadataForImDetach(
+  overrides?: OwnedFreezeSnapshotPatch,
+): Promise<{ success: boolean; sessionId?: string; metadata?: SessionMetadata; error?: string }> {
+  const targetSessionId = sessionId;
+  if (!targetSessionId) {
+    return { success: false, error: 'No active session to freeze.' };
+  }
+
+  const existing = getSessionMetadata(targetSessionId);
+  if (existing?.configSnapshotAt) {
+    setLazySessionMaterializationAllowed(false);
+    return { success: true, sessionId: targetSessionId, metadata: existing };
+  }
+
+  const patch = buildOwnedFreezeSnapshotPatch(overrides);
+  if (existing) {
+    const updated = await updateSessionMetadata(targetSessionId, patch);
+    if (!updated) {
+      return { success: false, sessionId: targetSessionId, error: 'Failed to update session metadata.' };
+    }
+    setLazySessionMaterializationAllowed(false);
+    console.log(`[agent] froze IM-bound session ${targetSessionId} as owned before binding transfer`);
+    return { success: true, sessionId: targetSessionId, metadata: updated };
+  }
+
+  const meta = createSessionMetadata(agentDir, patch);
+  meta.id = targetSessionId;
+  meta.title = 'New Chat';
+  await saveSessionMetadata(meta);
+  setLazySessionMaterializationAllowed(false);
+  console.log(`[agent] materialized and froze unindexed IM-bound session ${targetSessionId} as owned before binding transfer`);
+  return { success: true, sessionId: targetSessionId, metadata: meta };
+}
+
+function preparedMaterializationOwnsMetadata(
+  prepared: PendingDesktopMaterialization,
+  meta: SessionMetadata,
+): boolean {
+  return meta.materializationState === 'prepared'
+    && meta.materializationSourceSessionId === prepared.priorSessionId;
+}
+
+export async function materializePendingDesktopSession(
+  request: {
+    phase?: 'prepare' | 'commit' | 'rollback';
+    preparedSessionId?: string;
+    snapshotPatch?: Partial<{ [K in keyof DesktopSnapshotPatch]: DesktopSnapshotPatch[K] | null }>;
+  } = {},
+): Promise<{ success: boolean; sessionId?: string; metadata?: SessionMetadata; error?: string; status?: number }> {
+  const phase = request.phase ?? 'commit';
+
+  if (phase === 'rollback') {
+    const prepared = getPendingDesktopMaterialization();
+    if (!prepared) {
+      if (request.preparedSessionId) {
+        return { success: false, error: 'No prepared pending materialization to roll back.', status: 409 };
+      }
+      return { success: true };
+    }
+    const target = request.preparedSessionId ?? prepared.targetSessionId;
+    if (prepared.targetSessionId !== target) {
+      return { success: false, error: `Prepared session mismatch: expected ${prepared.targetSessionId}, got ${target}.`, status: 409 };
+    }
+    const meta = getSessionMetadata(target);
+    if (!meta) {
+      clearPendingDesktopMaterialization();
+      console.log(`[agent] rolled back pending desktop materialization target=${target} deleted=false (metadata already gone)`);
+      return { success: true };
+    }
+    if (!preparedMaterializationOwnsMetadata(prepared, meta)) {
+      return {
+        success: false,
+        error: `Refusing to roll back non-owned materialization target ${target}.`,
+        status: 409,
+      };
+    }
+    const deleted = await deleteSession(
+      target,
+      (current) => preparedMaterializationOwnsMetadata(prepared, current),
+    );
+    if (!deleted) {
+      const latest = getSessionMetadata(target);
+      if (!latest) {
+        clearPendingDesktopMaterialization();
+        console.log(`[agent] rolled back pending desktop materialization target=${target} deleted=false (metadata already gone)`);
+        return { success: true };
+      }
+      if (!preparedMaterializationOwnsMetadata(prepared, latest)) {
+        return {
+          success: false,
+          error: `Refusing to roll back non-owned materialization target ${target}.`,
+          status: 409,
+        };
+      }
+      return {
+        success: false,
+        error: `Failed to delete prepared session ${target}.`,
+        status: 500,
+      };
+    }
+    clearPendingDesktopMaterialization();
+    console.log(`[agent] rolled back pending desktop materialization target=${target} deleted=${deleted}`);
+    return { success: true };
+  }
+
+  if (!sessionId) {
+    return { success: false, error: 'No active session.', status: 400 };
+  }
+
+  if (phase === 'commit') {
+    const prepared = getPendingDesktopMaterialization();
+    if (!prepared) {
+      const metadata = !isPendingSessionId(sessionId) ? getSessionMetadata(sessionId) : null;
+      if (
+        metadata &&
+        metadata.materializationState !== 'prepared' &&
+        (!request.preparedSessionId || request.preparedSessionId === sessionId)
+      ) {
+        return { success: true, sessionId, metadata };
+      }
+      return { success: false, error: 'No prepared pending materialization to commit.', status: 409 };
+    }
+    if (request.preparedSessionId && request.preparedSessionId !== prepared.targetSessionId) {
+      return { success: false, error: `Prepared session mismatch: expected ${prepared.targetSessionId}, got ${request.preparedSessionId}.`, status: 409 };
+    }
+    if (sessionId !== prepared.priorSessionId && sessionId !== prepared.targetSessionId) {
+      return {
+        success: false,
+        error: `Active session changed before materialize commit: expected ${prepared.priorSessionId} or ${prepared.targetSessionId}, got ${sessionId}.`,
+        status: 409,
+      };
+    }
+    const meta = getSessionMetadata(prepared.targetSessionId);
+    if (!meta) {
+      clearPendingDesktopMaterialization();
+      return { success: false, error: `Prepared session ${prepared.targetSessionId} disappeared before commit.`, status: 404 };
+    }
+    if (!preparedMaterializationOwnsMetadata(prepared, meta)) {
+      return {
+        success: false,
+        error: `Prepared session ${prepared.targetSessionId} is not owned by the pending materialization.`,
+        status: 409,
+      };
+    }
+    const committedMeta = await updateSessionMetadata(prepared.targetSessionId, {
+      materializationState: undefined,
+      materializationSourceSessionId: undefined,
+    }, (current) => preparedMaterializationOwnsMetadata(prepared, current));
+    if (!committedMeta) {
+      const latest = getSessionMetadata(prepared.targetSessionId);
+      if (!latest) {
+        clearPendingDesktopMaterialization();
+        return { success: false, error: `Prepared session ${prepared.targetSessionId} disappeared before commit.`, status: 404 };
+      }
+      if (!preparedMaterializationOwnsMetadata(prepared, latest)) {
+        return {
+          success: false,
+          error: `Prepared session ${prepared.targetSessionId} is not owned by the pending materialization.`,
+          status: 409,
+        };
+      }
+      return {
+        success: false,
+        error: `Failed to durably commit prepared session ${prepared.targetSessionId}.`,
+        status: 500,
+      };
+    }
+
+    if (!prepared.reusingLiveSdkSession && lifecycleState.preWarmTimer) {
+      clearTimeout(lifecycleState.preWarmTimer);
+      setPreWarmTimer(null);
+    }
+    if (!prepared.reusingLiveSdkSession && (lifecycleState.processing || lifecycleState.query || lifecycleState.termination)) {
+      abortPersistentSession();
+      await awaitSessionTermination(10_000, 'materializePendingDesktopSession/commit');
+      setQuerySession(null);
+    }
+
+    sessionId = prepared.targetSessionId as typeof sessionId;
+    hasInitialPrompt = false;
+    setLazySessionMaterializationAllowed(false);
+    sessionRegistered = prepared.reusingLiveSdkSession;
+    pendingResumeSessionAt = undefined;
+    setPendingReloadAnchor(undefined);
+    if (!prepared.reusingLiveSdkSession) {
+      setSystemInitInfo(null);
+      setSdkControlReady(false);
+      _sdkReadyResolve = null;
+      _sdkReadyPromise = null;
+      setPreWarmInProgress(false);
+      resetPreWarmFailCount();
+      resetAbortFlag();
+      setSessionProcessing(false);
+      setSessionState('idle');
+    }
+    clearMessageState();
+    clearSessionPermissions();
+    initLogger(sessionId);
+
+    try {
+      await restoreBuiltinConfigFromOwnedMetadata(meta);
+    } catch (error) {
+      console.warn('[agent] materializePendingDesktopSession commit: config self-resolution failed:', error);
+    }
+
+    if (!prepared.reusingLiveSdkSession) {
+      schedulePreWarm();
+    }
+    clearPendingDesktopMaterialization();
+    console.log(`[agent] committed pending desktop materialization ${prepared.priorSessionId} → ${prepared.targetSessionId} (snapshot=${prepared.snapshotKind}, reusedLiveSdk=${prepared.reusingLiveSdkSession})`);
+    return { success: true, sessionId: prepared.targetSessionId, metadata: committedMeta };
+  }
+
+  if (phase !== 'prepare') {
+    return { success: false, error: `Unsupported materialize phase: ${phase}`, status: 400 };
+  }
+
+  if (transcriptState.messages.length > 0 || queueHasQueuedOrInFlightWork()) {
+    return {
+      success: false,
+      error: 'Pending session already has active work; refusing to remap it.',
+      status: 409,
+    };
+  }
+  const pendingMaterialization = getPendingDesktopMaterialization();
+  if (pendingMaterialization) {
+    const meta = getSessionMetadata(pendingMaterialization.targetSessionId);
+    if (meta) {
+      if (!preparedMaterializationOwnsMetadata(pendingMaterialization, meta)) {
+        return {
+          success: false,
+          error: `Prepared session ${pendingMaterialization.targetSessionId} is not owned by the pending materialization.`,
+          status: 409,
+        };
+      }
+      const snapshotPatch = buildDesktopSnapshotMetadataPatch(request.snapshotPatch);
+      if (snapshotPatch) {
+        const updated = await updateSessionMetadata(
+          pendingMaterialization.targetSessionId,
+          snapshotPatch,
+          (current) => preparedMaterializationOwnsMetadata(pendingMaterialization, current),
+        );
+        if (!updated) {
+          const latest = getSessionMetadata(pendingMaterialization.targetSessionId);
+          if (!latest) {
+            clearPendingDesktopMaterialization();
+            return {
+              success: false,
+              error: `Prepared session ${pendingMaterialization.targetSessionId} disappeared before prepare patch.`,
+              status: 404,
+            };
+          }
+          if (!preparedMaterializationOwnsMetadata(pendingMaterialization, latest)) {
+            return {
+              success: false,
+              error: `Prepared session ${pendingMaterialization.targetSessionId} is not owned by the pending materialization.`,
+              status: 409,
+            };
+          }
+          return {
+            success: false,
+            error: `Failed to update prepared session ${pendingMaterialization.targetSessionId}.`,
+            status: 500,
+          };
+        }
+        return {
+          success: true,
+          sessionId: pendingMaterialization.targetSessionId,
+          metadata: updated,
+        };
+      }
+      return {
+        success: true,
+        sessionId: pendingMaterialization.targetSessionId,
+        metadata: meta,
+      };
+    }
+    clearPendingDesktopMaterialization();
+  }
+
+  if (!isPendingSessionId(sessionId)) {
+    const metadata = getSessionMetadata(sessionId);
+    if (metadata) {
+      return { success: true, sessionId, metadata };
+    }
+    if (!isLazySessionMaterializationAllowed()) {
+      return { success: false, error: 'Active session is not pending and has no metadata.', status: 404 };
+    }
+  }
+
+  const priorSessionId = sessionId;
+  const liveSdkSessionId = lifecycleState.systemInitInfo?.session_id;
+  const targetSessionId = liveSdkSessionId && !isPendingSessionId(liveSdkSessionId)
+    ? liveSdkSessionId
+    : randomUUID();
+  const reusingLiveSdkSession = liveSdkSessionId === targetSessionId;
+
+  if (getSessionMetadata(targetSessionId)) {
+    return { success: false, error: `Session ${targetSessionId} already exists.`, status: 409 };
+  }
+
+  const { meta, snapshotKind } = createMetadataForSessionId(
+    targetSessionId,
+    'New Chat',
+    'desktop',
+  );
+  applyDesktopSnapshotPatch(meta, request.snapshotPatch);
+  meta.materializationState = 'prepared';
+  meta.materializationSourceSessionId = priorSessionId;
+  await saveSessionMetadata(meta);
+  if (!getSessionMetadata(targetSessionId)) {
+    return { success: false, error: `Failed to prepare session ${targetSessionId}.`, status: 500 };
+  }
+
+  setPendingDesktopMaterialization({
+    priorSessionId,
+    targetSessionId,
+    reusingLiveSdkSession,
+    snapshotKind,
+  });
+  console.log(`[agent] prepared pending desktop materialization ${priorSessionId} → ${targetSessionId} (snapshot=${snapshotKind}, reusedLiveSdk=${reusingLiveSdkSession})`);
+  return { success: true, sessionId: targetSessionId, metadata: meta };
+}
+
 export async function materializeCurrentSessionMetadataForPublishedReset(): Promise<void> {
   const targetSessionId = sessionId;
-  if (!targetSessionId || getSessionMetadata(targetSessionId)) {
+  if (!targetSessionId) {
+    return;
+  }
+  if (getSessionMetadata(targetSessionId)) {
+    setLazySessionMaterializationAllowed(false);
     return;
   }
   const { meta, snapshotKind } = createMetadataForSessionId(
@@ -4314,6 +4786,7 @@ export async function materializeCurrentSessionMetadataForPublishedReset(): Prom
     'agent-channel',
   );
   await saveSessionMetadata(meta);
+  setLazySessionMaterializationAllowed(false);
   console.log(`[agent] session ${targetSessionId} persisted to SessionStore (published reset, snapshot=${snapshotKind})`);
 }
 
@@ -6254,6 +6727,7 @@ export async function resetSession(): Promise<void> {
   // 3. Generate new session ID (don't persist yet - wait for first message)
   sessionId = randomUUID();
   hasInitialPrompt = false; // Reset so first message creates a new session in SessionStore
+  resetSessionMaterializationState({ allowLazySessionMaterialization: true });
 
   // 4. Clear SDK resume state - CRITICAL: prevents SDK from resuming old context!
   sessionRegistered = false;
@@ -6392,6 +6866,7 @@ export async function initializeAgent(
   // decision, message load, and MCP self-resolve); each call scans sessions.json
   // and a large JSONL can cost ~30-100ms. Read once, reuse.
   const initMeta = initialSessionId ? getSessionMetadata(initialSessionId) : null;
+  resetSessionMaterializationState({ allowLazySessionMaterialization: !initialSessionId });
 
   if (initialSessionId) {
     // Use caller-specified session_id (IM / Tab opening existing session / CronTask)
@@ -6500,6 +6975,7 @@ export async function initializeAgent(
       const resolved = resolveWorkspaceConfig(agentDir, initMeta, {
         includeMcp: shouldSelfResolveMcp,
       });
+      const restoreOwnedBuiltinConfig = Boolean(initMeta?.configSnapshotAt) && !isExternalRuntime(getCurrentRuntimeType());
       // Only self-resolve MCP for background authorities (IM/Cron/agent-channel)
       // with an initial prompt. Tab sessions must NOT self-resolve: the
       // frontend's /api/mcp/set is authoritative, and self-resolve produces
@@ -6509,7 +6985,17 @@ export async function initializeAgent(
         setCurrentMcpServers(resolved.mcpServers);
         console.log(`[agent] self-resolved ${resolved.mcpServers.length} MCP server(s): ${resolved.mcpServers.map((s: { id: string }) => s.id).join(', ')}`);
       }
-      if (!configState.currentProviderEnv && resolved.providerEnv) {
+      if (restoreOwnedBuiltinConfig) {
+        // Owned desktop/cron sessions carry a frozen snapshot. Restore must
+        // replace the previous session's in-memory config, not fill only empty
+        // slots; otherwise a resumed session can inherit another session's
+        // provider/model/effort until the renderer pushes config.
+        configSetProviderEnv(resolved.providerEnv);
+        configSetModel(resolved.model);
+        configSetReasoningEffort(normalizeReasoningEffort(resolved.reasoningEffort));
+        console.log(`[agent] restored owned session config: model=${resolved.model ?? 'default'}, provider=${resolved.providerEnv?.baseUrl ?? 'subscription/none'}, effort=${configState.currentReasoningEffort ?? 'default'}`);
+        if (resolved.providerEnv) ensureActiveSessionBridgeRegistered();
+      } else if (!configState.currentProviderEnv && resolved.providerEnv) {
         configSetProviderEnv(resolved.providerEnv);
         console.log(`[agent] self-resolved provider: ${resolved.providerEnv.baseUrl ?? 'anthropic'}`);
         // PRD #124: keep bridge registration in sync after self-resolve.
@@ -6518,7 +7004,7 @@ export async function initializeAgent(
       // Only self-resolve model for builtin runtime. External runtimes (CC/Codex) should use
       // their own model (set via /api/model/set from frontend runtimeModel effect).
       // agent.model is the builtin model (e.g. "glm-5.1") and must NOT be sent to CC/Codex. See: #71
-      if (!configState.currentModel && resolved.model && !isExternalRuntime(getCurrentRuntimeType())) {
+      if (!restoreOwnedBuiltinConfig && !configState.currentModel && resolved.model && !isExternalRuntime(getCurrentRuntimeType())) {
         configSetModel(resolved.model);
         console.log(`[agent] self-resolved model: ${resolved.model}`);
       }
@@ -6526,7 +7012,7 @@ export async function initializeAgent(
       // (IM bot / cron new-session / crash-restarted sidecar) have no desktop
       // push effect, so this self-resolve is their ONLY effort source. External
       // runtimes resolve effort from runtimeConfig in their own start paths.
-      if (!configState.currentReasoningEffort && resolved.reasoningEffort && !isExternalRuntime(getCurrentRuntimeType())) {
+      if (!restoreOwnedBuiltinConfig && !configState.currentReasoningEffort && resolved.reasoningEffort && !isExternalRuntime(getCurrentRuntimeType())) {
         configSetReasoningEffort(normalizeReasoningEffort(resolved.reasoningEffort));
         if (configState.currentReasoningEffort) {
           console.log(`[agent] self-resolved reasoning effort: ${configState.currentReasoningEffort}`);
@@ -6549,7 +7035,12 @@ export async function initializeAgent(
   }
 
   if (hasInitialPrompt) {
-    void enqueueUserMessage(initialPrompt!.trim());
+    const trimmedInitialPrompt = initialPrompt!.trim();
+    if (!isLazySessionMaterializationAllowed() && !getSessionMetadata(sessionId)) {
+      throw new Error(`[agent] refusing initial prompt for unindexed existing session ${sessionId}; session metadata must exist before starting a sidecar with --session-id`);
+    }
+    await materializeInitialPromptSessionMetadata(trimmedInitialPrompt);
+    void enqueueUserMessage(trimmedInitialPrompt);
   } else {
     // Pre-warm subprocess + MCP so first message is fast.
     // Only start immediately if MCP is already resolved (IM Bot sessions that
@@ -6637,6 +7128,7 @@ export async function switchToSession(targetSessionId: string): Promise<boolean>
 
   // Preserve target sessionId so new transcriptState.messages are saved to the same session
   sessionId = targetSessionId as `${string}-${string}-${string}-${string}-${string}`;
+  resetSessionMaterializationState({ allowLazySessionMaterialization: false });
 
   // Load existing transcriptState.messages from storage into memory
   // This is critical for incremental save logic in saveSessionMessages
@@ -7069,7 +7561,7 @@ export async function enqueueUserMessage(
   // bound per-turn at generator yield, read at result handler for reply pushback.
   inboxMeta?: import('./inbox/types').InboxTurnMeta,
   analyticsSource?: TurnAnalyticsSource,
-  options?: { fromDesktopChatSend?: boolean; injectedTurnId?: string },
+  options?: { fromDesktopChatSend?: boolean; injectedTurnId?: string; allowLazySessionMaterialization?: boolean },
 ): Promise<EnqueueResult> {
   // 等待进行中的 resetSession/switchToSession 完成，防止消息投递到已死的 generator
   // 这些函数是异步的（await lifecycleState.termination 需要数秒），
@@ -7090,6 +7582,13 @@ export async function enqueueUserMessage(
 
   if (!trimmed && !hasImages) {
     return { queued: false };
+  }
+
+  const canLazyMaterializeForThisMessage = () =>
+    isLazySessionMaterializationAllowed() || options?.allowLazySessionMaterialization === true;
+
+  if (!hasInitialPrompt && !canLazyMaterializeForThisMessage() && !getSessionMetadata(sessionId)) {
+    throw new Error(`[agent] refusing first message for unindexed existing session ${sessionId}; session metadata disappeared before first user turn`);
   }
 
   const queueId = randomUUID();
@@ -7379,6 +7878,10 @@ export async function enqueueUserMessage(
       }
       console.log(`[agent] session ${sessionId} already exists in SessionStore, preserving stats`);
     } else {
+      if (!canLazyMaterializeForThisMessage()) {
+        hasInitialPrompt = false;
+        throw new Error(`[agent] refusing first message for unindexed existing session ${sessionId}; session metadata disappeared before first user turn`);
+      }
       // Brand new session — create metadata. v0.1.69: lazy creation covers two cases:
       //   (a) Desktop first-send with a pending session ID (App.tsx generates a
       //       `pending-<tabId>` placeholder and never calls POST /sessions; the real
@@ -7399,6 +7902,7 @@ export async function enqueueUserMessage(
         currentScenario.type,
       );
       await saveSessionMetadata(sessionMeta);
+      setLazySessionMaterializationAllowed(false);
       console.log(`[agent] session ${sessionId} persisted to SessionStore (lazy, scenario=${currentScenario.type}, snapshot=${snapshotKind})`);
     }
   } else {
@@ -8430,6 +8934,7 @@ export async function rewindSession(userMessageId: string): Promise<{
       sessionRegistered = false;
       sessionId = randomUUID();
       hasInitialPrompt = false; // Reset so next message creates metadata for the new session
+      resetSessionMaterializationState({ allowLazySessionMaterialization: true });
     }
 
     // 8. 预热下次 session

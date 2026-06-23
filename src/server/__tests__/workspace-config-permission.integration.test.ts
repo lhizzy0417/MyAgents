@@ -222,6 +222,85 @@ describe('resolveWorkspaceConfig runtime-aware model snapshots', () => {
     expect(warn).toHaveBeenCalledWith(expect.stringContaining('permissionMode'));
   });
 
+  it('does not use agent model/provider/MCP fallbacks for locked owned snapshots', async () => {
+    const workspacePath = join(scratch, 'workspace');
+    writeConfig({
+      defaultProviderId: 'deepseek',
+      mcpEnabledServers: ['fs', 'git'],
+      agents: [{
+        id: 'agent-1',
+        name: 'Locked Snapshot Agent',
+        enabled: true,
+        workspacePath,
+        runtime: 'builtin',
+        providerId: 'deepseek',
+        model: 'deepseek-v4-flash',
+        permissionMode: 'fullAgency',
+        mcpEnabledServers: ['fs', 'git'],
+      }],
+    });
+    writeProjects([{
+      id: 'project-1',
+      name: 'Project',
+      path: workspacePath,
+      mcpEnabledServers: ['fs'],
+      permissionMode: 'plan',
+    }]);
+
+    const { resolveWorkspaceConfig } = await import('../utils/admin-config');
+    const resolved = resolveWorkspaceConfig(workspacePath, {
+      id: 'session-locked',
+      agentDir: workspacePath,
+      title: 'Locked',
+      createdAt: '2026-06-23T00:00:00.000Z',
+      lastActiveAt: '2026-06-23T00:00:00.000Z',
+      runtime: 'builtin',
+      configSnapshotAt: '2026-06-23T00:00:00.000Z',
+    } as SessionMetadata);
+
+    expect(resolved.model).toBeUndefined();
+    expect(resolved.providerEnv).toBeUndefined();
+    expect(resolved.mcpServers).toEqual([]);
+    expect(resolved.permissionMode).toBe('auto');
+  });
+
+  it('honors a snapshotted providerId without falling back to the live agent provider', async () => {
+    const workspacePath = join(scratch, 'workspace');
+    writeConfig({
+      providerApiKeys: {
+        deepseek: 'sk-test-deepseek',
+        minimax: 'sk-test-minimax',
+      },
+      agents: [{
+        id: 'agent-1',
+        name: 'Locked Snapshot Agent',
+        enabled: true,
+        workspacePath,
+        runtime: 'builtin',
+        providerId: 'minimax',
+        model: 'MiniMax-M2.7',
+      }],
+    });
+    writeProjects([]);
+
+    const { resolveWorkspaceConfig } = await import('../utils/admin-config');
+    const resolved = resolveWorkspaceConfig(workspacePath, {
+      id: 'session-locked-provider',
+      agentDir: workspacePath,
+      title: 'Locked Provider',
+      createdAt: '2026-06-23T00:00:00.000Z',
+      lastActiveAt: '2026-06-23T00:00:00.000Z',
+      runtime: 'builtin',
+      providerId: 'deepseek',
+      configSnapshotAt: '2026-06-23T00:00:00.000Z',
+    } as SessionMetadata, { includeMcp: false });
+
+    expect(resolved.providerEnv?.providerId).toBe('deepseek');
+    expect(resolved.providerEnv?.apiKey).toBe('sk-test-deepseek');
+    expect(resolved.providerEnv?.baseUrl).toBe('https://api.deepseek.com/anthropic');
+    expect(resolved.model).not.toBe('MiniMax-M2.7');
+  });
+
   it("preserves external-runtime snapshot reasoningEffort='default' over agent non-default", async () => {
     const workspacePath = join(scratch, 'workspace');
     writeConfig({

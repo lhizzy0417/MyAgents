@@ -52,6 +52,7 @@ export type ImMessageRequest = {
   providerEnv?: ProviderEnv | 'subscription';
   reasoningEffort?: string;
   runtimeConfig?: RuntimeConfig | null;
+  metadataBirthPending?: boolean;
   metadata?: { source: SessionSource; sourceId?: string; senderName?: string };
 };
 
@@ -170,6 +171,31 @@ export type SessionEngineConfigSnapshot = {
   reasoningEffort: string | null;
 };
 
+export type SessionEngineHeldImConfigSnapshot = {
+  model?: string;
+  permissionMode?: string;
+  providerEnv?: ProviderEnv;
+  reasoningEffort?: string;
+};
+
+export type SessionEngineSnapshotMaterializePatch = {
+  model?: string | null;
+  reasoningEffort?: string | null;
+  permissionMode?: string | null;
+  mcpEnabledServers?: string[] | null;
+  enabledPluginIds?: string[] | null;
+  providerId?: string | null;
+  providerEnvJson?: string | null;
+};
+
+export type SessionEngineMaterializePendingResult = {
+  success: boolean;
+  sessionId?: string;
+  metadata?: unknown;
+  error?: string;
+  status?: number;
+};
+
 export type SessionEngineLiveOverlay = {
   isActive: boolean;
   runtime?: RuntimeType;
@@ -200,6 +226,7 @@ export interface SessionEngine {
   getLatestAssistantResult(): SessionEngineLatestResult;
   getStreamReplaySnapshot(): SessionEngineStreamReplaySnapshot;
   getSessionConfigSnapshot(): SessionEngineConfigSnapshot;
+  getHeldImConfigSnapshot(): SessionEngineHeldImConfigSnapshot;
   getLiveSessionOverlay(sessionId: string): SessionEngineLiveOverlay;
   sendDesktopMessage(request: DesktopMessageRequest): Promise<DesktopAdmissionResult>;
   enqueueImMessage(request: ImMessageRequest): Promise<ImAdmissionResult>;
@@ -215,6 +242,18 @@ export interface SessionEngine {
   updateModel(model: string, opts?: { imConfigSync?: boolean }): Promise<{ success: boolean; error?: string }>;
   updatePermissionMode(mode: string): Promise<{ success: boolean; error?: string }>;
   updateReasoningEffort(effort: string): Promise<{ success: boolean; error?: string }>;
+  materializePendingDesktopSession(request: {
+    workspacePath: string;
+    phase?: 'prepare' | 'commit' | 'rollback';
+    preparedSessionId?: string;
+    snapshotPatch?: SessionEngineSnapshotMaterializePatch;
+  }): Promise<SessionEngineMaterializePendingResult>;
+  freezeCurrentSessionForImDetach(): Promise<{
+    success: boolean;
+    sessionId?: string;
+    metadata?: unknown;
+    error?: string;
+  }>;
   updateRuntimeConfig(
     patch: RuntimeConfigPatch,
     options?: { source?: ExternalConfigSource },

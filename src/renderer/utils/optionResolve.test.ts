@@ -312,13 +312,10 @@ describe('session-load transition classification (#255)', () => {
 });
 
 describe('shouldSkipSnapshotWrite (#305)', () => {
-  // The bug: pre-#305 used `isOwnedSession = !!sessionMeta?.configSnapshotAt` to gate
-  // the snapshot write. That returned "skip" both for IM sessions (correct, live-follow)
-  // AND for the sessionMeta-still-loading window (wrong — Desktop tab raced loadSession),
-  // silently dropping the user's model/permission change from sessions.json. The new
-  // gate flips that: skip ONLY when sessionMeta is loaded AND is a PURE-IM session
-  // (IM-shaped source AND no configSnapshotAt — desktop-handover sessions keep the
-  // snapshot writeable).
+  // v0.2.39: desktop Tab edits are explicit desktop-owner intent. Even a
+  // pure IM-sourced session must be promoted to a session snapshot when the
+  // user changes config from the Tab; IM live-follow resumes only after the
+  // channel creates a new session.
 
   it('writes snapshot when sessionMeta is still loading (loadSession in flight)', () => {
     // This is the reported #305 race: Windows + slow disk, user reaches model picker
@@ -348,33 +345,33 @@ describe('shouldSkipSnapshotWrite (#305)', () => {
     })).toBe(false);
   });
 
-  it('skips snapshot for a PURE-IM private session (live-follow contract)', () => {
+  it('writes snapshot for a PURE-IM private session opened in a desktop Tab', () => {
     expect(shouldSkipSnapshotWrite({
       sessionMetaSource: 'feishu_private',
       sessionMetaConfigSnapshotAt: null,
       sessionMetaLoaded: true,
-    })).toBe(true);
+    })).toBe(false);
   });
 
-  it('skips snapshot for a PURE-IM group session', () => {
+  it('writes snapshot for a PURE-IM group session opened in a desktop Tab', () => {
     expect(shouldSkipSnapshotWrite({
       sessionMetaSource: 'dingtalk_group',
       sessionMetaConfigSnapshotAt: null,
       sessionMetaLoaded: true,
-    })).toBe(true);
+    })).toBe(false);
   });
 
-  it('skips snapshot for OpenClaw channel sources following the *_private/_group convention', () => {
+  it('writes snapshot for OpenClaw channel sources following the *_private/_group convention', () => {
     expect(shouldSkipSnapshotWrite({
       sessionMetaSource: 'discord_group',
       sessionMetaConfigSnapshotAt: null,
       sessionMetaLoaded: true,
-    })).toBe(true);
+    })).toBe(false);
     expect(shouldSkipSnapshotWrite({
       sessionMetaSource: 'wechat_private',
       sessionMetaConfigSnapshotAt: null,
       sessionMetaLoaded: true,
-    })).toBe(true);
+    })).toBe(false);
   });
 
   it('writes snapshot for a desktop-to-IM handover session (PRD 0.2.14: snapshot survives handover)', () => {

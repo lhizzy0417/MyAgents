@@ -147,6 +147,8 @@ export interface ExternalSendContext {
   reasoningEffort?: string;
   /** Pattern B — IM trace ID. */
   requestId?: string;
+  /** IM router says this sidecar/session id is a newly rotated channel birth. */
+  metadataBirthPending?: boolean;
   /** PRD 0.2.18 Session Inbox metadata for cross-session messages. */
   inboxMeta?: import('../../inbox/types').InboxTurnMeta;
 }

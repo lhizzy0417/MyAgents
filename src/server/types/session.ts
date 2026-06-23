@@ -71,29 +71,37 @@ export interface SessionMetadata {
     lastContextUsage?: ContextUsage;
 
     // ─── Session config snapshot (v0.1.69 layered-snapshot model) ───
-    // Desktop/Cron owned sessions capture these at creation; IM sessions leave all
-    // of them undefined on purpose (live-follow AgentConfig + ChannelOverrides).
-    // Read path: `sessionMeta.<field> ?? agent.<field>` — see resolveSessionConfig().
+    // Desktop/Cron owned sessions capture these at creation; pure IM sessions leave
+    // them undefined on purpose (live-follow AgentConfig + ChannelOverrides).
+    // Read path is authority-aware: owned sessions do NOT silently fall back to
+    // Agent/Project defaults for missing fields; see resolveSessionConfig().
 
-    /** Snapshot model name. Undefined → fallback to agent.model (lazy migration). */
+    /** Snapshot model name. For owned sessions, undefined means "not pinned". */
     model?: string;
     /** #324 — snapshot reasoning effort setting ('default' | level, see
-     *  shared/reasoningEffort.ts). Undefined → fallback to agent.reasoningEffort
-     *  (builtin) / agent.runtimeConfig.reasoningEffort (external). The literal
-     *  'default' is persisted so a session can explicitly revert to default
-     *  even when the agent-level value is non-default. */
+     *  shared/reasoningEffort.ts). For owned sessions, undefined means default.
+     *  The literal 'default' is persisted so a session can explicitly revert to
+     *  default even when the agent-level value is non-default. */
     reasoningEffort?: string;
-    /** Snapshot permission mode. Undefined → fallback to agent.permissionMode. */
+    /** Snapshot permission mode. For owned sessions, undefined means "not pinned". */
     permissionMode?: string;
-    /** Snapshot MCP enabled list. Undefined → fallback to agent.mcpEnabledServers. */
+    /** Snapshot MCP enabled list. For owned sessions, undefined means no session-local list. */
     mcpEnabledServers?: string[];
-    /** Snapshot providerId. Undefined → fallback to agent.providerId. */
+    /** Snapshot Claude cc-plugin enabled list. For owned sessions, undefined means no session-local list. */
+    enabledPluginIds?: string[];
+    /** Snapshot providerId. For owned sessions, undefined means "not pinned". */
     providerId?: string;
-    /** Snapshot provider env JSON (credentials). Undefined → fallback to agent.providerEnvJson. */
+    /** Snapshot provider env JSON (credentials). For owned sessions, undefined means re-resolve from providerId. */
     providerEnvJson?: string;
     /** ISO8601 snapshot creation timestamp. Presence marks "this session is locked" — used
      *  by scheduleDeferredRestart guards to skip sessions that own their own config. */
     configSnapshotAt?: string;
+
+    /** Two-phase pending materialization marker. Prepared sessions are hidden
+     *  from history until commit clears this marker; rollback/delete removes them. */
+    materializationState?: 'prepared';
+    /** Pending id that produced this prepared real session. Diagnostic only. */
+    materializationSourceSessionId?: string;
 
     /**
      * Delayed Continue — set ONLY when the inactivity watchdog

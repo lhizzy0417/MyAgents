@@ -35,10 +35,13 @@ const mocks = vi.hoisted(() => {
     getGlobalServerUrl: vi.fn(async () => 'http://127.0.0.1:31415'),
     ensureSessionSidecar: vi.fn(async () => ({ port: 31417, isNew: true })),
     activateSession: vi.fn(async () => undefined),
+    releaseSessionSidecar: vi.fn(async () => false),
+    deactivateSession: vi.fn(async () => undefined),
     getSessionPort: vi.fn(async () => null),
     startBackgroundCompletion: vi.fn(async () => ({ started: false })),
     setAppActiveCorrelation: vi.fn(),
     setAppActiveTabId: vi.fn(),
+    chatProps: [] as Array<Record<string, unknown>>,
   };
 });
 
@@ -70,9 +73,9 @@ vi.mock('@/api/tauriClient', () => ({
   getSessionActivation: vi.fn(async () => null),
   updateSessionTab: vi.fn(async () => undefined),
   ensureSessionSidecar: mocks.ensureSessionSidecar,
-  releaseSessionSidecar: vi.fn(async () => false),
+  releaseSessionSidecar: mocks.releaseSessionSidecar,
   activateSession: mocks.activateSession,
-  deactivateSession: vi.fn(async () => undefined),
+  deactivateSession: mocks.deactivateSession,
   upgradeSessionId: vi.fn(async () => true),
   getSessionPort: mocks.getSessionPort,
   hasSessionSidecar: vi.fn(async () => true),
@@ -129,7 +132,10 @@ vi.mock('@/context/TabProvider', () => ({
 }));
 
 vi.mock('@/pages/Chat', () => ({
-  default: () => <div data-testid="chat-page" />,
+  default: (props: Record<string, unknown>) => {
+    mocks.chatProps.push(props);
+    return <div data-testid="chat-page" />;
+  },
 }));
 
 vi.mock('@/pages/Launcher', () => ({
@@ -269,6 +275,7 @@ import App from './App';
 describe('App helper launch', () => {
   afterEach(() => {
     vi.clearAllMocks();
+    mocks.chatProps.length = 0;
   });
 
   it('commits the helper tab before launching so the active tab is renderable', async () => {
@@ -306,6 +313,58 @@ describe('App helper launch', () => {
       }));
     } finally {
       logSpy.mockRestore();
+    }
+  });
+
+  it('releases the fork tab owner when fork tab activation fails', async () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    try {
+      render(<App />);
+
+      await act(async () => {
+        window.dispatchEvent(new CustomEvent(CUSTOM_EVENTS.LAUNCH_BUG_REPORT, {
+          detail: {
+            description: 'help',
+            providerId: mocks.provider.id,
+            model: 'mimo-v2.5-pro',
+            appVersion: 'test',
+            images: [],
+          },
+        }));
+      });
+
+      await waitFor(() => {
+        expect(mocks.chatProps.some((props) => typeof props.onForkSession === 'function')).toBe(true);
+      });
+
+      mocks.activateSession.mockRejectedValueOnce(new Error('activate failed'));
+      const chatProps = [...mocks.chatProps]
+        .reverse()
+        .find((props) => typeof props.onForkSession === 'function') as {
+          onForkSession: (sessionId: string, agentDir: string, title: string) => Promise<boolean>;
+        };
+
+      let opened = true;
+      await act(async () => {
+        opened = await chatProps.onForkSession('fork-session', mocks.project.path, 'Fork');
+      });
+
+      expect(opened).toBe(false);
+      expect(mocks.ensureSessionSidecar).toHaveBeenCalledWith(
+        'fork-session',
+        mocks.project.path,
+        'tab',
+        expect.stringMatching(/^tab-/),
+      );
+      expect(mocks.releaseSessionSidecar).toHaveBeenCalledWith(
+        'fork-session',
+        'tab',
+        expect.stringMatching(/^tab-/),
+      );
+      expect(mocks.deactivateSession).toHaveBeenCalledWith('fork-session');
+    } finally {
+      errorSpy.mockRestore();
     }
   });
 });

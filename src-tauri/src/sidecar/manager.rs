@@ -723,6 +723,18 @@ impl SidecarManager {
             })
             .unwrap_or(false)
     }
+
+    /// Check if a session's Sidecar currently has any desktop Tab owner.
+    ///
+    /// IM uses this as a runtime-only config hold signal: while a desktop Tab is
+    /// attached to an IM-bound session, subsequent IM turns must keep using the
+    /// live Sidecar config instead of following Agent defaults changed elsewhere.
+    pub fn session_has_tab_owner(&self, session_id: &str) -> bool {
+        self.sidecars
+            .get(session_id)
+            .map(|s| s.owners.iter().any(|o| matches!(o, SidecarOwner::Tab(_))))
+            .unwrap_or(false)
+    }
 }
 
 impl Default for SidecarManager {

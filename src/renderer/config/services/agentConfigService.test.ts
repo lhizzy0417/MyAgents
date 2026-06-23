@@ -5,6 +5,8 @@ import { DEFAULT_BUNDLED_WORKSPACE_TEMPLATE_ID, PRESET_TEMPLATES } from '../type
 import {
   buildAgentForProject,
   ensureAllProjectsHaveAgent,
+  resolveAgentRuntimeMcpServersJson,
+  resolveAgentMcpSelectionForConfig,
   resolveAgentDefaultsForProject,
 } from './agentConfigService';
 
@@ -168,5 +170,210 @@ describe('agentConfigService template Agent defaults', () => {
     expect(cfg.agents![0].enabled).toBe(false);
     expect(cfg.agents![0].heartbeat).toBeUndefined();
     expect(projects[0].isAgent).toBeUndefined();
+  });
+});
+
+describe('resolveAgentMcpSelectionForConfig', () => {
+  it('promotes legacy Agent-only HTTP MCP definitions into the global registry', () => {
+    const legacyRemote = {
+      id: 'remote-search',
+      name: 'Remote Search',
+      type: 'http' as const,
+      url: 'https://mcp.example.com/mcp',
+      headers: { Authorization: 'Bearer token' },
+      isBuiltin: false,
+    };
+    const agent = {
+      id: 'agent-1',
+      name: 'Agent',
+      enabled: true,
+      workspacePath: '/tmp/workspace',
+      permissionMode: 'plan',
+      channels: [],
+      mcpServersJson: JSON.stringify([legacyRemote]),
+    };
+    const cfg: AppConfig = {
+      defaultPermissionMode: 'plan',
+      theme: 'system',
+      minimizeToTray: true,
+      showDevTools: false,
+      autoStart: false,
+      osNotifications: true,
+      notificationSound: true,
+      agents: [agent],
+      mcpServers: [],
+      mcpEnabledServers: [],
+    };
+
+    const result = resolveAgentMcpSelectionForConfig(cfg, agent, ['remote-search']);
+
+    expect(result.config.mcpServers).toEqual([legacyRemote]);
+    expect(result.config.mcpEnabledServers).toEqual(['remote-search']);
+    expect(JSON.parse(result.mcpServersJson!)).toEqual([legacyRemote]);
+  });
+
+  it('does not globally enable a known custom SSE server that the user disabled globally', () => {
+    const remoteSse = {
+      id: 'remote-sse',
+      name: 'Remote SSE',
+      type: 'sse' as const,
+      url: 'https://mcp.example.com/sse',
+      isBuiltin: false,
+    };
+    const agent = {
+      id: 'agent-1',
+      name: 'Agent',
+      enabled: true,
+      workspacePath: '/tmp/workspace',
+      permissionMode: 'plan',
+      channels: [],
+    };
+    const cfg: AppConfig = {
+      defaultPermissionMode: 'plan',
+      theme: 'system',
+      minimizeToTray: true,
+      showDevTools: false,
+      autoStart: false,
+      osNotifications: true,
+      notificationSound: true,
+      agents: [agent],
+      mcpServers: [remoteSse],
+      mcpEnabledServers: [],
+    };
+
+    const result = resolveAgentMcpSelectionForConfig(cfg, agent, ['remote-sse']);
+
+    expect(result.config.mcpServers).toEqual([remoteSse]);
+    expect(result.config.mcpEnabledServers).toEqual([]);
+    expect(result.mcpServersJson).toBeUndefined();
+  });
+
+  it('builds runtime MCP JSON for an existing server only when the global gate is enabled', () => {
+    const remoteSse = {
+      id: 'remote-sse',
+      name: 'Remote SSE',
+      type: 'sse' as const,
+      url: 'https://mcp.example.com/sse',
+      isBuiltin: false,
+    };
+    const agent = {
+      id: 'agent-1',
+      name: 'Agent',
+      enabled: true,
+      workspacePath: '/tmp/workspace',
+      permissionMode: 'plan',
+      channels: [],
+    };
+    const cfg: AppConfig = {
+      defaultPermissionMode: 'plan',
+      theme: 'system',
+      minimizeToTray: true,
+      showDevTools: false,
+      autoStart: false,
+      osNotifications: true,
+      notificationSound: true,
+      agents: [agent],
+      mcpServers: [remoteSse],
+      mcpEnabledServers: ['remote-sse'],
+    };
+
+    const result = resolveAgentMcpSelectionForConfig(cfg, agent, ['remote-sse']);
+
+    expect(result.config.mcpServers).toEqual([remoteSse]);
+    expect(result.config.mcpEnabledServers).toEqual(['remote-sse']);
+    expect(JSON.parse(result.mcpServersJson!)).toEqual([remoteSse]);
+  });
+
+  it('does not fabricate runtime MCP JSON for unknown selected ids', () => {
+    const agent = {
+      id: 'agent-1',
+      name: 'Agent',
+      enabled: true,
+      workspacePath: '/tmp/workspace',
+      permissionMode: 'plan',
+      channels: [],
+    };
+    const cfg: AppConfig = {
+      defaultPermissionMode: 'plan',
+      theme: 'system',
+      minimizeToTray: true,
+      showDevTools: false,
+      autoStart: false,
+      osNotifications: true,
+      notificationSound: true,
+      agents: [agent],
+      mcpServers: [],
+      mcpEnabledServers: [],
+    };
+
+    const result = resolveAgentMcpSelectionForConfig(cfg, agent, ['missing']);
+
+    expect(result.config.mcpServers).toEqual([]);
+    expect(result.config.mcpEnabledServers).toEqual([]);
+    expect(result.mcpServersJson).toBeUndefined();
+  });
+
+  it('does not promote malformed or non-remote definitions from Agent JSON', () => {
+    const agent = {
+      id: 'agent-1',
+      name: 'Agent',
+      enabled: true,
+      workspacePath: '/tmp/workspace',
+      permissionMode: 'plan',
+      channels: [],
+      mcpServersJson: JSON.stringify([
+        {
+          id: 'remote-without-url',
+          name: 'Remote Missing URL',
+          type: 'http',
+          isBuiltin: false,
+        },
+        {
+          id: 'agent-stdio',
+          name: 'Agent Stdio',
+          type: 'stdio',
+          command: 'node',
+          isBuiltin: false,
+        },
+      ]),
+    };
+    const cfg: AppConfig = {
+      defaultPermissionMode: 'plan',
+      theme: 'system',
+      minimizeToTray: true,
+      showDevTools: false,
+      autoStart: false,
+      osNotifications: true,
+      notificationSound: true,
+      agents: [agent],
+      mcpServers: [],
+      mcpEnabledServers: [],
+    };
+
+    const result = resolveAgentMcpSelectionForConfig(cfg, agent, ['remote-without-url', 'agent-stdio']);
+
+    expect(result.config.mcpServers).toEqual([]);
+    expect(result.config.mcpEnabledServers).toEqual([]);
+    expect(result.mcpServersJson).toBeUndefined();
+  });
+});
+
+describe('resolveAgentRuntimeMcpServersJson', () => {
+  it('does not bypass the global enabled gate for manual Agent channel start', () => {
+    const disabledRemote = {
+      id: 'remote-sse',
+      name: 'Remote SSE',
+      type: 'sse' as const,
+      url: 'https://mcp.example.com/sse',
+      isBuiltin: false,
+    };
+
+    expect(
+      resolveAgentRuntimeMcpServersJson(
+        [disabledRemote],
+        [],
+        ['remote-sse'],
+      ),
+    ).toBeNull();
   });
 });

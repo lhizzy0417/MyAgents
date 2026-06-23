@@ -413,6 +413,19 @@ export default memo(function BrandSection({
         }) ?? false;
     }, [providers, apiKeys, providerVerifyStatus]);
 
+    const providerSettingsPrompt = !hasAnyProvider ? (
+        <p className="text-center text-sm text-[var(--ink-muted)]">
+            ✨ 只需一步，即刻开启 AI 之旅 —
+            <button
+                type="button"
+                onClick={() => onGoToSettings?.()}
+                className="ml-1 rounded-md px-1 py-0.5 text-[var(--accent-warm)] transition-colors hover:bg-[var(--accent-warm-subtle)] hover:text-[var(--accent-warm-hover)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent-warm-muted)]"
+            >
+                配置模型供应商 →
+            </button>
+        </p>
+    ) : null;
+
     return (
         <section ref={sectionRef} className="flex flex-1 flex-col items-center px-12">
             {/* Upper area: Brand Name + Slogans as ONE visual group.
@@ -535,11 +548,14 @@ export default memo(function BrandSection({
                         )}
                     </div>
                     {mode === 'thought' && modeSegmentEnabled && (
-                        <div className="absolute left-0 right-0 top-full mt-3">
+                        <div
+                            className="launcher-below-input-stack absolute left-0 right-0 top-full mt-3 flex flex-col gap-4"
+                        >
                             <RecentThoughtsRow
                                 refreshKey={thoughtRefreshKey}
                                 onOpenTaskCenter={openTaskCenter}
                             />
+                            {providerSettingsPrompt}
                         </div>
                     )}
                     {/* PRD 0.2.7 Phase F: launcher-only chip row that surfaces
@@ -548,34 +564,27 @@ export default memo(function BrandSection({
                      *  with that strip — dialogue mode shows this, thought mode
                      *  shows recent thoughts. */}
                     {mode === 'task' && (
-                        <div className="absolute left-0 right-0 top-full mt-3">
-                            <LauncherInputContextRow
-                                projects={projects}
-                                selectedProject={selectedProject}
-                                defaultWorkspacePath={defaultWorkspacePath}
-                                onSelectWorkspace={onSelectWorkspace}
-                                onAddFolder={onAddFolder}
-                                onSetDefaultWorkspace={onSetDefaultWorkspace}
-                                showRuntime={!!multiAgentRuntimeEnabled}
-                                runtime={activeRuntime}
-                                runtimeDetections={runtimeDetections}
-                                onRuntimeChange={onRuntimeChange}
-                            />
+                        <div
+                            className="launcher-below-input-stack absolute left-0 right-0 top-full mt-3 flex flex-col gap-4"
+                        >
+                            <div className="w-full">
+                                <LauncherInputContextRow
+                                    projects={projects}
+                                    selectedProject={selectedProject}
+                                    defaultWorkspacePath={defaultWorkspacePath}
+                                    onSelectWorkspace={onSelectWorkspace}
+                                    onAddFolder={onAddFolder}
+                                    onSetDefaultWorkspace={onSetDefaultWorkspace}
+                                    showRuntime={!!multiAgentRuntimeEnabled}
+                                    runtime={activeRuntime}
+                                    runtimeDetections={runtimeDetections}
+                                    onRuntimeChange={onRuntimeChange}
+                                />
+                            </div>
+                            {providerSettingsPrompt}
                         </div>
                     )}
                 </div>
-                {!hasAnyProvider && (
-                    <p className="mt-6 text-center text-sm text-[var(--ink-muted)]">
-                        ✨ 只需一步，即刻开启 AI 之旅 —
-                        <button
-                            type="button"
-                            onClick={onGoToSettings}
-                            className="ml-1 text-[var(--accent-warm)] hover:underline"
-                        >
-                            配置模型供应商 →
-                        </button>
-                    </p>
-                )}
             </div>
 
             {/* PRD 0.2.7 D1: launcher cron settings modal — confirming stages

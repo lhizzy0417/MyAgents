@@ -14,7 +14,6 @@ const mocks = vi.hoisted(() => ({
     getSessions: vi.fn(),
     updateSession: vi.fn(),
     deleteSession: vi.fn(),
-    deactivateSession: vi.fn(),
     exportSessionAsMarkdown: vi.fn(),
     getWorkspaceCronTasks: vi.fn(),
     getBackgroundSessions: vi.fn(),
@@ -25,7 +24,6 @@ vi.mock('@/api/sessionClient', () => ({
     updateSession: mocks.updateSession,
     deleteSession: mocks.deleteSession,
 }));
-vi.mock('@/api/tauriClient', () => ({ deactivateSession: mocks.deactivateSession }));
 vi.mock('@/utils/sessionExport', () => ({ exportSessionAsMarkdown: mocks.exportSessionAsMarkdown }));
 vi.mock('@/api/cronTaskClient', () => ({
     getWorkspaceCronTasks: mocks.getWorkspaceCronTasks,
@@ -45,25 +43,32 @@ const SESSION: SessionMetadata = {
     lastActiveAt: '2026-06-06T08:00:00.000Z',
 };
 
-function renderDropdown(onOpenInNewTab?: (id: string, title: string) => void) {
+function renderDropdown(
+    onOpenInNewTab?: (id: string, title: string) => void,
+    options: {
+        currentSessionId?: string | null;
+        prepareCurrentSessionForDelete?: () => Promise<boolean>;
+    } = {},
+) {
     const triggerRef = createRef<HTMLButtonElement>();
     const onClose = vi.fn();
+    const prepareCurrentSessionForDelete = options.prepareCurrentSessionForDelete ?? vi.fn().mockResolvedValue(true);
     render(
         <ToastProvider>
             <button ref={triggerRef}>历史</button>
             <SessionHistoryDropdown
                 agentDir="/ws"
-                currentSessionId={null}
+                currentSessionId={options.currentSessionId ?? null}
                 onSelectSession={vi.fn()}
                 onOpenInNewTab={onOpenInNewTab}
-                onDeleteCurrentSession={vi.fn()}
+                prepareCurrentSessionForDelete={prepareCurrentSessionForDelete}
                 isOpen
                 onClose={onClose}
                 triggerRef={triggerRef}
             />
         </ToastProvider>,
     );
-    return { onClose };
+    return { onClose, prepareCurrentSessionForDelete };
 }
 
 describe('SessionHistoryDropdown row actions', () => {
@@ -127,5 +132,39 @@ describe('SessionHistoryDropdown row actions', () => {
         await waitFor(() => {
             expect(mocks.updateSession).toHaveBeenCalledWith(SESSION.id, { favorite: true });
         });
+    });
+
+    it('prepares the current session before deleting it', async () => {
+        const prepareCurrentSessionForDelete = vi.fn().mockResolvedValue(true);
+        mocks.deleteSession.mockResolvedValue(true);
+        renderDropdown(vi.fn(), { currentSessionId: SESSION.id, prepareCurrentSessionForDelete });
+        await screen.findByText('My session');
+
+        fireEvent.click(screen.getByRole('button', { name: '更多操作' }));
+        fireEvent.click(screen.getByText('删除对话'));
+        fireEvent.click(screen.getByRole('button', { name: '删除' }));
+
+        await waitFor(() => {
+            expect(prepareCurrentSessionForDelete).toHaveBeenCalledTimes(1);
+            expect(mocks.deleteSession).toHaveBeenCalledWith(SESSION.id);
+        });
+        expect(prepareCurrentSessionForDelete.mock.invocationCallOrder[0]).toBeLessThan(
+            mocks.deleteSession.mock.invocationCallOrder[0],
+        );
+    });
+
+    it('does not delete the current session when preparation fails', async () => {
+        const prepareCurrentSessionForDelete = vi.fn().mockResolvedValue(false);
+        renderDropdown(vi.fn(), { currentSessionId: SESSION.id, prepareCurrentSessionForDelete });
+        await screen.findByText('My session');
+
+        fireEvent.click(screen.getByRole('button', { name: '更多操作' }));
+        fireEvent.click(screen.getByText('删除对话'));
+        fireEvent.click(screen.getByRole('button', { name: '删除' }));
+
+        await waitFor(() => {
+            expect(prepareCurrentSessionForDelete).toHaveBeenCalledTimes(1);
+        });
+        expect(mocks.deleteSession).not.toHaveBeenCalled();
     });
 });

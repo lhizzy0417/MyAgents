@@ -2,7 +2,7 @@
 //
 // Kept as a dependency-free leaf module so it can be unit-tested in the fast
 // `unit` pool without pulling Tauri/runtime imports.
-import type { AppConfig } from '../types';
+import type { AppConfig, McpServerDefinition } from '../types';
 
 /**
  * Restore the "stringified JSON" invariant for agent config fields at the load
@@ -56,6 +56,73 @@ export function normalizeStringifiedJsonFields(config: AppConfig): boolean {
     }
   }
   return changed;
+}
+
+/**
+ * Heal a legacy Agent-only MCP catalogue split:
+ * `agents[].mcpEnabledServers` references a custom HTTP/SSE server whose full
+ * definition exists only in `agents[].mcpServersJson`, while the global
+ * `config.mcpServers` registry is missing it. Runtime self-resolve uses the
+ * global registry, so promote those selected custom definitions back to the
+ * global layer at the load boundary.
+ *
+ * This intentionally only enables IDs that were also recovered into the global
+ * registry in this pass. If a known global server is disabled globally, loading
+ * config must not silently re-enable it just because an Agent still references
+ * the ID.
+ */
+export function promoteAgentMcpJsonToGlobal(config: AppConfig): boolean {
+  const agents = (config as unknown as { agents?: unknown }).agents;
+  if (!Array.isArray(agents)) return false;
+
+  const globalServers = Array.isArray(config.mcpServers) ? [...config.mcpServers] : [];
+  const globalEnabled = new Set(Array.isArray(config.mcpEnabledServers) ? config.mcpEnabledServers : []);
+  const knownIds = new Set(globalServers.map(server => server.id));
+  let changed = false;
+
+  for (const agent of agents) {
+    if (!agent || typeof agent !== 'object') continue;
+    const a = agent as Record<string, unknown>;
+    const enabledIds = Array.isArray(a.mcpEnabledServers)
+      ? new Set(a.mcpEnabledServers.filter((id): id is string => typeof id === 'string' && id.length > 0))
+      : new Set<string>();
+    if (enabledIds.size === 0 || typeof a.mcpServersJson !== 'string') continue;
+
+    for (const server of parseMcpServerDefinitions(a.mcpServersJson)) {
+      if (!enabledIds.has(server.id) || server.isBuiltin || knownIds.has(server.id)) continue;
+      const normalized: McpServerDefinition = { ...server, isBuiltin: false };
+      globalServers.push(normalized);
+      knownIds.add(normalized.id);
+      globalEnabled.add(normalized.id);
+      changed = true;
+    }
+  }
+
+  if (changed) {
+    config.mcpServers = globalServers;
+    config.mcpEnabledServers = Array.from(globalEnabled);
+  }
+  return changed;
+}
+
+function parseMcpServerDefinitions(raw: string): McpServerDefinition[] {
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter(isPromotableRemoteMcpDefinition);
+  } catch {
+    return [];
+  }
+}
+
+function isPromotableRemoteMcpDefinition(server: unknown): server is McpServerDefinition {
+  if (!server || typeof server !== 'object' || Array.isArray(server)) return false;
+  const candidate = server as { id?: unknown; name?: unknown; type?: unknown; url?: unknown };
+  return typeof candidate.id === 'string'
+    && typeof candidate.name === 'string'
+    && (candidate.type === 'http' || candidate.type === 'sse')
+    && typeof candidate.url === 'string'
+    && candidate.url.length > 0;
 }
 
 /**

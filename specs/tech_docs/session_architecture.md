@@ -20,10 +20,12 @@ interface SessionMetadata {
     stats?: SessionStats;
     cronTaskId?: string;
     runtime?: RuntimeType;      // 'builtin' | 'claude-code' | 'codex' | 'gemini'
+    runtimeSessionId?: string;  // external runtime thread/session id（Codex threadId 等）
     // 分层 config snapshot 字段（owned session 冻结）
     model?: string;
     // #324 推理强度：存字面 'default' | level（'default' 是有意义的值——session
-    // 显式回退默认可盖过 agent 级非默认值；undefined = 回落 agent）。变更经
+    // 显式回退默认可盖过 agent 级非默认值；owned session 下 undefined =
+    // 产品默认/未 pin，不得静默回落 agent）。变更经
     // /api/reasoning-effort/set（external 分流）；Anthropic 协议 effort 是
     // query() spawn 选项 → 变更走 abort+prewarm / deferred restart（reason:
     // 'reasoning-effort'）；OpenAI 协议经 bridge live resolver 每请求注入。
@@ -32,8 +34,12 @@ interface SessionMetadata {
     reasoningEffort?: string;
     permissionMode?: PermissionMode;
     mcpEnabledServers?: string[];
+    enabledPluginIds?: string[];
     providerId?: string;
     providerEnvJson?: string;
+    configSnapshotAt?: string;  // 存在即 owned snapshot；读侧不得用 Agent 补 owned 缺字段
+    materializationState?: 'prepared'; // pending->real 两阶段 materialize 隐藏行
+    materializationSourceSessionId?: string; // prepared 来源 pending id
 }
 
 interface SessionStats {
@@ -44,6 +50,8 @@ interface SessionStats {
     totalCacheCreationTokens?: number;
 }
 ```
+
+`configSnapshotAt` 是配置权威边界：存在时，session snapshot 拥有当前会话配置；缺字段不是“自动读 Agent 默认值”的许可。Agent/Project 只作为新 session 模板、legacy/no-snapshot 兼容源、以及 IM 无 Tab owner live-follow 源。
 
 ### Session ID 前缀约定
 

@@ -630,7 +630,8 @@ export function shouldCreateMissingExternalMetadataForRealUserTurn(
   turnPath: ExternalMetadataTurnPath,
   hasPendingBirth: boolean,
 ): boolean {
-  return turnPath === 'fresh-start' || hasPendingBirth;
+  void turnPath;
+  return hasPendingBirth;
 }
 
 export function shouldTrackPendingExternalSessionBirth(params: {
@@ -689,6 +690,7 @@ async function persistUserMessageBeforeRuntimeDispatch(params: {
   origin: string;
   scenario: InteractionScenario;
   turnPath: ExternalMetadataTurnPath;
+  metadataBirthPending?: boolean;
   userMsg: SessionMessage;
   failureContext: string;
 }): Promise<void> {
@@ -700,6 +702,7 @@ async function persistUserMessageBeforeRuntimeDispatch(params: {
       origin: params.origin,
       scenario: params.scenario,
       turnPath: params.turnPath,
+      metadataBirthPending: params.metadataBirthPending,
     });
     await persistExternalUserMessageAppend(params.sessionId, params.failureContext);
   } catch (err) {
@@ -721,6 +724,7 @@ async function ensureExternalSessionMetadataForRealUserTurn(params: {
   origin: string;
   scenario: InteractionScenario;
   turnPath: ExternalMetadataTurnPath;
+  metadataBirthPending?: boolean;
 }): Promise<void> {
   const { sessionId, workspacePath, messageText, origin, scenario, turnPath } = params;
   if (!sessionId) {
@@ -744,7 +748,15 @@ async function ensureExternalSessionMetadataForRealUserTurn(params: {
     return;
   }
 
-  if (!shouldCreateMissingExternalMetadataForRealUserTurn(turnPath, Boolean(pendingBirth))) {
+  const hasOwnedFreshStartAuthority =
+    turnPath === 'fresh-start'
+    && scenario.type !== 'im'
+    && scenario.type !== 'agent-channel';
+  const hasMaterializationBirth =
+    Boolean(pendingBirth)
+    || params.metadataBirthPending === true
+    || hasOwnedFreshStartAuthority;
+  if (!shouldCreateMissingExternalMetadataForRealUserTurn(turnPath, hasMaterializationBirth)) {
     throw new Error(
       `[external-session] Refusing to create missing metadata for ${sessionId} during ${origin}; `
       + 'no pending pre-warm birth exists, so this may be a deleted or invalid resume session.',
@@ -1522,6 +1534,8 @@ export async function startExternalSession(options: {
   resumeSessionId?: string;
   /** Issue #194 — per-agent env policy (proxy: myagents/terminal/direct). */
   envPolicy?: import('../../shared/types/runtime').RuntimeEnvPolicy;
+  /** IM-router birth marker; allows first-turn metadata materialization. */
+  metadataBirthPending?: boolean;
   /** Internal: false when a per-message snapshot should not overwrite desired last* state. */
   recordConfigState?: boolean;
 }): Promise<void> {
@@ -1559,6 +1573,7 @@ async function _doStartExternalSession(options: {
   analyticsSource?: TurnAnalyticsSource;
   resumeSessionId?: string;
   envPolicy?: import('../../shared/types/runtime').RuntimeEnvPolicy;
+  metadataBirthPending?: boolean;
   recordConfigState?: boolean;
 }): Promise<void> {
 
@@ -1716,6 +1731,7 @@ async function _doStartExternalSession(options: {
       origin: 'initial message',
       scenario: options.scenario,
       turnPath: options.resumeSessionId ? 'resume-start' : 'fresh-start',
+      metadataBirthPending: options.metadataBirthPending,
       userMsg,
       failureContext: '[external-session] Failed to persist initial user message',
     });
@@ -2026,6 +2042,7 @@ export async function sendExternalMessage(
         reasoningEffort: resolveTurnReasoningEffort(context),
         scenario: context.scenario,
         analyticsSource: turnAnalyticsSource,
+        metadataBirthPending: context.metadataBirthPending,
         recordConfigState: !hasQueuedExternalConfigOperation(),
       });
       return { queued: true };
@@ -2065,6 +2082,7 @@ export async function sendExternalMessage(
         scenario: nextScenario,
         analyticsSource: turnAnalyticsSource,
         resumeSessionId: resumeId, // CC: --resume <myagents-session-id>; Codex: --resume <threadId>
+        metadataBirthPending: context?.metadataBirthPending,
         recordConfigState: !hasQueuedExternalConfigOperation(),
       });
       return { queued: true };
@@ -2132,6 +2150,7 @@ export async function sendExternalMessage(
       origin: 'first message after pre-warm',
       scenario: getExternalLifecycleScenario(),
       turnPath: 'active-process',
+      metadataBirthPending: context?.metadataBirthPending,
       userMsg,
       failureContext: '[external-session] Failed to persist active-process user message',
     });

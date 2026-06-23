@@ -177,6 +177,102 @@ mod agent_monitor_tests {
         assert!(!normalize_stringified_json_value(&mut value));
     }
 
+    /// Issue #398: the Agent settings UI can leave a selected remote HTTP/SSE
+    /// MCP definition only in `agents[].mcpServersJson`. Agent channel cold-start
+    /// self-resolve reads the global registry, so the Rust reader must heal the
+    /// same split as the renderer load boundary before auto-start.
+    #[test]
+    fn promote_agent_mcp_json_to_global_recovers_selected_custom_definition() {
+        let mut value = serde_json::json!({
+            "agents": [{
+                "id": "a",
+                "name": "A",
+                "enabled": true,
+                "workspacePath": "/w",
+                "mcpEnabledServers": ["remote-http"],
+                "mcpServersJson": serde_json::json!([{
+                    "id": "remote-http",
+                    "name": "Remote HTTP",
+                    "type": "http",
+                    "url": "https://mcp.example.com/mcp",
+                    "headers": { "Authorization": "Bearer token" },
+                    "isBuiltin": false
+                }]).to_string()
+            }],
+            "mcpServers": [],
+            "mcpEnabledServers": []
+        });
+
+        assert!(promote_agent_mcp_json_to_global_value(&mut value));
+        assert_eq!(value["mcpServers"][0]["id"], "remote-http");
+        assert_eq!(value["mcpServers"][0]["isBuiltin"], false);
+        assert_eq!(
+            value["mcpEnabledServers"],
+            serde_json::json!(["remote-http"])
+        );
+        assert!(!promote_agent_mcp_json_to_global_value(&mut value));
+    }
+
+    #[test]
+    fn promote_agent_mcp_json_to_global_does_not_reenable_known_disabled_server() {
+        let remote = serde_json::json!({
+            "id": "remote-sse",
+            "name": "Remote SSE",
+            "type": "sse",
+            "url": "https://mcp.example.com/sse",
+            "isBuiltin": false
+        });
+        let mut value = serde_json::json!({
+            "agents": [{
+                "id": "a",
+                "name": "A",
+                "enabled": true,
+                "workspacePath": "/w",
+                "mcpEnabledServers": ["remote-sse"],
+                "mcpServersJson": serde_json::json!([remote.clone()]).to_string()
+            }],
+            "mcpServers": [remote],
+            "mcpEnabledServers": []
+        });
+
+        assert!(!promote_agent_mcp_json_to_global_value(&mut value));
+        assert_eq!(value["mcpEnabledServers"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn promote_agent_mcp_json_to_global_skips_malformed_or_non_remote_definitions() {
+        let mut value = serde_json::json!({
+            "agents": [{
+                "id": "a",
+                "name": "A",
+                "enabled": true,
+                "workspacePath": "/w",
+                "mcpEnabledServers": ["remote-without-url", "agent-stdio"],
+                "mcpServersJson": serde_json::json!([
+                    {
+                        "id": "remote-without-url",
+                        "name": "Remote Missing URL",
+                        "type": "http",
+                        "isBuiltin": false
+                    },
+                    {
+                        "id": "agent-stdio",
+                        "name": "Agent Stdio",
+                        "type": "stdio",
+                        "command": "node",
+                        "isBuiltin": false
+                    }
+                ]).to_string()
+            }],
+            "mcpServers": [],
+            "mcpEnabledServers": []
+        });
+
+        assert!(!promote_agent_mcp_json_to_global_value(&mut value));
+        assert_eq!(value["mcpServers"], serde_json::json!([]));
+        assert_eq!(value["mcpEnabledServers"], serde_json::json!([]));
+    }
+
     /// Issue #316: missing providerEnvJson was rebuilt only on the typed clone
     /// returned by `read_agent_configs_from_disk`, so status polling re-read the
     /// still-missing disk config every 5s and logged the migration repeatedly.
@@ -305,6 +401,58 @@ mod agent_monitor_tests {
             std::fs::read_to_string(path.with_file_name("config.json.bak")).unwrap(),
             backup,
             "read-time heal must not clobber fallback backup when main agents[] is unusable"
+        );
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn agent_mcp_read_heal_persists_promoted_global_registry_once() {
+        let path = temp_config_path("mcp-heal-ok");
+        let dir = path.parent().unwrap().to_path_buf();
+        let remote = serde_json::json!({
+            "id": "remote-http",
+            "name": "Remote HTTP",
+            "type": "http",
+            "url": "https://mcp.example.com/mcp",
+            "isBuiltin": false
+        });
+        std::fs::write(
+            &path,
+            serde_json::json!({
+                "agents": [{
+                    "id": "agent-1",
+                    "name": "Agent",
+                    "enabled": true,
+                    "workspacePath": "/tmp/project",
+                    "mcpEnabledServers": ["remote-http"],
+                    "mcpServersJson": serde_json::json!([remote]).to_string(),
+                    "channels": []
+                }],
+                "mcpServers": [],
+                "mcpEnabledServers": []
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        persist_agent_config_read_heal(&path, "test");
+        let healed = std::fs::read_to_string(&path).unwrap();
+        let healed_value: serde_json::Value = serde_json::from_str(&healed).unwrap();
+        assert_eq!(healed_value["mcpServers"][0]["id"], "remote-http");
+        assert_eq!(
+            healed_value["mcpEnabledServers"],
+            serde_json::json!(["remote-http"])
+        );
+        let backup_after_first = std::fs::read_to_string(path.with_file_name("config.json.bak"))
+            .expect("first heal should keep a backup of the pre-heal config");
+
+        persist_agent_config_read_heal(&path, "test");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), healed);
+        assert_eq!(
+            std::fs::read_to_string(path.with_file_name("config.json.bak")).unwrap(),
+            backup_after_first,
+            "second idempotent heal must not rewrite config or rotate backup"
         );
 
         let _ = std::fs::remove_dir_all(dir);
@@ -943,6 +1091,152 @@ fn normalize_stringified_json_value(value: &mut serde_json::Value) -> bool {
     changed
 }
 
+/// Promote selected custom MCP definitions stranded in `agents[].mcpServersJson`
+/// into the global `mcpServers` registry.
+///
+/// Agent channel self-resolve treats the global registry + global enabled list
+/// as the authoritative MCP catalogue. The Agent's `mcpEnabledServers` is only
+/// a per-Agent subset. A legacy renderer path could persist the subset and a
+/// stringified per-Agent runtime payload without adding the remote HTTP/SSE
+/// definition to the global layer, so cold-start saw `mcp=none` even though the
+/// Agent row looked enabled (issue #398).
+///
+/// Mirrors the TypeScript twin `promoteAgentMcpJsonToGlobal`. We only enable IDs
+/// recovered into the global catalogue in this pass; if a known global server is
+/// disabled globally, this load-boundary heal must not silently re-enable it.
+fn promote_agent_mcp_json_to_global_value(value: &mut serde_json::Value) -> bool {
+    let Some(agents) = value.get("agents").and_then(|v| v.as_array()) else {
+        return false;
+    };
+
+    let mut known_ids: std::collections::HashSet<String> = value
+        .get("mcpServers")
+        .and_then(|v| v.as_array())
+        .map(|servers| {
+            servers
+                .iter()
+                .filter_map(|server| {
+                    server
+                        .get("id")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string)
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let mut global_enabled: std::collections::HashSet<String> = value
+        .get("mcpEnabledServers")
+        .and_then(|v| v.as_array())
+        .map(|ids| {
+            ids.iter()
+                .filter_map(|id| id.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let mut recovered_servers = Vec::new();
+    let mut recovered_enabled_ids = Vec::new();
+
+    for agent in agents {
+        let Some(agent_obj) = agent.as_object() else {
+            continue;
+        };
+        let Some(agent_enabled) = agent_obj
+            .get("mcpEnabledServers")
+            .and_then(|v| v.as_array())
+        else {
+            continue;
+        };
+        let selected_ids: std::collections::HashSet<String> = agent_enabled
+            .iter()
+            .filter_map(|id| id.as_str().map(str::to_string))
+            .collect();
+        if selected_ids.is_empty() {
+            continue;
+        }
+
+        let Some(raw_servers) = agent_obj.get("mcpServersJson").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        let Ok(parsed) = serde_json::from_str::<serde_json::Value>(raw_servers) else {
+            continue;
+        };
+        let Some(servers) = parsed.as_array() else {
+            continue;
+        };
+
+        for server in servers {
+            let Some(server_obj) = server.as_object() else {
+                continue;
+            };
+            let Some(id) = server_obj.get("id").and_then(|v| v.as_str()) else {
+                continue;
+            };
+            let Some(server_type) = server_obj.get("type").and_then(|v| v.as_str()) else {
+                continue;
+            };
+            let has_required_shape = server_obj.get("name").and_then(|v| v.as_str()).is_some()
+                && matches!(server_type, "http" | "sse")
+                && server_obj
+                    .get("url")
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|url| !url.is_empty());
+            if !has_required_shape
+                || !selected_ids.contains(id)
+                || known_ids.contains(id)
+                || server_obj
+                    .get("isBuiltin")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false)
+            {
+                continue;
+            }
+
+            let id = id.to_string();
+            let mut normalized = server.clone();
+            if let Some(obj) = normalized.as_object_mut() {
+                obj.insert("isBuiltin".to_string(), serde_json::Value::Bool(false));
+            }
+            recovered_servers.push(normalized);
+            known_ids.insert(id.clone());
+            if global_enabled.insert(id.clone()) {
+                recovered_enabled_ids.push(id);
+            }
+        }
+    }
+
+    if recovered_servers.is_empty() {
+        return false;
+    }
+
+    let Some(root) = value.as_object_mut() else {
+        return false;
+    };
+    let servers_value = root
+        .entry("mcpServers".to_string())
+        .or_insert_with(|| serde_json::Value::Array(Vec::new()));
+    if !servers_value.is_array() {
+        *servers_value = serde_json::Value::Array(Vec::new());
+    }
+    if let Some(servers) = servers_value.as_array_mut() {
+        servers.extend(recovered_servers);
+    }
+
+    let enabled_value = root
+        .entry("mcpEnabledServers".to_string())
+        .or_insert_with(|| serde_json::Value::Array(Vec::new()));
+    if !enabled_value.is_array() {
+        *enabled_value = serde_json::Value::Array(Vec::new());
+    }
+    if let Some(enabled) = enabled_value.as_array_mut() {
+        for id in recovered_enabled_ids {
+            enabled.push(serde_json::Value::String(id));
+        }
+    }
+
+    true
+}
+
 /// Parse `agents[]` from an already-normalized config Value into typed
 /// `AgentConfigRust`, salvaging individually-valid entries so one malformed
 /// agent can't blank the whole fleet's auto-start (the failure class that made
@@ -1004,7 +1298,8 @@ fn persist_agent_config_read_heal(config_path: &Path, reason: &str) {
             .and_then(|v| serde_json::from_value(v.clone()).ok())
             .unwrap_or_default();
         let migrated_provider_env = migrate_agent_provider_env_value(&mut healed, &api_keys, false);
-        if !(normalized || migrated_provider_env) {
+        let promoted_mcp = promote_agent_mcp_json_to_global_value(&mut healed);
+        if !(normalized || migrated_provider_env || promoted_mcp) {
             return Ok(());
         }
 
@@ -1077,19 +1372,23 @@ pub(super) fn read_agent_configs_from_disk() -> Vec<AgentConfigRust> {
             .and_then(|v| serde_json::from_value(v.clone()).ok())
             .unwrap_or_default();
         let migrated_provider_env = migrate_agent_provider_env_value(&mut value, &api_keys, true);
+        let promoted_mcp = promote_agent_mcp_json_to_global_value(&mut value);
 
         match salvage_agents_from_value(&value, &api_keys) {
             Some(agents) => {
-                if i == 0 && (normalized || migrated_provider_env) {
-                    let reason = match (normalized, migrated_provider_env) {
-                        (true, true) => {
-                            "stringified JSON normalization + providerEnvJson migration"
-                        }
-                        (true, false) => "stringified JSON normalization",
-                        (false, true) => "providerEnvJson migration",
-                        (false, false) => unreachable!(),
-                    };
-                    persist_agent_config_read_heal(&main_path, reason);
+                if i == 0 && (normalized || migrated_provider_env || promoted_mcp) {
+                    let mut reasons = Vec::new();
+                    if normalized {
+                        reasons.push("stringified JSON normalization");
+                    }
+                    if migrated_provider_env {
+                        reasons.push("providerEnvJson migration");
+                    }
+                    if promoted_mcp {
+                        reasons.push("Agent MCP global registry promotion");
+                    }
+                    let reason = reasons.join(" + ");
+                    persist_agent_config_read_heal(&main_path, &reason);
                 }
                 if i > 0 {
                     ulog_warn!("[agent] Recovered config from {} file", label);

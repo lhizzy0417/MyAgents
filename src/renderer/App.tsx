@@ -22,11 +22,13 @@ import CustomTitleBar from '@/components/CustomTitleBar';
 import LinkContextMenuProvider from '@/components/LinkContextMenuProvider';
 import TabBar from '@/components/TabBar';
 import TabProvider from '@/context/TabProvider';
+import type { AdoptMigratedSessionOptions } from '@/context/TabContext';
 import { useToast } from '@/components/Toast';
 import { useUpdater } from '@/hooks/useUpdater';
 import { useTrayEvents } from '@/hooks/useTrayEvents';
 import { useHelperAgentModelDefaults } from '@/hooks/useHelperAgentModelDefaults';
 import { useConfig } from '@/hooks/useConfig';
+import { useSpaceBuildCapability } from '@/hooks/useSpaceBuildCapability';
 import { useThemeEffect } from '@/hooks/useTheme';
 import { useTabSwipeGesture } from '@/hooks/useTabSwipeGesture';
 import Launcher from '@/pages/Launcher'; // eager: default first view → no cold-start fallback
@@ -46,6 +48,7 @@ import Launcher from '@/pages/Launcher'; // eager: default first view → no col
 const Chat = lazy(() => import('@/pages/Chat'));
 const Settings = lazy(() => import('@/pages/Settings'));
 const TaskCenter = lazy(() => import('@/pages/TaskCenter'));
+const Space = lazy(() => import('@/pages/Space'));
 
 /** Layout-compatible Suspense fallback for a lazy page chunk — same paper fill
  *  as the deferred-mount placeholder, so a chunk-load is never a jarring blank. */
@@ -163,8 +166,8 @@ interface TabContentProps {
   onUpdateTitle: (tabId: string, title: string) => void;
   onUpdateUnread: (tabId: string, hasUnread: boolean) => void;
   onRenameSession: (tabId: string, newTitle: string) => void;
-  onForkSession: (tabId: string, newSessionId: string, agentDir: string, title: string, initialMessage?: string) => void;
-  onUpdateSessionId: (tabId: string, newSessionId: string) => Promise<void>;
+  onForkSession: (tabId: string, newSessionId: string, agentDir: string, title: string, initialMessage?: string) => Promise<boolean>;
+  onUpdateSessionId: (tabId: string, newSessionId: string, options?: AdoptMigratedSessionOptions) => Promise<boolean>;
   onClearInitialMessage: (tabId: string) => void;
   onSidecarConfigAdopted: (tabId: string) => void;
   onFilePreviewIntentConsumed?: (tabId: string, intentId: string) => void;
@@ -238,6 +241,10 @@ export const MemoizedTabContent = memo(function TabContent({
         <Suspense fallback={PAGE_FALLBACK}>
           <TaskCenter isActive={isActive} pendingIntent={taskCenterPendingIntent} />
         </Suspense>
+      ) : kind === 'space' ? (
+        <Suspense fallback={PAGE_FALLBACK}>
+          <Space isActive={isActive} />
+        </Suspense>
       ) : kind === 'cold' ? (
         // Restored-but-not-yet-activated chat tab (Issue #232). Render only a
         // cheap placeholder — crucially NO TabProvider, so no SSE connect, no
@@ -254,7 +261,7 @@ export const MemoizedTabContent = memo(function TabContent({
           onGeneratingChange={(isGenerating) => onUpdateGenerating(tab.id, isGenerating)}
           onTitleChange={(title) => onUpdateTitle(tab.id, title)}
           onUnreadChange={(hasUnread) => onUpdateUnread(tab.id, hasUnread)}
-          onSessionIdChange={(newSessionId) => onUpdateSessionId(tab.id, newSessionId)}
+          onSessionIdChange={(newSessionId, options) => onUpdateSessionId(tab.id, newSessionId, options)}
         >
           <Suspense fallback={<ChatBootOverlay />}>
             <Chat
@@ -321,6 +328,8 @@ export default function App() {
   // App config for tray behavior (shared via ConfigProvider — no CONFIG_CHANGED event needed)
   // Also get projects + CRUD actions for bug report (ensureSelfAwarenessWorkspace needs them)
   const { config, isLoading: configLoading, providers: appProviders, apiKeys: appApiKeys, providerVerifyStatus: appProviderVerifyStatus, projects: configProjects, addProject: configAddProject, patchProject: configPatchProject } = useConfig();
+  const spaceBuildCapability = useSpaceBuildCapability();
+  const teamSpaceAvailable = spaceBuildCapability.available && config.teamSpaceEnabled === true;
 
   // Helper Agent's persisted model defaults — used by BugReportOverlay for
   // initial picker selection + persist on pick. The LAUNCH_BUG_REPORT handler
@@ -403,6 +412,23 @@ export default function App() {
     syncRendererCorrelationForTab(next, nextTabs);
     setActiveTabIdState(next);
   }, [syncRendererCorrelationForTab]);
+
+  useEffect(() => {
+    if (configLoading || spaceBuildCapability.isLoading || teamSpaceAvailable) return;
+
+    const currentTabs = tabsRef.current;
+    if (!currentTabs.some((tab) => tab.view === 'space')) return;
+
+    const remainingTabs = currentTabs.filter((tab) => tab.view !== 'space');
+    const nextTabs = remainingTabs.length > 0 ? remainingTabs : [createNewTab()];
+    const currentActiveId = activeTabIdRef.current;
+    const nextActiveId = nextTabs.some((tab) => tab.id === currentActiveId)
+      ? currentActiveId
+      : nextTabs[nextTabs.length - 1]?.id ?? null;
+
+    setTabs(nextTabs);
+    setActiveTabId(nextActiveId, nextTabs);
+  }, [configLoading, spaceBuildCapability.isLoading, teamSpaceAvailable, setActiveTabId]);
 
   // Persist open chat tabs after every structural change (Issue #232). This is
   // a POST-COMMIT effect — it flushes shortly after each tabs/activeTabId change
@@ -1091,30 +1117,45 @@ export default function App() {
   // - Tab.sessionId syncs with the actual session ID
   // - History dropdown can detect if session is already open in a Tab
   // - Rust HashMap keys are upgraded from "pending-xxx" to real session ID
-  const updateTabSessionId = useCallback(async (tabId: string, newSessionId: string) => {
+  const updateTabSessionId = useCallback(async (
+    tabId: string,
+    newSessionId: string,
+    options?: AdoptMigratedSessionOptions,
+  ): Promise<boolean> => {
     // Find the current tab to get the old sessionId
     const currentTab = tabsRef.current.find(t => t.id === tabId);
+    if (!currentTab) {
+      console.error(`[App] Refusing to update missing tab ${tabId} sessionId to ${newSessionId}`);
+      return false;
+    }
     const oldSessionId = currentTab?.sessionId;
 
     console.log(`[App] Tab ${tabId} sessionId updating: ${oldSessionId} -> ${newSessionId}`);
 
     // Upgrade the session ID in Rust HashMap (sidecars + session_activations)
     // This is a no-op if oldSessionId is null or same as newSessionId
-    if (oldSessionId && oldSessionId !== newSessionId) {
+    if (oldSessionId && oldSessionId !== newSessionId && !options?.sidecarAlreadyMigrated) {
       const upgraded = await upgradeSessionId(oldSessionId, newSessionId);
       console.log(`[App] Rust HashMap upgrade: ${oldSessionId} -> ${newSessionId}, success=${upgraded}`);
+      if (!upgraded) {
+        console.error(`[App] Refusing to update tab ${tabId} sessionId because Rust sidecar upgrade failed: ${oldSessionId} -> ${newSessionId}`);
+        return false;
+      }
       if (upgraded) {
         const fbResult = await migrateFloatingBallSessionBinding(oldSessionId, newSessionId);
         if (fbResult.migrated) {
           console.log(`[App] Floating ball session binding migrated: ${oldSessionId} -> ${newSessionId}, notified=${fbResult.notified}`);
         }
       }
+    } else if (oldSessionId && oldSessionId !== newSessionId && options?.sidecarAlreadyMigrated) {
+      console.log(`[App] Skipping Rust HashMap upgrade for already-migrated sidecar: ${oldSessionId} -> ${newSessionId}`);
     }
 
     // Update UI state
     setTabs(prev => prev.map(t =>
       t.id === tabId ? { ...t, sessionId: newSessionId } : t
     ));
+    return true;
   }, []);
 
   // Perform the actual tab close operation (pure function, no confirmation)
@@ -1806,7 +1847,7 @@ export default function App() {
     // Check tab limit
     if (tabsRef.current.length >= MAX_TABS) {
       toastRef.current.error('标签页已达上限，请关闭一个后重试');
-      return;
+      return false;
     }
 
     const newTab: Tab = {
@@ -1824,14 +1865,27 @@ export default function App() {
     setTabs(prev => [...prev, newTab]);
     setLoadingTabs(prev => ({ ...prev, [newTab.id]: true }));
 
+    let ownerAcquired = false;
     try {
       const result = await ensureSessionSidecar(newSessionId, forkAgentDir, 'tab', newTab.id);
+      ownerAcquired = true;
       console.log(`[App] Fork tab ${newTab.id} sidecar ensured: port=${result.port}`);
+      if (!tabsRef.current.some(t => t.id === newTab.id)) {
+        await releaseSessionSidecar(newSessionId, 'tab', newTab.id).catch(() => {});
+        await deactivateSession(newSessionId).catch(() => {});
+        return false;
+      }
       await activateSession(newSessionId, newTab.id, null, result.port, forkAgentDir, false);
       setActiveTabId(newTab.id);
+      return true;
     } catch (error) {
       console.error('[App] Failed to start sidecar for forked session:', error);
       setTabs(prev => prev.filter(t => t.id !== newTab.id));
+      if (ownerAcquired) {
+        await releaseSessionSidecar(newSessionId, 'tab', newTab.id).catch(() => {});
+        await deactivateSession(newSessionId).catch(() => {});
+      }
+      return false;
     } finally {
       setLoadingTabs(prev => ({ ...prev, [newTab.id]: false }));
     }
@@ -2757,6 +2811,45 @@ export default function App() {
     return () => window.removeEventListener(CUSTOM_EVENTS.OPEN_TASK_CENTER, handler);
   }, [handleOpenTaskCenter]);
 
+  const handleOpenSpace = useCallback(() => {
+    if (spaceBuildCapability.isLoading) {
+      toastRef.current.info('正在读取团队功能状态');
+      return;
+    }
+    if (!spaceBuildCapability.available) {
+      toastRef.current.info(spaceBuildCapability.reason ?? '当前构建未启用团队功能');
+      return;
+    }
+    if (!teamSpaceAvailable) {
+      toastRef.current.info('团队功能尚未开放');
+      return;
+    }
+    const currentTabs = tabsRef.current;
+    const existing = currentTabs.find((t) => t.view === 'space');
+    if (existing) {
+      setActiveTabId(existing.id);
+      return;
+    }
+    if (currentTabs.length >= MAX_TABS) {
+      console.warn(`[App] Max tabs (${MAX_TABS}) reached`);
+      return;
+    }
+    const newTab: Tab = {
+      id: `tab-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      agentDir: null,
+      sessionId: null,
+      view: 'space',
+      title: '团队',
+      sidecarConfigDisposition: 'push',
+    };
+    openNewTabDeferred(newTab);
+  }, [openNewTabDeferred, setActiveTabId, spaceBuildCapability.available, spaceBuildCapability.isLoading, spaceBuildCapability.reason, teamSpaceAvailable]);
+
+  useEffect(() => {
+    window.addEventListener(CUSTOM_EVENTS.OPEN_SPACE, handleOpenSpace);
+    return () => window.removeEventListener(CUSTOM_EVENTS.OPEN_SPACE, handleOpenSpace);
+  }, [handleOpenSpace]);
+
   // One-shot legacy CronTask → Task sweep at app startup (PRD §11.4,
   // v0.1.69 UX round). The Launcher's 「我的任务」 tab reads new-model
   // Task[] — users who never open the Task Center page would see an
@@ -3335,6 +3428,7 @@ export default function App() {
         updateInstalling={updateInstalling}
         updatePreparing={updatePreparing}
         onRestartAndUpdate={() => void handleRestartAndUpdate()}
+        teamSpaceEnabled={teamSpaceAvailable}
         restoreCount={restorePillCount}
         onRestoreSession={handleRestoreLastSession}
         onDismissRestore={handleDismissRestore}

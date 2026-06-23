@@ -19,13 +19,15 @@
 //!   manage the `SidecarOwner::Agent` lifetime.
 
 use std::path::PathBuf;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use serde::Serialize;
+use serde_json::json;
 use tauri::{AppHandle, Emitter, Manager, Runtime};
 
 use super::health::HealthManager;
 use super::router::{parse_session_key, SessionRouter};
+use super::runtime_change;
 use super::types::{LastActiveChannel, PeerSession};
 use super::{ImConsumers, ManagedAgents};
 use crate::sidecar::{
@@ -99,6 +101,23 @@ fn short_id(s: &str) -> String {
     s.chars().take(8).collect()
 }
 
+async fn freeze_current_via_sidecar(port: u16) -> Result<(), String> {
+    let client = crate::local_http::json_client(Duration::from_secs(30));
+    let url = format!("http://127.0.0.1:{}/api/session/freeze-current", port);
+    let resp = client
+        .post(&url)
+        .json(&json!({}))
+        .send()
+        .await
+        .map_err(|e| format!("freeze-current HTTP send failed: {}", e))?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        return Err(format!("freeze-current returned {}: {}", status, body));
+    }
+    Ok(())
+}
+
 // ============================================================================
 // 1. New conversation with surface migration
 // ============================================================================
@@ -149,7 +168,7 @@ pub async fn cmd_session_new_with_surface_migration<R: Runtime>(
     }
     let target_agent_id = parts[1];
 
-    let router_arc = {
+    let found_binding = {
         let agents = agent_state.lock().await;
         let agent = agents.get(target_agent_id).ok_or_else(|| {
             format!(
@@ -166,14 +185,23 @@ pub async fn cmd_session_new_with_surface_migration<R: Runtime>(
             let router_guard = ch.bot_instance.router.lock().await;
             if router_guard.has_peer_session(&sessionKey) {
                 drop(router_guard);
-                found = Some(ch.bot_instance.router.clone());
+                let snapshot = runtime_change::build_snapshot_from_channel_state(
+                    &ch.bot_instance.runtime,
+                    &ch.bot_instance.current_model,
+                    &ch.bot_instance.permission_mode,
+                    &ch.bot_instance.mcp_servers_json,
+                    ch.bot_instance.config.provider_id.clone(),
+                    &ch.bot_instance.current_provider_env,
+                )
+                .await;
+                found = Some((ch.bot_instance.router.clone(), snapshot));
                 break;
             }
         }
         found
     };
 
-    let router_arc = router_arc.ok_or_else(|| {
+    let (router_arc, fallback_snapshot) = found_binding.ok_or_else(|| {
         format!(
             "No active channel binds session_key {}; cannot migrate",
             sessionKey
@@ -183,7 +211,7 @@ pub async fn cmd_session_new_with_surface_migration<R: Runtime>(
     let new_session_id = {
         let mut router = router_arc.lock().await;
         router
-            .reset_session(&sessionKey, &app, manager.inner())
+            .reset_session(&sessionKey, &app, manager.inner(), Some(&fallback_snapshot))
             .await?
     };
 
@@ -277,6 +305,7 @@ pub async fn cmd_handover_session_to_channel<R: Runtime>(
         target_health,
         agent_workspace,
         last_active_channel,
+        fallback_snapshot,
         channel_runtimes,
     ) = {
         let agents = agent_state.lock().await;
@@ -295,6 +324,15 @@ pub async fn cmd_handover_session_to_channel<R: Runtime>(
             );
             format!("Channel {} not found in agent {}", channelId, agentId)
         })?;
+        let fallback_snapshot = runtime_change::build_snapshot_from_channel_state(
+            &channel.bot_instance.runtime,
+            &channel.bot_instance.current_model,
+            &channel.bot_instance.permission_mode,
+            &channel.bot_instance.mcp_servers_json,
+            channel.bot_instance.config.provider_id.clone(),
+            &channel.bot_instance.current_provider_env,
+        )
+        .await;
         let channel_runtimes = agent
             .channels
             .iter()
@@ -311,6 +349,7 @@ pub async fn cmd_handover_session_to_channel<R: Runtime>(
             channel.bot_instance.health.clone(),
             agent.config.workspace_path.clone(),
             agent.last_active_channel.clone(),
+            fallback_snapshot,
             channel_runtimes,
         )
     };
@@ -370,33 +409,27 @@ pub async fn cmd_handover_session_to_channel<R: Runtime>(
         }
     };
     ulog_info!("[handover] step2 target_session_key={}", target_session_key);
+    let prior_before_handover = {
+        let router = router_arc.lock().await;
+        router.peer_session_snapshot(&target_session_key)
+    };
 
-    // ----- 3. Sanity-check that the target session HAS a Sidecar in the
-    // manager. We don't reuse this port directly — `ensure_session_sidecar`
-    // below returns the authoritative port (it may replace a dead sidecar
-    // and mint a new one). Reading the pre-ensure port and writing it into
-    // peer_sessions would bind IM to a stale port if a replacement happened
-    // (review-by-codex F1 finding).
+    // ----- 3. Check whether the target session already has a Sidecar in the
+    // manager. We don't require one here: provider/runtime boundary forks can
+    // create a fresh target SessionMetadata, move the IM binding to it, and only
+    // then open the desktop Tab. `ensure_session_sidecar` below is the
+    // authoritative attach/create point and returns the real port.
     {
         let mut mgr = manager.lock().map_err(|e| {
             ulog_warn!("[handover] step3 manager lock poisoned: {}", e);
             e.to_string()
         })?;
-        if !mgr.has_session_sidecar(&sessionId) {
-            ulog_warn!(
-                "[handover] step3 session {} has no Sidecar in manager",
-                short_id(&sessionId)
-            );
-            return Err(format!(
-                "Session {} has no running Sidecar — open the tab first",
-                short_id(&sessionId)
-            ));
-        }
+        ulog_info!(
+            "[handover] step3 session {} sidecar_present={}",
+            short_id(&sessionId),
+            mgr.has_session_sidecar(&sessionId),
+        );
     }
-    ulog_info!(
-        "[handover] step3 session {} sidecar present",
-        short_id(&sessionId),
-    );
 
     // ----- 4. Attach Agent owner to target Sidecar FIRST (fail-fast).
     //
@@ -449,6 +482,42 @@ pub async fn cmd_handover_session_to_channel<R: Runtime>(
         ensure_result.is_new,
     );
 
+    // ----- 4b. Freeze the prior channel-bound session BEFORE mutating the
+    // binding. If this fails, release the just-attached Agent owner and leave
+    // the channel on the old session. This preserves the transactional UX:
+    // no "old session frozen but IM still bound to it" half-state.
+    if let Some(prior) = prior_before_handover.as_ref() {
+        if prior.session_id != sessionId {
+            let freeze_result = if prior.sidecar_port != 0 {
+                freeze_current_via_sidecar(prior.sidecar_port).await.map(|_| {
+                    ulog_info!(
+                        "[handover] step4b froze prior session {} via sidecar port {}",
+                        short_id(&prior.session_id),
+                        prior.sidecar_port
+                    );
+                })
+            } else {
+                runtime_change::freeze_via_file_lock(&prior.session_id, &fallback_snapshot)
+                    .await
+                    .map(|_| {
+                        ulog_info!(
+                            "[handover] step4b froze idle prior session {} via file lock",
+                            short_id(&prior.session_id)
+                        );
+                    })
+            };
+            if let Err(e) = freeze_result {
+                let _ = release_session_sidecar(manager.inner(), &sessionId, &owner);
+                ulog_warn!(
+                    "[handover] step4b freeze prior session {} failed; target owner released: {}",
+                    short_id(&prior.session_id),
+                    e
+                );
+                return Err(format!("Failed to freeze prior channel session: {}", e));
+            }
+        }
+    }
+
     // ----- 5. Mutate router atomically (snapshot prior + upsert under one lock).
     //
     // Use `target_port` from step 4 (the authoritative port returned by
@@ -458,7 +527,22 @@ pub async fn cmd_handover_session_to_channel<R: Runtime>(
     // route subsequent messages into a closed socket.
     let (chat_id, prior_session_id, prior_sidecar_port, active_sessions_after_upsert) = {
         let mut router = router_arc.lock().await;
-        let prior = router.peer_session_snapshot(&target_session_key);
+        let current_prior = router.peer_session_snapshot(&target_session_key);
+        let before_identity = prior_before_handover
+            .as_ref()
+            .map(|p| (p.session_id.as_str(), p.sidecar_port));
+        let current_identity = current_prior
+            .as_ref()
+            .map(|p| (p.session_id.as_str(), p.sidecar_port));
+        if before_identity != current_identity {
+            let _ = release_session_sidecar(manager.inner(), &sessionId, &owner);
+            ulog_warn!(
+                "[handover] step5 binding changed while freezing; target owner released key={}",
+                target_session_key
+            );
+            return Err("Channel binding changed during handover; please retry.".to_string());
+        }
+        let prior = prior_before_handover.clone();
         let prior_session_id = prior.as_ref().map(|p| p.session_id.clone());
         let prior_sidecar_port = prior.as_ref().map(|p| p.sidecar_port);
         let (source_type, source_id) = parse_session_key(&target_session_key);
@@ -478,6 +562,7 @@ pub async fn cmd_handover_session_to_channel<R: Runtime>(
             source_display_name,
             last_sender_name,
             message_count: 0,
+            metadata_birth_pending: false,
             last_active: Instant::now(),
         });
 

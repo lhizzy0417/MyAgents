@@ -21,6 +21,7 @@ use crate::sidecar::{
     ManagedSidecarManager, RuntimeDriftResult, SidecarOwner,
 };
 
+use super::runtime_change::OwnedSessionSnapshot;
 use super::types::{ImMessage, ImSourceType, PeerSession};
 
 /// Max concurrent AI requests across all peers
@@ -39,6 +40,10 @@ const MAX_RESTART_BACKOFF_SECS: u64 = 30;
 /// HTTP timeout for Sidecar API calls
 const SIDECAR_HTTP_TIMEOUT_SECS: u64 = 300;
 
+fn short_id(s: &str) -> String {
+    s.chars().take(8).collect()
+}
+
 /// Result of Phase 1 of ensure_sidecar: either the sidecar is healthy, or we need to create one.
 pub enum EnsureSidecarPrep {
     /// Existing sidecar is healthy — return immediately with port.
@@ -55,6 +60,7 @@ pub struct EnsureSidecarInfo {
     pub session_id: String,
     pub workspace: PathBuf,
     pub prev_count: u32,
+    pub metadata_birth_pending: bool,
 }
 
 /// Error from Sidecar routing — distinguishes bufferable vs non-bufferable failures.
@@ -264,11 +270,11 @@ impl SessionRouter {
             ps.sidecar_port = 0;
         }
 
-        let prev_count = self
-            .peer_sessions
-            .get(session_key)
-            .map(|ps| ps.message_count)
-            .unwrap_or(0);
+        let peer_session = self.peer_sessions.get(session_key);
+        let prev_count = peer_session.map(|ps| ps.message_count).unwrap_or(0);
+        let metadata_birth_pending = peer_session
+            .map(|ps| ps.metadata_birth_pending)
+            .unwrap_or(true);
 
         let workspace = self
             .peer_sessions
@@ -287,6 +293,7 @@ impl SessionRouter {
             session_id,
             workspace,
             prev_count,
+            metadata_birth_pending,
         })
     }
 
@@ -352,6 +359,7 @@ impl SessionRouter {
                 source_display_name: None,
                 last_sender_name: None,
                 message_count: info.prev_count,
+                metadata_birth_pending: info.metadata_birth_pending,
                 last_active: Instant::now(),
             },
         );
@@ -368,6 +376,7 @@ impl SessionRouter {
     pub fn record_response(&mut self, session_key: &str, _session_id: Option<&str>) {
         if let Some(ps) = self.peer_sessions.get_mut(session_key) {
             ps.message_count += 1;
+            ps.metadata_birth_pending = false;
             ps.last_active = Instant::now();
         }
     }
@@ -391,6 +400,7 @@ impl SessionRouter {
                 mgr.upgrade_session_id(&old_id, new_session_id);
             }
             ps.session_id = new_session_id.to_string();
+            ps.metadata_birth_pending = false;
             ulog_info!(
                 "[im-router] Upgraded peer session_id: {} -> {} (session_key={})",
                 old_id,
@@ -530,6 +540,7 @@ impl SessionRouter {
             ps.session_id = new_id.clone();
             ps.sidecar_port = 0;
             ps.message_count = 0;
+            ps.metadata_birth_pending = true;
             ps.last_active = Instant::now();
         }
 
@@ -551,6 +562,7 @@ impl SessionRouter {
         session_key: &str,
         _app_handle: &AppHandle<R>,
         manager: &ManagedSidecarManager,
+        fallback_snapshot: Option<&OwnedSessionSnapshot>,
     ) -> Result<String, String> {
         if let Some(ps) = self.peer_sessions.get(session_key) {
             let old_session_id = ps.session_id.clone();
@@ -558,10 +570,30 @@ impl SessionRouter {
             // Sidecar not running (restored from disk after app restart, or idle-collected).
             // Just reset session metadata; next message will start a fresh sidecar with the new ID.
             if ps.sidecar_port == 0 {
+                if let Some(snapshot) = fallback_snapshot {
+                    match super::runtime_change::freeze_via_file_lock(&old_session_id, snapshot).await {
+                        Ok(()) => ulog_info!(
+                            "[im-router] froze idle session {} before /new binding reset",
+                            short_id(&old_session_id)
+                        ),
+                        Err(e) => {
+                            ulog_warn!(
+                                "[im-router] failed to freeze idle session {} before /new binding reset: {}",
+                                short_id(&old_session_id),
+                                e
+                            );
+                            return Err(format!(
+                                "Failed to freeze old session before /new reset: {}",
+                                e
+                            ));
+                        }
+                    }
+                }
                 let new_session_id = uuid::Uuid::new_v4().to_string();
                 if let Some(ps) = self.peer_sessions.get_mut(session_key) {
                     ps.session_id = new_session_id.clone();
                     ps.message_count = 0;
+                    ps.metadata_birth_pending = true;
                     ps.last_active = Instant::now();
                 }
                 return Ok(new_session_id);
@@ -591,6 +623,7 @@ impl SessionRouter {
                 if let Some(ps) = self.peer_sessions.get_mut(session_key) {
                     ps.session_id = new_session_id.clone();
                     ps.message_count = 0;
+                    ps.metadata_birth_pending = false;
                     ps.last_active = Instant::now();
                 }
 
@@ -687,6 +720,23 @@ impl SessionRouter {
     pub fn touch_session_activity(&mut self, session_key: &str) {
         if let Some(ps) = self.peer_sessions.get_mut(session_key) {
             ps.last_active = Instant::now();
+        }
+    }
+
+    /// True only while this peer binding points at a Rust-minted session_id that
+    /// has not yet been accepted by the sidecar as a real MyAgents session.
+    pub fn metadata_birth_pending(&self, session_key: &str) -> bool {
+        self.peer_sessions
+            .get(session_key)
+            .map(|ps| ps.metadata_birth_pending)
+            .unwrap_or(false)
+    }
+
+    /// The sidecar accepted the first enqueue for this peer binding. Metadata is
+    /// now expected to exist; future missing metadata means deletion/corruption.
+    pub fn mark_metadata_birth_consumed(&mut self, session_key: &str) {
+        if let Some(ps) = self.peer_sessions.get_mut(session_key) {
+            ps.metadata_birth_pending = false;
         }
     }
 
@@ -834,6 +884,7 @@ impl SessionRouter {
                     source_display_name: s.source_display_name.clone(),
                     last_sender_name: s.last_sender_name.clone(),
                     message_count: s.message_count,
+                    metadata_birth_pending: false,
                     last_active: Instant::now(),
                 },
             );
@@ -1175,7 +1226,9 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use std::time::Instant;
 
-    use super::{parse_session_key, persisted_session_runtime_differs, SessionRouter};
+    use super::{
+        parse_session_key, persisted_session_runtime_differs, EnsureSidecarInfo, SessionRouter,
+    };
     use crate::im::types::PeerSession;
     use crate::sidecar::SidecarManager;
 
@@ -1191,6 +1244,7 @@ mod tests {
             source_display_name: None,
             last_sender_name: None,
             message_count: 0,
+            metadata_birth_pending: false,
             last_active: Instant::now(),
         }
     }
@@ -1257,6 +1311,25 @@ mod tests {
     }
 
     #[test]
+    fn metadata_birth_pending_is_consumed_after_first_enqueue() {
+        let session_key = "agent:a:feishu:private:user";
+        let mut router = SessionRouter::new(PathBuf::from("/tmp/workspace"));
+        let info = EnsureSidecarInfo {
+            session_key: session_key.to_string(),
+            session_id: "new-session".to_string(),
+            workspace: PathBuf::from("/tmp/workspace"),
+            prev_count: 0,
+            metadata_birth_pending: true,
+        };
+
+        router.commit_ensure_sidecar(session_key, &info, 1234);
+        assert!(router.metadata_birth_pending(session_key));
+
+        router.mark_metadata_birth_consumed(session_key);
+        assert!(!router.metadata_birth_pending(session_key));
+    }
+
+    #[test]
     fn persisted_runtime_drift_rotates_peer_session_without_live_sidecar() {
         let session_key = "agent:a:feishu:private:user";
         let mut router = SessionRouter::new(PathBuf::from("/tmp/workspace"));
@@ -1280,5 +1353,6 @@ mod tests {
         assert_eq!(ps.session_id, new_id);
         assert_eq!(ps.sidecar_port, 0);
         assert_eq!(ps.message_count, 0);
+        assert!(ps.metadata_birth_pending);
     }
 }

@@ -18,12 +18,13 @@
  * sandbox. A guard test asserts the binding before anything destructive runs.
  */
 
-import { mkdtempSync, rmSync, existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
+import { mkdtempSync, rmSync, existsSync, readFileSync, writeFileSync, mkdirSync, readdirSync, utimesSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 
 type SessionStoreModule = typeof import('../SessionStore');
+type SessionMetadata = import('../types/session').SessionMetadata;
 
 let home: string;
 let store: SessionStoreModule;
@@ -31,6 +32,7 @@ let originalHome: string | undefined;
 
 const sessionsDir = () => join(home, '.myagents', 'sessions');
 const sessionsJson = () => join(home, '.myagents', 'sessions.json');
+const sessionsTmpJson = () => join(home, '.myagents', 'sessions.json.tmp');
 const jsonlPath = (id: string) => join(sessionsDir(), `${id}.jsonl`);
 
 function msg(id: number) {
@@ -39,6 +41,18 @@ function msg(id: number) {
         role: 'user' as const,
         content: `message ${id}`,
         timestamp: new Date().toISOString(),
+    };
+}
+
+function sessionMeta(id: string, agentDir: string): SessionMetadata {
+    return {
+        id,
+        agentDir,
+        title: `Recovered ${id.slice(0, 4)}`,
+        createdAt: '2026-01-01T00:00:00.000Z',
+        lastActiveAt: '2026-01-01T00:00:00.000Z',
+        unifiedSession: true,
+        runtime: 'builtin',
     };
 }
 
@@ -63,6 +77,125 @@ describe('issue #336 — delete vs persist resurrection', () => {
         expect(existsSync(sessionsJson())).toBe(true);
         const all = JSON.parse(readFileSync(sessionsJson(), 'utf-8')) as Array<{ id: string }>;
         expect(all.some(s => s.id === meta.id)).toBe(true);
+    });
+
+    it('backs up a corrupt sessions.json before creating metadata for a new session', async () => {
+        writeFileSync(sessionsJson(), '{"truncated"', 'utf-8');
+
+        const meta = await store.createSession('/tmp/workspace-corrupt');
+        const recovered = store.getSessionMetadata(meta.id);
+        expect(recovered?.id).toBe(meta.id);
+
+        const backupNames = readdirSync(join(home, '.myagents'))
+            .filter(name => name.startsWith('sessions.json.corrupt-'));
+        expect(backupNames.length).toBeGreaterThan(0);
+        expect(readFileSync(join(home, '.myagents', backupNames[0]), 'utf-8')).toBe('{"truncated"');
+
+        const persistResult = await store.saveSessionMessages(meta.id, [msg(10)]);
+        expect(persistResult.ok).toBe(true);
+        expect(existsSync(jsonlPath(meta.id))).toBe(true);
+    });
+
+    it('salvages valid metadata from a malformed sessions.json array before metadata creation', async () => {
+        const beforeBackups = readdirSync(join(home, '.myagents'))
+            .filter(name => name.startsWith('sessions.json.corrupt-')).length;
+        const preserved = sessionMeta('22222222-2222-2222-2222-222222222222', '/tmp/workspace-preserved-malformed');
+        writeFileSync(sessionsJson(), JSON.stringify([preserved, null], null, 2), 'utf-8');
+        expect(store.getSessionMetadata(preserved.id)?.id).toBe(preserved.id);
+
+        const meta = await store.createSession('/tmp/workspace-malformed');
+        expect(store.getSessionMetadata(meta.id)?.id).toBe(meta.id);
+        expect(store.getSessionMetadata(preserved.id)?.id).toBe(preserved.id);
+
+        const backupNames = readdirSync(join(home, '.myagents'))
+            .filter(name => name.startsWith('sessions.json.corrupt-'));
+        expect(backupNames.length).toBe(beforeBackups + 1);
+        const latestBackup = backupNames.sort().at(-1);
+        expect(latestBackup).toBeTruthy();
+        expect(readFileSync(join(home, '.myagents', latestBackup!), 'utf-8')).toContain(preserved.id);
+
+        const repaired = JSON.parse(readFileSync(sessionsJson(), 'utf-8')) as Array<{ id: string }>;
+        expect(repaired.some(s => s.id === preserved.id)).toBe(true);
+        expect(repaired.some(s => s.id === meta.id)).toBe(true);
+    });
+
+    it('salvages complete metadata objects from truncated sessions.json before metadata creation', async () => {
+        const beforeBackups = readdirSync(join(home, '.myagents'))
+            .filter(name => name.startsWith('sessions.json.corrupt-')).length;
+        const preserved = sessionMeta('33333333-3333-3333-3333-333333333333', '/tmp/workspace-preserved-truncated');
+        const corruptContent = `[\n${JSON.stringify(preserved, null, 2)},\n{"id":`;
+        writeFileSync(sessionsJson(), corruptContent, 'utf-8');
+        expect(store.getSessionMetadata(preserved.id)?.id).toBe(preserved.id);
+
+        const meta = await store.createSession('/tmp/workspace-truncated');
+        expect(store.getSessionMetadata(meta.id)?.id).toBe(meta.id);
+        expect(store.getSessionMetadata(preserved.id)?.id).toBe(preserved.id);
+
+        const backupNames = readdirSync(join(home, '.myagents'))
+            .filter(name => name.startsWith('sessions.json.corrupt-'));
+        expect(backupNames.length).toBe(beforeBackups + 1);
+        const latestBackup = backupNames.sort().at(-1);
+        expect(latestBackup).toBeTruthy();
+        expect(readFileSync(join(home, '.myagents', latestBackup!), 'utf-8')).toBe(corruptContent);
+
+        const repaired = JSON.parse(readFileSync(sessionsJson(), 'utf-8')) as Array<{ id: string }>;
+        expect(repaired.some(s => s.id === preserved.id)).toBe(true);
+        expect(repaired.some(s => s.id === meta.id)).toBe(true);
+    });
+
+    it('writes a repaired index even when the metadata operation is a no-op', async () => {
+        const beforeBackups = readdirSync(join(home, '.myagents'))
+            .filter(name => name.startsWith('sessions.json.corrupt-')).length;
+        const preserved = sessionMeta('44444444-4444-4444-4444-444444444444', '/tmp/workspace-preserved-noop');
+        writeFileSync(sessionsJson(), JSON.stringify([preserved, null], null, 2), 'utf-8');
+
+        const deleted = await store.deleteSession('55555555-5555-5555-5555-555555555555');
+        expect(deleted).toBe(false);
+
+        const backupNames = readdirSync(join(home, '.myagents'))
+            .filter(name => name.startsWith('sessions.json.corrupt-'));
+        expect(backupNames.length).toBe(beforeBackups + 1);
+        expect(existsSync(sessionsJson())).toBe(true);
+        const repaired = JSON.parse(readFileSync(sessionsJson(), 'utf-8')) as Array<{ id: string }>;
+        expect(repaired).toHaveLength(1);
+        expect(repaired[0]?.id).toBe(preserved.id);
+    });
+
+    it('ignores stale sessions.json.tmp when repairing a corrupt index', async () => {
+        const stale = sessionMeta('66666666-6666-6666-6666-666666666666', '/tmp/workspace-stale-tmp');
+        writeFileSync(sessionsTmpJson(), JSON.stringify([stale], null, 2), 'utf-8');
+        writeFileSync(sessionsJson(), '{"newer-corrupt"', 'utf-8');
+        const oldDate = new Date('2026-01-01T00:00:00.000Z');
+        const newerDate = new Date('2026-01-02T00:00:00.000Z');
+        utimesSync(sessionsTmpJson(), oldDate, oldDate);
+        utimesSync(sessionsJson(), newerDate, newerDate);
+
+        const meta = await store.createSession('/tmp/workspace-ignore-stale-tmp');
+
+        expect(store.getSessionMetadata(meta.id)?.id).toBe(meta.id);
+        expect(store.getSessionMetadata(stale.id)).toBeNull();
+        const repaired = JSON.parse(readFileSync(sessionsJson(), 'utf-8')) as Array<{ id: string }>;
+        expect(repaired.some(s => s.id === stale.id)).toBe(false);
+    });
+
+    it('prefers a valid newer sessions.json.tmp over partial structural salvage', async () => {
+        const partial = sessionMeta('77777777-7777-7777-7777-777777777777', '/tmp/workspace-partial-main');
+        const tmpOnly = sessionMeta('88888888-8888-8888-8888-888888888888', '/tmp/workspace-newer-tmp');
+        writeFileSync(sessionsJson(), `[\n${JSON.stringify(partial, null, 2)},\n{"id":`, 'utf-8');
+        writeFileSync(sessionsTmpJson(), JSON.stringify([partial, tmpOnly], null, 2), 'utf-8');
+        const olderDate = new Date('2026-01-01T00:00:00.000Z');
+        const newerDate = new Date('2026-01-02T00:00:00.000Z');
+        utimesSync(sessionsJson(), olderDate, olderDate);
+        utimesSync(sessionsTmpJson(), newerDate, newerDate);
+
+        const meta = await store.createSession('/tmp/workspace-prefer-newer-tmp');
+
+        expect(store.getSessionMetadata(meta.id)?.id).toBe(meta.id);
+        expect(store.getSessionMetadata(tmpOnly.id)?.id).toBe(tmpOnly.id);
+        const repaired = JSON.parse(readFileSync(sessionsJson(), 'utf-8')) as Array<{ id: string }>;
+        expect(repaired.some(s => s.id === partial.id)).toBe(true);
+        expect(repaired.some(s => s.id === tmpOnly.id)).toBe(true);
+        expect(repaired.some(s => s.id === meta.id)).toBe(true);
     });
 
     it('a post-delete persist must NOT resurrect the JSONL (the #336 race)', async () => {

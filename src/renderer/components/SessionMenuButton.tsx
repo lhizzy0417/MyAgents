@@ -35,7 +35,6 @@ import {
 } from 'lucide-react';
 
 import { deleteSession, updateSession, type SessionMetadata } from '@/api/sessionClient';
-import { deactivateSession } from '@/api/tauriClient';
 import { handoverSessionToChannel } from '@/api/sessionHandoverClient';
 import { exportSessionAsMarkdown } from '@/utils/sessionExport';
 import type { ChannelSurface } from '@/hooks/useSessionSurfaces';
@@ -95,8 +94,12 @@ export interface SessionMenuButtonProps {
     onShowContext?: () => void;
     /** Caller persists the change and updates sessionMeta optimistically. */
     onFavoriteChanged?: (next: boolean, updated: SessionMetadata | null) => void;
-    /** Called after a successful delete so caller can reset to a new session. */
-    onDeleted: () => void;
+    /**
+     * Move the mounted Chat tab off this session before storage deletion.
+     * The storage client deliberately refuses to delete live sidecars; only the
+     * caller owns enough lifecycle context to reset/switch the current tab.
+     */
+    prepareCurrentSessionForDelete: () => Promise<boolean>;
 }
 
 export default function SessionMenuButton({
@@ -111,7 +114,7 @@ export default function SessionMenuButton({
     onOpenRename,
     onShowContext,
     onFavoriteChanged,
-    onDeleted,
+    prepareCurrentSessionForDelete,
 }: SessionMenuButtonProps) {
     const toast = useToast();
     const triggerRef = useRef<HTMLButtonElement | null>(null);
@@ -219,10 +222,16 @@ export default function SessionMenuButton({
     const handleConfirmDelete = useCallback(async () => {
         setPendingDelete(false);
         try {
-            const ok = await deleteSession(sessionId);
+            const sessionIdToDelete = sessionId;
+            const prepared = await prepareCurrentSessionForDelete();
+            if (!prepared) {
+                toast.error('删除失败，请重试');
+                return;
+            }
+
+            const ok = await deleteSession(sessionIdToDelete);
             if (ok) {
-                await deactivateSession(sessionId);
-                onDeleted();
+                toast.success('已删除');
             } else {
                 toast.error('删除失败，请重试');
             }
@@ -230,7 +239,7 @@ export default function SessionMenuButton({
             console.error('[SessionMenuButton] delete failed:', err);
             toast.error('删除失败，请重试');
         }
-    }, [sessionId, onDeleted, toast]);
+    }, [sessionId, prepareCurrentSessionForDelete, toast]);
 
     // ─── Bot submenu ──────────────────────────────────────────────────────
 

@@ -76,6 +76,10 @@ export interface PersistInputOptionParams {
   /** Session snapshot writer — chat-tab only (owned sessions). Omit for
    *  launcher (no session yet) or unlocked sessions (no snapshot). */
   patchSnapshot?: (patch: SessionSnapshotPatch) => Promise<unknown>;
+  /** Chat-owned sessions require the snapshot write to succeed before any
+   *  Project/Agent default mutation. Launcher keeps the historical optional
+   *  mode because no session owner exists yet. */
+  snapshotWriteMode?: 'optional' | 'required' | 'disabled';
 
   /** Live sidecar push for MCP — chat-tab only (launcher has no Sidecar to
    *  push to; the new sidecar created during handoff picks up the disk write). */
@@ -105,10 +109,10 @@ export interface SessionSnapshotPatch {
   model?: string | null;
   /** #324 — persisted literally (incl. 'default', which meaningfully pins the
    *  session back to default over a non-default agent value). */
-  reasoningEffort?: string;
-  permissionMode?: string;
-  mcpEnabledServers?: string[];
-  enabledPluginIds?: string[];
+  reasoningEffort?: string | null;
+  permissionMode?: string | null;
+  mcpEnabledServers?: string[] | null;
+  enabledPluginIds?: string[] | null;
   /** #300 — credential snapshot. `null` clears it so the sidecar re-resolves the
    *  env live from `providerId`. Set to null whenever providerId changes (the old
    *  frozen env belongs to the OLD provider). Never sets a concrete value here —
@@ -129,8 +133,9 @@ export interface SessionSnapshotPatch {
  */
 export async function persistInputOptionChange(
   params: PersistInputOptionParams,
-): Promise<{ ok: boolean; errors: string[] }> {
+): Promise<{ ok: boolean; errors: string[]; snapshotWriteFailed: boolean }> {
   const errors: string[] = [];
+  let snapshotWriteFailed = false;
 
   const projectPatch = buildProjectPatch(params);
   const snapshotPatch = buildSnapshotPatch(params);
@@ -139,11 +144,19 @@ export async function persistInputOptionChange(
   // Order: snapshot first (matches the existing dual-write order in
   // Chat.tsx::persistTabConfigChange) so a snapshot failure surfaces before
   // we update the live config.
-  if (params.patchSnapshot && Object.keys(snapshotPatch).length > 0) {
+  const snapshotWriteMode = params.snapshotWriteMode ?? (params.patchSnapshot ? 'optional' : 'disabled');
+  if (snapshotWriteMode !== 'disabled' && Object.keys(snapshotPatch).length > 0) {
     try {
+      if (!params.patchSnapshot) {
+        throw new Error('session snapshot writer is required but unavailable');
+      }
       await params.patchSnapshot(snapshotPatch);
     } catch (e) {
+      snapshotWriteFailed = true;
       errors.push(`session snapshot: ${describe(e)}`);
+      if (snapshotWriteMode === 'required') {
+        return { ok: false, errors, snapshotWriteFailed };
+      }
     }
   }
 
@@ -216,7 +229,7 @@ export async function persistInputOptionChange(
     }
   }
 
-  return { ok: errors.length === 0, errors };
+  return { ok: errors.length === 0, errors, snapshotWriteFailed };
 }
 
 // ─── builders ────────────────────────────────────────────────────────────
