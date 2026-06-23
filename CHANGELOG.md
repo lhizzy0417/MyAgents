@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.2.39] - 2026-06-24
+
+> 本版聚焦会话配置归属与惰性会话物化：新建空会话、恢复会话、IM / 定时任务 / 后台通道共用会话时，模型、Provider、MCP 与 Agent 配置会回到对应 owner 的权威来源；同时修复活跃 sidecar 清理、启动页 Provider CTA 等稳定性问题。
+
+### Changed
+
+- **会话配置快照更明确**：Session 记录补齐 runtime session id、启用插件、配置快照时间和物化状态等元数据，恢复或懒加载时能按创建 owner 的配置重新进入 Chat。
+- **桌面 / IM / 定时任务配置归属收敛**：不同入口不再共用一套隐式配置状态，Agent 配置、远程 MCP registry 与会话 runtime 配置各自保留权威来源。
+
+### Fixed
+
+- **空会话改模型不再误报配置未保存**（[#399](https://github.com/hAcKlyc/MyAgents/issues/399)）：刚打开的空 session 在切换模型或配置时，会先完成必要的会话物化与配置落盘，不再提示“配置未能完全保存”。
+- **恢复 / 懒加载会话配置不再丢失**：从启动页、历史或冷恢复进入会话时，owned config snapshot 会被保留，避免 Provider、模型、MCP 或插件配置回退成旧值。
+- **通道会话不再覆盖桌面会话状态**：IM、定时任务和后台 completion 流程保留各自 owner 的 session state，减少跨入口切换后的配置串线。
+- **活跃 sidecar 不再被清理误删**：会话清理流程会跳过仍在运行或已被其他 owner 接管的 sidecar，避免误删后重启、失忆或空转。
+- **启动页 Provider CTA 可正常点击**：无可用 Provider 时的引导按钮恢复可点击状态，用户可以直接进入配置流程。
+
+---
+
 ## [0.2.38] - 2026-06-23
 
 > 本版聚焦外部 Runtime 的连续对话控制、会话稳定性和较大规模技术债清理：Codex 现在能跟随“实时响应 / 轮次响应”的连续发送设置，IM / 定时任务 / 后台注入回合对成功与失败的判断更可靠；同时完成 Session Engine、Sidecar owner 和前端巨型模块拆分，收紧 Provider / 上下文身份、Runtime CLI 检测和 Chat 欢迎页启动体验。
