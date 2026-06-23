@@ -228,6 +228,10 @@ export function spaceSetIssueStatus(id: string, status: string) {
   return spaceApi<{ status: string; updatedAt: string }>('POST', `/api/issues/${encodeURIComponent(id)}/status`, { status });
 }
 
+export function spaceCloseOwnIssue(id: string) {
+  return spaceApi<{ status: string; updatedAt: string }>('POST', `/api/issues/${encodeURIComponent(id)}/close-own`, {});
+}
+
 export function spaceDispatchIssue(id: string, registeredAgentId: string) {
   return spaceApi<{ dispatch: { id: string; issueId: string; registeredAgentId: string; deliveryStatus: string; createdAt: string } }>(
     'POST',
