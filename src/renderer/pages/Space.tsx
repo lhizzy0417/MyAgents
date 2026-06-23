@@ -17,6 +17,7 @@ import {
   X,
 } from 'lucide-react';
 
+import myagentsWebLogo from '@/assets/brand/myagents-web-logo.png';
 import CustomSelect, { type SelectOption } from '@/components/CustomSelect';
 import OverlayBackdrop from '@/components/OverlayBackdrop';
 import { useToast } from '@/components/Toast';
@@ -233,12 +234,11 @@ export default function Space({ isActive }: { isActive: boolean }) {
       <div className="flex h-full items-center justify-center bg-[var(--paper)] px-6">
         <div className="w-full max-w-md rounded-lg border border-[var(--line)] bg-[var(--paper-elevated)] p-6 shadow-sm">
           <div className="mb-5 flex items-center gap-3">
-            <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-[var(--accent-warm-subtle)] text-[var(--accent-warm)]">
-              <UploadCloud className="h-5 w-5" />
-            </div>
+            <img src={myagentsWebLogo} alt="" className="h-10 w-10 rounded-lg shadow-sm" />
             <div>
-              <h1 className="text-xl font-semibold text-[var(--ink)]">MyAgents社区</h1>
-              <p className="text-sm text-[var(--ink-muted)]">Google 账号登录后自动加入官方 Space</p>
+              <p className="text-xs font-medium text-[var(--accent-warm)]">MyAgents社区</p>
+              <h1 className="text-xl font-semibold text-[var(--ink)]">选择登录方式</h1>
+              <p className="text-sm text-[var(--ink-muted)]">使用 Google 账号登录后自动加入官方 Space</p>
             </div>
           </div>
           <button
@@ -248,8 +248,11 @@ export default function Space({ isActive }: { isActive: boolean }) {
             className="flex h-10 w-full items-center justify-center gap-2 rounded-lg bg-[var(--button-primary-bg)] px-4 text-sm font-medium text-[var(--button-primary-text)] transition-colors hover:bg-[var(--button-primary-bg-hover)] disabled:cursor-wait disabled:opacity-70"
           >
             {authBusy ? <Loader2 className="h-4 w-4 animate-spin" /> : <LogIn className="h-4 w-4" />}
-            {authBusy ? '等待登录' : '使用 Google 登录'}
+            {authBusy ? '等待 Google 登录完成' : '继续使用 Google'}
           </button>
+          <p className="mt-3 text-center text-xs text-[var(--ink-muted)]">
+            浏览器完成授权后，此页面会自动同步登录状态。
+          </p>
         </div>
       </div>
     );
@@ -261,9 +264,7 @@ export default function Space({ isActive }: { isActive: boolean }) {
     <div className="flex h-full flex-col bg-[var(--paper)] text-[var(--ink)]">
       <header className="flex h-14 shrink-0 items-center justify-between border-b border-[var(--line)] px-5">
         <div className="flex items-center gap-3">
-          <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-[var(--accent-warm-subtle)] text-[var(--accent-warm)]">
-            <UploadCloud className="h-4 w-4" />
-          </div>
+          <img src={myagentsWebLogo} alt="" className="h-8 w-8 rounded-lg shadow-sm" />
           <div>
             <div className="flex items-center gap-2">
               <h1 className="text-lg font-semibold text-[var(--ink)]">{session.space.name}</h1>
