@@ -26,6 +26,7 @@ describe('SESSION_ENGINE_ROUTE_CONTRACTS', () => {
       'POST /api/model/set',
       'POST /api/reasoning-effort/set',
       'POST /api/session/permission-mode',
+      'POST /api/session/materialize',
       'GET /api/session/config',
       'GET /api/session-state',
       'GET /api/session-latest-result',

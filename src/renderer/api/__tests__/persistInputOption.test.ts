@@ -45,6 +45,46 @@ describe('persistInputOptionChange — disk write fanout', () => {
     });
   });
 
+  it('required snapshot mode stops before project/agent writes when the session snapshot fails', async () => {
+    const m = makeMocks();
+    m.patchSnapshot.mockRejectedValue(new Error('session not materialized'));
+
+    const res = await persistInputOptionChange({
+      workspaceId: 'ws-1',
+      agentId: 'agent-1',
+      isExternalRuntime: false,
+      fields: { permissionMode: 'plan' },
+      patchProject: m.patchProject,
+      patchAgentConfig: m.patchAgentConfig,
+      patchSnapshot: m.patchSnapshot,
+      snapshotWriteMode: 'required',
+    });
+
+    expect(res.ok).toBe(false);
+    expect(res.errors[0]).toContain('session snapshot: session not materialized');
+    expect(m.patchProject).not.toHaveBeenCalled();
+    expect(m.patchAgentConfig).not.toHaveBeenCalled();
+  });
+
+  it('optional snapshot mode keeps launcher-style project/agent writes after snapshot failure', async () => {
+    const m = makeMocks();
+    m.patchSnapshot.mockRejectedValue(new Error('snapshot unavailable'));
+
+    const res = await persistInputOptionChange({
+      workspaceId: 'ws-1',
+      agentId: 'agent-1',
+      isExternalRuntime: false,
+      fields: { permissionMode: 'plan' },
+      patchProject: m.patchProject,
+      patchAgentConfig: m.patchAgentConfig,
+      patchSnapshot: m.patchSnapshot,
+    });
+
+    expect(res.ok).toBe(false);
+    expect(m.patchProject).toHaveBeenCalledWith('ws-1', { permissionMode: 'plan' });
+    expect(m.patchAgentConfig).toHaveBeenCalledWith('agent-1', { permissionMode: 'plan' });
+  });
+
   it('#300: clears snapshot providerEnvJson when providerId changes', async () => {
     const m = makeMocks();
     await persistInputOptionChange({

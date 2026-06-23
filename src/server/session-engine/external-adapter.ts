@@ -3,6 +3,7 @@ import {
   getAgentState,
   getSessionId,
   materializeCurrentSessionMetadataForPublishedReset,
+  materializePendingDesktopSession as materializeBuiltinPendingDesktopSession,
   resetSession,
 } from '../agent-session';
 import {
@@ -330,6 +331,18 @@ export function createExternalSessionEngine(): SessionEngine {
 
     updateReasoningEffort(effort) {
       return setExternalReasoningEffort(effort);
+    },
+
+    async materializePendingDesktopSession(request) {
+      await awaitExternalSessionStarting();
+      if (isExternalSessionActive()) {
+        await stopExternalSession();
+      }
+      const result = await materializeBuiltinPendingDesktopSession(request.snapshotPatch);
+      if (result.success && result.sessionId) {
+        restoreExternalSessionState(result.sessionId, request.workspacePath, { type: 'desktop' });
+      }
+      return result;
     },
 
     updateRuntimeConfig(patch, options) {

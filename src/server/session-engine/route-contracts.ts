@@ -176,6 +176,15 @@ export const SESSION_ENGINE_ROUTE_CONTRACTS: SessionEngineRouteContract[] = [
     behavior: 'Updates active engine permission mode.',
   },
   {
+    path: '/api/session/materialize',
+    method: 'POST',
+    engineMethod: 'materializePendingDesktopSession',
+    requiredFields: ['workspacePath'],
+    responseKeys: ['success', 'sessionId', 'metadata', 'error'],
+    failureStatuses: [400, 409, 500],
+    behavior: 'Materializes a pending desktop session before required snapshot writes, using the active engine owner.',
+  },
+  {
     path: '/api/session/config',
     method: 'GET',
     engineMethod: 'getSessionConfigSnapshot',

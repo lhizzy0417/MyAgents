@@ -8,6 +8,7 @@ import {
   parseLiteLLMCatalog,
   lookupModelContextLength,
   lookupModelCapability,
+  lookupProviderModelContextLength,
   __resetModelCapabilityCacheForTests,
 } from './model-capabilities';
 
@@ -213,6 +214,29 @@ describe('capability-suffix tolerance + per-field merge (#338)', () => {
     expect(lookupModelContextLength('claude-sonnet-4-6')).toBe(1_000_000);
     expect(lookupModelContextLength('claude-sonnet-4-6[1m]')).toBe(1_000_000);
     expect(applyContextWindowSuffix('claude-sonnet-4-6')).toBe('claude-sonnet-4-6[1m]');
+  });
+
+  it('prefers the active provider contextLength when duplicate custom providers reuse a model id', () => {
+    const providersDir = join(tmpHome, '.myagents', 'providers');
+    mkdirSync(providersDir, { recursive: true });
+    writeFileSync(
+      join(providersDir, 'dragon-a.json'),
+      JSON.stringify({
+        id: 'dragon-a',
+        models: [{ model: 'claude-sonnet-4-6', contextLength: 1_000_000 }],
+      }),
+    );
+    writeFileSync(
+      join(providersDir, 'dragon-b.json'),
+      JSON.stringify({
+        id: 'dragon-b',
+        models: [{ model: 'claude-sonnet-4-6', contextLength: 200_000 }],
+      }),
+    );
+    __resetModelCapabilityCacheForTests();
+
+    expect(lookupProviderModelContextLength('claude-sonnet-4-6[1m]', 'dragon-b')).toBe(200_000);
+    expect(lookupProviderModelContextLength('claude-sonnet-4-6[1m]', 'dragon-a')).toBe(1_000_000);
   });
 
   // Per-field merge interaction with modalities (Codex review note): a higher-

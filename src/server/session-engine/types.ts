@@ -170,6 +170,23 @@ export type SessionEngineConfigSnapshot = {
   reasoningEffort: string | null;
 };
 
+export type SessionEngineSnapshotMaterializePatch = {
+  model?: string | null;
+  reasoningEffort?: string | null;
+  permissionMode?: string | null;
+  mcpEnabledServers?: string[] | null;
+  providerId?: string | null;
+  providerEnvJson?: string | null;
+};
+
+export type SessionEngineMaterializePendingResult = {
+  success: boolean;
+  sessionId?: string;
+  metadata?: unknown;
+  error?: string;
+  status?: number;
+};
+
 export type SessionEngineLiveOverlay = {
   isActive: boolean;
   runtime?: RuntimeType;
@@ -215,6 +232,10 @@ export interface SessionEngine {
   updateModel(model: string, opts?: { imConfigSync?: boolean }): Promise<{ success: boolean; error?: string }>;
   updatePermissionMode(mode: string): Promise<{ success: boolean; error?: string }>;
   updateReasoningEffort(effort: string): Promise<{ success: boolean; error?: string }>;
+  materializePendingDesktopSession(request: {
+    workspacePath: string;
+    snapshotPatch?: SessionEngineSnapshotMaterializePatch;
+  }): Promise<SessionEngineMaterializePendingResult>;
   updateRuntimeConfig(
     patch: RuntimeConfigPatch,
     options?: { source?: ExternalConfigSource },

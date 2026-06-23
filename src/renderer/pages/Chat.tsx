@@ -42,7 +42,7 @@ import { useWorkspaceChangeSignal } from '@/hooks/useWorkspaceChangeSignal';
 import { isIntroductionAbsentError, shouldShowIntroductionOverlay, useIntroductionContent } from '@/hooks/useIntroductionContent';
 import { resolveAdoptedBuiltinProviderId } from '@/utils/sessionConfigAdoption';
 import { getSessionCronTask, updateCronTaskTab, isTaskExecuting, createCronTask, startCronTask as startCronTaskIpc, startCronScheduler } from '@/api/cronTaskClient';
-import { updateSession as patchSessionMetadata } from '@/api/sessionClient';
+import { updateSession as patchSessionMetadata, type SessionMetadata } from '@/api/sessionClient';
 import { persistInputOptionChange } from '@/api/persistInputOption';
 import type { CronTask } from '@/types/cronTask';
 import { formatScheduleDescription } from '@/types/cronTask';
@@ -1988,9 +1988,32 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
    */
   const patchSnapshot = useCallback(async (patch: Parameters<typeof patchSessionMetadata>[1]) => {
     if (!sessionId) return;
+    if (isPendingSessionId(sessionId)) {
+      if (!agentDir) {
+        throw new Error('Cannot materialize pending session without workspace path.');
+      }
+      const result = await apiPost<{
+        success?: boolean;
+        sessionId?: string;
+        metadata?: SessionMetadata;
+        error?: string;
+      }>('/api/session/materialize', {
+        workspacePath: agentDir,
+        snapshotPatch: patch,
+      });
+      if (!result?.success || !result.sessionId || !result.metadata) {
+        throw new Error(result?.error ?? 'Failed to materialize pending session.');
+      }
+      adoptMigratedSession(result.sessionId);
+      setSessionMeta(result.metadata);
+      return;
+    }
     const updated = await patchSessionMetadata(sessionId, patch);
-    if (updated) setSessionMeta(updated);
-  }, [sessionId, setSessionMeta]);
+    if (!updated) {
+      throw new Error(`Session ${sessionId} not found.`);
+    }
+    setSessionMeta(updated);
+  }, [sessionId, agentDir, apiPost, adoptMigratedSession, setSessionMeta]);
 
   // Persist a Tab-UI config change to session snapshot (owned) + project + agent.
   // See PRD v0.1.69 §4.3 rule 2. Toasts on persistence failure without rolling
@@ -2040,6 +2063,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
       // so the user's in-Tab change actually persists across tab reopen. (See
       // `skipSnapshotWrite` comment above for the loadSession-race rationale.)
       patchSnapshot: skipSnapshotWrite ? undefined : patchSnapshot,
+      snapshotWriteMode: skipSnapshotWrite ? 'disabled' : 'required',
       // Cross-review: Chat's MCP toggle previously did its own
       // `apiPost('/api/mcp/set')` AFTER the helper, leaving the helper's
       // `pushMcpToSidecar` plumbing dead-code. Wire it through so the
@@ -2190,33 +2214,39 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
     // /api/session/config returns). Re-applying persisted snapshot here would
     // overwrite the just-adopted live sidecar config.
     if (adoptedSessionRef.current && adoptedSessionRef.current === sessionMeta.id) return;
-    // Field-by-field merge: `session ?? agent` (Option C). Missing snapshot fields
-    // re-derive from the agent — this is the write-read symmetry of IM live-follow.
+    // Field-by-field merge remains for unlocked / live-follow sessions. Owned
+    // sessions are source-owned by SessionMetadata: falling back to the current
+    // Agent during the async metadata window reintroduces cross-session config
+    // stomp (#395/#396).
     const snapshotRuntime = (sessionMeta.runtime as RuntimeType | undefined) ?? agentRuntime;
     const snapshotIsExternal = snapshotRuntime !== 'builtin';
-    const rawModel = sessionMeta.model ?? (snapshotIsExternal
+    const snapshotOwnsConfig = Boolean(sessionMeta.configSnapshotAt);
+    const fallbackModel = snapshotIsExternal
       ? (currentAgent?.runtimeConfig as RuntimeConfig | undefined)?.model
-      : currentAgent?.model);
+      : currentAgent?.model;
+    const rawModel = snapshotOwnsConfig ? sessionMeta.model : (sessionMeta.model ?? fallbackModel);
     const model = snapshotIsExternal
       ? coerceExternalRuntimeModelForUi(rawModel, snapshotRuntime)
       : rawModel;
-    const rawMode = sessionMeta.permissionMode ?? (snapshotIsExternal
+    const fallbackMode = snapshotIsExternal
       ? (currentAgent?.runtimeConfig as RuntimeConfig | undefined)?.permissionMode
-      : (currentAgent?.permissionMode as string | undefined));
+      : (currentAgent?.permissionMode as string | undefined);
+    const rawMode = snapshotOwnsConfig ? sessionMeta.permissionMode : (sessionMeta.permissionMode ?? fallbackMode);
     const mode = snapshotIsExternal
       ? coerceExternalRuntimePermissionForUi(rawMode, snapshotRuntime)
       : rawMode;
-    const providerId = sessionMeta.providerId ?? currentAgent?.providerId;
-    const mcp = sessionMeta.mcpEnabledServers ?? currentAgent?.mcpEnabledServers;
+    const providerId = snapshotOwnsConfig ? sessionMeta.providerId : (sessionMeta.providerId ?? currentAgent?.providerId);
+    const mcp = snapshotOwnsConfig ? sessionMeta.mcpEnabledServers : (sessionMeta.mcpEnabledServers ?? currentAgent?.mcpEnabledServers);
     // #324 — snapshot effort wins over agent default; a persisted 'default'
     // is meaningful (session explicitly reverted) and flows through as-is.
     // UNCONDITIONAL set (`?? 'default'`, unlike model's `if (model)`): effort's
     // undefined has a defined meaning (= default), so a session without the
     // field must reset the picker — keeping the previous session's value here
     // is a cross-session leak (cross-review Critical).
-    const snapEffort = sessionMeta.reasoningEffort ?? (snapshotIsExternal
+    const fallbackEffort = snapshotIsExternal
       ? (currentAgent?.runtimeConfig as RuntimeConfig | undefined)?.reasoningEffort
-      : currentAgent?.reasoningEffort);
+      : currentAgent?.reasoningEffort;
+    const snapEffort = snapshotOwnsConfig ? sessionMeta.reasoningEffort : (sessionMeta.reasoningEffort ?? fallbackEffort);
     if (snapshotIsExternal) {
       setRuntimeModel(model);
     } else if (model) {
@@ -2324,6 +2354,11 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
     // adoption clears the flag, the user's later edits SHOULD reach the
     // sidecar — applying a sticky guard here would silently swallow them.
     if (configDispositionRef.current !== 'push') return;
+    // Existing-session restore: wait for REST metadata before pushing model
+    // state. The local picker may still contain Agent defaults until
+    // `sessionMeta` hydrates; pushing in that window overwrites the session's
+    // owned sidecar config (#396).
+    if (isSessionLoading) return;
 
     const modelToPush = isExternalRuntime ? runtimeModel : selectedModel;
     // External + no explicit pick → defer to runtime's built-in default.
@@ -2338,7 +2373,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
       lastPushedModelKeyRef.current = null; // allow retry
     });
   }, [isConnected, sessionRuntime, currentAgent, isExternalRuntime,
-      runtimeModel, selectedModel, sessionId, apiPost, configPending]);
+      runtimeModel, selectedModel, sessionId, apiPost, configPending, isSessionLoading]);
 
   // #324 — NO mount-time effort-push effect, deliberately diverging from the
   // model-push effect above. The sidecar self-resolves effort at boot from the

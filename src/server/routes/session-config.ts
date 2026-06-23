@@ -1,6 +1,6 @@
 import type { McpServerDefinition } from '../../shared/config-types';
 import { getSessionEngine } from '../session-engine';
-import type { PermissionMode, ProviderEnv } from '../session-engine/types';
+import type { PermissionMode, ProviderEnv, SessionEngineSnapshotMaterializePatch } from '../session-engine/types';
 import type { InteractionScenario } from '../system-prompt';
 
 function jsonResponse(body: unknown, status = 200): Response {
@@ -8,6 +8,13 @@ function jsonResponse(body: unknown, status = 200): Response {
     status,
     headers: { 'Content-Type': 'application/json' },
   });
+}
+
+function redactSessionMetadata<T>(metadata: T): T {
+  if (!metadata || typeof metadata !== 'object') return metadata;
+  const meta = metadata as T & { providerEnvJson?: unknown };
+  if (meta.providerEnvJson === undefined) return metadata;
+  return { ...meta, providerEnvJson: '[redacted]' };
 }
 
 function parseDesktopInteractionScenario(value: unknown): Extract<InteractionScenario, { type: 'desktop' }> | null {
@@ -92,6 +99,29 @@ export async function handleSessionConfigRoute(
     } catch (error) {
       console.error('[api/session/permission-mode] Error:', error);
       return jsonResponse({ success: false, error: error instanceof Error ? error.message : 'Failed to set permission mode' }, 500);
+    }
+  }
+
+  if (pathname === '/api/session/materialize' && request.method === 'POST') {
+    try {
+      const payload = await request.json() as {
+        workspacePath?: string;
+        snapshotPatch?: SessionEngineSnapshotMaterializePatch;
+      };
+      if (!payload?.workspacePath || typeof payload.workspacePath !== 'string') {
+        return jsonResponse({ success: false, error: 'workspacePath is required' }, 400);
+      }
+      const result = await getSessionEngine().materializePendingDesktopSession({
+        workspacePath: payload.workspacePath,
+        snapshotPatch: payload.snapshotPatch,
+      });
+      return jsonResponse(
+        result.metadata ? { ...result, metadata: redactSessionMetadata(result.metadata) } : result,
+        result.success ? 200 : (result.status ?? 500),
+      );
+    } catch (error) {
+      console.error('[api/session/materialize] Error:', error);
+      return jsonResponse({ success: false, error: error instanceof Error ? error.message : 'Failed to materialize session' }, 500);
     }
   }
 

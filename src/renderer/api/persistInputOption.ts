@@ -76,6 +76,10 @@ export interface PersistInputOptionParams {
   /** Session snapshot writer — chat-tab only (owned sessions). Omit for
    *  launcher (no session yet) or unlocked sessions (no snapshot). */
   patchSnapshot?: (patch: SessionSnapshotPatch) => Promise<unknown>;
+  /** Chat-owned sessions require the snapshot write to succeed before any
+   *  Project/Agent default mutation. Launcher keeps the historical optional
+   *  mode because no session owner exists yet. */
+  snapshotWriteMode?: 'optional' | 'required' | 'disabled';
 
   /** Live sidecar push for MCP — chat-tab only (launcher has no Sidecar to
    *  push to; the new sidecar created during handoff picks up the disk write). */
@@ -139,11 +143,18 @@ export async function persistInputOptionChange(
   // Order: snapshot first (matches the existing dual-write order in
   // Chat.tsx::persistTabConfigChange) so a snapshot failure surfaces before
   // we update the live config.
-  if (params.patchSnapshot && Object.keys(snapshotPatch).length > 0) {
+  const snapshotWriteMode = params.snapshotWriteMode ?? (params.patchSnapshot ? 'optional' : 'disabled');
+  if (snapshotWriteMode !== 'disabled' && Object.keys(snapshotPatch).length > 0) {
     try {
+      if (!params.patchSnapshot) {
+        throw new Error('session snapshot writer is required but unavailable');
+      }
       await params.patchSnapshot(snapshotPatch);
     } catch (e) {
       errors.push(`session snapshot: ${describe(e)}`);
+      if (snapshotWriteMode === 'required') {
+        return { ok: false, errors };
+      }
     }
   }
 

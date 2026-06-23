@@ -27,6 +27,7 @@ import {
   interruptCurrentResponse,
   isSessionBusy,
   materializeCurrentSessionMetadataForPublishedReset,
+  materializePendingDesktopSession as materializeBuiltinPendingDesktopSession,
   resetSession,
   rewindSession,
   setAgents,
@@ -332,6 +333,10 @@ export function createBuiltinSessionEngine(): SessionEngine {
     async updateReasoningEffort(effort) {
       setSessionReasoningEffort(effort);
       return { success: true };
+    },
+
+    materializePendingDesktopSession(request) {
+      return materializeBuiltinPendingDesktopSession(request.snapshotPatch);
     },
 
     async updateRuntimeConfig() {
