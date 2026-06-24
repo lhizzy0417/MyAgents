@@ -15,6 +15,16 @@ Space 是 build-time capability：
 - `cmd_space_get_capability` 返回 `{available, baseUrl, publicClientId, reason}`，只代表构建能力；前端还必须叠加 `config.teamSpaceEnabled === true`（默认关闭）才展示开发中的 Team Space 入口。
 - 缺少能力时，Space UI 不应降级为硬编码 URL；所有云端请求必须经 Rust 能力检查。
 
+### Dev/Test mock data mode
+
+Phase 2 为本地验证和自动化测试新增了显式 mock mode：
+
+- debug/test build 中运行时设置 `MYAGENTS_SPACE_MOCK_DATA=true` 时，`space_build_capability()` 返回可用能力，baseUrl 为 `https://space.mock.myagents.local`。release build 中该环境变量被忽略。
+- mock mode 仍然由 Rust Space 边界拥有：renderer 继续只调用 `src/renderer/api/spaceCloud.ts`，Tauri command/CLI helper 继续走 `src-tauri/src/space_cloud.rs`，不会在 React 组件里塞假数据。
+- mock mode 使用进程内 deterministic 数据集，覆盖 Issues、评论、附件、Skills、Skill 文件、Registered Agents、dispatch。mutation 会更新同一份 in-memory state，便于验证创建/评论/状态/指派等交互。
+- mock mode 不读写真实 `~/.myagents/space/session.json`，不访问 `space.myagents.io`，不作为发布能力写入 CHANGELOG 或 Release notes。
+- mock mode 只用于 dev/test。生产构建仍以 `MYAGENTS_SPACE_ENABLED` / `MYAGENTS_SPACE_BASE_URL` / public client id 的 build-time capability 为准。
+
 ## 模块边界
 
 | 层 | 文件 | 职责 |

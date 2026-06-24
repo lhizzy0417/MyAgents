@@ -25,13 +25,13 @@ const SESSION_FILE: &str = "session.json";
 const LOCAL_AGENTS_FILE: &str = "registered_agents.json";
 const DISPATCH_LOG_FILE: &str = "dispatch_log.json";
 const SPACE_CONNECTOR_INTERVAL_SECS: u64 = 60;
-const MAX_SKILL_ZIP_BYTES: usize = 50 * 1024 * 1024;
+pub(crate) const MAX_SKILL_ZIP_BYTES: usize = 50 * 1024 * 1024;
 const MAX_SKILL_ZIP_ENTRIES: usize = 512;
 const MAX_SKILL_FILE_BYTES: u64 = 10 * 1024 * 1024;
 const MAX_SKILL_TOTAL_BYTES: u64 = 50 * 1024 * 1024;
 const MAX_ATTACHMENT_DOWNLOAD_BYTES: usize = 50 * 1024 * 1024;
-const MAX_ATTACHMENT_UPLOAD_BYTES: u64 = 25 * 1024 * 1024;
-const MAX_ATTACHMENT_UPLOAD_COUNT: usize = 5;
+pub(crate) const MAX_ATTACHMENT_UPLOAD_BYTES: u64 = 25 * 1024 * 1024;
+pub(crate) const MAX_ATTACHMENT_UPLOAD_COUNT: usize = 5;
 static SPACE_CONNECTOR_STARTED: AtomicBool = AtomicBool::new(false);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -343,6 +343,9 @@ pub async fn cmd_space_get_capability() -> Result<SpaceBuildCapability, String> 
 
 #[tauri::command]
 pub async fn cmd_space_get_session() -> Result<Option<SpaceSessionPublic>, String> {
+    if crate::space_cloud_mock::is_enabled() {
+        return Ok(Some(crate::space_cloud_mock::session().into()));
+    }
     ensure_space_available()?;
     Ok(read_current_session()?.map(Into::into))
 }
@@ -426,6 +429,10 @@ pub async fn cmd_space_auth_ack(input: SpaceAuthPollInput) -> Result<(), String>
 
 #[tauri::command]
 pub async fn cmd_space_logout() -> Result<(), String> {
+    if crate::space_cloud_mock::is_enabled() {
+        crate::space_cloud_mock::reset();
+        return Ok(());
+    }
     let capability = space_build_capability();
     let session_to_revoke = capability
         .available
@@ -460,9 +467,6 @@ pub async fn cmd_space_logout() -> Result<(), String> {
 
 #[tauri::command]
 pub async fn cmd_space_api_request(input: SpaceApiRequestInput) -> Result<Value, String> {
-    ensure_space_available()?;
-    let session = require_session()?;
-    let client = http_client()?;
     let method = reqwest::Method::from_bytes(input.method.to_uppercase().as_bytes())
         .map_err(|_| "Invalid HTTP method".to_string())?;
     if !matches!(
@@ -474,6 +478,12 @@ pub async fn cmd_space_api_request(input: SpaceApiRequestInput) -> Result<Value,
     ) {
         return Err("Unsupported Space API method".to_string());
     }
+    if crate::space_cloud_mock::is_enabled() {
+        return crate::space_cloud_mock::api_request(input);
+    }
+    ensure_space_available()?;
+    let session = require_session()?;
+    let client = http_client()?;
     let mut req = with_public_client_id_header(
         client
             .request(method, api_url(&session.base_url, &input.path)?)
@@ -497,6 +507,9 @@ pub async fn cmd_space_api_request(input: SpaceApiRequestInput) -> Result<Value,
 pub async fn cmd_space_register_agent(
     input: SpaceRegisterAgentInput,
 ) -> Result<LocalRegisteredAgentPublic, String> {
+    if crate::space_cloud_mock::is_enabled() {
+        return crate::space_cloud_mock::register_agent(input);
+    }
     ensure_space_available()?;
     let workspace_root = validate_workspace_root(&input.workspace_path)?;
     let workspace_path = workspace_root.to_string_lossy().to_string();
@@ -550,6 +563,9 @@ pub async fn cmd_space_register_agent(
 
 #[tauri::command]
 pub async fn cmd_space_list_local_agents() -> Result<Vec<LocalRegisteredAgentPublic>, String> {
+    if crate::space_cloud_mock::is_enabled() {
+        return Ok(crate::space_cloud_mock::list_local_agents());
+    }
     ensure_space_available()?;
     Ok(read_current_local_agents()?
         .into_iter()
@@ -559,6 +575,9 @@ pub async fn cmd_space_list_local_agents() -> Result<Vec<LocalRegisteredAgentPub
 
 #[tauri::command]
 pub async fn cmd_space_poll_dispatches(input: SpacePollDispatchesInput) -> Result<Value, String> {
+    if crate::space_cloud_mock::is_enabled() {
+        return crate::space_cloud_mock::poll_dispatches(&input.registered_agent_id);
+    }
     let agent = require_local_agent(&input.registered_agent_id)?;
     let session = space_base_url()?;
     authorized_json_request(
@@ -575,6 +594,14 @@ pub async fn cmd_space_poll_dispatches(input: SpacePollDispatchesInput) -> Resul
 pub async fn cmd_space_mark_dispatch_delivered(
     input: SpaceMarkDispatchDeliveredInput,
 ) -> Result<Value, String> {
+    if crate::space_cloud_mock::is_enabled() {
+        return crate::space_cloud_mock::mark_dispatch_delivered(
+            &input.dispatch_id,
+            Some(&input.registered_agent_id),
+            input.local_task_id,
+            input.local_run_id,
+        );
+    }
     let agent = require_local_agent(&input.registered_agent_id)?;
     let session = space_base_url()?;
     authorized_json_request(
@@ -595,6 +622,9 @@ pub async fn cmd_space_mark_dispatch_delivered(
 
 #[tauri::command]
 pub async fn cmd_space_process_dispatches_once() -> Result<SpaceProcessDispatchResult, String> {
+    if crate::space_cloud_mock::is_enabled() {
+        return Ok(crate::space_cloud_mock::process_dispatches_once());
+    }
     process_pending_dispatches().await
 }
 
@@ -668,6 +698,9 @@ pub async fn cmd_space_install_skill(
 
 #[tauri::command]
 pub async fn cmd_space_upload_skill(input: SpaceUploadSkillInput) -> Result<Value, String> {
+    if crate::space_cloud_mock::is_enabled() {
+        return crate::space_cloud_mock::upload_skill(input);
+    }
     let session = require_session()?;
     let file_path = PathBuf::from(input.file_path.trim());
     if !file_path.is_absolute() {
@@ -725,6 +758,9 @@ pub async fn cmd_space_upload_skill(input: SpaceUploadSkillInput) -> Result<Valu
 pub async fn cmd_space_upload_issue_attachments(
     input: SpaceUploadIssueAttachmentsInput,
 ) -> Result<Value, String> {
+    if crate::space_cloud_mock::is_enabled() {
+        return crate::space_cloud_mock::upload_issue_attachments(input);
+    }
     let session = require_session()?;
     let issue_id = input.issue_id.trim();
     if issue_id.is_empty() {
@@ -786,6 +822,15 @@ pub async fn cmd_space_upload_issue_attachments(
 pub async fn cmd_space_download_attachment(
     input: SpaceDownloadAttachmentInput,
 ) -> Result<SpaceDownloadAttachmentResult, String> {
+    if crate::space_cloud_mock::is_enabled() {
+        return crate::space_cloud_mock::download_attachment(
+            &input.workspace_path,
+            &input.attachment_id,
+            input.issue_id.as_deref(),
+            input.file_name.as_deref(),
+            input.output.as_deref(),
+        );
+    }
     let (base_url, token) = if let Some(agent_id) = input.registered_agent_id.as_deref() {
         let agent = require_local_agent(agent_id)?;
         let base = space_base_url()?;
@@ -875,6 +920,11 @@ async fn download_attachment_with_token(
 pub async fn cmd_space_download_skill_zip(
     input: SpaceInstallSkillInput,
 ) -> Result<IpcResponse, String> {
+    if crate::space_cloud_mock::is_enabled() {
+        return Ok(IpcResponse::new(
+            crate::space_cloud_mock::skill_package_bytes(&input.skill_id)?,
+        ));
+    }
     let session = require_session()?;
     let bytes = authorized_bytes_request(
         &session.base_url,
@@ -991,6 +1041,9 @@ pub async fn space_cli_attachment_download(
 }
 
 pub async fn process_pending_dispatches() -> Result<SpaceProcessDispatchResult, String> {
+    if crate::space_cloud_mock::is_enabled() {
+        return Ok(crate::space_cloud_mock::process_dispatches_once());
+    }
     ensure_space_available()?;
     if !team_space_runtime_enabled() {
         return Ok(SpaceProcessDispatchResult {
@@ -1247,6 +1300,14 @@ fn validate_configured_space_base_url(raw: &str) -> Result<String, String> {
 }
 
 pub fn space_build_capability() -> SpaceBuildCapability {
+    if crate::space_cloud_mock::is_enabled() {
+        return SpaceBuildCapability {
+            available: true,
+            base_url: Some(crate::space_cloud_mock::MOCK_BASE_URL.to_string()),
+            public_client_id: Some("mock-public-client".to_string()),
+            reason: None,
+        };
+    }
     if !space_enabled_flag() {
         return SpaceBuildCapability {
             available: false,
@@ -1358,6 +1419,10 @@ async fn authorized_json_request(
     method: reqwest::Method,
     body: Option<Value>,
 ) -> Result<Value, String> {
+    if crate::space_cloud_mock::is_enabled() {
+        let data = crate::space_cloud_mock::api_data_request(method.as_str(), path, body)?;
+        return Ok(serde_json::json!({ "success": true, "data": data }));
+    }
     let capability = ensure_space_available()?;
     let client = http_client()?;
     let mut req = with_public_client_id_header(
@@ -1386,6 +1451,9 @@ async fn authorized_json_data_request(
     method: reqwest::Method,
     body: Option<Value>,
 ) -> Result<Value, String> {
+    if crate::space_cloud_mock::is_enabled() {
+        return crate::space_cloud_mock::api_data_request(method.as_str(), path, body);
+    }
     let capability = ensure_space_available()?;
     let client = http_client()?;
     let mut req = with_public_client_id_header(
@@ -1410,6 +1478,12 @@ async fn authorized_multipart_data_request(
     token: &str,
     form: reqwest::multipart::Form,
 ) -> Result<Value, String> {
+    if crate::space_cloud_mock::is_enabled() {
+        return Err(
+            "Mock Space does not accept raw multipart requests; use typed mock upload commands"
+                .to_string(),
+        );
+    }
     let capability = ensure_space_available()?;
     let response = with_public_client_id_header(
         http_client()?
@@ -1429,6 +1503,9 @@ async fn authorized_raw_request(
     path: &str,
     token: &str,
 ) -> Result<reqwest::Response, String> {
+    if crate::space_cloud_mock::is_enabled() {
+        return Err("Mock Space raw HTTP response is not available through this path".to_string());
+    }
     let capability = ensure_space_available()?;
     let response = with_public_client_id_header(
         http_client()?
@@ -1452,6 +1529,15 @@ async fn authorized_bytes_request(
     path: &str,
     token: &str,
 ) -> Result<Vec<u8>, String> {
+    if crate::space_cloud_mock::is_enabled() {
+        if let Some(skill_id) = path
+            .strip_prefix("/api/skills/")
+            .and_then(|rest| rest.strip_suffix("/package.zip"))
+        {
+            return crate::space_cloud_mock::skill_package_bytes(skill_id);
+        }
+        return Err(format!("Mock Space bytes route not implemented: {}", path));
+    }
     let response = authorized_raw_request(base_url, path, token).await?;
     response
         .bytes()
@@ -1492,6 +1578,9 @@ fn read_session() -> Result<Option<SpaceSession>, String> {
 }
 
 fn require_session() -> Result<SpaceSession, String> {
+    if crate::space_cloud_mock::is_enabled() {
+        return Ok(crate::space_cloud_mock::session());
+    }
     let configured_base_url = space_base_url()?;
     let session = read_session()?.ok_or_else(|| "Not logged in to MyAgents Space".to_string())?;
     if !space_base_urls_equal(&session.base_url, &configured_base_url) {
@@ -1515,12 +1604,34 @@ fn read_local_agents() -> Result<LocalRegisteredAgentsFile, String> {
 }
 
 fn read_current_session() -> Result<Option<SpaceSession>, String> {
+    if crate::space_cloud_mock::is_enabled() {
+        return Ok(Some(crate::space_cloud_mock::session()));
+    }
     let configured_base_url = space_base_url()?;
     Ok(read_session()?
         .filter(|session| space_base_urls_equal(&session.base_url, &configured_base_url)))
 }
 
 fn read_current_local_agents() -> Result<Vec<LocalRegisteredAgent>, String> {
+    if crate::space_cloud_mock::is_enabled() {
+        return Ok(crate::space_cloud_mock::list_local_agents()
+            .into_iter()
+            .map(|agent| LocalRegisteredAgent {
+                id: agent.id.clone(),
+                base_url: agent.base_url.clone(),
+                space_id: agent.space_id.clone(),
+                workspace_id: agent.workspace_id.clone(),
+                display_name: agent.display_name.clone(),
+                workspace_path: agent.workspace_path.clone(),
+                workspace_label: agent.workspace_label.clone(),
+                goal_md: agent.goal_md.clone(),
+                token: format!("mock-token-{}", agent.id),
+                status: agent.status.clone(),
+                created_at: agent.created_at.clone(),
+                updated_at: agent.updated_at.clone(),
+            })
+            .collect());
+    }
     let configured_base_url = space_base_url()?;
     Ok(read_local_agents()?
         .items
@@ -1543,6 +1654,9 @@ fn upsert_local_agent(agent: LocalRegisteredAgent) -> Result<(), String> {
 }
 
 fn require_local_agent(id: &str) -> Result<LocalRegisteredAgent, String> {
+    if crate::space_cloud_mock::is_enabled() {
+        return crate::space_cloud_mock::require_local_agent(id);
+    }
     ensure_space_available()?;
     read_current_local_agents()?
         .into_iter()
@@ -1554,6 +1668,9 @@ fn resolve_local_agent_for_cli(
     agent_id: Option<&str>,
     workspace_path: Option<&str>,
 ) -> Result<LocalRegisteredAgent, String> {
+    if crate::space_cloud_mock::is_enabled() {
+        return crate::space_cloud_mock::resolve_local_agent_for_cli(agent_id, workspace_path);
+    }
     ensure_space_available()?;
     let agents = read_current_local_agents()?
         .into_iter()
@@ -1966,4 +2083,237 @@ fn url_component(value: &str) -> String {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn mock_space_issue_comment_routes_are_mutable_and_method_guarded() {
+        let _mock = crate::space_cloud_mock::enable_for_test();
+        let official = cmd_space_api_request(SpaceApiRequestInput {
+            method: "GET".to_string(),
+            path: "/api/spaces/official".to_string(),
+            body: None,
+        })
+        .await
+        .expect("official metadata should load");
+        assert_eq!(
+            official.pointer("/data/space/name").and_then(Value::as_str),
+            Some("MyAgents社区")
+        );
+        assert!(official
+            .pointer("/data/tags")
+            .and_then(Value::as_array)
+            .map(|items| items.len() >= 7)
+            .unwrap_or(false));
+
+        let issue_list = cmd_space_api_request(SpaceApiRequestInput {
+            method: "GET".to_string(),
+            path: "/api/spaces/official/issues?limit=30".to_string(),
+            body: None,
+        })
+        .await
+        .expect("issue list should load");
+        assert!(issue_list
+            .pointer("/data/items")
+            .and_then(Value::as_array)
+            .map(|items| items.len() >= 18)
+            .unwrap_or(false));
+
+        let skill_list = cmd_space_api_request(SpaceApiRequestInput {
+            method: "GET".to_string(),
+            path: "/api/spaces/official/skills".to_string(),
+            body: None,
+        })
+        .await
+        .expect("skill list should load");
+        assert!(skill_list
+            .pointer("/data/items")
+            .and_then(Value::as_array)
+            .map(|items| items.len() >= 10)
+            .unwrap_or(false));
+        assert!(cmd_space_list_local_agents().await.expect("agents").len() >= 5);
+
+        let result = cmd_space_api_request(SpaceApiRequestInput {
+            method: "POST".to_string(),
+            path: "/api/issues/iss_mock_001/comments".to_string(),
+            body: Some(serde_json::json!({ "body": "补一条来自测试的评论" })),
+        })
+        .await
+        .expect("comment should succeed");
+
+        assert_eq!(result.get("success").and_then(Value::as_bool), Some(true));
+        assert_eq!(
+            result.pointer("/data/comment/body").and_then(Value::as_str),
+            Some("补一条来自测试的评论")
+        );
+
+        let detail = cmd_space_api_request(SpaceApiRequestInput {
+            method: "GET".to_string(),
+            path: "/api/issues/iss_mock_001?commentsLimit=5".to_string(),
+            body: None,
+        })
+        .await
+        .expect("issue detail should load");
+
+        let comments = detail
+            .pointer("/data/comments/items")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(comments.len(), 1);
+        assert_eq!(
+            comments[0].get("body").and_then(Value::as_str),
+            Some("补一条来自测试的评论")
+        );
+
+        let data = space_cli_issue_comment(SpaceCliIssueCommentInput {
+            issue_id: "iss_mock_002".to_string(),
+            body: "Agent 已读取并开始处理。".to_string(),
+            agent_id: Some("rag_mock_frontend".to_string()),
+            workspace_path: None,
+        })
+        .await
+        .expect("cli comment should succeed");
+
+        assert_eq!(
+            data.pointer("/comment/body").and_then(Value::as_str),
+            Some("Agent 已读取并开始处理。")
+        );
+
+        let status = cmd_space_api_request(SpaceApiRequestInput {
+            method: "POST".to_string(),
+            path: "/api/issues/iss_mock_002/status".to_string(),
+            body: Some(serde_json::json!({ "status": "resolved" })),
+        })
+        .await
+        .expect("status should update");
+        assert_eq!(
+            status.pointer("/data/status").and_then(Value::as_str),
+            Some("resolved")
+        );
+
+        let dispatch = cmd_space_api_request(SpaceApiRequestInput {
+            method: "POST".to_string(),
+            path: "/api/issues/iss_mock_002/dispatch".to_string(),
+            body: Some(serde_json::json!({ "registeredAgentId": "rag_mock_frontend" })),
+        })
+        .await
+        .expect("dispatch should succeed");
+        assert_eq!(
+            dispatch
+                .pointer("/data/dispatch/deliveryStatus")
+                .and_then(Value::as_str),
+            Some("pending")
+        );
+        let processed = cmd_space_process_dispatches_once()
+            .await
+            .expect("mock process dispatches");
+        assert!(processed.processed >= 1);
+
+        let upload_dir = tempfile::tempdir().expect("upload tempdir");
+        let upload_source = upload_dir.path().join("trace.log");
+        fs::write(&upload_source, "mock trace").expect("write upload source");
+        let uploaded = cmd_space_upload_issue_attachments(SpaceUploadIssueAttachmentsInput {
+            issue_id: "iss_mock_002".to_string(),
+            file_paths: vec![upload_source.to_string_lossy().to_string()],
+        })
+        .await
+        .expect("attachment upload should succeed");
+        let uploaded_id = uploaded
+            .pointer("/attachments/0/id")
+            .and_then(Value::as_str)
+            .expect("uploaded attachment id")
+            .to_string();
+        let workspace = crate::workspace_files::test_support::make_test_workspace("space_mock");
+        let downloaded = cmd_space_download_attachment(SpaceDownloadAttachmentInput {
+            attachment_id: uploaded_id,
+            workspace_path: workspace.to_string_lossy().to_string(),
+            issue_id: Some("iss_mock_002".to_string()),
+            file_name: None,
+            registered_agent_id: None,
+            output: Some("downloaded/trace.log".to_string()),
+        })
+        .await
+        .expect("attachment download should succeed");
+        assert!(workspace.join(&downloaded.relative_path).is_file());
+
+        let skill_detail = cmd_space_api_request(SpaceApiRequestInput {
+            method: "GET".to_string(),
+            path: "/api/skills/skl_mock_prd_writer".to_string(),
+            body: None,
+        })
+        .await
+        .expect("skill detail should load");
+        assert_eq!(
+            skill_detail
+                .pointer("/data/skill/name")
+                .and_then(Value::as_str),
+            Some("PRD Writer")
+        );
+        let skill_file = cmd_space_api_request(SpaceApiRequestInput {
+            method: "GET".to_string(),
+            path: "/api/skills/skl_mock_prd_writer/file-content?path=SKILL.md".to_string(),
+            body: None,
+        })
+        .await
+        .expect("skill file should load");
+        assert!(skill_file
+            .pointer("/data/text")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .contains("prd-writer"));
+        let package = crate::space_cloud_mock::skill_package_bytes("skl_mock_prd_writer")
+            .expect("mock package bytes");
+        assert!(package.len() > 100);
+
+        let registered = cmd_space_register_agent(SpaceRegisterAgentInput {
+            display_name: "Mock Acceptance Agent".to_string(),
+            workspace_id: "project_acceptance".to_string(),
+            workspace_path: workspace.to_string_lossy().to_string(),
+            workspace_label: Some("Acceptance Workspace".to_string()),
+            goal_md: "Validate Space Phase 2 mock flows.".to_string(),
+        })
+        .await
+        .expect("agent registration should succeed");
+        assert_eq!(registered.display_name, "Mock Acceptance Agent");
+
+        let error = cmd_space_api_request(SpaceApiRequestInput {
+            method: "TRACE".to_string(),
+            path: "/api/issues/iss_mock_001/comments".to_string(),
+            body: Some(serde_json::json!({ "body": "nope" })),
+        })
+        .await
+        .expect_err("TRACE must be rejected");
+
+        assert_eq!(error, "Unsupported Space API method");
+        let _ = fs::remove_dir_all(&workspace);
+    }
+
+    #[test]
+    fn public_client_id_header_is_applied_to_space_requests() {
+        let capability = SpaceBuildCapability {
+            available: true,
+            base_url: Some("https://space.myagents.test".to_string()),
+            public_client_id: Some("client_test_123".to_string()),
+            reason: None,
+        };
+        let client = reqwest::Client::builder().build().expect("client");
+        let request = with_public_client_id_header(
+            client.get("https://space.myagents.test/api/issues/iss_1"),
+            &capability,
+        )
+        .build()
+        .expect("request");
+
+        assert_eq!(
+            request
+                .headers()
+                .get(SPACE_PUBLIC_CLIENT_ID_HEADER)
+                .and_then(|value| value.to_str().ok()),
+            Some("client_test_123")
+        );
+    }
 }

@@ -30,6 +30,7 @@ mod proxy_config;
 pub mod search;
 mod sidecar;
 pub mod space_cloud;
+mod space_cloud_mock;
 mod sse_proxy;
 pub mod system_binary;
 pub mod task;

@@ -6,7 +6,7 @@ updated: 2026-06-24
 scope: "团队 Space Issue 交互与数据生命周期重设计：在现有 Space tab 上重做 Issue 列表、创建弹窗、详情页评论与派发区、状态变更、复制 issue 口令，并修复团队 tab 每次激活就全量刷新页面的基础体验问题。核心是去掉假功能和浮层感，把 Space 数据收敛为稳定的前端数据层 + 显式 revalidate，复用现有 Space/Rust/CLI/registered-agent/dispatch 链路，不做新的 Space 数据模型、不做多 Space UI、不重建云端权限体系。"
 issue: "用户需求（2026-06-24，基于三张截图反馈团队 tab / Issue 创建 / Issue 详情交互）"
 research: ""
-review: "pending（实现前建议先做两个 PoC：① SpaceDataStore/useSyncExternalStore 后 tab 激活不清屏且只静默 revalidate；② `myagents issue <id>` 只读短别名命中现有 space issue-get 路由，不扩大 comment/status 写入口）"
+review: "pending（第一批已覆盖 SpaceDataStore/useSyncExternalStore、Issue 详情/创建/短 CLI；下一批新增评论失败根因修复、Skills 列表去浮层、完整 mock 数据、Rust/management API 接口测试、全按钮无假功能审计）"
 ---
 
 # Space Issue 交互与数据生命周期优化 PRD
@@ -633,6 +633,182 @@ myagents issue <issueId> [--json] [--comments-limit 5] [--comments-cursor <curso
 18. Issues、Skills、Agents、Issue detail、Skill detail、CreateIssueDialog、RegisterAgentDialog 共享同一个 Space 数据快照，不各自拥有独立初始化请求链。
 19. 网络请求失败时保留旧数据，并在局部或 toast 提示错误。
 
-## 9. 开放问题
+## 9. 下一批任务需求（2026-06-24 追加）
+
+### 9.1 新反馈与问题定义
+
+用户在第一批交互优化后继续验证，新增两类截图反馈和一条系统性要求：
+
+1. **评论 Issue 功能无效**：详情页发送评论时 toast 暴露原始错误：
+   `Space API request failed: error sending request for url (https://space.myagents.io/api/issues/{issueId}/comments)`。
+   这说明问题不能只在 UI 层兜 toast；必须从 Space API proxy、云端 comments endpoint、请求体、网络/代理错误表达、mutation 保留输入等链路一起排查。
+2. **Skills 列表仍有浮层卡片感**：`SkillsWorkspace` 的列表仍包在 `rounded-xl border bg-[var(--paper-elevated)]/50 shadow-sm` 大容器里，和 Issue 列表已调整后的“地板上的行列表”不一致。
+3. **需要完整 mock 数据**：MyAgents 社区空间必须有一套像真实社区一样的 mock 数据，覆盖 Issues / Skills / Registered Agents / 评论 / 附件 / dispatch 等场景，方便快速验证所有样式效果。
+4. **后端接口要有单测**：涉及 Space 的后端接口不能只靠真实 `space.myagents.io` 手测；必须有不依赖真实网络的测试，证明最终可用。
+5. **所有按钮必须是真功能**：界面上存在的按钮、可点击控件、看起来像操作的行，都要么实现真实交互，要么改成只读展示/禁用并明确原因；不允许存在 todo/fake 按钮。
+
+这一批的本质不是继续堆 UI，而是把 Space 从“看起来能用”推进到“每个入口都有真实行为、每个接口都有可重复验证、每个状态都有数据可看”。
+
+### 9.2 当前代码审计事实
+
+已核对当前代码，下一批实现必须基于这些事实继续：
+
+- Renderer 已有 `src/renderer/pages/space/spaceStore.ts` 与 `spaceStore.test.ts`；评论走 `actions.commentIssue()`，内部调用 `spaceCommentIssue(issueId, body)`，成功后 patch detail comments 和 list comment count。
+- `src/renderer/api/spaceCloud.ts::spaceCommentIssue()` 通过 `cmd_space_api_request` POST `/api/issues/{id}/comments`，请求体为 `{ body }`。
+- `src-tauri/src/space_cloud.rs::cmd_space_api_request()` 是通用 Space HTTP proxy。它只把 `reqwest::send()` 错误包装成 `Space API request failed: {e}`，renderer 直接把这个 raw message toast 给用户。
+- CLI/management API 另有 `space_cli_issue_comment()`，同样 POST `/api/issues/{id}/comments`，但走 Registered Agent token；这条链路也需要测试。
+- `SkillsWorkspace` 的 list screen 仍使用大卡容器；Issue list 已经改成无大卡的行列表。
+- `SpaceSidebar` 中 `我的小队 soon` 下的 Issues / Skills / Agents 仍是 button。当前点击只 toast `团队 Space 将在后续版本开放`。这属于“有按钮但无真实功能”的高风险入口。
+- `IssueAdminMenu` 名为“管理”，但当前只展示指标和 tag 信息，没有实际管理动作。要么改名为只读“概览”，要么补真实管理动作。
+- `AgentsWorkspace` 里 `0 待处理`、`Poll 60s`、`Token ok` 是硬编码展示，不是后端真实数据。即使它们不是按钮，也会误导用户，必须改为真实数据或删除。
+- 附件列表行有 hover 强调但不是按钮；如果设计上要“点击附件”，必须接入下载/打开逻辑，否则去掉可点击暗示。
+- 目前仓库里只有 renderer Space store/helper 单测，没有 `src-tauri/src/space_cloud.rs` / `management_api.rs` 对 Space issue/comment/status/skill/agent 接口的覆盖。
+
+### 9.3 Phase 2 范围
+
+#### P2-A：修复评论 Issue 失败，并把错误体验做对
+
+必须先复现并定位根因，再修复。不要只改 toast 文案。
+
+排查顺序：
+
+1. 用本地 mock Space HTTP server 验证 `cmd_space_api_request()` POST `/api/issues/{id}/comments` 是否正确发送 method、path、Authorization、public client id header、JSON body。
+2. 用同一个 mock server 验证 `space_cli_issue_comment()` 和 management API `/api/space/issue-comment`，确保 Agent CLI 写评论链路也可用。
+3. 对真实 `space.myagents.io` 的失败只做人工诊断，不把真实网络作为单测依赖。需要确认是 DNS/TLS/代理/服务端路由/权限/session token/请求体契约中的哪一类。
+4. 若是云端 API contract 问题，桌面端 PR 要记录实际 contract，并同步 `spaceCloud.ts` 与 CLI 输入。
+
+交互要求：
+
+- 点击发送后输入框保留内容，直到服务端确认成功才清空。
+- 失败时不要丢失用户输入。
+- 成功后评论立即出现在评论列表，comment count 更新，随后静默 revalidate detail/list。
+- 连续点击发送要被 busy state 阻止，不能重复提交同一条。
+- 空内容不可发送；全空白 trim 后不可发送。
+- 失败 toast 用用户可理解的中文，例如“评论发送失败，请检查网络或稍后重试”；raw URL、reqwest error、HTTP status、response body 进入日志或 debug detail，不直接铺满 toast。
+- 若服务端返回业务错误 envelope，应展示业务错误摘要；若是 transport error，展示 transport 摘要。
+
+必测：
+
+- renderer store：`commentIssue` 成功 patch detail comments 和 list count。
+- renderer store：`commentIssue` 失败不 patch、不清空输入的组件行为至少用 component test 或手动验收覆盖。
+- Rust：`cmd_space_api_request` 对 comments endpoint 的 method/path/body/header 测试。
+- Rust/management API：`space_cli_issue_comment` / `/api/space/issue-comment` 成功、401/403、5xx、invalid JSON response 的测试。
+
+#### P2-B：Skills 列表去掉浮层卡片，和 Issues 列表同一地板语言
+
+`SkillsWorkspace` list screen 要改成无大卡的行列表：
+
+- 移除 list wrapper 上的大圆角、大边框、`paper-elevated` 背景、`shadow-sm`。
+- header 变成普通行头：`N skills` + “官方上传 · 点击查看详情”。
+- skill row 使用 `border-b`、hover、active/selected 状态组织，不使用卡片阴影。
+- loading skeleton、empty state 也直接落在底纸上，不放虚线大卡。
+- Skill detail 内部仍可以有局部面板，因为它是文件/安装工具面；本条只针对 list screen 的“浮起来大盒子”。
+
+验收截图标准：Issues 与 Skills 两个列表的视觉结构一致，用户切到 Skills 不会看到又一张浮起的大白卡。
+
+#### P2-C：MyAgents 社区完整 mock 数据集
+
+目的：快速验证视觉密度、长文本、空态、错误态、各种状态 badge、评论线程、附件、Skill 文件树、Agent 登记卡片，不依赖真实社区数据是否刚好存在。
+
+技术方案：
+
+- 在 Space API 边界提供 deterministic mock mode。优先放在 Rust Space 层或本地 mock HTTP server，使 renderer 仍然通过 `spaceCloud.ts` / Tauri command 访问同一套接口，不在 React 组件里塞假数据。
+- mock mode 只用于 dev/test，不写入真实 `space.myagents.io`，不污染真实 `~/.myagents/space/session.json`。
+- 建议新增显式开关，例如构建/运行时 `MYAGENTS_SPACE_MOCK_DATA=true` 或内部 dev setting；默认生产关闭。
+- 提供 reset seed 能力：每次测试可以回到固定数据，mutation 后可验证变化。
+- mock 数据 ID、时间、作者、状态固定，便于截图和单测断言。
+
+数据覆盖：
+
+- Space：`MyAgents社区`，official/open join，owner/admin/member 三类 membership 可切换。
+- Tags：`bug`、`feature`、`ux`、`docs`、`runtime`、`windows`、`needs-agent`。
+- Issues：至少 18 条，覆盖 `open`、`triaged`、`in_progress`、`resolved`、`closed`、`declined`、`duplicate`、`archived`；包含短标题、长标题、长正文、无正文边界、0/多评论、0/多附件。
+- 评论：每个代表性 issue 至少 3 类作者：owner/member/registered_agent；包含处理记录、追问、结果同步；时间分布要像真实协作。
+- 附件：至少覆盖 png、log、zip、md、txt；大小有 2KB、180KB、3.4MB 等不同量级；下载接口能返回可写入 workspace 的内容。
+- Skills：至少 10 个，包含真实 MyAgents 风格名称和描述，例如 issue triage、frontend design、PRD writer、release helper、PDF/XLSX/docx 工具、browser automation；每个有 revision、updatedAt、文件树。
+- Skill files：至少覆盖 `SKILL.md`、`README.md`、`scripts/*.ts|py`、`assets/*`、二进制文件占位；file-content endpoint 能返回文本或 binary metadata。
+- Registered Agents：至少 5 个，覆盖 active/online/offline/error；workspaceLabel、goalMd、updatedAt 有差异。
+- Dispatch：至少有 pending、delivered、failed 场景，能让“指派 Agent”“同步派发”看到真实变化。
+
+#### P2-D：Space 后端接口单测矩阵
+
+所有测试必须不依赖真实外网，使用 mock HTTP server / tempfile / in-memory state。
+
+Rust / Tauri Space 层至少覆盖：
+
+| 模块 | 接口 | 必测场景 |
+|---|---|---|
+| `cmd_space_api_request` | GET/POST/PATCH/DELETE allowlist | method 校验、path 拼接、Authorization、公有 client header、JSON body、非 JSON response、HTTP envelope 透传 |
+| Issue | list/get/create/comment/status/close-own/dispatch | success、权限错误、不存在、服务端错误、invalid response |
+| Attachments | upload/download | path 校验、大小限制、workspace 内写入、mock 内容完整 |
+| Skills | list/get/file-content/upload/install/download zip | zip 限制、文本/二进制文件、project/global install |
+| Registered Agents | register/list/poll/mark delivered/process once | 本地文件写入、token 保存不外泄、幂等 delivered |
+| CLI management API | `/api/space/issue-get/comment/status/attachment-download` | request body 映射、ok/error envelope、workspacePath/agentId 选择 |
+
+Renderer 侧至少覆盖：
+
+- `spaceApi()` 对 success=false envelope 抛错。
+- `spaceApi()` 对 transport error 经过统一错误归一化。
+- store mutation：create/comment/status/attachment/dispatch/register/uploadSkill 成功 patch；失败 preserve old data。
+- useSpaceData：tab 激活不清空已有 snapshot。
+
+CI/命令要求：
+
+- 增加可单独运行的 targeted test 命令或在现有 test pipeline 中纳入。
+- 测试不能访问 `https://space.myagents.io`。
+- 测试不能依赖用户真实 `~/.myagents/space`；全部用 tempfile / injected home。
+
+#### P2-E：全按钮与可点击控件审计清单
+
+实现者要逐项审计。每一项只能落到三种状态之一：`implemented`、`disabled-with-reason`、`removed/renamed-to-readonly`。
+
+| 区域 | 控件 | 下一批要求 |
+|---|---|---|
+| Sidebar 官方 Space | Issues / Skills / Agents | 已有真实子页，保留；确保切换不触发全页清空 |
+| Sidebar 我的小队 soon | Issues / Skills / Agents | 当前无真实团队空间模型；隐藏子项或 disabled，不再作为可点击 tab 只弹 warning |
+| Sidebar 用户账号 | 账号按钮 / 退出登录 | 账号按钮应支持 click/toggle，不只依赖 hover；退出登录继续真实执行 |
+| Issues toolbar | 搜索 / tag / status / 刷新 / 新建 | 保留真实功能；刷新失败保留旧数据 |
+| Issues toolbar | 管理 | 若只展示指标，改名“概览”；若叫“管理”，必须提供真实管理动作 |
+| Issue row | 点击行 | 打开详情；附件数、评论数、状态都来自真实或 mock 数据 |
+| Create Issue | tag / 附件 / 持续创建 / 创建 / 关闭 | 已有功能要补测试；上传失败不丢表单 |
+| Issue detail top | 状态 badge/menu | 权限判断、状态变更、close-own 全可用 |
+| Issue detail comments | 附件 / 发送图标 | 评论修复；附件上传成功 patch detail；失败保留输入 |
+| Issue detail right | 附件上传 | 可用；附件列表若看起来可点，则实现下载/打开，否则去掉 hover 暗示 |
+| Issue detail right | 指派 Agent / 复制 issue 口令 | 指派真实 dispatch；复制真实 prompt；无 agent 时按钮 disabled 并说明 |
+| Skills toolbar | 上传 Skill / 刷新 | 上传、刷新都要走真实 API 或 mock API，失败保留旧数据 |
+| Skills list | skill row | 打开 detail；列表去浮层 |
+| Skill detail | 返回 / 概览 / 文件 / 全局安装 / 安装到项目 / 文件选择 | 全部真实可用；无 project 时禁用“安装到项目”并解释 |
+| Agents toolbar | 同步派发 / 刷新 / 登记 Agent | 全部真实可用；无 agent 时同步派发 disabled 但说明原因 |
+| Agent card | 查看登记设置 | 展示真实 poll/last sync/token status/pending count；不能再用硬编码假数 |
+| Register Agent | workspace / goal / cancel / register / close | register 真实写云端与本地映射；无 workspace 时禁用并说明 |
+
+#### P2-F：错误与日志规范
+
+Space 的用户错误提示要统一做一层归一化，不再把底层 URL 和 reqwest 原文直接展示给普通用户。
+
+建议新增 helper：
+
+- renderer：`normalizeSpaceError(error, context)`，输出 `{ userMessage, debugMessage, status? }`。
+- Rust：Space HTTP helpers 尽量保留 status code、method、path、request id 到 error/debug log，但 renderer toast 只拿摘要。
+
+规则：
+
+- toast 不展示完整 URL、token、文件绝对路径、response body 大段文本。
+- console/unified log 可以记录 method/path/status/request id，但不能记录 bearer token。
+- 网络错误、权限错误、服务端 5xx、数据 contract 错误使用不同摘要，便于用户判断是否重试。
+
+### 9.4 Phase 2 验收标准
+
+1. 在 mock Space 数据模式下，不登录真实社区也能看到完整 Issues / Skills / Agents 场景，且所有列表、详情、评论、附件、Skill 文件、Agent 卡片都有真实感数据。
+2. 发送 Issue 评论成功可见、失败不丢输入；不再出现 raw `Space API request failed: error sending request for url (...)` 大 toast。
+3. `cmd_space_api_request` 与 CLI management API 的 issue comment/status/get 等链路有后端测试覆盖。
+4. Skills 列表不再有浮层卡片容器，视觉语言与 Issues 列表一致。
+5. Space 页面所有按钮和可点击控件完成审计；没有“点了只 warning/todo”的假入口。
+6. `我的小队 soon` 不再展示成可操作子页入口，除非本期同时实现真实团队空间数据。
+7. Agent 卡片不再展示硬编码 `0 待处理`、`Poll 60s`、`Token ok` 假数据。
+8. 所有新增测试不访问真实 `space.myagents.io`，不读写用户真实 Space 状态文件。
+
+## 10. 开放问题
 
 1. **tag 在持续创建后是否保留**：本 PRD 倾向保留当前 tag，方便批量创建同类 issue；如果“页面清空”需要完全重置，则实现时把 tag 重置为默认。
+2. **mock 数据 owner**：如果 MyAgents Space 云端服务仓库也在同一开发上下文，真实数据库 seed 应归云端服务拥有；桌面端仍需要本地 mock transport 用于 UI/接口测试。当前本 PRD 基于桌面端仓库可见事实，先要求在 Rust Space API 边界提供 deterministic mock。

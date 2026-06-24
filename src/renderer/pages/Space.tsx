@@ -28,6 +28,7 @@ import {
   spaceAuthAck,
   spaceAuthPoll,
   spaceAuthStart,
+  spaceErrorMessage,
   type LocalRegisteredAgent,
   type SpaceIssue,
   type SpaceSession,
@@ -63,7 +64,6 @@ import {
 import { useSpaceData } from '@/pages/space/useSpaceData';
 
 type ViewMode = 'issues' | 'skills' | 'agents';
-type SpaceId = 'community' | 'team';
 type SkillScreen = 'list' | 'detail';
 type SkillDetailMode = 'overview' | 'files';
 
@@ -90,7 +90,7 @@ const SPACE_BACKGROUND_STYLE: CSSProperties = {
 };
 
 function errMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
+  return spaceErrorMessage(error);
 }
 
 function formatTime(value?: string | null): string {
@@ -154,7 +154,6 @@ export default function Space({ isActive }: { isActive: boolean }) {
   const [authBusy, setAuthBusy] = useState(false);
   const [authFlow, setAuthFlow] = useState<{ token: string; expiresAt: number } | null>(null);
   const authPollWarningShownRef = useRef(false);
-  const [activeSpaceId, setActiveSpaceId] = useState<SpaceId>('community');
   const [mode, setMode] = useState<ViewMode>('issues');
   const [issueQ, setIssueQ] = useState('');
   const [selectedTag, setSelectedTag] = useState('');
@@ -328,15 +327,10 @@ export default function Space({ isActive }: { isActive: boolean }) {
     }
   }, [toast]);
 
-  const selectSpaceTab = useCallback((spaceId: SpaceId, next: ViewMode) => {
-    if (spaceId !== 'community') {
-      toast.warning('团队 Space 将在后续版本开放');
-      return;
-    }
-    setActiveSpaceId(spaceId);
+  const selectSpaceTab = useCallback((next: ViewMode) => {
     setMode(next);
     setIssueDetailId(null);
-  }, [toast]);
+  }, []);
 
   const refreshCurrent = useCallback(async () => {
     if (mode === 'issues') await actions.refreshIssues(issueQuery, { force: true });
@@ -392,7 +386,6 @@ export default function Space({ isActive }: { isActive: boolean }) {
       <div className="relative z-10 flex h-full min-h-0">
         <SpaceSidebar
           session={session}
-          activeSpaceId={activeSpaceId}
           mode={mode}
           issueCount={issues.length}
           skillCount={skills.length}
@@ -527,7 +520,6 @@ function SpaceLogin({
 
 function SpaceSidebar({
   session,
-  activeSpaceId,
   mode,
   issueCount,
   skillCount,
@@ -536,23 +528,24 @@ function SpaceSidebar({
   onLogout,
 }: {
   session: SpaceSession;
-  activeSpaceId: SpaceId;
   mode: ViewMode;
   issueCount: number;
   skillCount: number;
   agentCount: number;
-  onSpaceTabChange: (spaceId: SpaceId, mode: ViewMode) => void;
+  onSpaceTabChange: (mode: ViewMode) => void;
   onLogout: () => void;
 }) {
+  const [accountMenuOpen, setAccountMenuOpen] = useState(false);
+  useCloseLayer(() => {
+    if (!accountMenuOpen) return false;
+    setAccountMenuOpen(false);
+    return true;
+  }, 20);
+
   const communityItems: Array<{ mode: ViewMode; label: string; count?: number; icon: typeof MessageSquare }> = [
     { mode: 'issues', label: 'Issues', count: issueCount, icon: MessageSquare },
     { mode: 'skills', label: 'Skills', count: skillCount, icon: Package },
     { mode: 'agents', label: 'Agents', count: agentCount, icon: Bot },
-  ];
-  const teamItems: Array<{ mode: ViewMode; label: string; icon: typeof MessageSquare }> = [
-    { mode: 'issues', label: 'Issues', icon: MessageSquare },
-    { mode: 'skills', label: 'Skills', icon: Package },
-    { mode: 'agents', label: 'Agents', icon: Bot },
   ];
 
   return (
@@ -579,12 +572,12 @@ function SpaceSidebar({
           <nav className="grid gap-1 pt-1 pl-6" aria-label={session.space.name}>
             {communityItems.map((item) => {
               const Icon = item.icon;
-              const selected = activeSpaceId === 'community' && mode === item.mode;
+              const selected = mode === item.mode;
               return (
                 <button
                   key={item.mode}
                   type="button"
-                  onClick={() => onSpaceTabChange('community', item.mode)}
+                  onClick={() => onSpaceTabChange(item.mode)}
                   className={`grid min-h-9 w-full grid-cols-[18px_minmax(0,1fr)_auto] items-center gap-2.5 rounded-lg px-2.5 text-left text-sm font-semibold transition-colors ${
                     selected
                       ? 'bg-[var(--accent-warm-subtle)] text-[var(--accent-warm)]'
@@ -614,47 +607,36 @@ function SpaceSidebar({
             </span>
             <ChevronDown className="h-4 w-4 -rotate-90 text-[var(--ink-muted)] transition-transform group-open/space:rotate-0" />
           </summary>
-          <nav className="grid gap-1 pt-1 pl-6" aria-label="我的小队">
-            {teamItems.map((item) => {
-              const Icon = item.icon;
-              const selected = activeSpaceId === 'team' && mode === item.mode;
-              return (
-                <button
-                  key={item.mode}
-                  type="button"
-                  onClick={() => onSpaceTabChange('team', item.mode)}
-                  className={`grid min-h-9 w-full grid-cols-[18px_minmax(0,1fr)_auto] items-center gap-2.5 rounded-lg px-2.5 text-left text-sm font-semibold transition-colors ${
-                    selected
-                      ? 'bg-[var(--accent-warm-subtle)] text-[var(--accent-warm)]'
-                      : 'text-[var(--ink-muted)] hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]'
-                  }`}
-                >
-                  <Icon className="h-4 w-4 shrink-0" />
-                  <span className="truncate">{item.label}</span>
-                </button>
-              );
-            })}
-          </nav>
+          <div className="ml-6 mt-1 rounded-lg border border-dashed border-[var(--line-subtle)] px-3 py-2 text-xs leading-5 text-[var(--ink-muted)]">
+            私有团队空间尚未开放，当前只显示官方社区空间。
+          </div>
         </details>
       </div>
 
-      <div className="group relative border-t border-[var(--line-subtle)] pt-3">
+      <div className="relative border-t border-[var(--line-subtle)] pt-3">
         <button
           type="button"
+          onClick={() => setAccountMenuOpen((value) => !value)}
+          aria-expanded={accountMenuOpen}
           className="flex h-10 w-full items-center gap-2 rounded-xl border border-[var(--line-subtle)] bg-[var(--paper-elevated)]/60 px-3 text-left text-sm font-semibold text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-elevated)] hover:text-[var(--ink)]"
         >
           <User className="h-4 w-4 shrink-0" />
           <span className="min-w-0 flex-1 truncate">{session.user.email}</span>
           <ChevronDown className="h-3.5 w-3.5 shrink-0" />
         </button>
-        <div className="pointer-events-none absolute bottom-full left-0 right-0 z-20 mb-2 rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)]/95 p-2 opacity-0 shadow-md backdrop-blur-md transition-all group-hover:pointer-events-auto group-hover:translate-y-0 group-hover:opacity-100">
+        <div className={`absolute bottom-full left-0 right-0 z-20 mb-2 rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)]/95 p-2 shadow-md backdrop-blur-md transition-all ${
+          accountMenuOpen ? 'pointer-events-auto translate-y-0 opacity-100' : 'pointer-events-none translate-y-[-4px] opacity-0'
+        }`}>
           <div className="mb-1 border-b border-[var(--line-subtle)] px-2 py-2 text-xs leading-5 text-[var(--ink-muted)]">
             已通过 Google 登录<br />
             {session.user.email}
           </div>
           <button
             type="button"
-            onClick={onLogout}
+            onClick={() => {
+              setAccountMenuOpen(false);
+              onLogout();
+            }}
             className="flex h-9 w-full items-center gap-2 rounded-lg px-2 text-left text-sm font-semibold text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
           >
             <LogOut className="h-4 w-4" />
@@ -723,7 +705,7 @@ function IssuesWorkspace({
           <RefreshCw className="h-4 w-4" />
           刷新
         </button>
-        {admin ? <IssueAdminMenu issueMetrics={issueMetrics} tags={tags} /> : <span />}
+        {admin ? <IssueOverviewMenu issueMetrics={issueMetrics} tags={tags} /> : <span />}
         <button
           type="button"
           onClick={onCreate}
@@ -775,28 +757,41 @@ function IssuesWorkspace({
   );
 }
 
-function IssueAdminMenu({
+function IssueOverviewMenu({
   issueMetrics,
   tags,
 }: {
   issueMetrics: { open: number; inProgress: number; total: number };
   tags: SpaceTag[];
 }) {
+  const [open, setOpen] = useState(false);
+  useCloseLayer(() => {
+    if (!open) return false;
+    setOpen(false);
+    return true;
+  }, 20);
+
   return (
-    <div className="group relative">
+    <div className="relative">
       <button
         type="button"
+        aria-expanded={open}
+        onClick={() => setOpen((value) => !value)}
         className="flex h-10 items-center justify-center gap-2 rounded-xl bg-transparent px-3 text-sm font-semibold text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
       >
         <Settings className="h-4 w-4" />
-        管理
+        概览
       </button>
-      <div className="pointer-events-none absolute right-0 top-full z-20 mt-2 w-80 translate-y-[-4px] rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)]/95 p-2 opacity-0 shadow-md backdrop-blur-md transition-all group-hover:pointer-events-auto group-hover:translate-y-0 group-hover:opacity-100">
+      <div
+        className={`absolute right-0 top-full z-20 mt-2 w-80 rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)]/95 p-2 shadow-md backdrop-blur-md transition-all ${
+          open ? 'pointer-events-auto translate-y-0 opacity-100' : 'pointer-events-none translate-y-[-4px] opacity-0'
+        }`}
+      >
         <section className="m-0 rounded-xl border border-[var(--line-subtle)] bg-[var(--paper-elevated)]/50">
           <div className="flex h-11 items-center justify-between border-b border-[var(--line-subtle)] px-3.5">
             <h2 className="flex items-center gap-2 text-sm font-semibold text-[var(--ink-secondary)]">
               <Activity className="h-4 w-4" />
-              管理员信息
+              Space 概览
             </h2>
           </div>
           <div className="px-3.5 py-3">
@@ -1316,11 +1311,11 @@ function IssueDetailDrawer({
                     <button
                       type="button"
                       disabled={busy || !comment.trim()}
-	                      onClick={() => void sendComment()}
-	                      className="grid h-9 w-9 place-items-center rounded-xl bg-[var(--button-primary-bg)] text-sm font-semibold text-[var(--button-primary-text)] transition-colors hover:bg-[var(--button-primary-bg-hover)] disabled:cursor-wait disabled:opacity-70"
-	                      aria-label="发送评论"
-	                      title="发送评论"
-	                    >
+                      onClick={() => void sendComment()}
+                      className="grid h-9 w-9 place-items-center rounded-xl bg-[var(--button-primary-bg)] text-sm font-semibold text-[var(--button-primary-text)] transition-colors hover:bg-[var(--button-primary-bg-hover)] disabled:cursor-wait disabled:opacity-70"
+                      aria-label="发送评论"
+                      title="发送评论"
+                    >
                       {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
                     </button>
                   </div>
@@ -1350,7 +1345,7 @@ function IssueDetailDrawer({
                 ) : (
                   <div>
                     {detail.attachments.map((attachment) => (
-                      <div key={attachment.id} className="grid min-h-[42px] grid-cols-[18px_minmax(0,1fr)_auto] items-center gap-2 border-b border-dashed border-[var(--line-subtle)] text-sm text-[var(--ink-secondary)] first:border-t hover:text-[var(--accent-warm)]">
+                      <div key={attachment.id} className="grid min-h-[42px] grid-cols-[18px_minmax(0,1fr)_auto] items-center gap-2 border-b border-dashed border-[var(--line-subtle)] text-sm text-[var(--ink-secondary)] first:border-t">
                         <Paperclip className="h-4 w-4" />
                         <span className="truncate">{attachment.name}</span>
                         <small className="text-xs text-[var(--ink-subtle)]">{formatBytes(attachment.sizeBytes)}</small>
@@ -1368,9 +1363,9 @@ function IssueDetailDrawer({
                 <div className="grid gap-2">
                   {admin && (
                     <div className="relative">
-	                      <button
-	                        type="button"
-	                        disabled={localAgents.length === 0 || dispatchingAgentId !== null}
+                      <button
+                        type="button"
+                        disabled={localAgents.length === 0 || dispatchingAgentId !== null}
                         onClick={() => setAgentMenuOpen((value) => !value)}
                         className="flex h-9 w-full items-center justify-center gap-2 rounded-xl bg-[var(--button-secondary-bg)] px-3 text-sm font-semibold text-[var(--button-secondary-text)] transition-colors hover:bg-[var(--button-secondary-bg-hover)] disabled:cursor-wait disabled:opacity-70"
                       >
@@ -1385,23 +1380,23 @@ function IssueDetailDrawer({
                           ) : (
                             localAgents.map((agent) => (
                               <button
-	                                key={agent.id}
-	                                type="button"
-	                                disabled={dispatchingAgentId !== null || !isAgentAssignable(agent)}
-	                                onClick={() => void assignAgent(agent)}
-	                                className="grid min-h-12 w-full grid-cols-[28px_minmax(0,1fr)_auto] items-center gap-2 rounded-lg px-2.5 text-left transition-colors hover:bg-[var(--paper-inset)] disabled:cursor-not-allowed disabled:opacity-55"
-	                              >
+                                key={agent.id}
+                                type="button"
+                                disabled={dispatchingAgentId !== null || !isAgentAssignable(agent)}
+                                onClick={() => void assignAgent(agent)}
+                                className="grid min-h-12 w-full grid-cols-[28px_minmax(0,1fr)_auto] items-center gap-2 rounded-lg px-2.5 text-left transition-colors hover:bg-[var(--paper-inset)] disabled:cursor-not-allowed disabled:opacity-55"
+                              >
                                 <span className="grid h-7 w-7 place-items-center rounded-lg bg-[var(--accent-cool-subtle)] text-xs font-bold text-[var(--accent-cool)]">
                                   {dispatchingAgentId === agent.id ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : initials(agent.displayName)}
                                 </span>
                                 <span className="min-w-0">
-	                                  <strong className="block truncate text-sm font-semibold text-[var(--ink)]">{agent.displayName}</strong>
-	                                  <small className="block truncate text-xs text-[var(--ink-muted)]">{formatAgentSecondaryLabel(agent, projects)}</small>
-	                                </span>
-	                                {!isAgentAssignable(agent) && (
-	                                  <span className="rounded-md bg-[var(--paper-inset)] px-2 py-1 text-xs font-semibold text-[var(--ink-muted)]">{agent.status}</span>
-	                                )}
-	                              </button>
+                                  <strong className="block truncate text-sm font-semibold text-[var(--ink)]">{agent.displayName}</strong>
+                                  <small className="block truncate text-xs text-[var(--ink-muted)]">{formatAgentSecondaryLabel(agent, projects)}</small>
+                                </span>
+                                {!isAgentAssignable(agent) && (
+                                  <span className="rounded-md bg-[var(--paper-inset)] px-2 py-1 text-xs font-semibold text-[var(--ink-muted)]">{agent.status}</span>
+                                )}
+                              </button>
                             ))
                           )}
                         </div>
@@ -1517,20 +1512,27 @@ function SkillsWorkspace({
       </section>
 
       {screen === 'list' || !selected ? (
-        <main className="min-h-0 overflow-hidden px-5 pb-6 pt-4">
-          <section className="h-full min-h-0 overflow-hidden rounded-xl border border-[var(--line-subtle)] bg-[var(--paper-elevated)]/50 shadow-sm" aria-label="Skill list">
-            <div className="grid h-12 grid-cols-[minmax(0,1fr)_auto] items-center gap-3 border-b border-[var(--line-subtle)] px-4 text-xs font-semibold text-[var(--ink-muted)]">
-              <strong className="text-sm font-bold text-[var(--ink-secondary)]">{skills.length} skills</strong>
-              <span>官方上传 · 点击查看详情</span>
+        <main className="min-h-0 overflow-y-auto px-6 pb-8 pt-5">
+          <section className="mx-auto max-w-[1280px]" aria-label="Skill list">
+            <div className="mb-3 grid min-h-9 grid-cols-[minmax(0,1fr)_auto] items-center gap-3 text-xs font-semibold text-[var(--ink-muted)]">
+              <strong className="text-base font-semibold text-[var(--ink-secondary)]">{skills.length} skills</strong>
+              <span className="inline-flex items-center gap-2">
+                {loading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
+                官方上传 · 点击查看详情
+              </span>
             </div>
-            <div className="h-[calc(100%-48px)] overflow-y-auto p-1.5">
+            <div className="border-y border-[var(--line-subtle)]">
               {loading ? (
-                <div className="flex h-64 items-center justify-center text-sm text-[var(--ink-muted)]">
-                  <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                  加载 Skills
+                <div className="grid gap-0">
+                  {Array.from({ length: 4 }).map((_, index) => (
+                    <div key={index} className="min-h-[78px] border-b border-[var(--line-subtle)] py-4 last:border-b-0">
+                      <div className="h-4 w-56 rounded-md bg-[var(--paper-inset)]" />
+                      <div className="mt-3 h-3 w-80 rounded-md bg-[var(--paper-inset)]" />
+                    </div>
+                  ))}
                 </div>
               ) : skills.length === 0 ? (
-                <div className="grid min-h-40 place-items-center rounded-xl border border-dashed border-[var(--line)] bg-[var(--paper-elevated)]/40 text-sm text-[var(--ink-muted)]">
+                <div className="grid min-h-44 place-items-center border-x border-dashed border-[var(--line-subtle)] text-sm text-[var(--ink-muted)]">
                   暂无 Skills
                 </div>
               ) : (
@@ -1540,7 +1542,9 @@ function SkillsWorkspace({
                     type="button"
                     onClick={() => openSkill(skill.id)}
                     style={{ animationDelay: `${index * 42}ms` }}
-                    className="grid min-h-[72px] w-full grid-cols-[minmax(0,1fr)_auto] items-start gap-3.5 rounded-lg px-4 py-3.5 text-left transition-colors first:border-t-0 hover:bg-[var(--paper-elevated)]/70 hover:shadow-[inset_0_0_0_1px_var(--line-subtle)] [&+&]:border-t [&+&]:border-[var(--line-subtle)]"
+                    className={`grid min-h-[78px] w-full grid-cols-[minmax(0,1fr)_auto] items-start gap-4 border-b border-[var(--line-subtle)] px-1 py-4 text-left transition-colors last:border-b-0 sm:px-3 ${
+                      selectedSkillId === skill.id ? 'bg-[var(--paper-elevated)]/70 shadow-[inset_3px_0_0_var(--accent-warm)]' : 'hover:bg-[var(--paper-elevated)]/60'
+                    }`}
                   >
                     <span className="min-w-0">
                       <span className="flex min-w-0 flex-wrap items-center gap-2">
@@ -1554,7 +1558,7 @@ function SkillsWorkspace({
                         <span className="before:mr-2 before:text-[var(--line-strong)] before:content-['·']">点击查看详情</span>
                       </span>
                     </span>
-                    <span className="rounded-md bg-[var(--paper-inset)] px-2 py-1 text-xs font-semibold text-[var(--ink-muted)]">rev {skill.latestRevision}</span>
+                    <span className="hidden pt-1 text-xs font-semibold text-[var(--ink-subtle)] sm:block">{formatDate(skill.updatedAt)}</span>
                   </button>
                 ))
               )}
@@ -1607,11 +1611,22 @@ function SkillDetailWorkspace({
     () => projects.map((project) => ({ value: project.path, label: project.displayName || project.name })),
     [projects],
   );
+  const hasProjects = projectOptions.length > 0;
 
   useEffect(() => {
     setSelectedPath('');
     void actions.refreshSkillDetail(skill.id, { maxAgeMs: SPACE_VISIBLE_REFRESH_TTL_MS }).catch((error) => toast.error(errMessage(error)));
   }, [actions, skill.id, toast]);
+
+  useEffect(() => {
+    if (projectOptions.length === 0) {
+      setProjectPath('');
+      return;
+    }
+    if (!projectOptions.some((option) => option.value === projectPath)) {
+      setProjectPath(projectOptions[0].value);
+    }
+  }, [projectOptions, projectPath]);
 
   useEffect(() => {
     if (!detail || selectedPath) return;
@@ -1694,12 +1709,19 @@ function SkillDetailWorkspace({
               {installingTarget === 'global' ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}
               全局安装
             </button>
-            <CustomSelect value={projectPath} options={projectOptions} onChange={setProjectPath} className="w-48" />
+            {hasProjects ? (
+              <CustomSelect value={projectPath} options={projectOptions} onChange={setProjectPath} className="w-48" />
+            ) : (
+              <span className="inline-flex h-9 items-center rounded-xl bg-[var(--paper-inset)]/60 px-3 text-sm font-semibold text-[var(--ink-muted)]">
+                无项目工作区
+              </span>
+            )}
             <button
               type="button"
-              disabled={installingTarget !== null}
+              disabled={installingTarget !== null || !hasProjects}
+              title={hasProjects ? '安装到选中的项目' : '暂无可安装的项目工作区'}
               onClick={() => void install('project')}
-              className="flex h-9 items-center gap-2 rounded-xl bg-[var(--button-primary-bg)] px-3 text-sm font-semibold text-[var(--button-primary-text)] transition-colors hover:bg-[var(--button-primary-bg-hover)] disabled:cursor-wait disabled:opacity-70"
+              className="flex h-9 items-center gap-2 rounded-xl bg-[var(--button-primary-bg)] px-3 text-sm font-semibold text-[var(--button-primary-text)] transition-colors hover:bg-[var(--button-primary-bg-hover)] disabled:cursor-not-allowed disabled:opacity-70"
             >
               {installingTarget === 'project' ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}
               安装到项目
@@ -1868,7 +1890,7 @@ function AgentsWorkspace({
                     <div className="flex flex-wrap gap-2">
                       <span className="rounded-md bg-[var(--accent-cool-subtle)] px-2 py-1 text-xs font-semibold text-[var(--accent-cool)]"># agent</span>
                     </div>
-                    <span className="rounded-md bg-[var(--paper-inset)] px-2 py-1 text-xs font-semibold text-[var(--ink-muted)]">0 待处理</span>
+                    <span className="rounded-md bg-[var(--paper-inset)] px-2 py-1 text-xs font-semibold text-[var(--ink-muted)]">{formatTime(agent.updatedAt) || '未同步'}</span>
                   </div>
                   <details className="mt-3 border-t border-[var(--line-subtle)] pt-2.5">
                     <summary className="inline-flex cursor-pointer list-none items-center gap-2 text-sm font-semibold text-[var(--ink-muted)] hover:text-[var(--ink)] [&::-webkit-details-marker]:hidden">
@@ -1876,9 +1898,9 @@ function AgentsWorkspace({
                       查看登记设置
                     </summary>
                     <div className="mt-3 grid grid-cols-3 gap-2">
-                      <AgentStat label="Poll" value="60s" />
+                      <AgentStat label="Status" value={agent.status} />
                       <AgentStat label="Last sync" value={formatTime(agent.updatedAt) || 'n/a'} />
-                      <AgentStat label="Token" value="ok" />
+                      <AgentStat label="Workspace" value={agent.workspaceLabel || 'local'} />
                     </div>
                     <div className="mt-3 rounded-xl bg-[var(--paper-inset)]/40 p-3 text-sm leading-6 text-[var(--ink-secondary)] whitespace-pre-wrap">
                       Goal:

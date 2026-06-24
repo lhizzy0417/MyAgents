@@ -2407,3 +2407,55 @@ async fn session_watch_handler(
         "result": result,
     }))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::Value;
+
+    #[tokio::test]
+    async fn space_issue_comment_handler_wraps_mock_comment_result() {
+        let _mock = crate::space_cloud_mock::enable_for_test();
+
+        let Json(comment_result) =
+            space_issue_comment_handler(Json(crate::space_cloud::SpaceCliIssueCommentInput {
+                issue_id: "iss_mock_004".to_string(),
+                body: "management api comment".to_string(),
+                agent_id: Some("rag_mock_frontend".to_string()),
+                workspace_path: None,
+            }))
+            .await;
+
+        assert_eq!(
+            comment_result.get("ok").and_then(Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            comment_result
+                .pointer("/data/comment/body")
+                .and_then(Value::as_str),
+            Some("management api comment")
+        );
+
+        let Json(detail_result) =
+            space_issue_get_handler(Json(crate::space_cloud::SpaceCliIssueGetInput {
+                issue_id: "iss_mock_004".to_string(),
+                agent_id: Some("rag_mock_frontend".to_string()),
+                workspace_path: None,
+                comments_cursor: None,
+                comments_limit: Some(5),
+            }))
+            .await;
+
+        assert_eq!(detail_result.get("ok").and_then(Value::as_bool), Some(true));
+        let comments = detail_result
+            .pointer("/data/comments/items")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        assert!(comments
+            .iter()
+            .any(|comment| comment.get("body").and_then(Value::as_str)
+                == Some("management api comment")));
+    }
+}

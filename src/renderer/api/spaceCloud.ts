@@ -167,16 +167,129 @@ export interface SpaceApiEnvelope<T> {
   hint?: string;
 }
 
+export interface SpaceErrorContext {
+  method?: string;
+  path?: string;
+  operation?: string;
+}
+
+export interface NormalizedSpaceError {
+  userMessage: string;
+  debugMessage: string;
+}
+
+interface SpaceUserFacingError extends Error {
+  readonly __spaceUserFacingError: true;
+}
+
+function spaceUserFacingError(message: string): SpaceUserFacingError {
+  const error = new Error(message) as SpaceUserFacingError;
+  Object.defineProperty(error, '__spaceUserFacingError', { value: true });
+  return error;
+}
+
+function isSpaceUserFacingError(error: unknown): error is SpaceUserFacingError {
+  return error instanceof Error && (error as Partial<SpaceUserFacingError>).__spaceUserFacingError === true;
+}
+
+function rawErrorMessage(error: unknown): string {
+  if (error instanceof Error) return error.message;
+  return String(error);
+}
+
+function sanitizeSpaceError(message: string): string {
+  return message
+    .replace(/\s*\(https?:\/\/[^)]+\)/g, '')
+    .replace(/https?:\/\/\S+/g, '[URL]')
+    .replace(/Bearer\s+[A-Za-z0-9._~+/=-]+/gi, 'Bearer [redacted]')
+    .replace(/\/Users\/[^\s)]+/g, '[path]')
+    .replace(/\/var\/folders\/[^\s)]+/g, '[path]')
+    .replace(/[A-Z]:\\Users\\[^\s)]+/g, '[path]')
+    .trim();
+}
+
+function operationFromPath(context?: SpaceErrorContext): string {
+  if (context?.operation) return context.operation;
+  const path = context?.path ?? '';
+  const method = (context?.method ?? '').toUpperCase();
+  if (method === 'POST' && /\/api\/issues\/[^/]+\/comments$/.test(path)) return '评论发送';
+  if (method === 'POST' && path === '/api/spaces/official/issues') return 'Issue 创建';
+  if (method === 'POST' && /\/api\/issues\/[^/]+\/status$/.test(path)) return 'Issue 状态更新';
+  if (method === 'POST' && /\/api\/issues\/[^/]+\/close-own$/.test(path)) return 'Issue 关闭';
+  if (method === 'POST' && /\/api\/issues\/[^/]+\/dispatch$/.test(path)) return 'Agent 指派';
+  if (path.includes('/attachments')) return '附件操作';
+  if (path.includes('/skills')) return 'Skill 操作';
+  return 'Space 请求';
+}
+
+export function normalizeSpaceError(error: unknown, context?: SpaceErrorContext): NormalizedSpaceError {
+  if (isSpaceUserFacingError(error)) {
+    return {
+      userMessage: error.message,
+      debugMessage: error.message,
+    };
+  }
+  const raw = rawErrorMessage(error);
+  const sanitized = sanitizeSpaceError(raw);
+  const operation = operationFromPath(context);
+  const lower = raw.toLowerCase();
+
+  if (
+    lower.includes('error sending request')
+    || lower.includes('space api request failed')
+    || lower.includes('load failed')
+    || lower.includes('network')
+    || lower.includes('timed out')
+  ) {
+    return {
+      userMessage: `${operation}失败，请检查网络或稍后重试`,
+      debugMessage: sanitized,
+    };
+  }
+
+  if (lower.includes('invalid space api response') || lower.includes('response missing data')) {
+    return {
+      userMessage: `${operation}失败：服务返回了无法识别的数据`,
+      debugMessage: sanitized,
+    };
+  }
+
+  if (sanitized) {
+    return {
+      userMessage: `${operation}失败：${sanitized}`,
+      debugMessage: sanitized,
+    };
+  }
+
+  return {
+    userMessage: `${operation}失败`,
+    debugMessage: raw,
+  };
+}
+
+export function spaceErrorMessage(error: unknown, context?: SpaceErrorContext): string {
+  return normalizeSpaceError(error, context).userMessage;
+}
+
 async function spaceApi<T>(method: string, path: string, body?: unknown): Promise<T> {
-  const result = await inv<SpaceApiEnvelope<T>>('cmd_space_api_request', {
-    input: {
-      method,
-      path,
-      body: body ?? null,
-    },
-  });
+  let result: SpaceApiEnvelope<T>;
+  try {
+    result = await inv<SpaceApiEnvelope<T>>('cmd_space_api_request', {
+      input: {
+        method,
+        path,
+        body: body ?? null,
+      },
+    });
+  } catch (error) {
+    const normalized = normalizeSpaceError(error, { method, path });
+    console.warn('[Space] API transport failed', { method, path, error: normalized.debugMessage });
+    throw spaceUserFacingError(normalized.userMessage);
+  }
   if (!result.success) {
-    throw new Error(result.error ?? `Space API failed: ${method} ${path}`);
+    const normalized = normalizeSpaceError(result.error ?? `Space API failed: ${method} ${path}`, { method, path });
+    console.warn('[Space] API business error', { method, path, error: normalized.debugMessage });
+    throw spaceUserFacingError(normalized.userMessage);
   }
   return result.data as T;
 }

@@ -46,7 +46,7 @@ vi.mock('@/api/spaceCloud', () => ({
   spaceUploadSkillZip: apiMocks.spaceUploadSkillZip,
 }));
 
-import type { SpaceIssue, SpaceSession } from '@/api/spaceCloud';
+import type { SpaceIssue, SpaceIssueComment, SpaceIssueDetail, SpaceSession } from '@/api/spaceCloud';
 import {
   __resetSpaceStoreForTest,
   __setSpaceStoreStateForTest,
@@ -75,6 +75,17 @@ const fakeIssue: SpaceIssue = {
   attachmentCount: 0,
   createdAt: '2026-06-24T00:00:00.000Z',
   updatedAt: '2026-06-24T00:00:00.000Z',
+};
+
+const fakeDetail: SpaceIssueDetail = {
+  issue: fakeIssue,
+  comments: {
+    items: [],
+    hasMore: false,
+    nextCursor: null,
+    limit: 5,
+  },
+  attachments: [],
 };
 
 function deferred<T>() {
@@ -191,5 +202,57 @@ describe('spaceStore issue refresh', () => {
     expect(getIssueListState({ status: 'open', limit: 50 }).items).toEqual([]);
     expect(getIssueListState({ status: 'in_progress', limit: 50 }).items.map((issue) => issue.id)).toEqual(['iss_123']);
     expect(getIssueListState({ status: 'in_progress', limit: 50 }).items[0]?.status).toBe('in_progress');
+  });
+
+  it('patches issue detail comments and list counters after a successful comment', async () => {
+    __setSpaceStoreStateForTest({ boot: 'ready', session: fakeSession });
+    apiMocks.spaceListIssues.mockResolvedValueOnce({ items: [fakeIssue], hasMore: false, nextCursor: null });
+    await actions.refreshIssues({ limit: 50 }, { force: true });
+    __setSpaceStoreStateForTest({
+      issueDetails: {
+        iss_123: {
+          detail: fakeDetail,
+          lastFetchedAt: Date.now(),
+          isLoading: false,
+          error: null,
+        },
+      },
+    });
+    const comment: SpaceIssueComment = {
+      id: 'cmt_123',
+      author: { id: 'user-1', type: 'user' },
+      body: '效果咋样呢？',
+      createdAt: '2026-06-24T02:00:00.000Z',
+    };
+    apiMocks.spaceCommentIssue.mockResolvedValueOnce({ comment });
+
+    await actions.commentIssue('iss_123', '效果咋样呢？');
+
+    const detail = getSnapshot().issueDetails.iss_123?.detail;
+    expect(detail?.comments.items).toEqual([comment]);
+    expect(detail?.issue.commentCount).toBe(1);
+    expect(getIssueListState({ limit: 50 }).items[0]?.commentCount).toBe(1);
+  });
+
+  it('does not patch comments when comment submission fails', async () => {
+    __setSpaceStoreStateForTest({
+      boot: 'ready',
+      session: fakeSession,
+      issueDetails: {
+        iss_123: {
+          detail: fakeDetail,
+          lastFetchedAt: Date.now(),
+          isLoading: false,
+          error: null,
+        },
+      },
+    });
+    apiMocks.spaceCommentIssue.mockRejectedValueOnce(new Error('network down'));
+
+    await expect(actions.commentIssue('iss_123', 'will fail')).rejects.toThrow('network down');
+
+    const detail = getSnapshot().issueDetails.iss_123?.detail;
+    expect(detail?.comments.items).toEqual([]);
+    expect(detail?.issue.commentCount).toBe(0);
   });
 });
