@@ -4,6 +4,7 @@ import { createRef } from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { ImagePreviewProvider } from '@/context/ImagePreviewContext';
+import type { Provider } from '@/config/types';
 import SimpleChatInput, { type SimpleChatInputHandle } from './SimpleChatInput';
 import { ToastProvider } from './Toast';
 
@@ -69,6 +70,55 @@ describe('SimpleChatInput send paths', () => {
     await user.click(screen.getByTitle(/发送/));
 
     expect(onSend).toHaveBeenCalledWith('chat hello', undefined);
+  });
+
+  it('emits provider-scoped builtin model selections from the model menu', async () => {
+    const user = userEvent.setup();
+    const onBuiltinModelSelect = vi.fn();
+    const onModelChange = vi.fn();
+    const providers = [
+      {
+        id: 'provider-a',
+        name: 'Provider A',
+        vendor: 'A',
+        cloudProvider: '模型官方',
+        type: 'api',
+        primaryModel: 'deepseek-v4-pro',
+        isBuiltin: false,
+        config: { baseUrl: 'https://a.example.com' },
+        models: [{ model: 'deepseek-v4-pro', modelName: 'A Pro' }],
+      },
+      {
+        id: 'provider-b',
+        name: 'Provider B',
+        vendor: 'B',
+        cloudProvider: '模型官方',
+        type: 'api',
+        primaryModel: 'deepseek-v4-pro',
+        isBuiltin: false,
+        config: { baseUrl: 'https://b.example.com' },
+        models: [{ model: 'deepseek-v4-pro', modelName: 'B Pro' }],
+      },
+    ] as Provider[];
+
+    renderInput({
+      runtime: 'builtin',
+      provider: providers[0],
+      providers,
+      selectedModel: 'deepseek-v4-pro',
+      apiKeys: { 'provider-a': 'key-a', 'provider-b': 'key-b' },
+      onBuiltinModelSelect,
+      onModelChange,
+    });
+
+    await user.click(screen.getByTitle('切换模型'));
+    await user.click(await screen.findByText('B Pro'));
+
+    expect(onBuiltinModelSelect).toHaveBeenCalledWith({
+      providerId: 'provider-b',
+      model: 'deepseek-v4-pro',
+    });
+    expect(onModelChange).not.toHaveBeenCalled();
   });
 
   it('sends text from the Launcher input surface', async () => {

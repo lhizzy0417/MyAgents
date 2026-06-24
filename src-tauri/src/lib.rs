@@ -30,6 +30,7 @@ mod proxy_config;
 pub mod search;
 mod sidecar;
 pub mod space_cloud;
+mod space_cloud_mock;
 mod sse_proxy;
 pub mod system_binary;
 pub mod task;
@@ -569,6 +570,8 @@ pub fn run() {
             space_cloud::cmd_space_logout,
             space_cloud::cmd_space_api_request,
             space_cloud::cmd_space_register_agent,
+            space_cloud::cmd_space_update_registered_agent,
+            space_cloud::cmd_space_revoke_registered_agent,
             space_cloud::cmd_space_list_local_agents,
             space_cloud::cmd_space_poll_dispatches,
             space_cloud::cmd_space_mark_dispatch_delivered,

@@ -107,7 +107,62 @@ describe('persistInputOptionChange — disk write fanout', () => {
     });
   });
 
-  it('#300: does NOT touch providerEnvJson on a model-only change (same provider keeps its frozen env)', async () => {
+  it('#401: writes provider-scoped builtinSelection atomically while preserving same-provider env', async () => {
+    const m = makeMocks();
+    await persistInputOptionChange({
+      workspaceId: 'ws-1',
+      agentId: 'agent-1',
+      isExternalRuntime: false,
+      fields: {
+        builtinSelection: { providerId: 'zhipu', model: 'glm-4.7-air' },
+        builtinProviderEnvPolicy: 'preserve-provider-env',
+        permissionMode: 'fullAgency',
+      },
+      patchProject: m.patchProject,
+      patchAgentConfig: m.patchAgentConfig,
+      patchSnapshot: m.patchSnapshot,
+    });
+
+    expect(m.patchProject).toHaveBeenCalledWith('ws-1', {
+      providerId: 'zhipu',
+      model: 'glm-4.7-air',
+      permissionMode: 'fullAgency',
+    });
+    expect(m.patchAgentConfig).toHaveBeenCalledWith('agent-1', {
+      providerId: 'zhipu',
+      model: 'glm-4.7-air',
+      permissionMode: 'fullAgency',
+    });
+    expect(m.patchSnapshot).toHaveBeenCalledWith({
+      providerId: 'zhipu',
+      model: 'glm-4.7-air',
+      permissionMode: 'fullAgency',
+    });
+  });
+
+  it('#401: clears providerEnvJson only when builtin selection crosses provider boundary', async () => {
+    const m = makeMocks();
+    await persistInputOptionChange({
+      workspaceId: 'ws-1',
+      agentId: 'agent-1',
+      isExternalRuntime: false,
+      fields: {
+        builtinSelection: { providerId: 'deepseek', model: 'deepseek-v4-pro' },
+        builtinProviderEnvPolicy: 'clear-stale-provider-env',
+      },
+      patchProject: m.patchProject,
+      patchAgentConfig: m.patchAgentConfig,
+      patchSnapshot: m.patchSnapshot,
+    });
+
+    expect(m.patchSnapshot).toHaveBeenCalledWith({
+      providerId: 'deepseek',
+      model: 'deepseek-v4-pro',
+      providerEnvJson: null,
+    });
+  });
+
+  it('#300 legacy loose field: does NOT touch providerEnvJson on a model-only change', async () => {
     const m = makeMocks();
     await persistInputOptionChange({
       workspaceId: 'ws-1',

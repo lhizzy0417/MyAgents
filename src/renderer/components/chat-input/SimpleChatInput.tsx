@@ -98,6 +98,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
   providers = [],
   onProviderChange,
   selectedModel,
+  onBuiltinModelSelect,
   onModelChange,
   reasoningEffort = 'default',
   onReasoningEffortChange,
@@ -2009,7 +2010,9 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                             type="button"
                             onClick={(e) => {
                               e.stopPropagation();
-                              if (provider?.id !== p.id) {
+                              if (onBuiltinModelSelect) {
+                                onBuiltinModelSelect({ providerId: p.id, model: model.model });
+                              } else if (provider?.id !== p.id) {
                                 onProviderChange?.(p.id, model.model);
                               } else {
                                 onModelChange?.(model.model);

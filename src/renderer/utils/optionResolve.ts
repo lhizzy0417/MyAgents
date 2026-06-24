@@ -94,6 +94,26 @@ export function resolveLauncherProvider(args: {
 }
 
 /**
+ * Resolve the provider object the Chat UI may treat as "current".
+ *
+ * New/unlocked sessions can use the first-available fallback as a template
+ * convenience. Owned sessions cannot: falling back would present DeepSeek (or
+ * any first available provider) as if it were the session-pinned Zhipu/SensNova
+ * provider, and later model-only logic would persist the wrong provider.
+ */
+export function resolveCurrentProviderForSession<T>(args: {
+  sessionSnapshotOwnsConfig: boolean;
+  selectedProviderId: string | undefined;
+  selectedProvider: T | undefined;
+  selectedProviderAvailable: boolean;
+  fallbackProvider: T | undefined;
+}): T | undefined {
+  if (!args.sessionSnapshotOwnsConfig) return args.fallbackProvider;
+  if (!args.selectedProviderId) return undefined;
+  return args.selectedProviderAvailable ? args.selectedProvider : undefined;
+}
+
+/**
  * #235 — should the degraded-load fallback actually fire when its timer
  * elapses? The tab's SSE never (re)attached within the grace window, so we
  * want to load the session over HTTP — but only if the world hasn't moved on

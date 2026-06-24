@@ -5,6 +5,7 @@ import { DEFAULT_BUNDLED_WORKSPACE_TEMPLATE_ID, PRESET_TEMPLATES } from '../type
 import {
   buildAgentForProject,
   ensureAllProjectsHaveAgent,
+  migrateImBotConfigsToAgents,
   resolveAgentRuntimeMcpServersJson,
   resolveAgentMcpSelectionForConfig,
   resolveAgentDefaultsForProject,
@@ -170,6 +171,73 @@ describe('agentConfigService template Agent defaults', () => {
     expect(cfg.agents![0].enabled).toBe(false);
     expect(cfg.agents![0].heartbeat).toBeUndefined();
     expect(projects[0].isAgent).toBeUndefined();
+  });
+});
+
+describe('migrateImBotConfigsToAgents', () => {
+  it('groups legacy IM bots by canonical Windows workspace identity without rewriting the persisted path', () => {
+    const winPath = 'C:\\Users\\Me\\Project';
+    const cfg = {
+      defaultPermissionMode: 'auto',
+      theme: 'system',
+      minimizeToTray: true,
+      showDevTools: false,
+      autoStart: false,
+      osNotifications: true,
+      notificationSound: true,
+      imBotConfigs: [
+        {
+          id: 'bot-a',
+          name: 'Primary Bot',
+          platform: 'telegram',
+          botToken: 'token-a',
+          allowedUsers: [],
+          permissionMode: 'fullAgency',
+          enabled: true,
+          defaultWorkspacePath: winPath,
+          setupCompleted: true,
+        },
+        {
+          id: 'bot-b',
+          name: 'Secondary Bot',
+          platform: 'telegram',
+          botToken: 'token-b',
+          allowedUsers: [],
+          permissionMode: 'fullAgency',
+          enabled: true,
+          defaultWorkspacePath: 'c:/users/me/project/',
+          setupCompleted: true,
+        },
+        {
+          id: 'bot-default',
+          name: 'Default Bot',
+          platform: 'telegram',
+          botToken: 'token-default',
+          allowedUsers: [],
+          permissionMode: 'fullAgency',
+          enabled: true,
+          setupCompleted: true,
+        },
+      ],
+    } as AppConfig;
+    const projects = [
+      project({ path: 'c:/users/me/project/' }),
+      project({ id: 'malformed-project', path: undefined as unknown as string }),
+    ];
+
+    const migrated = migrateImBotConfigsToAgents(cfg, projects);
+
+    expect(migrated.agents).toHaveLength(2);
+    expect(migrated.agents![0].workspacePath).toBe(winPath);
+    expect(migrated.agents![0].channels).toHaveLength(2);
+    expect(migrated.agents![1].workspacePath).toBe('');
+    expect(migrated.agents![1].channels).toHaveLength(1);
+    expect(projects[0]).toMatchObject({
+      isAgent: true,
+      agentId: migrated.agents![0].id,
+    });
+    expect(projects[1].isAgent).toBeUndefined();
+    expect(projects[1].agentId).toBeUndefined();
   });
 });
 

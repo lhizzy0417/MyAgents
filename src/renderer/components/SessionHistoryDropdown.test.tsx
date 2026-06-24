@@ -17,6 +17,10 @@ const mocks = vi.hoisted(() => ({
     exportSessionAsMarkdown: vi.fn(),
     getWorkspaceCronTasks: vi.fn(),
     getBackgroundSessions: vi.fn(),
+    isTauri: false,
+    invoke: vi.fn(),
+    listenWithCleanup: vi.fn(),
+    listeners: new Map<string, Array<() => void>>(),
 }));
 
 vi.mock('@/api/sessionClient', () => ({
@@ -29,9 +33,11 @@ vi.mock('@/api/cronTaskClient', () => ({
     getWorkspaceCronTasks: mocks.getWorkspaceCronTasks,
     getBackgroundSessions: mocks.getBackgroundSessions,
 }));
-// Stay in browser mode: skips the Tauri invoke/listen branches entirely.
-vi.mock('@/utils/browserMock', () => ({ isTauriEnvironment: () => false }));
-vi.mock('@/utils/tauriListen', () => ({ listenWithCleanup: vi.fn() }));
+vi.mock('@/utils/browserMock', () => ({ isTauriEnvironment: () => mocks.isTauri }));
+vi.mock('@tauri-apps/api/core', () => ({ invoke: mocks.invoke }));
+vi.mock('@/utils/tauriListen', () => ({
+    listenWithCleanup: mocks.listenWithCleanup,
+}));
 
 import SessionHistoryDropdown from './SessionHistoryDropdown';
 
@@ -78,6 +84,15 @@ describe('SessionHistoryDropdown row actions', () => {
         mocks.getWorkspaceCronTasks.mockResolvedValue([]);
         mocks.getBackgroundSessions.mockResolvedValue([]);
         mocks.updateSession.mockResolvedValue({ ...SESSION, favorite: true });
+        mocks.isTauri = false;
+        mocks.invoke.mockResolvedValue({});
+        mocks.listenWithCleanup.mockImplementation((event: string, callback: () => void) => {
+            const list = mocks.listeners.get(event) ?? [];
+            list.push(callback);
+            mocks.listeners.set(event, list);
+            return Promise.resolve(() => {});
+        });
+        mocks.listeners.clear();
     });
 
     it('surfaces only 在新 tab 打开 + 更多 on the row; the rest live behind 更多', async () => {
@@ -166,5 +181,29 @@ describe('SessionHistoryDropdown row actions', () => {
             expect(prepareCurrentSessionForDelete).toHaveBeenCalledTimes(1);
         });
         expect(mocks.deleteSession).not.toHaveBeenCalled();
+    });
+
+    it('refreshes session metadata when a background completion finishes while open', async () => {
+        mocks.isTauri = true;
+        const refreshed = {
+            ...SESSION,
+            title: 'Finished title',
+            lastActiveAt: '2026-06-06T09:00:00.000Z',
+        };
+        mocks.getSessions
+            .mockResolvedValueOnce([SESSION])
+            .mockResolvedValueOnce([refreshed]);
+
+        renderDropdown(vi.fn());
+        await screen.findByText('My session');
+
+        const callbacks = mocks.listeners.get('session:background-complete') ?? [];
+        expect(callbacks.length).toBeGreaterThan(0);
+        callbacks[0]?.();
+
+        await screen.findByText('Finished title');
+        expect(screen.queryByText('My session')).toBeNull();
+        expect(mocks.getBackgroundSessions).toHaveBeenCalledTimes(2);
+        expect(mocks.getSessions).toHaveBeenCalledTimes(2);
     });
 });

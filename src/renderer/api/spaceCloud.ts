@@ -1,6 +1,8 @@
 import type { Project } from '@/config/types';
 import { workspacePathsEqual } from '@/../shared/workspacePath';
 
+export const DEFAULT_SPACE_ID = 'official';
+
 function isTauri(): boolean {
   return typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
 }
@@ -11,6 +13,10 @@ async function inv<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
   }
   const { invoke } = await import('@tauri-apps/api/core');
   return invoke<T>(cmd, args);
+}
+
+function spacePath(spaceId = DEFAULT_SPACE_ID): string {
+  return encodeURIComponent(spaceId || DEFAULT_SPACE_ID);
 }
 
 export interface SpaceUser {
@@ -84,6 +90,13 @@ export interface SpaceAttachment {
   createdAt: string;
 }
 
+export interface SpaceDownloadAttachmentResult {
+  name: string;
+  relativePath: string;
+  fullPath: string;
+  sizeBytes: number;
+}
+
 export interface SpaceIssueDetail {
   issue: SpaceIssue;
   comments: {
@@ -136,6 +149,18 @@ export interface LocalRegisteredAgent {
   updatedAt: string;
 }
 
+export interface SpaceRegisteredAgent {
+  id: string;
+  spaceId: string;
+  ownerUserId?: string | null;
+  displayName: string;
+  workspaceLabel?: string | null;
+  goalMd: string;
+  status: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface SpaceDispatchItem {
   dispatch: {
     id: string;
@@ -160,23 +185,191 @@ export interface SpaceDispatchItem {
   };
 }
 
+export interface SpaceEvent {
+  id: string;
+  type: string;
+  resourceType?: string | null;
+  resourceId?: string | null;
+  actorType?: string | null;
+  actorId?: string | null;
+  targetRegisteredAgentId?: string | null;
+  payload?: Record<string, unknown> | null;
+  createdAt: string;
+}
+
 export interface SpaceApiEnvelope<T> {
   success: boolean;
   data?: T;
   error?: string;
+  code?: string;
+  requestId?: string;
+  recoveryHint?: {
+    message: string;
+    recoveryCommand?: string;
+  };
   hint?: string;
 }
 
+export interface SpaceErrorContext {
+  method?: string;
+  path?: string;
+  operation?: string;
+}
+
+export interface NormalizedSpaceError {
+  userMessage: string;
+  debugMessage: string;
+}
+
+interface SpaceUserFacingError extends Error {
+  readonly __spaceUserFacingError: true;
+}
+
+function spaceUserFacingError(message: string): SpaceUserFacingError {
+  const error = new Error(message) as SpaceUserFacingError;
+  Object.defineProperty(error, '__spaceUserFacingError', { value: true });
+  return error;
+}
+
+function isSpaceUserFacingError(error: unknown): error is SpaceUserFacingError {
+  return error instanceof Error && (error as Partial<SpaceUserFacingError>).__spaceUserFacingError === true;
+}
+
+function rawErrorMessage(error: unknown): string {
+  if (error && typeof error === 'object' && 'error' in error && typeof error.error === 'string') {
+    return error.error;
+  }
+  if (error instanceof Error) return error.message;
+  return String(error);
+}
+
+function sanitizeSpaceError(message: string): string {
+  return message
+    .replace(/\s*\(https?:\/\/[^)]+\)/g, '')
+    .replace(/https?:\/\/\S+/g, '[URL]')
+    .replace(/Bearer\s+[A-Za-z0-9._~+/=-]+/gi, 'Bearer [redacted]')
+    .replace(/\/Users\/[^\s)]+/g, '[path]')
+    .replace(/\/var\/folders\/[^\s)]+/g, '[path]')
+    .replace(/[A-Z]:\\Users\\[^\s)]+/g, '[path]')
+    .trim();
+}
+
+function operationFromPath(context?: SpaceErrorContext): string {
+  if (context?.operation) return context.operation;
+  const path = context?.path ?? '';
+  const method = (context?.method ?? '').toUpperCase();
+  if (method === 'POST' && /\/api\/issues\/[^/]+\/comments$/.test(path)) return '评论发送';
+  if (method === 'POST' && /\/api\/spaces\/[^/]+\/issues$/.test(path)) return 'Issue 创建';
+  if (method === 'POST' && /\/api\/issues\/[^/]+\/status$/.test(path)) return 'Issue 状态更新';
+  if (method === 'POST' && /\/api\/issues\/[^/]+\/close-own$/.test(path)) return 'Issue 关闭';
+  if (method === 'POST' && /\/api\/issues\/[^/]+\/dispatch$/.test(path)) return 'Agent 指派';
+  if (method === 'POST' && /\/api\/spaces\/[^/]+\/tags$/.test(path)) return 'Tag 创建';
+  if (path.includes('/attachments')) return '附件操作';
+  if (path.includes('/skills')) return 'Skill 操作';
+  return 'Space 请求';
+}
+
+export function normalizeSpaceError(error: unknown, context?: SpaceErrorContext): NormalizedSpaceError {
+  if (isSpaceUserFacingError(error)) {
+    return {
+      userMessage: error.message,
+      debugMessage: error.message,
+    };
+  }
+  const raw = rawErrorMessage(error);
+  const sanitized = sanitizeSpaceError(raw);
+  const operation = operationFromPath(context);
+  const lower = raw.toLowerCase();
+  const envelope = error && typeof error === 'object' ? (error as Partial<SpaceApiEnvelope<unknown>>) : null;
+  const code = typeof envelope?.code === 'string' ? envelope.code : '';
+  const requestId = typeof envelope?.requestId === 'string' ? envelope.requestId : '';
+  const recoveryMessage = typeof envelope?.recoveryHint?.message === 'string' ? envelope.recoveryHint.message.trim() : '';
+  const debugSuffix = [code, requestId].filter(Boolean).join(' ');
+
+  if (code === 'NOT_AUTHENTICATED' || code === 'SESSION_EXPIRED') {
+    return {
+      userMessage: `${operation}失败：请重新登录 MyAgents 社区`,
+      debugMessage: [debugSuffix, sanitized].filter(Boolean).join(' · '),
+    };
+  }
+
+  if (code === 'FORBIDDEN' || code.includes('PERMISSION') || lower.includes('permission required')) {
+    return {
+      userMessage: `${operation}失败：权限不足`,
+      debugMessage: [debugSuffix, sanitized].filter(Boolean).join(' · '),
+    };
+  }
+
+  if (code === 'INTERNAL_ERROR') {
+    return {
+      userMessage: `${operation}失败：服务暂时不可用，请稍后重试`,
+      debugMessage: [debugSuffix, sanitized].filter(Boolean).join(' · '),
+    };
+  }
+
+  if (recoveryMessage) {
+    return {
+      userMessage: `${operation}失败：${recoveryMessage}`,
+      debugMessage: [debugSuffix, sanitized].filter(Boolean).join(' · '),
+    };
+  }
+
+  if (
+    lower.includes('error sending request')
+    || lower.includes('space api request failed')
+    || lower.includes('load failed')
+    || lower.includes('network')
+    || lower.includes('timed out')
+  ) {
+    return {
+      userMessage: `${operation}失败，请检查网络或稍后重试`,
+      debugMessage: [debugSuffix, sanitized].filter(Boolean).join(' · '),
+    };
+  }
+
+  if (lower.includes('invalid space api response') || lower.includes('response missing data')) {
+    return {
+      userMessage: `${operation}失败：服务返回了无法识别的数据`,
+      debugMessage: [debugSuffix, sanitized].filter(Boolean).join(' · '),
+    };
+  }
+
+  if (sanitized) {
+    return {
+      userMessage: `${operation}失败：${sanitized}`,
+      debugMessage: [debugSuffix, sanitized].filter(Boolean).join(' · '),
+    };
+  }
+
+  return {
+    userMessage: `${operation}失败`,
+    debugMessage: [debugSuffix, raw].filter(Boolean).join(' · '),
+  };
+}
+
+export function spaceErrorMessage(error: unknown, context?: SpaceErrorContext): string {
+  return normalizeSpaceError(error, context).userMessage;
+}
+
 async function spaceApi<T>(method: string, path: string, body?: unknown): Promise<T> {
-  const result = await inv<SpaceApiEnvelope<T>>('cmd_space_api_request', {
-    input: {
-      method,
-      path,
-      body: body ?? null,
-    },
-  });
+  let result: SpaceApiEnvelope<T>;
+  try {
+    result = await inv<SpaceApiEnvelope<T>>('cmd_space_api_request', {
+      input: {
+        method,
+        path,
+        body: body ?? null,
+      },
+    });
+  } catch (error) {
+    const normalized = normalizeSpaceError(error, { method, path });
+    console.warn('[Space] API transport failed', { method, path, error: normalized.debugMessage });
+    throw spaceUserFacingError(normalized.userMessage);
+  }
   if (!result.success) {
-    throw new Error(result.error ?? `Space API failed: ${method} ${path}`);
+    const normalized = normalizeSpaceError(result.error ? result : `Space API failed: ${method} ${path}`, { method, path });
+    console.warn('[Space] API business error', { method, path, error: normalized.debugMessage });
+    throw spaceUserFacingError(normalized.userMessage);
   }
   return result.data as T;
 }
@@ -205,11 +398,14 @@ export function spaceLogout(): Promise<void> {
   return inv('cmd_space_logout');
 }
 
-export function spaceGetOfficial(): Promise<{ space: SpaceInfo; membership: SpaceMembership; tags: SpaceTag[] }> {
-  return spaceApi('GET', '/api/spaces/official');
+export function spaceGetOfficial(spaceId = DEFAULT_SPACE_ID): Promise<{ space: SpaceInfo; membership: SpaceMembership; tags: SpaceTag[] }> {
+  return spaceApi('GET', `/api/spaces/${spacePath(spaceId)}`);
 }
 
-export function spaceListIssues(params: { q?: string; tag?: string; status?: string; cursor?: string; limit?: number }) {
+export function spaceListIssues(
+  params: { q?: string; tag?: string; status?: string; cursor?: string; limit?: number },
+  spaceId = DEFAULT_SPACE_ID,
+) {
   const search = new URLSearchParams();
   if (params.q) search.set('q', params.q);
   if (params.tag) search.set('tag', params.tag);
@@ -218,12 +414,27 @@ export function spaceListIssues(params: { q?: string; tag?: string; status?: str
   search.set('limit', String(params.limit ?? 30));
   return spaceApi<{ items: SpaceIssue[]; hasMore: boolean; nextCursor?: string | null }>(
     'GET',
-    `/api/spaces/official/issues?${search.toString()}`,
+    `/api/spaces/${spacePath(spaceId)}/issues?${search.toString()}`,
   );
 }
 
-export function spaceCreateIssue(input: { title: string; body: string; tags: string[] }) {
-  return spaceApi<{ issue: SpaceIssue }>('POST', '/api/spaces/official/issues', input);
+export function spaceListEvents(params: { cursor?: string | null; limit?: number; tail?: boolean }, spaceId = DEFAULT_SPACE_ID) {
+  const search = new URLSearchParams();
+  if (params.cursor) search.set('cursor', params.cursor);
+  if (params.tail) search.set('tail', '1');
+  search.set('limit', String(params.limit ?? 50));
+  return spaceApi<{ items: SpaceEvent[]; hasMore: boolean; nextCursor?: string | null }>(
+    'GET',
+    `/api/spaces/${spacePath(spaceId)}/events?${search.toString()}`,
+  );
+}
+
+export function spaceCreateIssue(input: { title: string; body: string; tags: string[] }, spaceId = DEFAULT_SPACE_ID) {
+  return spaceApi<{ issue: SpaceIssue }>('POST', `/api/spaces/${spacePath(spaceId)}/issues`, input);
+}
+
+export function spaceCreateTag(input: { name: string; color?: string | null; description?: string | null }, spaceId = DEFAULT_SPACE_ID) {
+  return spaceApi<{ tag: SpaceTag }>('POST', `/api/spaces/${spacePath(spaceId)}/tags`, input);
 }
 
 export function spaceGetIssue(id: string, commentsCursor?: string | null) {
@@ -252,8 +463,8 @@ export function spaceDispatchIssue(id: string, registeredAgentId: string) {
   );
 }
 
-export function spaceListSkills() {
-  return spaceApi<{ items: SpaceSkill[] }>('GET', '/api/spaces/official/skills');
+export function spaceListSkills(spaceId = DEFAULT_SPACE_ID) {
+  return spaceApi<{ items: SpaceSkill[] }>('GET', `/api/spaces/${spacePath(spaceId)}/skills`);
 }
 
 export function spaceGetSkill(id: string) {
@@ -288,8 +499,22 @@ export function spaceUploadSkillZip(input: {
   return inv<{ skill: SpaceSkill }>('cmd_space_upload_skill', { input });
 }
 
+export function spaceDeleteSkill(skillId: string) {
+  return spaceApi<{ deleted: boolean }>('DELETE', `/api/skills/${encodeURIComponent(skillId)}`);
+}
+
 export function spaceUploadIssueAttachments(input: { issueId: string; filePaths: string[] }) {
   return inv<{ attachments: SpaceAttachment[] }>('cmd_space_upload_issue_attachments', { input });
+}
+
+export function spaceDownloadIssueAttachment(input: {
+  attachmentId: string;
+  workspacePath: string;
+  issueId?: string;
+  fileName?: string;
+  output?: string;
+}) {
+  return inv<SpaceDownloadAttachmentResult>('cmd_space_download_attachment', { input });
 }
 
 export function spaceRegisterAgent(input: {
@@ -300,6 +525,24 @@ export function spaceRegisterAgent(input: {
   goalMd: string;
 }) {
   return inv<LocalRegisteredAgent>('cmd_space_register_agent', { input });
+}
+
+export function spaceUpdateRegisteredAgent(input: {
+  id: string;
+  displayName?: string;
+  workspaceLabel?: string;
+  goalMd?: string;
+  status?: 'active' | 'disabled';
+}) {
+  return inv<LocalRegisteredAgent>('cmd_space_update_registered_agent', { input });
+}
+
+export function spaceRevokeRegisteredAgent(id: string) {
+  return inv<LocalRegisteredAgent>('cmd_space_revoke_registered_agent', { input: { id } });
+}
+
+export function spaceListRegisteredAgents(spaceId = DEFAULT_SPACE_ID) {
+  return spaceApi<{ items: SpaceRegisteredAgent[] }>('GET', `/api/spaces/${spacePath(spaceId)}/registered-agents`);
 }
 
 export function spaceListLocalAgents() {

@@ -336,13 +336,15 @@ export function getEnabledMcpServerIds(config?: AdminAppConfig): string[] {
  * Get effective MCP servers for a specific project (global enabled ∩ project enabled)
  */
 export function getEffectiveMcpServers(projectPath: string): McpServerDefinition[] {
+  if (!projectPath) return [];
+
   const config = loadConfig();
   const allServers = getAllMcpServers(config);
   const globalEnabled = new Set(getEnabledMcpServerIds(config));
 
   // Find project by path
   const projects = loadProjects();
-  const project = projects.find(p => p.path === projectPath);
+  const project = projects.find(p => typeof p.path === 'string' && workspacePathsEqual(p.path, projectPath));
   const projectEnabled = new Set(project?.mcpEnabledServers ?? []);
 
   if (projectEnabled.size === 0) return [];

@@ -5,11 +5,53 @@ import {
   isPinnedProviderUnavailable,
   isResetSessionBirth,
   resolveBuiltinPermissionMode,
+  resolveCurrentProviderForSession,
   resolveLauncherProvider,
   shouldDegradedLoad,
   shouldResetModelOnProviderChange,
   shouldSkipSnapshotWrite,
 } from './optionResolve';
+
+describe('resolveCurrentProviderForSession (#401)', () => {
+  const pinned = { id: 'zhipu' };
+  const fallback = { id: 'deepseek' };
+
+  it('uses first-available fallback for fresh/unlocked sessions', () => {
+    expect(
+      resolveCurrentProviderForSession({
+        sessionSnapshotOwnsConfig: false,
+        selectedProviderId: 'zhipu',
+        selectedProvider: undefined,
+        selectedProviderAvailable: false,
+        fallbackProvider: fallback,
+      }),
+    ).toBe(fallback);
+  });
+
+  it('does not let owned sessions treat fallback as current provider', () => {
+    expect(
+      resolveCurrentProviderForSession({
+        sessionSnapshotOwnsConfig: true,
+        selectedProviderId: 'zhipu',
+        selectedProvider: pinned,
+        selectedProviderAvailable: false,
+        fallbackProvider: fallback,
+      }),
+    ).toBeUndefined();
+  });
+
+  it('returns the exact pinned provider for owned sessions when available', () => {
+    expect(
+      resolveCurrentProviderForSession({
+        sessionSnapshotOwnsConfig: true,
+        selectedProviderId: 'zhipu',
+        selectedProvider: pinned,
+        selectedProviderAvailable: true,
+        fallbackProvider: fallback,
+      }),
+    ).toBe(pinned);
+  });
+});
 
 describe('isPinnedProviderUnavailable (#300)', () => {
   const base = {

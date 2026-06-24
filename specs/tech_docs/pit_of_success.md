@@ -512,7 +512,7 @@ v0.2.0 Windows 版的 IM Bot 全部启动失败就是这个 trap：`find_tsx_run
 
 **Invariants enforced.** 是 Rust `normalize_path` 的逐行 TS 端口：Windows 式路径分隔符归一 + 去尾斜杠（保留根）+ Windows 盘符/UNC 小写；POSIX 大小写敏感、反斜杠当字面字符。于是渲染层"哪个 Project 拥有这个路径"与 Rust 对 cron 的分组**按构造一致**，不靠各调用点记得归一。
 
-**Don't.** 比较工作区路径（`Project.path` ↔ `CronTask`/`Task`.workspacePath / session `agentDir` / config `defaultWorkspacePath`）禁止 raw `===` 或 inline `.replace(/\\/g,'/')`。已知**有意留白**：`agentConfigService.ts` legacy imBot→agent 迁移的分组键（它同时是持久化的 `agent.workspacePath`，归一会小写盘符）；同源 within-tree 的 `node.path` 比较；React.memo prop 相等。
+**Don't.** 比较工作区路径（`Project.path` ↔ `CronTask`/`Task`.workspacePath / session `agentDir` / config `defaultWorkspacePath`）禁止 raw `===` 或 inline `.replace(/\\/g,'/')`。需要分组时用 `normalizeWorkspacePathIdentity` 作为 Map/Set key；若分组结果要写回配置，仍保留用户原始路径作为 persisted value。已知**有意留白**：同源 within-tree 的 `node.path` 比较；React.memo prop 相等。
 
 ---
 

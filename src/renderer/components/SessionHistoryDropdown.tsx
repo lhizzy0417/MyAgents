@@ -87,6 +87,26 @@ export default function SessionHistoryDropdown({
 
     const onCloseRef = useRef(onClose);
     const statsSessionRef = useRef(statsSession);
+    const sessionsFetchSeqRef = useRef(0);
+    const sessionsAppliedSeqRef = useRef(0);
+
+    const applySessionsIfFresh = useCallback((seq: number, data: SessionMetadata[]) => {
+        if (seq <= sessionsAppliedSeqRef.current) return;
+        sessionsAppliedSeqRef.current = seq;
+        setSessions(data);
+    }, []);
+
+    const applySessionsErrorIfFresh = useCallback((seq: number) => {
+        if (seq <= sessionsAppliedSeqRef.current) return;
+        sessionsAppliedSeqRef.current = seq;
+        setSessions([]);
+    }, []);
+
+    const invalidateSessionsFetches = useCallback(() => {
+        const staleSeq = sessionsFetchSeqRef.current + 1;
+        sessionsFetchSeqRef.current = staleSeq;
+        sessionsAppliedSeqRef.current = Math.max(sessionsAppliedSeqRef.current, staleSeq);
+    }, []);
 
     // Agent statuses for active session tagging
     const [agentStatuses, setAgentStatuses] = useState<AgentStatusMap>({});
@@ -124,6 +144,7 @@ export default function SessionHistoryDropdown({
         if (!isOpen || !agentDir) return;
 
         let cancelled = false;
+        const sessionsFetchSeq = ++sessionsFetchSeqRef.current;
 
         (async () => {
             // Load sessions, cron tasks, agent statuses, and background sessions in parallel
@@ -143,12 +164,15 @@ export default function SessionHistoryDropdown({
 
             if (cancelled) return;
 
-            // Always set sessions if available (primary data)
+            // Always set sessions if available (primary data). Multiple refresh
+            // sources can overlap while the dropdown is open. Newer successes
+            // beat older responses, but a newer failed refresh must not suppress
+            // an older successful initial load.
             if (sessionsResult.status === 'fulfilled') {
-                setSessions(sessionsResult.value);
+                applySessionsIfFresh(sessionsFetchSeq, sessionsResult.value);
             } else {
                 console.error('[SessionHistoryDropdown] Failed to load sessions:', sessionsResult.reason);
-                setSessions([]); // Show empty state rather than loading forever
+                applySessionsErrorIfFresh(sessionsFetchSeq); // Show empty state rather than loading forever
             }
 
             // Cron tasks are optional enhancement - don't block on failure
@@ -177,6 +201,7 @@ export default function SessionHistoryDropdown({
 
         return () => {
             cancelled = true;
+            invalidateSessionsFetches();
             // Reset state when closing or agentDir changes
             setSessions(null);
             setCronTasks(null);
@@ -188,17 +213,22 @@ export default function SessionHistoryDropdown({
             setDeleteError(null);
             setMenuSessionId(null);
         };
-    }, [isOpen, agentDir]);
+    }, [isOpen, agentDir, applySessionsIfFresh, applySessionsErrorIfFresh, invalidateSessionsFetches]);
 
     // Refetch when session title changes (auto-generated or user rename)
     useEffect(() => {
         if (!isOpen || !agentDir) return;
         const handler = () => {
-            getSessions(agentDir).then(data => setSessions(data)).catch(() => {});
+            const sessionsFetchSeq = ++sessionsFetchSeqRef.current;
+            getSessions(agentDir)
+                .then(data => {
+                    applySessionsIfFresh(sessionsFetchSeq, data);
+                })
+                .catch(() => {});
         };
         window.addEventListener(CUSTOM_EVENTS.SESSION_TITLE_CHANGED, handler);
         return () => window.removeEventListener(CUSTOM_EVENTS.SESSION_TITLE_CHANGED, handler);
-    }, [isOpen, agentDir]);
+    }, [isOpen, agentDir, applySessionsIfFresh]);
 
     // Real-time tag updates: listen for cron/IM/agent status changes while dropdown is open
     useEffect(() => {
@@ -224,15 +254,24 @@ export default function SessionHistoryDropdown({
         };
         void listenWithCleanup('agent:status-changed', refreshStatuses, ac.signal);
 
-        // Background completion → refresh background sessions
+        // Background completion is the global completion signal for turns that
+        // finished after this tab moved away from their sidecar. That turn can
+        // update session metadata (title, lastActiveAt, stats) without any
+        // tab-scoped SSE consumer, so refresh sessions along with the tag data.
         void listenWithCleanup('session:background-complete', () => {
             getBackgroundSessions()
                 .then(ids => { if (!ac.signal.aborted) setBackgroundSessionIds(ids); })
                 .catch(() => {});
+            const sessionsFetchSeq = ++sessionsFetchSeqRef.current;
+            getSessions(agentDir)
+                .then(data => {
+                    if (!ac.signal.aborted) applySessionsIfFresh(sessionsFetchSeq, data);
+                })
+                .catch(() => {});
         }, ac.signal);
 
         return () => ac.abort();
-    }, [isOpen, agentDir]);
+    }, [isOpen, agentDir, applySessionsIfFresh]);
 
     // Outside-click + Escape dismissal are owned by the Popover primitive.
     // The `handlePopoverClose` wrapper below blocks close propagation while

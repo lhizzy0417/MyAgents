@@ -5,7 +5,7 @@ import type { AgentConfig, ChannelConfig, ChannelOverrides } from '../../../shar
 import type { ImBotConfig } from '../../../shared/types/im';
 import { atomicModifyConfig, loadAppConfig } from './appConfigService';
 import { getAllMcpServersFromConfig } from './mcpService';
-import { workspacePathsEqual } from '../../../shared/workspacePath';
+import { normalizeWorkspacePathIdentity, workspacePathsEqual } from '../../../shared/workspacePath';
 
 // ============= Query Helpers =============
 
@@ -108,10 +108,14 @@ export function migrateImBotConfigsToAgents(config: AppConfig, projects: Project
   _agentMigrationDone = true;
   console.log(`[agentConfigService] Migrating ${bots.length} ImBotConfig(s) to Agent architecture`);
 
-  // Group bots by workspace path
+  // Group bots by canonical workspace identity, but keep the primary bot's raw
+  // path as the persisted Agent.workspacePath. The identity must collapse
+  // Windows slash/case variants; persisted paths should remain user-native.
   const groups = new Map<string, ImBotConfig[]>();
   for (const bot of bots) {
-    const key = (bot.defaultWorkspacePath || '__default__').replace(/\\/g, '/');
+    const key = bot.defaultWorkspacePath
+      ? normalizeWorkspacePathIdentity(bot.defaultWorkspacePath)
+      : '__default__';
     const group = groups.get(key) || [];
     group.push(bot);
     groups.set(key, group);
@@ -119,10 +123,10 @@ export function migrateImBotConfigsToAgents(config: AppConfig, projects: Project
 
   const agents: AgentConfig[] = [];
 
-  for (const [workspacePath, groupBots] of groups) {
+  for (const [workspaceKey, groupBots] of groups) {
     const primary = groupBots[0];
     const agentId = crypto.randomUUID();
-    const resolvedPath = workspacePath === '__default__' ? '' : workspacePath;
+    const resolvedPath = workspaceKey === '__default__' ? '' : (primary.defaultWorkspacePath ?? '');
 
     // Build channels from each bot
     const channels: ChannelConfig[] = groupBots.map(bot => {
@@ -178,7 +182,7 @@ export function migrateImBotConfigsToAgents(config: AppConfig, projects: Project
 
     const agent: AgentConfig = {
       id: agentId,
-      name: primary.name || `Agent (${resolvedPath.split('/').pop() || 'default'})`,
+      name: primary.name || `Agent (${resolvedPath.split(/[\\/]/).filter(Boolean).pop() || 'default'})`,
       enabled: groupBots.some(b => b.enabled),
       workspacePath: resolvedPath,
       providerId: primary.providerId,
@@ -194,7 +198,9 @@ export function migrateImBotConfigsToAgents(config: AppConfig, projects: Project
     agents.push(agent);
 
     // Mark corresponding project as agent
-    const project = projects.find(p => workspacePathsEqual(p.path, resolvedPath));
+    const project = resolvedPath
+      ? projects.find(p => workspacePathsEqual(p.path, resolvedPath))
+      : undefined;
     if (project) {
       project.isAgent = true;
       project.agentId = agentId;

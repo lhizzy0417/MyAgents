@@ -3,6 +3,7 @@
 
 import type { Project, AppConfig } from '@/config/types';
 import { DEFAULT_CONFIG } from '@/config/types';
+import { workspacePathsEqual } from '../../shared/workspacePath';
 
 // Storage keys
 const STORAGE_KEYS = {
@@ -111,7 +112,7 @@ export function mockAddProject(path: string): Project {
     const projects = mockLoadProjects();
 
     // Check if exists
-    const existing = projects.find(p => p.path === path);
+    const existing = projects.find(p => workspacePathsEqual(p.path, path));
     if (existing) {
         existing.lastOpened = new Date().toISOString();
         mockSaveProjects(projects);

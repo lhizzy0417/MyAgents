@@ -702,7 +702,7 @@ export function getDefaultEnabledPluginIdsForWorkspace(workspacePath: string): s
   try {
     const cfg = loadConfig();
     const agents = (cfg.agents as Array<{ workspacePath?: string; enabledPluginIds?: string[] }> | undefined) ?? [];
-    const agent = agents.find(a => a.workspacePath === workspacePath);
+    const agent = agents.find(a => workspacePathsEqual(a.workspacePath, workspacePath));
     if (agent?.enabledPluginIds) return [...agent.enabledPluginIds];
     // Fall back to Project entry (legacy workspaces that haven't been
     // upgraded to Agents still get plugin support via the workspace path).
@@ -714,10 +714,11 @@ export function getDefaultEnabledPluginIdsForWorkspace(workspacePath: string): s
       path?: string;
       enabledPluginIds?: string[];
     }>;
-    const project = Array.isArray(projects) ? projects.find(p => p.path === workspacePath) : null;
+    const project = Array.isArray(projects)
+      ? projects.find(p => workspacePathsEqual(p.path, workspacePath))
+      : null;
     return project?.enabledPluginIds ? [...project.enabledPluginIds] : [];
   } catch {
     return [];
   }
 }
-

@@ -203,6 +203,7 @@ Commands:
   task      Manage Task Center tasks (list/get/update-status/run/rerun ...)
   thought   Manage Task Center thoughts (list/create)
   space     MyAgents Cloud Space issue/attachment bridge
+  issue     Read a Space issue (alias of 'space issue get')
   im        IM runtime actions for current chat (send-media)
   session   Session-to-session messaging (send prompts, watch completion/result events)
   widget    Generative UI widget design guidelines (readme)
@@ -266,6 +267,7 @@ Examples:
     # Pass --json for machine-readable output (task_id + docs_path).
     # Same per-task override flags as create-direct apply here.
   myagents space issue get <issueId> --json
+  myagents issue <issueId> --json
   myagents space issue comment <issueId> --body-file result.md
   myagents space issue status <issueId> resolved
   myagents space attachment download <attachmentId> --output myagents_files/space/file.bin
@@ -1849,6 +1851,9 @@ function buildRoute(group: string, action: string, rest: string[]): string {
   if (group === 'task' && action === 'remove') {
     return 'task/delete';
   }
+  if (group === 'issue') {
+    return 'space/issue-get';
+  }
   if (group === 'space' && action === 'issue') {
     const issueAction = rest[0] || 'get';
     if (issueAction === 'get') return 'space/issue-get';
@@ -2008,6 +2013,28 @@ function buildRequestBody(
       }
     }
     return {};
+  }
+
+  if (group === 'issue') {
+    const workspacePath = resolveSpaceWorkspacePath(flags);
+    if (action === 'comment' || action === 'comments' || action === 'status') {
+      console.error(`Error: myagents issue only reads an issue. Use "myagents space issue ${action} ..." for this operation.`);
+      process.exit(1);
+    }
+    const positionalIssueId = action === 'list' || action === 'get' ? rest[0] : action;
+    const issueId = requirePositional(
+      (positionalIssueId ?? flags.issueId) as string | undefined,
+      'issueId',
+      'issue',
+      'issueId',
+    );
+    return {
+      issueId,
+      agentId: flags.agentId,
+      workspacePath,
+      commentsLimit: optionalNumberFlag(flags.commentsLimit),
+      commentsCursor: flags.commentsCursor ?? flags.cursor,
+    };
   }
 
   // MCP commands

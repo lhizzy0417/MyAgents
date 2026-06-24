@@ -70,7 +70,7 @@ import { getAllCronTasks, getTabCronTask, updateCronTaskTab } from '@/api/cronTa
 import { type CronRecoverySummaryPayload, type CronTaskRecoveredPayload, CRON_EVENTS } from '@/types/cronEvents';
 import { isBrowserDevMode, isTauriEnvironment } from '@/utils/browserMock';
 import { apiGetJson } from '@/api/apiFetch';
-import { updateSession } from '@/api/sessionClient';
+import { getSessions, updateSession } from '@/api/sessionClient';
 import { dismissTopmost } from '@/utils/closeLayer';
 import { dispatchAppShortcut } from '@/utils/appShortcuts';
 import { handleSelectAllKeydown } from '@/utils/selectAllRouter';
@@ -78,6 +78,7 @@ import { forceFlushLogs, setLogServerUrl, clearLogServerUrl, setAppActiveTabId }
 import { normalizeRuntime, resolveEffectiveRuntime, planSessionOpen } from '@/utils/sessionOpenPlan';
 import { resolveNotificationClickRoute } from '@/utils/notificationClickRoute';
 import { applyTerminalSessionToTabs } from '@/utils/sessionTermination';
+import { getSessionDisplayText } from '@/utils/sessionDisplay';
 import { listenWithCleanup } from '@/utils/tauriListen';
 import { migrateFloatingBallSessionBinding } from '@/floating-ball/sessionBinding';
 import { CUSTOM_EVENTS, createPendingSessionId, isPendingSessionId } from '../shared/constants';
@@ -872,6 +873,30 @@ export default function App() {
           if (!mountedRef.current) return;
           const { sessionId, sidecarStopped } = event.payload;
           console.log(`[App] Background session completion finished: session=${sessionId}, sidecarStopped=${sidecarStopped}`);
+
+          setTabs(prev => prev.map(tab =>
+            tab.sessionId === sessionId && tab.isGenerating
+              ? { ...tab, isGenerating: false }
+              : tab
+          ));
+
+          const matchingTab = tabsRef.current.find(tab => tab.sessionId === sessionId && tab.agentDir);
+          if (matchingTab?.agentDir) {
+            getSessions(matchingTab.agentDir)
+              .then((sessions) => {
+                if (!mountedRef.current) return;
+                const refreshed = sessions.find(session => session.id === sessionId);
+                if (!refreshed) return;
+                const refreshedTitle = getSessionDisplayText(refreshed);
+                setTabs(prev => prev.map(tab =>
+                  tab.sessionId === sessionId && tab.title !== refreshedTitle
+                    ? { ...tab, title: refreshedTitle }
+                    : tab
+                ));
+                window.dispatchEvent(new CustomEvent(CUSTOM_EVENTS.SESSION_TITLE_CHANGED));
+              })
+              .catch(err => console.warn('[App] Failed to refresh background-completed session metadata:', err));
+          }
         },
         listenerAc.signal,
       );

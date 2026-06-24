@@ -46,6 +46,7 @@ export interface SimpleChatInputProps {
   providers?: Provider[];
   onProviderChange?: (providerId: string, targetModel?: string) => void;
   selectedModel?: string;
+  onBuiltinModelSelect?: (selection: { providerId: string; model: string }) => void;
   onModelChange?: (modelId: string) => void;
   reasoningEffort?: string;
   onReasoningEffortChange?: (effort: string) => void;

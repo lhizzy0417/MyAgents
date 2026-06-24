@@ -53,6 +53,8 @@ interface SessionStats {
 
 `configSnapshotAt` 是配置权威边界：存在时，session snapshot 拥有当前会话配置；缺字段不是“自动读 Agent 默认值”的许可。Agent/Project 只作为新 session 模板、legacy/no-snapshot 兼容源、以及 IM 无 Tab owner live-follow 源。
 
+`providerEnvJson` 是 owned snapshot 身份的一部分：同 provider 的模型切换必须保留 frozen env（自定义 baseUrl / apiKey / alias 仍属于该会话）；只有 providerId 真正改变且调用方没有显式提供新 env 时，PATCH 才清空它，让 sidecar 按新的 providerId 重新解析 live env。第一轮把 legacy/no-snapshot session promote 成 owned snapshot 时，baseline + 显式 patch 必须基于最新 metadata 写入，避免并发 config edit 用旧 baseline 覆盖已提交字段。
+
 ### Session ID 前缀约定
 
 | 前缀 | 格式 | 用途 | 何时生成 |
