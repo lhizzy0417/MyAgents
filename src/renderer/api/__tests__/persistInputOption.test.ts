@@ -107,7 +107,7 @@ describe('persistInputOptionChange — disk write fanout', () => {
     });
   });
 
-  it('#401: writes provider-scoped builtinSelection atomically even for same-provider model changes', async () => {
+  it('#401: writes provider-scoped builtinSelection atomically while preserving same-provider env', async () => {
     const m = makeMocks();
     await persistInputOptionChange({
       workspaceId: 'ws-1',
@@ -115,6 +115,7 @@ describe('persistInputOptionChange — disk write fanout', () => {
       isExternalRuntime: false,
       fields: {
         builtinSelection: { providerId: 'zhipu', model: 'glm-4.7-air' },
+        builtinProviderEnvPolicy: 'preserve-provider-env',
         permissionMode: 'fullAgency',
       },
       patchProject: m.patchProject,
@@ -135,8 +136,29 @@ describe('persistInputOptionChange — disk write fanout', () => {
     expect(m.patchSnapshot).toHaveBeenCalledWith({
       providerId: 'zhipu',
       model: 'glm-4.7-air',
-      providerEnvJson: null,
       permissionMode: 'fullAgency',
+    });
+  });
+
+  it('#401: clears providerEnvJson only when builtin selection crosses provider boundary', async () => {
+    const m = makeMocks();
+    await persistInputOptionChange({
+      workspaceId: 'ws-1',
+      agentId: 'agent-1',
+      isExternalRuntime: false,
+      fields: {
+        builtinSelection: { providerId: 'deepseek', model: 'deepseek-v4-pro' },
+        builtinProviderEnvPolicy: 'clear-stale-provider-env',
+      },
+      patchProject: m.patchProject,
+      patchAgentConfig: m.patchAgentConfig,
+      patchSnapshot: m.patchSnapshot,
+    });
+
+    expect(m.patchSnapshot).toHaveBeenCalledWith({
+      providerId: 'deepseek',
+      model: 'deepseek-v4-pro',
+      providerEnvJson: null,
     });
   });
 

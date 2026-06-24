@@ -69,7 +69,11 @@ describe('buildSessionSnapshotPatchUpdates', () => {
 
   it('clears stale providerEnvJson when providerId changes without an explicit env payload', () => {
     const updates = buildSessionSnapshotPatchUpdates({
-      existing: metadata({ configSnapshotAt: '2026-06-24T00:30:00.000Z' }),
+      existing: metadata({
+        configSnapshotAt: '2026-06-24T00:30:00.000Z',
+        providerId: 'zhipu',
+        providerEnvJson: '{"providerId":"zhipu","apiKey":"old"}',
+      }),
       payload: { providerId: 'deepseek', model: 'deepseek-v4-pro' },
       nowIso: '2026-06-24T01:00:00.000Z',
     });
@@ -78,6 +82,49 @@ describe('buildSessionSnapshotPatchUpdates', () => {
       providerId: 'deepseek',
       model: 'deepseek-v4-pro',
       providerEnvJson: undefined,
+      configSnapshotAt: '2026-06-24T01:00:00.000Z',
+    });
+  });
+
+  it('preserves providerEnvJson when provider-scoped model patch stays on the same provider', () => {
+    const updates = buildSessionSnapshotPatchUpdates({
+      existing: metadata({
+        configSnapshotAt: '2026-06-24T00:30:00.000Z',
+        providerId: 'zhipu',
+        providerEnvJson: '{"providerId":"zhipu","apiKey":"frozen"}',
+      }),
+      payload: { providerId: 'zhipu', model: 'glm-4.7-air' },
+      nowIso: '2026-06-24T01:00:00.000Z',
+    });
+
+    expect(updates).toEqual({
+      providerId: 'zhipu',
+      model: 'glm-4.7-air',
+      configSnapshotAt: '2026-06-24T01:00:00.000Z',
+    });
+    expect('providerEnvJson' in updates).toBe(false);
+  });
+
+  it('keeps base providerEnvJson during first promotion when provider does not change', () => {
+    const updates = buildSessionSnapshotPatchUpdates({
+      existing: metadata(),
+      baseSnapshot: {
+        runtime: 'builtin',
+        providerId: 'zhipu',
+        providerEnvJson: '{"providerId":"zhipu","apiKey":"frozen"}',
+        model: 'glm-4.7',
+        permissionMode: 'fullAgency',
+      },
+      payload: { providerId: 'zhipu', model: 'glm-4.7-air' },
+      nowIso: '2026-06-24T01:00:00.000Z',
+    });
+
+    expect(updates).toMatchObject({
+      runtime: 'builtin',
+      providerId: 'zhipu',
+      providerEnvJson: '{"providerId":"zhipu","apiKey":"frozen"}',
+      model: 'glm-4.7-air',
+      permissionMode: 'fullAgency',
       configSnapshotAt: '2026-06-24T01:00:00.000Z',
     });
   });

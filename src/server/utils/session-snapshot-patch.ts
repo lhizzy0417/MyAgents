@@ -43,6 +43,27 @@ function copyPresentSnapshotFields(source: Partial<SessionMetadata> | undefined)
   return copied;
 }
 
+function hasOwnSnapshotPayloadKey<K extends keyof SessionSnapshotPatchPayload>(
+  payload: SessionSnapshotPatchPayload,
+  key: K,
+): boolean {
+  return Object.prototype.hasOwnProperty.call(payload, key);
+}
+
+function normalizeProviderId(value: SessionMetadata['providerId'] | null | undefined): string | undefined {
+  return typeof value === 'string' && value.length > 0 ? value : undefined;
+}
+
+function providerIdBeforePatch(args: {
+  existing: SessionMetadata;
+  baseSnapshot?: Partial<SessionMetadata>;
+}): string | undefined {
+  if (args.existing.providerId !== undefined) {
+    return normalizeProviderId(args.existing.providerId);
+  }
+  return normalizeProviderId(args.baseSnapshot?.providerId);
+}
+
 /**
  * Build the metadata update for PATCH /sessions/:id config-snapshot fields.
  *
@@ -61,15 +82,16 @@ export function buildSessionSnapshotPatchUpdates(args: {
   let wroteSnapshotField = false;
 
   for (const key of SNAPSHOT_KEYS) {
-    if (!Object.prototype.hasOwnProperty.call(args.payload, key)) continue;
+    if (!hasOwnSnapshotPayloadKey(args.payload, key)) continue;
     const value = args.payload[key];
     (explicit as Record<string, unknown>)[key] = value === null ? undefined : value;
     wroteSnapshotField = true;
   }
 
   if (
-    Object.prototype.hasOwnProperty.call(args.payload, 'providerId') &&
-    !Object.prototype.hasOwnProperty.call(args.payload, 'providerEnvJson')
+    hasOwnSnapshotPayloadKey(args.payload, 'providerId') &&
+    !hasOwnSnapshotPayloadKey(args.payload, 'providerEnvJson') &&
+    normalizeProviderId(args.payload.providerId) !== providerIdBeforePatch(args)
   ) {
     explicit.providerEnvJson = undefined;
     wroteSnapshotField = true;

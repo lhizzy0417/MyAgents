@@ -30,12 +30,18 @@ export interface BuiltinModelSelection {
   model: string;
 }
 
+export type BuiltinProviderEnvPolicy = 'preserve-provider-env' | 'clear-stale-provider-env';
+
 /** What the user just changed in the toolbar. All fields optional. */
 export interface InputOptionFields {
   /** Provider-scoped builtin model selection. Preferred over the loose legacy
    *  providerId/builtinModel pair because builtin model ids are not globally
    *  unique across providers. */
   builtinSelection?: BuiltinModelSelection;
+  /** Snapshot env policy for provider-scoped builtin selections. Cross-provider
+   *  edits clear stale frozen env; same-provider model edits preserve the
+   *  session's exact provider env identity. */
+  builtinProviderEnvPolicy?: BuiltinProviderEnvPolicy;
   /** Selected provider id. Builtin runtime only. */
   providerId?: string | null;
   /** Selected model when on the builtin runtime. Legacy loose field; Chat's
@@ -124,9 +130,8 @@ export interface SessionSnapshotPatch {
   mcpEnabledServers?: string[] | null;
   enabledPluginIds?: string[] | null;
   /** #300/#401 — credential snapshot. `null` clears it so the sidecar re-resolves
-   *  the env live from `providerId`. Provider-scoped builtin selections clear it
-   *  because the helper has no access to credentials and an explicit picker edit
-   *  should self-heal any stale providerEnvJson/providerId mismatch. */
+   *  the env live from `providerId`. Same-provider builtin model edits must not
+   *  clear it because owned sessions treat frozen env as part of exact identity. */
   providerEnvJson?: string | null;
 }
 
@@ -282,7 +287,9 @@ function buildSnapshotPatch(params: PersistInputOptionParams): SessionSnapshotPa
   if (!isExternalRuntime && fields.builtinSelection !== undefined) {
     patch.providerId = fields.builtinSelection.providerId;
     patch.model = fields.builtinSelection.model;
-    patch.providerEnvJson = null;
+    if (fields.builtinProviderEnvPolicy === 'clear-stale-provider-env') {
+      patch.providerEnvJson = null;
+    }
   } else if (fields.providerId !== undefined) {
     patch.providerId = fields.providerId;
     // #300: the session's frozen `providerEnvJson` was captured for the OLD

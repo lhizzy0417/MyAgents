@@ -44,7 +44,7 @@ import { isIntroductionAbsentError, shouldShowIntroductionOverlay, useIntroducti
 import { resolveAdoptedBuiltinProviderId } from '@/utils/sessionConfigAdoption';
 import { getSessionCronTask, updateCronTaskTab, isTaskExecuting, createCronTask, startCronTask as startCronTaskIpc, startCronScheduler } from '@/api/cronTaskClient';
 import { updateSession as patchSessionMetadata } from '@/api/sessionClient';
-import { persistInputOptionChange, type BuiltinModelSelection } from '@/api/persistInputOption';
+import { persistInputOptionChange, type BuiltinModelSelection, type BuiltinProviderEnvPolicy } from '@/api/persistInputOption';
 import { materializePendingSessionConfig } from '@/api/sessionMaterialize';
 import type { CronTask } from '@/types/cronTask';
 import { formatScheduleDescription } from '@/types/cronTask';
@@ -333,6 +333,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
     currentAgent?.providerId ?? currentProject?.providerId ?? config.defaultProviderId ?? undefined
   );
   const sessionSnapshotOwnsConfig = !!sessionMeta?.configSnapshotAt;
+  const waitingForExistingSessionMeta = !!sessionId && !isPendingSessionId(sessionId) && !sessionMeta;
   const selectedProviderExact = selectedProviderId ? providers.find(p => p.id === selectedProviderId) : undefined;
   const selectedProviderAvailable = selectedProviderExact
     ? isProviderAvailable(selectedProviderExact, apiKeys, providerVerifyStatus)
@@ -2039,6 +2040,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
   // bug where Chat's path sent external-runtime permission to the wrong field.
   const persistTabConfigChange = useCallback(async (patch: {
     builtinSelection?: BuiltinModelSelection;
+    builtinProviderEnvPolicy?: BuiltinProviderEnvPolicy;
     providerId?: string;
     /** Builtin model. Use `runtimeModel` instead for external runtimes. */
     model?: string | null;
@@ -2060,6 +2062,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
       currentRuntimeConfig: currentAgent?.runtimeConfig,
       fields: {
         builtinSelection: patch.builtinSelection,
+        builtinProviderEnvPolicy: patch.builtinProviderEnvPolicy,
         providerId: patch.providerId,
         builtinModel: patch.model,
         runtimeModel: patch.runtimeModel,
@@ -2189,7 +2192,6 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
     // projectSyncedRef — so this re-runs once the disposition resolves (configPending
     // is in deps). On 'adopt' the model seed below is gated to 'push' so adoption owns it.
     if (!currentProject || projectSyncedRef.current || hadInitialMessage.current || configPending) return;
-    const waitingForExistingSessionMeta = !!sessionId && !isPendingSessionId(sessionId) && !sessionMeta;
     if (waitingForExistingSessionMeta) return;
     if (sessionSnapshotOwnsConfig) {
       projectSyncedRef.current = true;
@@ -2304,6 +2306,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
   // 若 selectedModel 不在当前 provider 的 models 中（如模型已被删除），回退到 primaryModel 并更新项目
   useEffect(() => {
     if (!currentProject || !currentProvider || configDispositionRef.current !== 'push') return;
+    if (waitingForExistingSessionMeta) return;
     if (sessionSnapshotOwnsConfig) return;
     // #300: `currentProvider` here is the fallback provider, NOT the session's
     // pinned one — the pinned model legitimately isn't in its model list. Without
@@ -2324,7 +2327,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
       }
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps -- only react to specific sub-properties, not full object refs
-  }, [currentProject?.id, currentProvider?.id, currentProvider?.models, currentProvider?.primaryModel, selectedModel, patchProject, pinnedProviderUnavailable, configPending, sessionSnapshotOwnsConfig]);
+  }, [currentProject?.id, currentProvider?.id, currentProvider?.models, currentProvider?.primaryModel, selectedModel, patchProject, pinnedProviderUnavailable, configPending, sessionSnapshotOwnsConfig, waitingForExistingSessionMeta]);
 
   // Unified model-push effect — single source of truth for `/api/model/set`.
   //
@@ -2671,6 +2674,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
       // Provider unchanged but caller passed a specific model — treat as model change.
       // Same dual-write policy as handleModelChange (PRD §4.3 rule 2).
       if (targetModel) {
+        if (targetModel === selectedModel) return;
         const canResumeProviderHistory = canResumeAcrossProviderBoundary(
           toProviderHistoryEnv(currentProvider, selectedModel),
           toProviderHistoryEnv(currentProvider, targetModel),
@@ -2681,6 +2685,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
         }
         const persisted = await persistTabConfigChange({
           builtinSelection: { providerId, model: targetModel },
+          builtinProviderEnvPolicy: 'preserve-provider-env',
           permissionMode: effectivePermissionMode,
         });
         if (!persisted) return;
@@ -2713,6 +2718,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
     if (!model) return;
     const persisted = await persistTabConfigChange({
       builtinSelection: { providerId, model },
+      builtinProviderEnvPolicy: 'clear-stale-provider-env',
       permissionMode: effectivePermissionMode,
     });
     if (!persisted) return;
@@ -2760,6 +2766,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
     if (!currentProviderId) return;
     const persisted = await persistTabConfigChange({
       builtinSelection: { providerId: currentProviderId, model },
+      builtinProviderEnvPolicy: 'preserve-provider-env',
       permissionMode: effectivePermissionMode,
     });
     if (!persisted) return;

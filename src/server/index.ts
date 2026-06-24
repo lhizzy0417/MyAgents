@@ -3712,12 +3712,6 @@ async function main() {
           return jsonResponse({ success: false, error: 'Invalid JSON payload.' }, 400);
         }
 
-        const existingMeta = getSessionMetadata(sessionId);
-        if (!existingMeta) {
-          return jsonResponse({ success: false, error: 'Session not found.' }, 404);
-        }
-        const nowIso = new Date().toISOString();
-
         // `lastActiveAt` is the recency signal that drives history sort
         // order. Bumping it on EVERY PATCH means a pure-UI flag change
         // (favorite toggle) makes an old session jump to the top of the
@@ -3738,42 +3732,78 @@ async function main() {
           .filter((k) => payload[k] !== undefined)
           .some((k) => RECENCY_BUMP_FIELDS.has(k));
 
-        const updates: Record<string, unknown> = touchedRecencyField
-          ? { lastActiveAt: nowIso }
-          : {};
-        if (payload.title !== undefined) updates.title = String(payload.title).slice(0, 100);
-        if (payload.titleSource !== undefined) updates.titleSource = payload.titleSource;
-        if (payload.favorite !== undefined) {
-          // Convert false → undefined so the on-disk shape stays minimal
-          // (the JSON serializer drops undefined keys).
-          updates.favorite = payload.favorite === true ? true : undefined;
+        let updated: SessionMetadata | null = null;
+        let sawExistingSession = false;
+        let sawSnapshotCasChange = false;
+
+        for (let attempt = 0; attempt < 2; attempt += 1) {
+          const existingMeta = getSessionMetadata(sessionId);
+          if (!existingMeta) {
+            if (!sawExistingSession) {
+              return jsonResponse({ success: false, error: 'Session not found.' }, 404);
+            }
+            break;
+          }
+          sawExistingSession = true;
+          const nowIso = new Date().toISOString();
+
+          const updates: Record<string, unknown> = touchedRecencyField
+            ? { lastActiveAt: nowIso }
+            : {};
+          if (payload.title !== undefined) updates.title = String(payload.title).slice(0, 100);
+          if (payload.titleSource !== undefined) updates.titleSource = payload.titleSource;
+          if (payload.favorite !== undefined) {
+            // Convert false → undefined so the on-disk shape stays minimal
+            // (the JSON serializer drops undefined keys).
+            updates.favorite = payload.favorite === true ? true : undefined;
+          }
+
+          // Snapshot fields: null → clear (undefined in stored JSON); value → set.
+          //
+          // v0.2.40: the first desktop snapshot write promotes a legacy/no-snapshot
+          // session into a self-owned session. Promotion must freeze a complete
+          // baseline before applying the explicit patch; otherwise a model-only
+          // patch creates `model + configSnapshotAt` and silently drops permission
+          // / provider ownership.
+          const baseSnapshot = existingMeta.configSnapshotAt
+            ? undefined
+            : (() => {
+              const agent = findAgentByWorkspacePath(existingMeta.agentDir) as AgentConfig | undefined;
+              return agent
+                ? snapshotForOwnedSession(agent, { runtimeOverride: existingMeta.runtime as RuntimeType | undefined })
+                : undefined;
+            })();
+          Object.assign(updates, buildSessionSnapshotPatchUpdates({
+            existing: existingMeta,
+            payload,
+            baseSnapshot,
+            nowIso,
+          }));
+
+          const expectedConfigSnapshotAt = existingMeta.configSnapshotAt;
+          updated = await updateSessionMetadata(
+            sessionId,
+            updates,
+            (current) => current.configSnapshotAt === expectedConfigSnapshotAt,
+          );
+          if (updated) break;
+
+          const latest = getSessionMetadata(sessionId);
+          if (!latest) break;
+          sawSnapshotCasChange = latest.configSnapshotAt !== expectedConfigSnapshotAt;
+          if (!sawSnapshotCasChange) break;
         }
 
-        // Snapshot fields: null → clear (undefined in stored JSON); value → set.
-        //
-        // v0.2.40: the first desktop snapshot write promotes a legacy/no-snapshot
-        // session into a self-owned session. Promotion must freeze a complete
-        // baseline before applying the explicit patch; otherwise a model-only
-        // patch creates `model + configSnapshotAt` and silently drops permission
-        // / provider ownership.
-        const baseSnapshot = existingMeta.configSnapshotAt
-          ? undefined
-          : (() => {
-            const agent = findAgentByWorkspacePath(existingMeta.agentDir) as AgentConfig | undefined;
-            return agent
-              ? snapshotForOwnedSession(agent, { runtimeOverride: existingMeta.runtime as RuntimeType | undefined })
-              : undefined;
-          })();
-        Object.assign(updates, buildSessionSnapshotPatchUpdates({
-          existing: existingMeta,
-          payload,
-          baseSnapshot,
-          nowIso,
-        }));
-
-        const updated = await updateSessionMetadata(sessionId, updates);
         if (!updated) {
-          return jsonResponse({ success: false, error: 'Session not found.' }, 404);
+          if (!getSessionMetadata(sessionId)) {
+            return jsonResponse({ success: false, error: 'Session not found.' }, 404);
+          }
+          return jsonResponse({
+            success: false,
+            error: sawSnapshotCasChange
+              ? 'Session config changed while applying metadata patch; please retry.'
+              : 'Failed to update session metadata.',
+          }, sawSnapshotCasChange ? 409 : 500);
         }
 
         // Zero-trust: redact credential-bearing fields from the echo payload.
