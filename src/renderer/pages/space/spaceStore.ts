@@ -289,8 +289,12 @@ function ensureReady(): boolean {
   return state.boot === 'ready' && Boolean(state.session);
 }
 
+function spaceRouteSegment(space?: SpaceSession['space'] | null): string {
+  return space?.slug || space?.id || DEFAULT_SPACE_ID;
+}
+
 function activeSpaceId(): string {
-  return state.spaceId || state.session?.space?.id || state.session?.space?.slug || DEFAULT_SPACE_ID;
+  return state.spaceId || spaceRouteSegment(state.session?.space);
 }
 
 function scopedKey(key: string): string {
@@ -456,9 +460,9 @@ export const actions: SpaceActions = {
           });
           return;
         }
-        const official = await spaceGetOfficial(session.space?.id ?? session.space?.slug ?? DEFAULT_SPACE_ID);
+        const official = await spaceGetOfficial(spaceRouteSegment(session.space));
         if (!isLatest('boot', requestSeq)) return;
-        const nextSpaceId = official.space.id || session.space?.id || DEFAULT_SPACE_ID;
+        const nextSpaceId = spaceRouteSegment(official.space || session.space);
         const spaceChanged = Boolean(state.spaceId && state.spaceId !== nextSpaceId);
         if (spaceChanged) {
           state = { ...initialState(), boot: state.boot };

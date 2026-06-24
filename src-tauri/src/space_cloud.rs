@@ -1537,9 +1537,9 @@ fn api_url(base_url: &str, path: &str) -> Result<String, String> {
 fn session_space_segment(session: &SpaceSession) -> String {
     session
         .space
-        .get("id")
+        .get("slug")
         .and_then(Value::as_str)
-        .or_else(|| session.space.get("slug").and_then(Value::as_str))
+        .or_else(|| session.space.get("id").and_then(Value::as_str))
         .filter(|value| !value.trim().is_empty())
         .map(url_component)
         .unwrap_or_else(|| "official".to_string())
@@ -1557,7 +1557,11 @@ async fn parse_cloud_data<T: for<'de> Deserialize<'de>>(
         let mut message = envelope
             .error
             .unwrap_or_else(|| format!("Space API request failed with {}", status));
-        if let Some(code) = envelope.code.as_deref().filter(|value| !value.trim().is_empty()) {
+        if let Some(code) = envelope
+            .code
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+        {
             message = format!("{} ({})", message, code);
         }
         if let Some(request_id) = envelope
@@ -2545,6 +2549,24 @@ mod tests {
 
         assert_eq!(error, "Unsupported Space API method");
         let _ = fs::remove_dir_all(&workspace);
+    }
+
+    #[test]
+    fn session_space_segment_prefers_slug_for_official_route_compatibility() {
+        let session = SpaceSession {
+            base_url: "https://space.myagents.test".to_string(),
+            session_token: "session_test".to_string(),
+            expires_at: None,
+            user: Value::Null,
+            space: serde_json::json!({
+                "id": "space_fb63fde836254c9c90146c4f5bb142bd",
+                "slug": "official",
+            }),
+            membership: Value::Null,
+            updated_at: "2026-06-24T00:00:00.000Z".to_string(),
+        };
+
+        assert_eq!(session_space_segment(&session), "official");
     }
 
     #[test]

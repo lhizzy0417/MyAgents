@@ -131,7 +131,7 @@ const fakeAgent: LocalRegisteredAgent = {
 };
 
 function scoped(id: string): string {
-  return `space-1\n${id}`;
+  return `official\n${id}`;
 }
 
 function deferred<T>() {
@@ -162,6 +162,22 @@ describe('spaceStore snapshot', () => {
   });
 });
 
+describe('spaceStore boot', () => {
+  it('uses the stable space slug for API routes even when the session contains a database id', async () => {
+    apiMocks.spaceGetSession.mockResolvedValueOnce(fakeSession);
+    apiMocks.spaceGetOfficial.mockResolvedValueOnce({
+      space: fakeSession.space,
+      membership: fakeSession.membership,
+      tags: [],
+    });
+
+    await actions.ensureBootstrapped({ force: true });
+
+    expect(apiMocks.spaceGetOfficial).toHaveBeenCalledWith('official');
+    expect(getSnapshot().spaceId).toBe('official');
+  });
+});
+
 describe('spaceStore issue refresh', () => {
   it('dedupes same-key issue refreshes while a request is in flight', async () => {
     __setSpaceStoreStateForTest({ boot: 'ready', session: fakeSession });
@@ -174,7 +190,7 @@ describe('spaceStore issue refresh', () => {
     expect(apiMocks.spaceListIssues).toHaveBeenCalledTimes(1);
     expect(apiMocks.spaceListIssues).toHaveBeenCalledWith(
       { q: 'Test', tag: undefined, status: undefined, cursor: undefined, limit: 50 },
-      'space-1',
+      'official',
     );
 
     pending.resolve({ items: [fakeIssue], hasMore: false, nextCursor: null });
@@ -257,7 +273,7 @@ describe('spaceStore issue refresh', () => {
 
     await expect(actions.createTag({ name: 'feature' })).resolves.toEqual(featureTag);
 
-    expect(apiMocks.spaceCreateTag).toHaveBeenCalledWith({ name: 'feature' }, 'space-1');
+    expect(apiMocks.spaceCreateTag).toHaveBeenCalledWith({ name: 'feature' }, 'official');
     expect(getSnapshot().tags.map((tag) => tag.name)).toEqual(['bug', 'feature']);
   });
 
@@ -470,8 +486,8 @@ describe('spaceStore event sync', () => {
     await expect(actions.syncEvents({ force: true })).resolves.toEqual([]);
     await expect(actions.syncEvents({ force: true })).resolves.toEqual([newEvent]);
 
-    expect(apiMocks.spaceListEvents).toHaveBeenNthCalledWith(1, { cursor: null, limit: 100, tail: true }, 'space-1');
-    expect(apiMocks.spaceListEvents).toHaveBeenNthCalledWith(2, { cursor: oldCursor, limit: 100, tail: false }, 'space-1');
+    expect(apiMocks.spaceListEvents).toHaveBeenNthCalledWith(1, { cursor: null, limit: 100, tail: true }, 'official');
+    expect(apiMocks.spaceListEvents).toHaveBeenNthCalledWith(2, { cursor: oldCursor, limit: 100, tail: false }, 'official');
     expect(getSnapshot().events.cursor).toBe(newCursor);
   });
 
@@ -525,7 +541,7 @@ describe('spaceStore event sync', () => {
     await expect(actions.syncEvents({ force: true })).resolves.toEqual([]);
     await expect(actions.syncEvents({ force: true })).resolves.toEqual([secondEvent]);
 
-    expect(apiMocks.spaceListEvents).toHaveBeenNthCalledWith(2, { cursor: firstCursor, limit: 100, tail: false }, 'space-1');
+    expect(apiMocks.spaceListEvents).toHaveBeenNthCalledWith(2, { cursor: firstCursor, limit: 100, tail: false }, 'official');
     expect(getSnapshot().events.cursor).toBe(secondCursor);
   });
 });
