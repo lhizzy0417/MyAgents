@@ -107,7 +107,40 @@ describe('persistInputOptionChange — disk write fanout', () => {
     });
   });
 
-  it('#300: does NOT touch providerEnvJson on a model-only change (same provider keeps its frozen env)', async () => {
+  it('#401: writes provider-scoped builtinSelection atomically even for same-provider model changes', async () => {
+    const m = makeMocks();
+    await persistInputOptionChange({
+      workspaceId: 'ws-1',
+      agentId: 'agent-1',
+      isExternalRuntime: false,
+      fields: {
+        builtinSelection: { providerId: 'zhipu', model: 'glm-4.7-air' },
+        permissionMode: 'fullAgency',
+      },
+      patchProject: m.patchProject,
+      patchAgentConfig: m.patchAgentConfig,
+      patchSnapshot: m.patchSnapshot,
+    });
+
+    expect(m.patchProject).toHaveBeenCalledWith('ws-1', {
+      providerId: 'zhipu',
+      model: 'glm-4.7-air',
+      permissionMode: 'fullAgency',
+    });
+    expect(m.patchAgentConfig).toHaveBeenCalledWith('agent-1', {
+      providerId: 'zhipu',
+      model: 'glm-4.7-air',
+      permissionMode: 'fullAgency',
+    });
+    expect(m.patchSnapshot).toHaveBeenCalledWith({
+      providerId: 'zhipu',
+      model: 'glm-4.7-air',
+      providerEnvJson: null,
+      permissionMode: 'fullAgency',
+    });
+  });
+
+  it('#300 legacy loose field: does NOT touch providerEnvJson on a model-only change', async () => {
     const m = makeMocks();
     await persistInputOptionChange({
       workspaceId: 'ws-1',

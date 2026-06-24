@@ -44,7 +44,7 @@ import { isIntroductionAbsentError, shouldShowIntroductionOverlay, useIntroducti
 import { resolveAdoptedBuiltinProviderId } from '@/utils/sessionConfigAdoption';
 import { getSessionCronTask, updateCronTaskTab, isTaskExecuting, createCronTask, startCronTask as startCronTaskIpc, startCronScheduler } from '@/api/cronTaskClient';
 import { updateSession as patchSessionMetadata } from '@/api/sessionClient';
-import { persistInputOptionChange } from '@/api/persistInputOption';
+import { persistInputOptionChange, type BuiltinModelSelection } from '@/api/persistInputOption';
 import { materializePendingSessionConfig } from '@/api/sessionMaterialize';
 import type { CronTask } from '@/types/cronTask';
 import { formatScheduleDescription } from '@/types/cronTask';
@@ -59,6 +59,7 @@ import { syncMcpServerNames } from '@/components/tools/toolBadgeConfig';
 import {
   getAllMcpServers,
   getEnabledMcpServerIds,
+  isProviderAvailable,
   resolveProvider,
 } from '@/config/configService';
 import { patchAgentConfig, getAgentById } from '@/config/services/agentConfigService';
@@ -83,7 +84,7 @@ import type { RuntimeType, RuntimeDetections, RuntimeConfig } from '../../shared
 import type { FilePreviewIntent, InitialMessage, SidecarConfigDisposition } from '@/types/tab';
 import type { FilePreviewFocusTarget } from '@/types/filePreview';
 import { shouldAutoSendInitialMessage } from '@/utils/initialMessageAutoSend';
-import { resolveBuiltinPermissionMode, isPinnedProviderUnavailable, shouldResetModelOnProviderChange, shouldSkipSnapshotWrite } from '@/utils/optionResolve';
+import { resolveBuiltinPermissionMode, resolveCurrentProviderForSession, isPinnedProviderUnavailable, shouldResetModelOnProviderChange, shouldSkipSnapshotWrite } from '@/utils/optionResolve';
 // CronTaskConfig type is used via useCronTask hook
 
 import { getRichDocKind, isPreviewable, type RichDocKind } from '../../shared/fileTypes';
@@ -331,7 +332,19 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
   const [selectedProviderId, setSelectedProviderId] = useState<string | undefined>(
     currentAgent?.providerId ?? currentProject?.providerId ?? config.defaultProviderId ?? undefined
   );
-  const currentProvider = resolveProvider(selectedProviderId, providers, apiKeys, providerVerifyStatus);
+  const sessionSnapshotOwnsConfig = !!sessionMeta?.configSnapshotAt;
+  const selectedProviderExact = selectedProviderId ? providers.find(p => p.id === selectedProviderId) : undefined;
+  const selectedProviderAvailable = selectedProviderExact
+    ? isProviderAvailable(selectedProviderExact, apiKeys, providerVerifyStatus)
+    : false;
+  const fallbackProvider = resolveProvider(selectedProviderId, providers, apiKeys, providerVerifyStatus);
+  const currentProvider = resolveCurrentProviderForSession({
+    sessionSnapshotOwnsConfig,
+    selectedProviderId,
+    selectedProvider: selectedProviderExact,
+    selectedProviderAvailable,
+    fallbackProvider,
+  });
 
   // PERFORMANCE: Ref-stabilize object deps used in handleSendMessage
   // Prevents useCallback from creating new references when these objects change,
@@ -1173,7 +1186,8 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
   // `permissionMode` from initialMessage.permissionMode and the project-sync
   // effect is skipped, so trusting state here preserves the launcher's explicit
   // choice instead of overriding it with the agent default).
-  const permissionStateAuthoritative = projectSyncedRef.current || hadInitialMessage.current;
+  const permissionStateAuthoritative =
+    projectSyncedRef.current || hadInitialMessage.current || sessionSnapshotOwnsConfig;
   const effectivePermissionMode = isExternalRuntime
     ? effectiveRuntimePermissionMode as PermissionMode
     : resolveBuiltinPermissionMode({
@@ -1940,7 +1954,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
   // changes in a desktop Tab MUST first land in the session snapshot. Agent is
   // still updated as the template for future sessions, but the current Tab's
   // session authority is the snapshot once the user touches a config knob.
-  const isOwnedSession = !!sessionMeta?.configSnapshotAt;
+  const isOwnedSession = sessionSnapshotOwnsConfig;
 
   // v0.2.39 — desktop Tab config edits always snapshot first. Even if the
   // session originated from IM and is currently live-following, a user edit in
@@ -2024,6 +2038,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
   // instead of `agent.permissionMode` / `agent.model`) — fixing a long-standing
   // bug where Chat's path sent external-runtime permission to the wrong field.
   const persistTabConfigChange = useCallback(async (patch: {
+    builtinSelection?: BuiltinModelSelection;
     providerId?: string;
     /** Builtin model. Use `runtimeModel` instead for external runtimes. */
     model?: string | null;
@@ -2044,6 +2059,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
       isExternalRuntime,
       currentRuntimeConfig: currentAgent?.runtimeConfig,
       fields: {
+        builtinSelection: patch.builtinSelection,
         providerId: patch.providerId,
         builtinModel: patch.model,
         runtimeModel: patch.runtimeModel,
@@ -2143,6 +2159,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
       providerInitRef.current = false;
       return;
     }
+    if (sessionSnapshotOwnsConfig) return;
     // #300: when the pinned provider is unavailable, `currentProvider` is a
     // silent first-available fallback (e.g. deepseek). Judging — let alone
     // resetting — the pinned model against the fallback's model list is exactly
@@ -2160,7 +2177,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
     if (currentProvider?.primaryModel) {
       setSelectedModel(currentProvider.primaryModel);
     }
-  }, [currentProvider?.id, currentProvider?.primaryModel, currentProvider?.models, currentProvider?.type, selectedModel, pinnedProviderUnavailable]);
+  }, [currentProvider?.id, currentProvider?.primaryModel, currentProvider?.models, currentProvider?.type, selectedModel, pinnedProviderUnavailable, sessionSnapshotOwnsConfig]);
 
   // One-time sync: apply project-stored settings after useConfig finishes async load.
   // useState initializers run with currentProject=undefined (useConfig loads asynchronously),
@@ -2172,6 +2189,12 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
     // projectSyncedRef — so this re-runs once the disposition resolves (configPending
     // is in deps). On 'adopt' the model seed below is gated to 'push' so adoption owns it.
     if (!currentProject || projectSyncedRef.current || hadInitialMessage.current || configPending) return;
+    const waitingForExistingSessionMeta = !!sessionId && !isPendingSessionId(sessionId) && !sessionMeta;
+    if (waitingForExistingSessionMeta) return;
+    if (sessionSnapshotOwnsConfig) {
+      projectSyncedRef.current = true;
+      return;
+    }
     projectSyncedRef.current = true;
     // AgentConfig is source of truth, Project is fallback for non-agent workspaces
     const effectivePermission = (currentAgent?.permissionMode as PermissionMode | undefined) ?? currentProject.permissionMode ?? config.defaultPermissionMode;
@@ -2200,7 +2223,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
       setReasoningEffort(currentAgent?.reasoningEffort ?? 'default');
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps -- one-time sync when project first loads
-  }, [currentProject?.id, configPending]);
+  }, [currentProject?.id, configPending, sessionId, sessionMeta, sessionSnapshotOwnsConfig]);
 
   // v0.1.69: session snapshot → local state (session-first per D7 Option C).
   // Also handles T11 reset-on-session-switch: when switching to an unlocked / IM session
@@ -2251,10 +2274,13 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
       ? (currentAgent?.runtimeConfig as RuntimeConfig | undefined)?.reasoningEffort
       : currentAgent?.reasoningEffort;
     const snapEffort = snapshotOwnsConfig ? sessionMeta.reasoningEffort : (sessionMeta.reasoningEffort ?? fallbackEffort);
+    if (snapshotOwnsConfig) {
+      projectSyncedRef.current = true;
+    }
     if (snapshotIsExternal) {
       setRuntimeModel(model);
-    } else if (model) {
-        setSelectedModel(model);
+    } else if (snapshotOwnsConfig || model) {
+      setSelectedModel(model);
     }
     setReasoningEffort(
       (snapshotIsExternal
@@ -2264,10 +2290,12 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
     );
     if (snapshotIsExternal) {
       setRuntimePermissionMode(mode ?? getDefaultRuntimePermissionMode(snapshotRuntime) ?? 'default');
-    } else if (mode) {
-      setPermissionMode(mode as PermissionMode);
+    } else if (snapshotOwnsConfig || mode) {
+      setPermissionMode((mode as PermissionMode | undefined) ?? 'auto');
     }
-    if (providerId) setSelectedProviderId(providerId);
+    if (!snapshotIsExternal && (snapshotOwnsConfig || providerId)) {
+      setSelectedProviderId(providerId);
+    }
     if (mcp) setWorkspaceMcpEnabled(mcp);
     setWorkspaceEnabledPlugins(plugins);
   // eslint-disable-next-line react-hooks/exhaustive-deps -- currentAgent derived from config, listening to its identity would re-fire on unrelated agent changes
@@ -2276,6 +2304,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
   // 若 selectedModel 不在当前 provider 的 models 中（如模型已被删除），回退到 primaryModel 并更新项目
   useEffect(() => {
     if (!currentProject || !currentProvider || configDispositionRef.current !== 'push') return;
+    if (sessionSnapshotOwnsConfig) return;
     // #300: `currentProvider` here is the fallback provider, NOT the session's
     // pinned one — the pinned model legitimately isn't in its model list. Without
     // this guard the effect would "heal" the model to the fallback provider's
@@ -2295,7 +2324,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
       }
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps -- only react to specific sub-properties, not full object refs
-  }, [currentProject?.id, currentProvider?.id, currentProvider?.models, currentProvider?.primaryModel, selectedModel, patchProject, pinnedProviderUnavailable, configPending]);
+  }, [currentProject?.id, currentProvider?.id, currentProvider?.models, currentProvider?.primaryModel, selectedModel, patchProject, pinnedProviderUnavailable, configPending, sessionSnapshotOwnsConfig]);
 
   // Unified model-push effect — single source of truth for `/api/model/set`.
   //
@@ -2366,6 +2395,12 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
     if (isSessionLoading) return;
 
     const modelToPush = isExternalRuntime ? runtimeModel : selectedModel;
+    if (sessionSnapshotOwnsConfig) {
+      const snapshotModel = isExternalRuntime
+        ? coerceExternalRuntimeModelForUi(sessionMeta?.model, currentRuntime)
+        : sessionMeta?.model;
+      if (modelToPush !== snapshotModel) return;
+    }
     // External + no explicit pick → defer to runtime's built-in default.
     if (!modelToPush) return;
 
@@ -2378,7 +2413,8 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
       lastPushedModelKeyRef.current = null; // allow retry
     });
   }, [isConnected, sessionRuntime, currentAgent, isExternalRuntime,
-      runtimeModel, selectedModel, sessionId, apiPost, configPending, isSessionLoading]);
+      runtimeModel, selectedModel, sessionId, apiPost, configPending, isSessionLoading,
+      sessionSnapshotOwnsConfig, sessionMeta?.model, currentRuntime]);
 
   // #324 — NO mount-time effort-push effect, deliberately diverging from the
   // model-push effect above. The sidecar self-resolves effort at boot from the
@@ -2643,7 +2679,10 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
           setPendingProviderSwitch({ providerId, model: targetModel });
           return;
         }
-        const persisted = await persistTabConfigChange({ model: targetModel });
+        const persisted = await persistTabConfigChange({
+          builtinSelection: { providerId, model: targetModel },
+          permissionMode: effectivePermissionMode,
+        });
         if (!persisted) return;
         setSelectedModel(targetModel);
       }
@@ -2671,7 +2710,11 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
     // Write back: owned session snapshots this choice locally so the current session
     // keeps using it; agent/project always gets written so FUTURE new sessions inherit
     // the user's latest preference (PRD v0.1.69 §4.3 rule 2 dual-write).
-    const persisted = await persistTabConfigChange({ providerId, model: model ?? null });
+    if (!model) return;
+    const persisted = await persistTabConfigChange({
+      builtinSelection: { providerId, model },
+      permissionMode: effectivePermissionMode,
+    });
     if (!persisted) return;
 
     // Update local state only after the snapshot write succeeds. The model-push
@@ -2685,7 +2728,11 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
     // Suppress the deferred provider-change useEffect — we've already set the correct model
     providerInitRef.current = true;
   // eslint-disable-next-line react-hooks/exhaustive-deps -- narrowed deps; messagesRef avoids dep on messages array
-  }, [selectedProviderId, selectedModel, providers, currentProvider?.id, currentProvider?.type, currentProvider?.config.baseUrl, currentProvider?.apiProtocol, persistTabConfigChange]);
+  }, [selectedProviderId, selectedModel, providers, currentProvider?.id, currentProvider?.type, currentProvider?.config.baseUrl, currentProvider?.apiProtocol, effectivePermissionMode, persistTabConfigChange]);
+
+  const handleBuiltinModelSelect = useCallback(async (selection: BuiltinModelSelection) => {
+    await handleProviderChange(selection.providerId, selection.model);
+  }, [handleProviderChange]);
 
   // Handle model change with analytics tracking.
   // Dual-write per PRD v0.1.69 §4.3 rule 2 "写 Session + 向上写 Agent": owned sessions
@@ -2710,11 +2757,15 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
       return;
     }
 
-    const persisted = await persistTabConfigChange({ model });
+    if (!currentProviderId) return;
+    const persisted = await persistTabConfigChange({
+      builtinSelection: { providerId: currentProviderId, model },
+      permissionMode: effectivePermissionMode,
+    });
     if (!persisted) return;
     setSelectedModel(model);
   // eslint-disable-next-line react-hooks/exhaustive-deps -- narrowed deps; currentProvider fields cover toProviderHistoryEnv inputs
-  }, [selectedModel, currentProvider?.id, currentProvider?.type, currentProvider?.config.baseUrl, currentProvider?.apiProtocol, selectedProviderId, persistTabConfigChange]);
+  }, [selectedModel, currentProvider?.id, currentProvider?.type, currentProvider?.config.baseUrl, currentProvider?.apiProtocol, selectedProviderId, effectivePermissionMode, persistTabConfigChange]);
 
   // External-runtime model change. Same dual-write policy as builtin
   // `handleModelChange`, routed through `runtimeModel` so the helper writes
@@ -4212,6 +4263,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
             providers={providers}
             onProviderChange={handleProviderChange}
             selectedModel={isExternalRuntime ? runtimeModel : selectedModel}
+            onBuiltinModelSelect={isExternalRuntime ? undefined : handleBuiltinModelSelect}
             onModelChange={isExternalRuntime ? handleRuntimeModelChange : handleModelChange}
             reasoningEffort={reasoningEffort}
             onReasoningEffortChange={handleReasoningEffortChange}

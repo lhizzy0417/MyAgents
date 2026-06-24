@@ -25,11 +25,21 @@ import type { PermissionMode, Project, McpServerDefinition } from '@/config/type
 import type { AgentConfig } from '@/../shared/types/agent';
 import type { RuntimeConfig } from '@/../shared/types/runtime';
 
+export interface BuiltinModelSelection {
+  providerId: string;
+  model: string;
+}
+
 /** What the user just changed in the toolbar. All fields optional. */
 export interface InputOptionFields {
+  /** Provider-scoped builtin model selection. Preferred over the loose legacy
+   *  providerId/builtinModel pair because builtin model ids are not globally
+   *  unique across providers. */
+  builtinSelection?: BuiltinModelSelection;
   /** Selected provider id. Builtin runtime only. */
   providerId?: string | null;
-  /** Selected model when on the builtin runtime — paired with providerId. */
+  /** Selected model when on the builtin runtime. Legacy loose field; Chat's
+   *  provider/model picker must use builtinSelection instead. */
   builtinModel?: string | null;
   /** Selected model when on an external runtime (Codex/CC/Gemini). */
   runtimeModel?: string | null;
@@ -113,10 +123,10 @@ export interface SessionSnapshotPatch {
   permissionMode?: string | null;
   mcpEnabledServers?: string[] | null;
   enabledPluginIds?: string[] | null;
-  /** #300 — credential snapshot. `null` clears it so the sidecar re-resolves the
-   *  env live from `providerId`. Set to null whenever providerId changes (the old
-   *  frozen env belongs to the OLD provider). Never sets a concrete value here —
-   *  this helper has no access to credentials and live re-resolution is correct. */
+  /** #300/#401 — credential snapshot. `null` clears it so the sidecar re-resolves
+   *  the env live from `providerId`. Provider-scoped builtin selections clear it
+   *  because the helper has no access to credentials and an explicit picker edit
+   *  should self-heal any stale providerEnvJson/providerId mismatch. */
   providerEnvJson?: string | null;
 }
 
@@ -240,14 +250,17 @@ function buildProjectPatch(
   const patch: Partial<Omit<Project, 'id'>> = {};
   const { fields, isExternalRuntime } = params;
 
-  if (fields.providerId !== undefined) {
+  if (!isExternalRuntime && fields.builtinSelection !== undefined) {
+    patch.providerId = fields.builtinSelection.providerId;
+    patch.model = fields.builtinSelection.model;
+  } else if (fields.providerId !== undefined) {
     patch.providerId = fields.providerId ?? undefined;
   }
   // builtinModel goes to project.model — that's the project-level "default
   // model" used by future sessions. runtimeModel does NOT go to the project
   // because the project doesn't track a per-runtime model; that field lives
   // on the agent.runtimeConfig.
-  if (fields.builtinModel !== undefined) {
+  if (!isExternalRuntime && fields.builtinSelection === undefined && fields.builtinModel !== undefined) {
     patch.model = fields.builtinModel ?? null;
   }
   if (fields.permissionMode !== undefined && !isExternalRuntime) {
@@ -266,7 +279,11 @@ function buildSnapshotPatch(params: PersistInputOptionParams): SessionSnapshotPa
   const patch: SessionSnapshotPatch = {};
   const { fields, isExternalRuntime } = params;
 
-  if (fields.providerId !== undefined) {
+  if (!isExternalRuntime && fields.builtinSelection !== undefined) {
+    patch.providerId = fields.builtinSelection.providerId;
+    patch.model = fields.builtinSelection.model;
+    patch.providerEnvJson = null;
+  } else if (fields.providerId !== undefined) {
     patch.providerId = fields.providerId;
     // #300: the session's frozen `providerEnvJson` was captured for the OLD
     // provider. Once providerId changes it is stale credentials (e.g. a deepseek
@@ -274,8 +291,7 @@ function buildSnapshotPatch(params: PersistInputOptionParams): SessionSnapshotPa
     // resolveWorkspaceConfig treats "snapshot env wins" (admin-config.ts), so on
     // a headless handover (IM / cron / pre-warm) that stale blob would override
     // the freshly-resolved env and send to the wrong upstream. Clear it so the
-    // sidecar re-resolves the env live from the new providerId. Only on provider
-    // change — a model-only change keeps the same provider's frozen env.
+    // sidecar re-resolves the env live from the new providerId.
     patch.providerEnvJson = null;
   }
   // Snapshot.model is the session's "current model" regardless of runtime —
@@ -287,6 +303,8 @@ function buildSnapshotPatch(params: PersistInputOptionParams): SessionSnapshotPa
   // builtin values.
   if (isExternalRuntime) {
     if (fields.runtimeModel !== undefined) patch.model = fields.runtimeModel;
+  } else if (fields.builtinSelection !== undefined) {
+    patch.model = fields.builtinSelection.model;
   } else if (fields.builtinModel !== undefined) {
     patch.model = fields.builtinModel;
   }
@@ -312,7 +330,9 @@ function buildAgentPatch(
   const patch: Partial<Omit<AgentConfig, 'id'>> = {};
   const { fields, isExternalRuntime, currentRuntimeConfig } = params;
 
-  if (fields.providerId !== undefined) {
+  if (!isExternalRuntime && fields.builtinSelection !== undefined) {
+    patch.providerId = fields.builtinSelection.providerId;
+  } else if (fields.providerId !== undefined) {
     patch.providerId = fields.providerId ?? undefined;
   }
   if (fields.mcpEnabledServers !== undefined) {
@@ -349,7 +369,9 @@ function buildAgentPatch(
     if (fields.permissionMode !== undefined) {
       patch.permissionMode = fields.permissionMode as PermissionMode;
     }
-    if (fields.builtinModel !== undefined) {
+    if (fields.builtinSelection !== undefined) {
+      patch.model = fields.builtinSelection.model;
+    } else if (fields.builtinModel !== undefined) {
       patch.model = fields.builtinModel ?? undefined;
     }
     if (fields.reasoningEffort !== undefined) {

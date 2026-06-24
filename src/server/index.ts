@@ -531,6 +531,7 @@ import {
 } from './SessionStore';
 import { decodeProviderEnvSnapshot, findAgentByWorkspacePath, findProvider, getAllMcpServers, getEffectiveMcpServers, isProviderDisabled, loadConfig, resolveImProviderEnv, resolveProviderEnv, resolveWorkspaceConfig } from './utils/admin-config';
 import { snapshotForOwnedSession } from './utils/session-snapshot';
+import { buildSessionSnapshotPatchUpdates } from './utils/session-snapshot-patch';
 import { resolveSessionConfig } from './utils/resolve-session-config';
 import { resolveLastRealUserMessagePreview, shrinkSessionMessagesForClient } from './utils/session-message-preview';
 import type { AgentConfig } from '../shared/types/agent';
@@ -3711,6 +3712,12 @@ async function main() {
           return jsonResponse({ success: false, error: 'Invalid JSON payload.' }, 400);
         }
 
+        const existingMeta = getSessionMetadata(sessionId);
+        if (!existingMeta) {
+          return jsonResponse({ success: false, error: 'Session not found.' }, 404);
+        }
+        const nowIso = new Date().toISOString();
+
         // `lastActiveAt` is the recency signal that drives history sort
         // order. Bumping it on EVERY PATCH means a pure-UI flag change
         // (favorite toggle) makes an old session jump to the top of the
@@ -3732,7 +3739,7 @@ async function main() {
           .some((k) => RECENCY_BUMP_FIELDS.has(k));
 
         const updates: Record<string, unknown> = touchedRecencyField
-          ? { lastActiveAt: new Date().toISOString() }
+          ? { lastActiveAt: nowIso }
           : {};
         if (payload.title !== undefined) updates.title = String(payload.title).slice(0, 100);
         if (payload.titleSource !== undefined) updates.titleSource = payload.titleSource;
@@ -3743,42 +3750,28 @@ async function main() {
         }
 
         // Snapshot fields: null → clear (undefined in stored JSON); value → set.
-        // `undefined` in stored metadata is how the resolver recognizes "fall back to agent".
         //
-        // v0.2.39 owner rule: a desktop Tab editing a session is explicit
-        // desktop ownership, even when the session's source is IM-shaped. The
-        // first snapshot field write promotes that session out of live-follow;
-        // the channel returns to live-follow only when it creates a new session.
-
-        const snapshotKeys = [
-          'model',
-          'reasoningEffort',
-          'permissionMode',
-          'mcpEnabledServers',
-          'enabledPluginIds',
-          'providerId',
-          'providerEnvJson',
-        ] as const;
-        let wroteSnapshotField = false;
-        for (const key of snapshotKeys) {
-          const v = payload[key];
-          if (v === undefined) continue;
-          updates[key] = v === null ? undefined : v;
-          wroteSnapshotField = true;
-        }
-        if (payload.providerId !== undefined && payload.providerEnvJson === undefined) {
-          updates.providerEnvJson = undefined;
-          wroteSnapshotField = true;
-        }
-
-        // Stamp configSnapshotAt on the first snapshot write (lazy migration).
-        // Also bumps on subsequent writes — harmless, useful for debugging.
-        if (wroteSnapshotField) {
-          updates.configSnapshotAt = new Date().toISOString();
-        }
+        // v0.2.40: the first desktop snapshot write promotes a legacy/no-snapshot
+        // session into a self-owned session. Promotion must freeze a complete
+        // baseline before applying the explicit patch; otherwise a model-only
+        // patch creates `model + configSnapshotAt` and silently drops permission
+        // / provider ownership.
+        const baseSnapshot = existingMeta.configSnapshotAt
+          ? undefined
+          : (() => {
+            const agent = findAgentByWorkspacePath(existingMeta.agentDir) as AgentConfig | undefined;
+            return agent
+              ? snapshotForOwnedSession(agent, { runtimeOverride: existingMeta.runtime as RuntimeType | undefined })
+              : undefined;
+          })();
+        Object.assign(updates, buildSessionSnapshotPatchUpdates({
+          existing: existingMeta,
+          payload,
+          baseSnapshot,
+          nowIso,
+        }));
 
         const updated = await updateSessionMetadata(sessionId, updates);
-
         if (!updated) {
           return jsonResponse({ success: false, error: 'Session not found.' }, 404);
         }
