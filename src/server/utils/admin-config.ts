@@ -22,6 +22,7 @@ import { resolve } from 'path';
 import { getHomeDirOrNull } from './platform';
 import { stripBom } from '../../shared/utils';
 import { workspacePathsEqual } from '../../shared/workspacePath';
+import { promoteAgentMcpJsonToGlobal } from '../../shared/mcpConfig';
 import type { McpServerDefinition } from '../../shared/config-types';
 import { applyProviderEnablementAndOrder, isProviderEnabled, PRESET_MCP_SERVERS, PRESET_PROVIDERS } from '../../shared/config-types';
 import {
@@ -148,14 +149,21 @@ export function loadConfig(): AdminAppConfig {
   }
   try {
     const raw = readFileSync(configPath, 'utf-8');
-    return JSON.parse(stripBom(raw)) as AdminAppConfig;
+    const config = JSON.parse(stripBom(raw)) as AdminAppConfig;
+    // Keep Admin API/CLI reads aligned with renderer and Rust IM config
+    // readers: legacy Agent-only HTTP/SSE definitions are part of the MCP
+    // catalogue until the user explicitly removes or disables them.
+    promoteAgentMcpJsonToGlobal(config);
+    return config;
   } catch {
     // Malformed JSON — try .bak fallback
     const bakPath = configPath + '.bak';
     if (existsSync(bakPath)) {
       try {
         console.warn('[admin-config] config.json parse failed, falling back to .bak');
-        return JSON.parse(stripBom(readFileSync(bakPath, 'utf-8'))) as AdminAppConfig;
+        const config = JSON.parse(stripBom(readFileSync(bakPath, 'utf-8'))) as AdminAppConfig;
+        promoteAgentMcpJsonToGlobal(config);
+        return config;
       } catch { /* bak also corrupt */ }
     }
     console.error('[admin-config] config.json and .bak both unreadable, returning empty config');

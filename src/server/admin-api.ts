@@ -17,6 +17,7 @@ import { promisify } from 'node:util';
 import { splitProviderModelInput, type McpServerDefinition } from '../shared/config-types';
 import { deriveCliToolKind, type CliToolRegistryEntry } from '../shared/types/cliTools';
 import { workspacePathsEqual } from '../shared/workspacePath';
+import { removeMcpServerEverywhere } from '../shared/mcpConfig';
 import { SDK_RESERVED_MCP_NAMES } from './agent-session';
 import {
   findMissingEnvKeys,
@@ -456,15 +457,7 @@ export async function handleMcpRemove(payload: { id: string }): Promise<AdminRes
     return { success: false, error: `Cannot remove built-in MCP server '${id}'. Only custom servers can be removed.` };
   }
 
-  await atomicModifyConfig(c => {
-    const servers = (c.mcpServers || []).filter(s => s.id !== id);
-    const enabled = (c.mcpEnabledServers || []).filter(s => s !== id);
-    const envOverrides = { ...(c.mcpServerEnv || {}) };
-    delete envOverrides[id];
-    const argsOverrides = { ...(c.mcpServerArgs || {}) };
-    delete argsOverrides[id];
-    return { ...c, mcpServers: servers, mcpEnabledServers: enabled, mcpServerEnv: envOverrides, mcpServerArgs: argsOverrides };
-  });
+  await atomicModifyConfig(c => removeMcpServerEverywhere(c, id));
 
   notifyMcpChange('remove', id);
   return { success: true, data: { id }, hint: 'Server removed.' };

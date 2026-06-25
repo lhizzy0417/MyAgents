@@ -103,3 +103,99 @@ describe('admin-api MCP project scope', () => {
     ]);
   });
 });
+
+describe('admin-api MCP remove/disable legacy HTTP servers', () => {
+  const remoteHttp = {
+    id: 'yuandian-law',
+    name: 'YuanDian Law',
+    type: 'http',
+    url: 'https://mcp.example.com/yuandian-law',
+    headers: { Authorization: 'Bearer token' },
+    isBuiltin: false,
+  };
+
+  it('removes HTTP MCP definitions from global config and Agent legacy payloads', async () => {
+    const { handleMcpRemove } = await import('./admin-api');
+    writeJson(join(scratch, '.myagents', 'config.json'), {
+      mcpServers: [remoteHttp],
+      mcpEnabledServers: ['yuandian-law'],
+      mcpServerEnv: { 'yuandian-law': { TOKEN: 'secret' } },
+      mcpServerArgs: { 'yuandian-law': ['--stale'] },
+      agents: [{
+        id: 'agent-1',
+        name: 'Agent',
+        enabled: true,
+        workspacePath: '/tmp/workspace',
+        permissionMode: 'plan',
+        channels: [],
+        mcpEnabledServers: ['yuandian-law'],
+        mcpServersJson: JSON.stringify([remoteHttp]),
+      }],
+    });
+
+    const result = await handleMcpRemove({ id: 'yuandian-law' });
+    const config = readConfig();
+    const agent = (config.agents as Array<Record<string, unknown>>)[0];
+
+    expect(result.success).toBe(true);
+    expect(config.mcpServers).toEqual([]);
+    expect(config.mcpEnabledServers).toEqual([]);
+    expect(config.mcpServerEnv).toEqual({});
+    expect(config.mcpServerArgs).toEqual({});
+    expect(agent.mcpEnabledServers).toEqual([]);
+    expect(agent.mcpServersJson).toBeUndefined();
+  });
+
+  it('removes Agent-only legacy HTTP MCP servers after Admin API load-boundary promotion', async () => {
+    const { handleMcpRemove } = await import('./admin-api');
+    writeJson(join(scratch, '.myagents', 'config.json'), {
+      mcpServers: [],
+      mcpEnabledServers: [],
+      agents: [{
+        id: 'agent-1',
+        name: 'Agent',
+        enabled: true,
+        workspacePath: '/tmp/workspace',
+        permissionMode: 'plan',
+        channels: [],
+        mcpEnabledServers: ['yuandian-law'],
+        mcpServersJson: JSON.stringify([remoteHttp]),
+      }],
+    });
+
+    const result = await handleMcpRemove({ id: 'yuandian-law' });
+    const config = readConfig();
+    const agent = (config.agents as Array<Record<string, unknown>>)[0];
+
+    expect(result.success).toBe(true);
+    expect(config.mcpServers).toEqual([]);
+    expect(config.mcpEnabledServers).toEqual([]);
+    expect(agent.mcpEnabledServers).toEqual([]);
+    expect(agent.mcpServersJson).toBeUndefined();
+  });
+
+  it('disables Agent-only legacy HTTP MCP servers without letting promotion re-enable them', async () => {
+    const { handleMcpDisable } = await import('./admin-api');
+    writeJson(join(scratch, '.myagents', 'config.json'), {
+      mcpServers: [],
+      mcpEnabledServers: [],
+      agents: [{
+        id: 'agent-1',
+        name: 'Agent',
+        enabled: true,
+        workspacePath: '/tmp/workspace',
+        permissionMode: 'plan',
+        channels: [],
+        mcpEnabledServers: ['yuandian-law'],
+        mcpServersJson: JSON.stringify([remoteHttp]),
+      }],
+    });
+
+    const result = await handleMcpDisable({ id: 'yuandian-law', scope: 'both' });
+    const config = readConfig();
+
+    expect(result.success).toBe(true);
+    expect((config.mcpServers as Array<Record<string, unknown>>).map(s => s.id)).toEqual(['yuandian-law']);
+    expect(config.mcpEnabledServers).toEqual([]);
+  });
+});
