@@ -8,4 +8,9 @@ if [[ ! -f "${SCRIPT_PATH}" ]]; then
   exit 1
 fi
 
-open -a Terminal "${SCRIPT_PATH}"
+osascript <<OSA
+tell application "Terminal"
+  activate
+  do script quoted form of POSIX path of "${SCRIPT_PATH}"
+end tell
+OSA
