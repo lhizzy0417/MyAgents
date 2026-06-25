@@ -34,8 +34,8 @@ pub struct CronExecutePayload {
     pub runtime: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub runtime_config: Option<serde_json::Value>,
-    /// Per-task MCP enable list override (PRD 0.2.4 §需求 4).
-    /// `None` = follow workspace MCP config (Agent's mcpEnabledServers).
+    /// Per-task MCP enable list override. `None` = follow workspace MCP config
+    /// (Agent's mcpEnabledServers). `Some([])` = explicitly no MCP.
     /// `Some([...])` = enable only these server ids for this task.
     /// Sidecar `/cron/execute-sync` applies via `setMcpServers()` before
     /// delivering the prompt so the SDK's tool list matches the override.

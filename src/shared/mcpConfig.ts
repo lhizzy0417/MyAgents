@@ -11,6 +11,9 @@ export type McpConfigContainer = {
   mcpServerEnv?: Record<string, Record<string, string>>;
   mcpServerArgs?: Record<string, string[]>;
   agents?: unknown[];
+  imBotConfig?: unknown;
+  imBotConfigs?: unknown[];
+  launcherLastUsed?: unknown;
 };
 
 type RemoteMcpDefinition = McpServerDefinition & {
@@ -58,6 +61,11 @@ function asAgentMcpConfig(agent: unknown): (Record<string, unknown> & AgentMcpCo
   return agent as Record<string, unknown> & AgentMcpConfig;
 }
 
+function asMcpRefConfig(value: unknown): (Record<string, unknown> & AgentMcpConfig) | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  return value as Record<string, unknown> & AgentMcpConfig;
+}
+
 /**
  * Heal a legacy Agent-only MCP catalogue split:
  * `agents[].mcpEnabledServers` references a custom HTTP/SSE server whose full
@@ -103,26 +111,26 @@ export function promoteAgentMcpJsonToGlobal<T extends McpConfigContainer>(config
   return changed;
 }
 
-function pruneAgentMcpReference(agent: AgentMcpConfig, serverId: string): boolean {
+function pruneMcpReference(holder: AgentMcpConfig, serverId: string): boolean {
   let changed = false;
 
-  if (Array.isArray(agent.mcpEnabledServers)) {
-    const nextEnabled = agent.mcpEnabledServers.filter(id => id !== serverId);
-    if (nextEnabled.length !== agent.mcpEnabledServers.length) {
-      agent.mcpEnabledServers = nextEnabled;
+  if (Array.isArray(holder.mcpEnabledServers)) {
+    const nextEnabled = holder.mcpEnabledServers.filter(id => id !== serverId);
+    if (nextEnabled.length !== holder.mcpEnabledServers.length) {
+      holder.mcpEnabledServers = nextEnabled;
       changed = true;
     }
   }
 
-  const currentEntries = parseMcpServerEntries(agent.mcpServersJson);
+  const currentEntries = parseMcpServerEntries(holder.mcpServersJson);
   if (currentEntries.length > 0) {
     const nextEntries = currentEntries.filter(entry => !hasMcpServerId(entry, serverId));
     if (nextEntries.length !== currentEntries.length) {
       const serialized = normalizeMcpServersJson(nextEntries);
       if (serialized === undefined) {
-        delete agent.mcpServersJson;
+        delete holder.mcpServersJson;
       } else {
-        agent.mcpServersJson = serialized;
+        holder.mcpServersJson = serialized;
       }
       changed = true;
     }
@@ -138,29 +146,69 @@ function withoutKey<T>(record: T | undefined, key: string): T | undefined {
   return next as T;
 }
 
-/**
- * Remove a custom MCP server everywhere it can be resurrected from:
- * global catalogue, global enabled gate, env/args overrides, and legacy
- * per-Agent selected runtime payloads.
- */
-export function removeMcpServerEverywhere<T extends McpConfigContainer>(config: T, serverId: string): T {
+export function pruneMcpServerReferencesFromAppConfig<T extends McpConfigContainer>(config: T, serverId: string): T {
   const next = { ...config } as McpConfigContainer;
 
-  next.mcpServers = (Array.isArray(config.mcpServers) ? config.mcpServers : [])
-    .filter(server => server.id !== serverId);
   next.mcpEnabledServers = (Array.isArray(config.mcpEnabledServers) ? config.mcpEnabledServers : [])
     .filter(id => id !== serverId);
-  next.mcpServerEnv = withoutKey(config.mcpServerEnv, serverId);
-  next.mcpServerArgs = withoutKey(config.mcpServerArgs, serverId);
 
   if (Array.isArray(config.agents)) {
     next.agents = config.agents.map(agent => {
       const a = asAgentMcpConfig(agent);
       if (!a) return agent;
       const cloned = { ...a };
-      return pruneAgentMcpReference(cloned, serverId) ? cloned : agent;
+      return pruneMcpReference(cloned, serverId) ? cloned : agent;
     });
   }
 
+  const legacyBot = asMcpRefConfig(config.imBotConfig);
+  if (legacyBot) {
+    const cloned = { ...legacyBot };
+    if (pruneMcpReference(cloned, serverId)) {
+      next.imBotConfig = cloned;
+    }
+  }
+
+  if (Array.isArray(config.imBotConfigs)) {
+    next.imBotConfigs = config.imBotConfigs.map(bot => {
+      const b = asMcpRefConfig(bot);
+      if (!b) return bot;
+      const cloned = { ...b };
+      return pruneMcpReference(cloned, serverId) ? cloned : bot;
+    });
+  }
+
+  const launcherLastUsed = asMcpRefConfig(config.launcherLastUsed);
+  if (launcherLastUsed && Array.isArray(launcherLastUsed.mcpEnabledServers)) {
+    const nextEnabled = launcherLastUsed.mcpEnabledServers.filter(id => id !== serverId);
+    if (nextEnabled.length !== launcherLastUsed.mcpEnabledServers.length) {
+      next.launcherLastUsed = { ...launcherLastUsed, mcpEnabledServers: nextEnabled };
+    }
+  }
+
   return next as T;
+}
+
+export function removeMcpServerDefinitionFromAppConfig<T extends McpConfigContainer>(config: T, serverId: string): T {
+  const next = { ...config } as McpConfigContainer;
+
+  next.mcpServers = (Array.isArray(config.mcpServers) ? config.mcpServers : [])
+    .filter(server => server.id !== serverId);
+  next.mcpServerEnv = withoutKey(config.mcpServerEnv, serverId);
+  next.mcpServerArgs = withoutKey(config.mcpServerArgs, serverId);
+
+  return next as T;
+}
+
+/**
+ * Remove a custom MCP server from the AppConfig-owned stores: custom
+ * definition, global gate, env/args overrides, Agent/legacy Bot selection
+ * refs, legacy runtime payloads, and UI caches. Project, Session, Task, and
+ * Cron references belong to their own stores and are handled by the cascade
+ * service, not this helper.
+ */
+export function removeMcpServerFromAppConfig<T extends McpConfigContainer>(config: T, serverId: string): T {
+  const withoutRefs = pruneMcpServerReferencesFromAppConfig(config, serverId);
+  const withoutDefinition = removeMcpServerDefinitionFromAppConfig(withoutRefs, serverId);
+  return withoutDefinition as T;
 }

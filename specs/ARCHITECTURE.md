@@ -207,6 +207,7 @@ Tab2 apiPost() ──► getSessionPort(session_456) ──► Rust proxy ──
 |------|------|--------|
 | `/api/cron/*`（9 条） | CronTask CRUD + 调度控制 | CLI、`im-cron-tool.ts` |
 | `/api/task/*`（13 条） | Task Center 任务 CRUD + run/rerun + doc 读写 | CLI、`admin-api.ts` |
+| `/api/mcp/remove-references` | Task/Cron 中删除 custom MCP identity 的持久引用 | `admin-api.ts` MCP remove cascade |
 | `/api/thought/*`（2 条） | 想法 create / list | CLI、`admin-api.ts` |
 | `/api/im/*` + `/api/im-bridge/*` | IM Bot 唤醒 + 媒体下发 + Plugin Bridge 回调 | Node.js / 社区插件 Bridge |
 | `/api/plugin/*`（3 条） | OpenClaw 插件 CRUD | CLI |

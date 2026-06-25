@@ -92,6 +92,10 @@ pub async fn start_management_api() -> Result<u16, String> {
         .route("/api/cron/trigger", post(trigger_cron_handler))
         .route("/api/cron/runs", get(runs_cron_handler))
         .route("/api/cron/status", get(status_cron_handler))
+        .route(
+            "/api/mcp/remove-references",
+            post(remove_mcp_references_handler),
+        )
         .route("/api/im/channels", get(list_im_channels_handler))
         .route("/api/im/wake", post(wake_bot_handler))
         .route("/api/im/send-media", post(send_media_handler))
@@ -201,6 +205,20 @@ struct ListCronQuery {
     workspace_path: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RemoveMcpReferencesRequest {
+    server_id: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RemoveMcpReferencesResponse {
+    ok: bool,
+    task_updated: usize,
+    cron_updated: usize,
+}
+
 // ListCronResponse removed — list_cron_handler now returns serde_json::Value
 // with explicit { "ok": true, "tasks": [...] } for Admin API forwarding compatibility.
 
@@ -292,6 +310,64 @@ struct ApiResponse {
 }
 
 // ===== Handlers =====
+
+async fn remove_mcp_references_handler(
+    Json(req): Json<RemoveMcpReferencesRequest>,
+) -> Json<serde_json::Value> {
+    if req.server_id.trim().is_empty() {
+        return Json(serde_json::json!({
+            "ok": false,
+            "error": "serverId is required",
+        }));
+    }
+
+    let Some(task_store) = task::get_task_store() else {
+        return Json(serde_json::json!({
+            "ok": false,
+            "error": "Task store is not initialized",
+        }));
+    };
+
+    let task_updated = match task_store
+        .remove_mcp_server_references(&req.server_id)
+        .await
+    {
+        Ok(count) => count,
+        Err(error) => {
+            return Json(serde_json::json!({
+                "ok": false,
+                "error": format!("Task cleanup failed: {}", error),
+            }));
+        }
+    };
+
+    let cron_manager = cron_task::get_cron_task_manager();
+    let cron_updated = match cron_manager
+        .remove_mcp_server_references(&req.server_id)
+        .await
+    {
+        Ok(count) => count,
+        Err(error) => {
+            return Json(serde_json::json!({
+                "ok": false,
+                "error": format!("Cron cleanup failed: {}", error),
+            }));
+        }
+    };
+
+    Json(
+        serde_json::to_value(RemoveMcpReferencesResponse {
+            ok: true,
+            task_updated,
+            cron_updated,
+        })
+        .unwrap_or_else(|_| serde_json::json!({
+            "ok": true,
+            "taskUpdated": task_updated,
+            "cronUpdated": cron_updated,
+        })),
+    )
+}
 
 async fn create_cron_handler(Json(req): Json<CreateCronRequest>) -> Json<serde_json::Value> {
     let manager = cron_task::get_cron_task_manager();

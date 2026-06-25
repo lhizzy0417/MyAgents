@@ -93,7 +93,7 @@ interface Draft {
   maxExecutions: string;
   aiCanExit: boolean;
   notification: NotificationConfig;
-  // Advanced overrides — `undefined` means "follow Agent". (PRD 0.2.4 §需求 4 / 0.2.9)
+  // Advanced overrides — `undefined` means "follow Agent"; MCP `[]` means explicit no MCP.
   runtime: RuntimeType | undefined;
   /** PRD 0.2.9 — Per-task provider id; paired with `model`. */
   providerId: string | undefined;
@@ -486,14 +486,21 @@ export function TaskEditPanel({
         }
       }
     }
-    // mcpEnabledServers diff. Send an actual array when there's a change;
-    // mapping "follow Agent" (draft = undefined) → `[]` since Rust's
-    // `update()` treats an empty vec as "clear override". A real tri-state
-    // for "explicitly run with no MCP" is out of scope for v0.2.4.
-    const initialMcp = JSON.stringify(task.mcpEnabledServers ?? []);
-    const draftMcp = JSON.stringify(draft.mcpEnabledServers ?? []);
+    // MCP override is tri-state: undefined = follow Agent, [] = explicit no
+    // MCP, [ids] = explicit override. Clearing to follow uses a dedicated flag
+    // because [] is now a real persisted state.
+    const initialMcp = task.mcpEnabledServers === undefined
+      ? '__follow__'
+      : JSON.stringify(task.mcpEnabledServers);
+    const draftMcp = draft.mcpEnabledServers === undefined
+      ? '__follow__'
+      : JSON.stringify(draft.mcpEnabledServers);
     if (initialMcp !== draftMcp) {
-      payload.mcpEnabledServers = draft.mcpEnabledServers ?? [];
+      if (draft.mcpEnabledServers === undefined) {
+        payload.clearMcpOverride = true;
+      } else {
+        payload.mcpEnabledServers = draft.mcpEnabledServers;
+      }
     }
 
     const initialNotification = JSON.stringify(task.notification ?? null);

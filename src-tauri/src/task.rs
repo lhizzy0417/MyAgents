@@ -604,11 +604,15 @@ pub struct TaskUpdateInput {
     /// established pattern from `clear_provider_override`.
     #[serde(default)]
     pub clear_runtime_override: bool,
-    /// Per-task MCP enable list override (PRD 0.2.4 §需求 4).
-    /// `Some(vec![])` clears overrides (= follow Agent); `None` = leave
-    /// existing override untouched.
+    /// Per-task MCP enable list override. `Some(vec![])` means explicitly no
+    /// MCP; `None` = leave existing override untouched.
     #[serde(default)]
     pub mcp_enabled_servers: Option<Vec<String>>,
+    /// Reset MCP override to follow Agent/workspace. This is separate from
+    /// `mcp_enabled_servers = Some(vec![])`, which is now a real explicit
+    /// "no MCP" state.
+    #[serde(default)]
+    pub clear_mcp_override: bool,
     #[serde(default)]
     pub tags: Option<Vec<String>>,
     #[serde(default)]
@@ -1507,6 +1511,32 @@ impl TaskStore {
         out
     }
 
+    pub async fn remove_mcp_server_references(&self, server_id: &str) -> Result<usize, String> {
+        let mut inner = self.inner.write().await;
+        let mut next = inner.clone();
+        let mut updated = 0usize;
+
+        for task in next.values_mut() {
+            let Some(ids) = task.mcp_enabled_servers.as_mut() else {
+                continue;
+            };
+            let before = ids.len();
+            ids.retain(|id| id != server_id);
+            if ids.len() != before {
+                task.updated_at = now_ms();
+                updated += 1;
+            }
+        }
+
+        if updated == 0 {
+            return Ok(0);
+        }
+
+        Self::persist_locked(&self.jsonl_path, &next)?;
+        *inner = next;
+        Ok(updated)
+    }
+
     // ---- Update fields ----
 
     pub async fn update(&self, input: TaskUpdateInput) -> Result<Task, String> {
@@ -1529,6 +1559,11 @@ impl TaskStore {
         {
             return Err(
                 "providerId 与 clearProviderOverride=true 冲突 — 调用方必须二选一".to_string(),
+            );
+        }
+        if input.clear_mcp_override && input.mcp_enabled_servers.is_some() {
+            return Err(
+                "mcpEnabledServers 与 clearMcpOverride=true 冲突 — 调用方必须二选一".to_string(),
             );
         }
         let mut updated = existing.clone();
@@ -1600,12 +1635,10 @@ impl TaskStore {
             updated.runtime_config = None;
         }
         if let Some(v) = input.mcp_enabled_servers {
-            // Two-state semantics (PRD 0.2.4 §需求 4 — "先简单点"):
-            //   None / Some([])  → "follow Agent" (no override)
-            //   Some([a, b, …])  → snapshot the chosen servers onto the task
-            // Goes through the shared `normalize_mcp_override` helper so
-            // create / update / legacy paths all enforce the same shape.
             updated.mcp_enabled_servers = normalize_mcp_override(Some(v));
+        }
+        if input.clear_mcp_override {
+            updated.mcp_enabled_servers = None;
         }
         if let Some(v) = input.tags {
             updated.tags = v;
@@ -2295,22 +2328,13 @@ impl TaskStore {
 
 // ================ Helpers ================
 
-/// Normalise the per-task `mcp_enabled_servers` override at storage time
-/// (PRD 0.2.4 §需求 4 — two-state semantics).
+/// Normalise the per-task `mcp_enabled_servers` override at storage time.
 ///
-///   `None`      → "follow Agent"      (no override stored)
-///   `Some([])`  → "follow Agent"      (collapsed: empty intent ≡ no override)
-///   `Some([…])` → "explicit override" (snapshot the chosen server ids)
-///
-/// Applied at every storage boundary (create_direct, create_from_alignment,
-/// legacy_upgrade, update) so direct API/CLI callers can never produce a
-/// `Some(vec![])` row that the rest of the code would have to special-case.
+///   `None`      → follow Agent/workspace
+///   `Some([])`  → explicit no MCP
+///   `Some([…])` → explicit override
 fn normalize_mcp_override(input: Option<Vec<String>>) -> Option<Vec<String>> {
-    match input {
-        None => None,
-        Some(v) if v.is_empty() => None,
-        Some(v) => Some(v),
-    }
+    input
 }
 
 fn now_ms() -> i64 {
@@ -3591,6 +3615,7 @@ mod tests {
                 runtime_config: None,
                 clear_runtime_override: false,
                 mcp_enabled_servers: None,
+                clear_mcp_override: false,
                 tags: None,
                 notification: None,
                 prompt: None,
@@ -3642,6 +3667,80 @@ mod tests {
         assert!(task_docs_dir("").is_err());
         // Valid UUID-ish id works
         assert!(task_docs_dir("abc-123_ok").is_ok());
+    }
+
+    #[test]
+    fn normalize_mcp_override_preserves_explicit_empty() {
+        assert_eq!(normalize_mcp_override(None), None);
+        assert_eq!(normalize_mcp_override(Some(vec![])), Some(vec![]));
+        assert_eq!(
+            normalize_mcp_override(Some(vec!["tool-a".to_string()])),
+            Some(vec!["tool-a".to_string()])
+        );
+    }
+
+    #[tokio::test]
+    async fn remove_mcp_server_references_preserves_empty_override() {
+        ensure_test_docs_root();
+        let dir = tempdir().unwrap();
+        let ws = dir.path().join("workspace");
+        std::fs::create_dir_all(&ws).unwrap();
+        let store = TaskStore::new(dir.path().join("data"));
+        let mut input = sample_direct_input(&ws);
+        input.mcp_enabled_servers = Some(vec!["removed".to_string()]);
+        let created = store.create_direct(input).await.unwrap();
+
+        let updated = store
+            .remove_mcp_server_references("removed")
+            .await
+            .unwrap();
+        assert_eq!(updated, 1);
+
+        let task = store.get(&created.id).await.unwrap();
+        assert_eq!(task.mcp_enabled_servers, Some(vec![]));
+    }
+
+    #[tokio::test]
+    async fn update_rejects_conflicting_mcp_override_inputs() {
+        ensure_test_docs_root();
+        let dir = tempdir().unwrap();
+        let ws = dir.path().join("workspace");
+        std::fs::create_dir_all(&ws).unwrap();
+        let store = TaskStore::new(dir.path().join("data"));
+        let created = store.create_direct(sample_direct_input(&ws)).await.unwrap();
+
+        let err = store
+            .update(TaskUpdateInput {
+                id: created.id.clone(),
+                name: None,
+                executor: None,
+                description: None,
+                execution_mode: None,
+                run_mode: None,
+                end_conditions: None,
+                interval_minutes: None,
+                cron_expression: None,
+                cron_timezone: None,
+                dispatch_at: None,
+                model: None,
+                provider_id: None,
+                clear_provider_override: false,
+                permission_mode: None,
+                preselected_session_id: None,
+                runtime: None,
+                runtime_config: None,
+                clear_runtime_override: false,
+                mcp_enabled_servers: Some(vec![]),
+                clear_mcp_override: true,
+                tags: None,
+                notification: None,
+                prompt: None,
+            })
+            .await
+            .expect_err("should reject contradictory MCP override inputs");
+
+        assert!(err.contains("mcpEnabledServers"));
+        assert!(err.contains("clearMcpOverride"));
     }
 
     /// PRD 0.2.9 — verify the provider-routing validator enforces both

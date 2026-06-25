@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest';
 import type { McpServerDefinition } from './config-types';
 import {
   promoteAgentMcpJsonToGlobal,
-  removeMcpServerEverywhere,
+  removeMcpServerFromAppConfig,
   type McpConfigContainer,
 } from './mcpConfig';
 
@@ -51,7 +51,7 @@ describe('MCP config helpers', () => {
       }],
     };
 
-    const next = removeMcpServerEverywhere(config, 'yuandian-law');
+    const next = removeMcpServerFromAppConfig(config, 'yuandian-law');
     const agent = next.agents?.[0] as { mcpEnabledServers?: string[]; mcpServersJson?: string };
 
     expect(next.mcpServers?.map(s => s.id)).toEqual(['keep-law']);
@@ -75,7 +75,7 @@ describe('MCP config helpers', () => {
       }],
     };
 
-    const next = removeMcpServerEverywhere(config, 'yuandian-law');
+    const next = removeMcpServerFromAppConfig(config, 'yuandian-law');
     const agent = next.agents?.[0] as { mcpEnabledServers?: string[]; mcpServersJson?: string };
 
     expect(next.mcpServers).toEqual([]);
@@ -102,11 +102,47 @@ describe('MCP config helpers', () => {
       }],
     };
 
-    const next = removeMcpServerEverywhere(config, 'stdio-tool');
+    const next = removeMcpServerFromAppConfig(config, 'stdio-tool');
     const agent = next.agents?.[0] as { mcpEnabledServers?: string[]; mcpServersJson?: string };
 
     expect(next.mcpServers).toEqual([]);
     expect(agent.mcpEnabledServers).toEqual([]);
     expect(agent.mcpServersJson).toBeUndefined();
+  });
+
+  it('removes legacy IM Bot refs, runtime payloads, and launcher cache entries', () => {
+    const target = remote('bot-tool');
+    const keep = remote('keep-tool');
+    const config: McpConfigContainer = {
+      mcpServers: [target, keep],
+      mcpEnabledServers: ['bot-tool', 'keep-tool'],
+      imBotConfig: {
+        id: 'legacy-single',
+        mcpEnabledServers: ['bot-tool', 'keep-tool'],
+        mcpServersJson: JSON.stringify([target, keep]),
+      },
+      imBotConfigs: [{
+        id: 'legacy-list',
+        mcpEnabledServers: ['bot-tool'],
+        mcpServersJson: JSON.stringify([target]),
+      }],
+      launcherLastUsed: {
+        mcpEnabledServers: ['bot-tool', 'keep-tool'],
+      },
+    };
+
+    const next = removeMcpServerFromAppConfig(config, 'bot-tool');
+    const legacySingle = next.imBotConfig as { mcpEnabledServers?: string[]; mcpServersJson?: string };
+    const legacyList = next.imBotConfigs?.[0] as { mcpEnabledServers?: string[]; mcpServersJson?: string };
+    const launcher = next.launcherLastUsed as { mcpEnabledServers?: string[] };
+
+    expect(next.mcpServers?.map(s => s.id)).toEqual(['keep-tool']);
+    expect(next.mcpEnabledServers).toEqual(['keep-tool']);
+    expect(legacySingle.mcpEnabledServers).toEqual(['keep-tool']);
+    expect(JSON.parse(String(legacySingle.mcpServersJson)).map((s: McpServerDefinition) => s.id))
+      .toEqual(['keep-tool']);
+    expect(legacyList.mcpEnabledServers).toEqual([]);
+    expect(legacyList.mcpServersJson).toBeUndefined();
+    expect(launcher.mcpEnabledServers).toEqual(['keep-tool']);
   });
 });

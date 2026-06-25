@@ -530,7 +530,7 @@ import {
   updateSessionMetadata,
   getAttachmentPath,
 } from './SessionStore';
-import { decodeProviderEnvSnapshot, findAgentByWorkspacePath, findProvider, getAllMcpServers, getEffectiveMcpServers, isProviderDisabled, loadConfig, resolveImProviderEnv, resolveProviderEnv, resolveWorkspaceConfig } from './utils/admin-config';
+import { decodeProviderEnvSnapshot, findAgentByWorkspacePath, findProvider, getAllMcpServers, getEffectiveMcpServers, getEnabledMcpServerIds, isProviderDisabled, loadConfig, resolveImProviderEnv, resolveProviderEnv, resolveWorkspaceConfig } from './utils/admin-config';
 import { snapshotForOwnedSession } from './utils/session-snapshot';
 import { buildSessionSnapshotPatchUpdates } from './utils/session-snapshot-patch';
 import { resolveSessionConfig } from './utils/resolve-session-config';
@@ -848,8 +848,9 @@ type CronExecutePayload = {
    */
   providerIntent?: 'followAgent' | 'subscription' | 'explicit';
   /**
-   * Per-task MCP enable list override (PRD 0.2.4 §需求 4).
+   * Per-task MCP enable list override.
    * `undefined` = follow workspace MCP (`config.agents[].mcpEnabledServers`).
+   * `[]` = explicitly run with no MCP servers.
    * `[id, id, ...]` = enable only these MCP server ids for this task.
    * Sidecar applies via `setMcpServers()` before `enqueueUserMessage`.
    */
@@ -3241,7 +3242,10 @@ async function main() {
             // already matches `currentMcpServers` it's a cheap no-op.
             let target: McpServerDefinition[];
             if (payload.mcpEnabledServers !== undefined) {
-              const overrideIds = new Set(payload.mcpEnabledServers);
+              const globalEnabledIds = new Set(getEnabledMcpServerIds());
+              const overrideIds = new Set(
+                payload.mcpEnabledServers.filter((id) => globalEnabledIds.has(id)),
+              );
               // Prefer `currentMcpServers` (set by frontend's /api/mcp/set)
               // when its IDs cover all override IDs. Sidecar's
               // `getAllMcpServers()` and the renderer's mcpService produce

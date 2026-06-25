@@ -17,7 +17,7 @@ import { promisify } from 'node:util';
 import { splitProviderModelInput, type McpServerDefinition } from '../shared/config-types';
 import { deriveCliToolKind, type CliToolRegistryEntry } from '../shared/types/cliTools';
 import { workspacePathsEqual } from '../shared/workspacePath';
-import { removeMcpServerEverywhere } from '../shared/mcpConfig';
+import { removeCustomMcpServerCascade, McpRemovalError } from './services/mcp-removal';
 import { SDK_RESERVED_MCP_NAMES } from './agent-session';
 import {
   findMissingEnvKeys,
@@ -38,7 +38,7 @@ import {
   getAllMcpServers,
   getEnabledMcpServerIds,
   loadProjects,
-  saveProjects,
+  atomicModifyProjects,
   redactSecret,
   findProvider,
   findAgentByWorkspacePath,
@@ -54,13 +54,8 @@ import { cancellableFetch } from './utils/cancellation';
 import { ensureShellPath } from './utils/shell';
 import { buildCronScope } from './utils/cron-scope';
 import { readLoopbackJson } from './utils/loopback-response';
+import { ADMIN_LOOPBACK_TIMEOUT_MS, managementApi } from './utils/management-api-client';
 import { getCuseDiagnostics } from './utils/cuse-diagnostics';
-
-// Localhost loopback timeout for management / sidecar self-calls.
-// 10s is generous for an in-process Rust handler or a same-process Hono
-// route — anything slower means the backend is wedged, in which case we'd
-// rather surface a CLI error than hang the user's terminal indefinitely.
-const ADMIN_LOOPBACK_TIMEOUT_MS = 10_000;
 
 // Long-running sidecar operations need their own budget. Anchored to the
 // sidecar's internal `FETCH_TIMEOUT_MS` (300s for tarball download) plus a
@@ -111,57 +106,6 @@ import { trackServer } from './analytics';
  */
 function cliSource(): 'cli' | 'cli_agent' {
   return process.env.MYAGENTS_PORT ? 'cli_agent' : 'cli';
-}
-
-// ---------------------------------------------------------------------------
-// Management API forwarding (Node Sidecar → Rust)
-// ---------------------------------------------------------------------------
-
-const MGMT_PORT = process.env.MYAGENTS_MANAGEMENT_PORT;
-
-async function managementApi(
-  path: string,
-  method: 'GET' | 'POST' = 'GET',
-  body?: Record<string, unknown>,
-): Promise<Record<string, unknown>> {
-  if (!MGMT_PORT) {
-    // Happens when the Node Sidecar is up but the Rust-side Management API
-    // isn't — during app cold boot, after a crashed restart, or in the
-    // standalone dev sidecar used for CLI smoke tests. Returning the hint
-    // alongside the error lets `wrapMgmtResponse` propagate it to the CLI
-    // so the reader sees `→ Run: myagents status` instead of a dead-end.
-    return {
-      ok: false,
-      error: 'Management API not available (app may still be starting)',
-      recoveryHint: {
-        recoveryCommand: 'myagents status',
-        message: 'Check whether the app backend is fully up; if not, retry in a few seconds.',
-      },
-    };
-  }
-  const url = `http://127.0.0.1:${MGMT_PORT}${path}`;
-  const options: RequestInit = {
-    method,
-    headers: { 'Content-Type': 'application/json' },
-  };
-  if (body && method === 'POST') {
-    options.body = JSON.stringify(body);
-  }
-  try {
-    const resp = await cancellableFetch(url, options, { timeoutMs: ADMIN_LOOPBACK_TIMEOUT_MS });
-    // Issue #114 — defensive read via shared helper.
-    return await readLoopbackJson(resp, 'Management API');
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    return {
-      ok: false,
-      error: `Management API unreachable: ${msg}`,
-      recoveryHint: {
-        recoveryCommand: 'myagents status',
-        message: 'Check backend health; restart the app if the problem persists.',
-      },
-    };
-  }
 }
 
 // ---------------------------------------------------------------------------
@@ -449,18 +393,20 @@ export async function handleMcpRemove(payload: { id: string }): Promise<AdminRes
   const { id } = payload;
   if (!id) return { success: false, error: 'Missing required field: id' };
 
-  // Check if it's a built-in preset
-  const allServers = getAllMcpServers();
-  const target = allServers.find(s => s.id === id);
-  if (!target) return { success: false, error: `MCP server '${id}' not found` };
-  if (target.isBuiltin) {
-    return { success: false, error: `Cannot remove built-in MCP server '${id}'. Only custom servers can be removed.` };
+  try {
+    const result = await removeCustomMcpServerCascade(id);
+    notifyMcpChange('remove', id);
+    return { success: true, data: result, hint: 'Server removed.' };
+  } catch (err) {
+    const response: AdminResponse = {
+      success: false,
+      error: err instanceof Error ? err.message : String(err),
+    };
+    if (err instanceof McpRemovalError && err.recoveryHint && typeof err.recoveryHint === 'object') {
+      response.recoveryHint = err.recoveryHint as RecoveryHint;
+    }
+    return response;
   }
-
-  await atomicModifyConfig(c => removeMcpServerEverywhere(c, id));
-
-  notifyMcpChange('remove', id);
-  return { success: true, data: { id }, hint: 'Server removed.' };
 }
 
 export async function handleMcpEnable(payload: { id: string; scope?: string }): Promise<AdminResponse> {
@@ -487,7 +433,7 @@ export async function handleMcpEnable(payload: { id: string; scope?: string }): 
 
   let projectMutation: ProjectMcpMutationResult | null = null;
   if (scope === 'project' || scope === 'both') {
-    projectMutation = enableMcpForCurrentProject(id);
+    projectMutation = await enableMcpForCurrentProject(id);
     if (scope === 'project' && projectMutation.status !== 'updated') {
       return projectMcpMutationFailure('enable', id, projectMutation);
     }
@@ -523,7 +469,7 @@ export async function handleMcpDisable(payload: { id: string; scope?: string }):
 
   let projectMutation: ProjectMcpMutationResult | null = null;
   if (scope === 'project' || scope === 'both') {
-    projectMutation = disableMcpForCurrentProject(id);
+    projectMutation = await disableMcpForCurrentProject(id);
     if (scope === 'project' && projectMutation.status !== 'updated') {
       return projectMcpMutationFailure('disable', id, projectMutation);
     }
@@ -1626,19 +1572,21 @@ Per-task RUNTIME overrides (all optional; omit to inherit workspace defaults):
   --permissionMode     Override permission mode — values depend on runtime
                        See: myagents runtime describe <runtime>
   --runtimeConfig      JSON string for runtime-specific extra config
+  --mcpEnabledServers  Comma-separated MCP ids; "" means explicit no MCP
 
 Options for 'create-from-alignment' (identical override flags):
   Positional: <alignmentSessionId>
   --name               Task name (required)
   --executor --description --workspaceId --workspacePath
   --executionMode --runMode --tags --sourceThoughtId
-  --runtime --model --permissionMode --runtimeConfig   (per-task overrides)
+  --runtime --model --permissionMode --runtimeConfig --mcpEnabledServers
 
 Options for 'update' <taskId>:
   Accepts every create-direct flag (each optional; missing = leave unchanged).
   Additional flags for clearing overrides:
     --clearProviderOverride   Reset providerId + model to follow Agent
     --clearRuntimeOverride    Reset runtime + runtimeConfig to follow Agent
+    --clearMcpOverride        Reset MCP override to follow Agent
   Update is rejected when the task is Running/Verifying.
   Notification semantics: --notification* flags MERGE with the existing
   config (CLI reads current state, overlays your values, then writes). So
@@ -4003,38 +3951,46 @@ function projectMcpMutationFailure(
 }
 
 /** Enable MCP for the current workspace project */
-function enableMcpForCurrentProject(serverId: string): ProjectMcpMutationResult {
+async function enableMcpForCurrentProject(serverId: string): Promise<ProjectMcpMutationResult> {
   // The workspace path is set via process-global; use it to find the project
   const workspacePath = getCurrentWorkspacePath();
   if (!workspacePath) return { status: 'no-workspace' };
 
-  const projects = loadProjects();
-  const idx = projects.findIndex(p => typeof p.path === 'string' && workspacePathsEqual(p.path, workspacePath));
-  if (idx < 0) return { status: 'project-not-found', workspacePath };
+  let result: ProjectMcpMutationResult = { status: 'project-not-found', workspacePath };
+  await atomicModifyProjects(projects => {
+    const idx = projects.findIndex(p => typeof p.path === 'string' && workspacePathsEqual(p.path, workspacePath));
+    if (idx < 0) return projects;
 
-  const project = projects[idx];
-  const enabled = new Set(project.mcpEnabledServers ?? []);
-  enabled.add(serverId);
-  projects[idx] = { ...project, mcpEnabledServers: Array.from(enabled) };
-  saveProjects(projects);
-  return { status: 'updated', workspacePath };
+    const project = projects[idx];
+    const enabled = new Set(project.mcpEnabledServers ?? []);
+    enabled.add(serverId);
+    const next = [...projects];
+    next[idx] = { ...project, mcpEnabledServers: Array.from(enabled) };
+    result = { status: 'updated', workspacePath };
+    return next;
+  });
+  return result;
 }
 
 /** Disable MCP for the current workspace project */
-function disableMcpForCurrentProject(serverId: string): ProjectMcpMutationResult {
+async function disableMcpForCurrentProject(serverId: string): Promise<ProjectMcpMutationResult> {
   const workspacePath = getCurrentWorkspacePath();
   if (!workspacePath) return { status: 'no-workspace' };
 
-  const projects = loadProjects();
-  const idx = projects.findIndex(p => typeof p.path === 'string' && workspacePathsEqual(p.path, workspacePath));
-  if (idx < 0) return { status: 'project-not-found', workspacePath };
+  let result: ProjectMcpMutationResult = { status: 'project-not-found', workspacePath };
+  await atomicModifyProjects(projects => {
+    const idx = projects.findIndex(p => typeof p.path === 'string' && workspacePathsEqual(p.path, workspacePath));
+    if (idx < 0) return projects;
 
-  const project = projects[idx];
-  const enabled = new Set(project.mcpEnabledServers ?? []);
-  enabled.delete(serverId);
-  projects[idx] = { ...project, mcpEnabledServers: Array.from(enabled) };
-  saveProjects(projects);
-  return { status: 'updated', workspacePath };
+    const project = projects[idx];
+    const enabled = new Set(project.mcpEnabledServers ?? []);
+    enabled.delete(serverId);
+    const next = [...projects];
+    next[idx] = { ...project, mcpEnabledServers: Array.from(enabled) };
+    result = { status: 'updated', workspacePath };
+    return next;
+  });
+  return result;
 }
 
 /** Get workspace path from agent-session (set during session init) */

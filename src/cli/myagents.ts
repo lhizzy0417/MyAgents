@@ -2420,13 +2420,15 @@ function buildRequestBody(
         model: flags.model,
         permissionMode: flags.permissionMode,
         runtimeConfig: parseRuntimeConfigFlag(flags.runtimeConfig),
+        mcpEnabledServers: parseMcpEnabledServersFlag(flags.mcpEnabledServers),
       };
     }
     if (action === 'update') {
       // Patch shape mirrors `create-direct`: the same flag set, but every
       // field is optional. Rust `TaskUpdateInput` treats `None` as
       // "leave unchanged" except for the explicit clear-override flags
-      // (`clearProviderOverride` / `clearRuntimeOverride`), which the CLI
+      // (`clearProviderOverride` / `clearRuntimeOverride` /
+      // `clearMcpOverride`), which the CLI
       // exposes for the AI's "reset to follow Agent" intent.
       const id = requirePositional(rest[0] ?? (flags.id as string | undefined), 'task-id', 'task update', 'id');
       // `--taskMdFile` / `--taskMdContent` map to TaskUpdateInput.prompt
@@ -2456,6 +2458,8 @@ function buildRequestBody(
       if (flags.runtime !== undefined) body.runtime = flags.runtime;
       if (flags.runtimeConfig !== undefined) body.runtimeConfig = parseRuntimeConfigFlag(flags.runtimeConfig);
       if (flags.clearRuntimeOverride) body.clearRuntimeOverride = true;
+      if (flags.mcpEnabledServers !== undefined) body.mcpEnabledServers = parseMcpEnabledServersFlag(flags.mcpEnabledServers);
+      if (flags.clearMcpOverride) body.clearMcpOverride = true;
       if (typeof flags.tags === 'string') {
         body.tags = (flags.tags as string).split(',').map(s => s.trim()).filter(Boolean);
       }
@@ -2492,6 +2496,7 @@ function buildRequestBody(
         model: flags.model,
         permissionMode: flags.permissionMode,
         runtimeConfig: parseRuntimeConfigFlag(flags.runtimeConfig),
+        mcpEnabledServers: parseMcpEnabledServersFlag(flags.mcpEnabledServers),
       };
     }
     if (action === 'run' || action === 'rerun') {
@@ -2864,6 +2869,19 @@ function parseRuntimeConfigFlag(raw: unknown): Record<string, unknown> | undefin
     process.exit(2);
   }
   return parsed as Record<string, unknown>;
+}
+
+function parseMcpEnabledServersFlag(raw: unknown): string[] | undefined {
+  if (raw === undefined) return undefined;
+  if (typeof raw !== 'string') {
+    console.error('Error: --mcpEnabledServers must be a comma-separated string (e.g. --mcpEnabledServers playwright,im-cron). Use --mcpEnabledServers "" for explicit no MCP.');
+    process.exit(2);
+  }
+  if (raw.trim() === '') return [];
+  return raw
+    .split(',')
+    .map(s => s.trim())
+    .filter(Boolean);
 }
 
 /**

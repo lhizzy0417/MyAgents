@@ -62,7 +62,7 @@ pub use run_records::{
 use run_records::{run_record_path, TERMINAL_STOP_SENTINEL};
 pub use schedule::enrich_for_summary;
 use schedule::{enrich_task, sleep_until_wallclock};
-use store::atomic_save_tasks;
+use store::{atomic_save_task_snapshot, atomic_save_tasks};
 #[cfg(test)]
 use types::default_permission_mode;
 use types::CronTaskStore;

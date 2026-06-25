@@ -73,6 +73,15 @@ export class ConfigBusyError extends Error {
   }
 }
 
+export class ProjectsBusyError extends Error {
+  readonly code = 'PROJECTS_BUSY';
+
+  constructor(message = 'Projects busy: could not acquire projects.json.lock within 5000ms; retry') {
+    super(message);
+    this.name = 'ProjectsBusyError';
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Minimal types (mirrors renderer/config/types.ts — only the fields we touch)
 // ---------------------------------------------------------------------------
@@ -289,6 +298,58 @@ export function saveProjects(projects: ProjectSlim[]): void {
     renameSync(tmpPath, path);
   } catch (err) {
     try { unlinkSync(tmpPath); } catch { /* ignore — tmp may not exist */ }
+    throw err;
+  }
+}
+
+/**
+ * Cross-process serialized read-modify-write on projects.json.
+ * New Admin API mutations should use this helper instead of open-coded
+ * loadProjects() + saveProjects(), because Settings, CLI, and background
+ * owner code can all mutate workspace metadata.
+ */
+export async function atomicModifyProjects(
+  modifier: (projects: ProjectSlim[]) => ProjectSlim[] | Promise<ProjectSlim[]>
+): Promise<ProjectSlim[]> {
+  const projectsPath = getProjectsPath();
+  const configDir = getConfigDir();
+
+  if (!existsSync(configDir)) {
+    ensureDirSync(configDir);
+  }
+
+  try {
+    return await withFileLock(
+      {
+        lockPath: projectsPath + '.lock',
+        timeoutMs: CONFIG_LOCK_TIMEOUT_MS,
+        staleMs: CONFIG_LOCK_STALE_MS,
+      },
+      async () => {
+        const projects = loadProjects();
+        const before = JSON.stringify(projects);
+        const modified = await modifier(projects);
+
+        if (JSON.stringify(modified) === before) {
+          return modified;
+        }
+
+        const tmpPath = projectsPath + '.tmp';
+        writeFileSynced(tmpPath, JSON.stringify(modified, null, 2));
+        try {
+          renameSync(tmpPath, projectsPath);
+          fsyncDir(configDir);
+        } catch (err) {
+          try { unlinkSync(tmpPath); } catch { /* ignore — tmp may not exist */ }
+          throw err;
+        }
+        return modified;
+      }
+    );
+  } catch (err) {
+    if (err instanceof FileBusyError) {
+      throw new ProjectsBusyError();
+    }
     throw err;
   }
 }

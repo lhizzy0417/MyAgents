@@ -1,10 +1,10 @@
 // MCP server management — CRUD, env, args, effective servers
 import type { AppConfig, McpServerDefinition } from '../types';
 import { PRESET_MCP_SERVERS } from '../types';
-import { removeMcpServerEverywhere } from '../../../shared/mcpConfig';
 import { withProjectsLock } from './configStore';
 import { loadAppConfig, atomicModifyConfig } from './appConfigService';
 import { loadProjects, saveProjects } from './projectService';
+import { apiPostJson } from '@/api/apiFetch';
 
 /**
  * Detect host platform in the renderer using the same vocabulary as
@@ -120,7 +120,10 @@ export async function addCustomMcpServer(server: McpServerDefinition): Promise<v
 }
 
 export async function deleteCustomMcpServer(serverId: string): Promise<void> {
-    await atomicModifyConfig(c => removeMcpServerEverywhere(c, serverId));
+    const result = await apiPostJson<{ success: boolean; error?: string }>('/api/admin/mcp/remove', { id: serverId });
+    if (!result.success) {
+        throw new Error(result.error ?? 'Failed to delete MCP server');
+    }
     console.log('[configService] Custom MCP server deleted:', serverId);
 }
 
