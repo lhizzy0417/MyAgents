@@ -1,7 +1,7 @@
 # Task Provider Routing — 三层架构
 
-> 状态：v0.2.9 落地  
-> 关联：PRD 0.2.9（issue #130 + 配套架构整顿），PRD #119（CronTask provider intent）
+> 状态：v0.2.9 落地；v0.2.41 补齐 Task/Cron MCP override 三态与 custom MCP identity 删除级联
+> 关联：PRD 0.2.9（issue #130 + 配套架构整顿），PRD #119（CronTask provider intent），PRD 0.2.41（MCP remove cascade）
 
 ## 1. 产品语义
 
@@ -50,6 +50,7 @@ Task 执行    =  每次 tick 派生 session（live re-derive）
 |------|----------------------|------------------------------|------|
 | `providerId` | ✅ 新写入路径 | ✅ 新写入路径 | PRD 0.2.9 — 唯一持久化的 provider intent |
 | `model` | ✅ | ✅ | `providerId` 设置时 MUST 配对 |
+| `mcpEnabledServers` / `mcp_enabled_servers` | ✅ 三态 override | ✅ 三态 override | `None`/缺字段 = follow Agent；`[]` = explicit no MCP；`[ids]` = explicit override |
 | `provider_env` | ❌ 不存 | 🟡 read-only deprecated（`#[serde(default, skip_serializing)]`：load 老数据，但永远不再写盘） | apiKey / baseUrl / authType / modelAliases — 一旦下次 save_to_disk 就消失 |
 | `provider_intent` | ❌ 不存 | 🟡 仍写入，但语义降级 | 当 `providerId == None` 时仍输出 `FollowAgent` / `Subscription` / `Explicit`（兼容老 cron 路径）；当 `providerId` 存在时 sidecar 忽略 intent，按 provider.type 在线决定 |
 
@@ -107,6 +108,18 @@ else if (intent === 'explicit') {
 | 跨-runtime 互斥 | `runtime ∈ {claude-code, codex, gemini} && providerId.is_some()` |
 
 应用点：`create_direct` / `create_from_alignment` / `update`（用合并后的状态校验）/ `create_migrated`。
+
+## 6.1 MCP override 三态与删除语义
+
+Task / Cron 的 MCP override 不是 provider routing，但共享同一组持久配置边界：
+
+| 存储值 | 语义 |
+|--------|------|
+| `None` / 字段缺失 | 跟随 Agent / workspace 的 effective MCP |
+| `Some([])` / `[]` | 显式不用任何 MCP |
+| `Some([id...])` / `[id...]` | 只启用这些 MCP id |
+
+删除 custom MCP identity 时，Admin API 先通过 Management API 让 Rust owner 清 Task/Cron 引用，再删除 AppConfig definition。若某个 Task/Cron override 原本只包含被删除 id，清理后必须保存为空数组 `[]`，不能折叠回 `None`；否则用户删除一个 MCP 后，任务会突然继承 Agent 的其它 MCP。手动编辑时，`clearMcpOverride` 才表示恢复 follow Agent，且不能和 `mcpEnabledServers` 同时传。
 
 ## 7. UI 入口（TaskAdvancedConfigEditor）
 
