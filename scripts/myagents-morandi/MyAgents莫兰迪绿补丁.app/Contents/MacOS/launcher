@@ -1,7 +1,7 @@
 #!/bin/zsh
 set -euo pipefail
 
-SCRIPT_PATH="/Users/hanako/Documents/New project 2/scripts/myagents-morandi/升级后套用莫兰迪绿.command"
+SCRIPT_PATH="/Users/hanako/Documents/New project 2/MyAgents-green/scripts/myagents-morandi/升级后套用莫兰迪绿.command"
 
 if [[ ! -f "${SCRIPT_PATH}" ]]; then
   osascript -e 'display alert "找不到绿色补丁脚本" message "请检查脚本目录是否完整。" as critical buttons {"好"} default button 1'

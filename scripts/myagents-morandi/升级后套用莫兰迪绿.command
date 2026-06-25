@@ -5,6 +5,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PREPARE_SCRIPT="${SCRIPT_DIR}/prepare-build.sh"
 REPO_URL="https://github.com/lhizzy0417/MyAgents.git"
 REPO_PATH="/private/tmp/MyAgents-green-fork"
+UPSTREAM_URL="https://github.com/hAcKlyc/MyAgents.git"
 APP_PATH="/Applications/MyAgents.app"
 BACKUP_PATH="/Applications/MyAgents.app.backup-before-morandi"
 LOG_PATH="${HOME}/Desktop/MyAgents-莫兰迪绿-安装日志.txt"
@@ -37,28 +38,60 @@ echo "  MyAgents 莫兰迪绿补丁"
 echo "======================================"
 echo ""
 echo "绿色源码仓库：${REPO_URL}"
+echo "上游源码仓库：${UPSTREAM_URL}"
 echo "固定源码目录：${REPO_PATH}"
 echo "日志位置：${LOG_PATH}"
 echo ""
 
 if [[ -d "${REPO_PATH}/.git" ]]; then
-echo "[1/6] 更新源码..."
-  git -C "${REPO_PATH}" fetch --depth=1 origin main
-  git -C "${REPO_PATH}" checkout -f FETCH_HEAD
+  echo "[1/7] 更新绿色仓库..."
+  git -C "${REPO_PATH}" fetch origin main
+  git -C "${REPO_PATH}" checkout -B main FETCH_HEAD
 else
-  echo "[1/6] 下载源码..."
+  echo "[1/7] 下载绿色仓库..."
   rm -rf "${REPO_PATH}"
-  git clone --depth=1 "${REPO_URL}" "${REPO_PATH}"
+  git clone "${REPO_URL}" "${REPO_PATH}"
 fi
 
-echo "[2/6] 安装依赖..."
 cd "${REPO_PATH}"
+git remote add upstream "${UPSTREAM_URL}" 2>/dev/null || git remote set-url upstream "${UPSTREAM_URL}"
+
+echo "[2/7] 对齐原作者最新版..."
+git fetch upstream main
+git config user.name "Hanako Local Sync"
+git config user.email "hanako-local-sync@users.noreply.github.com"
+set +e
+git merge --no-edit upstream/main
+MERGE_STATUS=$?
+set -e
+if [[ ${MERGE_STATUS} -ne 0 ]]; then
+  echo ""
+  echo "上游合并失败，可能是原作者这次改动和绿色补丁发生了冲突。"
+  echo "本次已停止，避免装进异常版本。"
+  exit ${MERGE_STATUS}
+fi
+
+echo "[3/7] 重新套用莫兰迪绿..."
+node "${SCRIPT_DIR}/apply-theme.mjs" "${REPO_PATH}"
+git add -A
+if ! git diff --cached --quiet; then
+  git commit -m "chore(sync): refresh morandi green from upstream" >/dev/null
+fi
+
+echo "[4/7] 回写到你的绿色仓库..."
+if command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; then
+  git push origin HEAD:main
+else
+  echo "未检测到 GitHub 登录，本次先只在本机安装绿色最新版，不回写 GitHub。"
+fi
+
+echo "[5/7] 安装依赖..."
 npm ci
 
-echo "[3/6] 准备绿色主题和运行时..."
+echo "[6/7] 准备绿色主题和运行时..."
 zsh "${PREPARE_SCRIPT}" "${REPO_PATH}"
 
-echo "[4/6] 准备打包环境..."
+echo "[7/7] 准备打包环境并生成 App..."
 export NODE_OPTIONS=--max-old-space-size=12288
 SOURCE_VERSION="$(node -e "const p=require('${REPO_PATH}/package.json'); process.stdout.write(p.version)")"
 INSTALLED_VERSION=""
@@ -68,12 +101,11 @@ fi
 
 echo "源码版本：${SOURCE_VERSION}"
 if [[ -n "${INSTALLED_VERSION}" ]]; then
-  echo "当前已装版本：${INSTALLED_VERSION}"
+echo "当前已装版本：${INSTALLED_VERSION}"
 fi
 echo "清理旧打包产物..."
 rm -rf "${RELEASE_APP_PATH}" "${RELEASE_TAR_PATH}"
 
-echo "[5/6] 打包 App..."
 echo "这一步可能会长时间停在 transforming...，属于正常现象。"
 echo "只要不要重复再点第二次，等桌面日志继续往下走就行。"
 set +e
@@ -135,7 +167,7 @@ NODE
   fi
 fi
 
-echo "[6/6] 安装到应用程序..."
+echo "[安装] 写入应用程序..."
 if [[ -d "${APP_PATH}" ]]; then
   rm -rf "${BACKUP_PATH}"
   mv "${APP_PATH}" "${BACKUP_PATH}"
@@ -153,7 +185,7 @@ echo "安装完成。"
 echo "以后你只要双击："
 echo "${SCRIPT_DIR}/MyAgents莫兰迪绿补丁.app"
 echo ""
-echo "它会自动下载你自己仓库里的绿色最新版、重新安装。"
+echo "它会自动对齐原作者最新版、重新套用绿色、安装到你的电脑。"
 echo "如果窗口长时间停在“打包 App”，再看桌面日志最后几行是否已经出现“安装完成”。"
 echo ""
 read -k 1 "?按任意键关闭窗口…"
