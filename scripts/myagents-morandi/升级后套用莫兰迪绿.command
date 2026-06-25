@@ -4,7 +4,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PREPARE_SCRIPT="${SCRIPT_DIR}/prepare-build.sh"
 REPO_URL="https://github.com/lhizzy0417/MyAgents.git"
-REPO_PATH="/private/tmp/MyAgents-green-fork"
+REPO_PATH="/Users/hanako/Documents/New project 2/MyAgents-green"
 UPSTREAM_URL="https://github.com/hAcKlyc/MyAgents.git"
 APP_PATH="/Applications/MyAgents.app"
 BACKUP_PATH="/Applications/MyAgents.app.backup-before-morandi"
@@ -39,36 +39,50 @@ echo "======================================"
 echo ""
 echo "绿色源码仓库：${REPO_URL}"
 echo "上游源码仓库：${UPSTREAM_URL}"
-echo "固定源码目录：${REPO_PATH}"
+echo "本地绿色仓库：${REPO_PATH}"
 echo "日志位置：${LOG_PATH}"
 echo ""
 
-if [[ -d "${REPO_PATH}/.git" ]]; then
-  echo "[1/7] 更新绿色仓库..."
-  git -C "${REPO_PATH}" fetch origin main
-  git -C "${REPO_PATH}" checkout -B main FETCH_HEAD
-else
-  echo "[1/7] 下载绿色仓库..."
-  rm -rf "${REPO_PATH}"
-  git clone "${REPO_URL}" "${REPO_PATH}"
+if [[ ! -d "${REPO_PATH}/.git" ]]; then
+  echo "找不到本地绿色仓库：${REPO_PATH}"
+  exit 1
 fi
 
 cd "${REPO_PATH}"
 git remote add upstream "${UPSTREAM_URL}" 2>/dev/null || git remote set-url upstream "${UPSTREAM_URL}"
+git checkout main >/dev/null 2>&1 || true
+
+echo "[1/7] 更新本地绿色仓库..."
+set +e
+git fetch origin main
+FETCH_ORIGIN_STATUS=$?
+set -e
+if [[ ${FETCH_ORIGIN_STATUS} -eq 0 ]]; then
+  git checkout -B main FETCH_HEAD
+else
+  echo "连接你的 GitHub 仓库失败，先继续使用本地已有版本。"
+fi
 
 echo "[2/7] 对齐原作者最新版..."
-git fetch upstream main
-git config user.name "Hanako Local Sync"
-git config user.email "hanako-local-sync@users.noreply.github.com"
 set +e
-git merge --no-edit upstream/main
-MERGE_STATUS=$?
+git fetch upstream main
+FETCH_UPSTREAM_STATUS=$?
 set -e
-if [[ ${MERGE_STATUS} -ne 0 ]]; then
-  echo ""
-  echo "上游合并失败，可能是原作者这次改动和绿色补丁发生了冲突。"
-  echo "本次已停止，避免装进异常版本。"
-  exit ${MERGE_STATUS}
+if [[ ${FETCH_UPSTREAM_STATUS} -eq 0 ]]; then
+  git config user.name "Hanako Local Sync"
+  git config user.email "hanako-local-sync@users.noreply.github.com"
+  set +e
+  git merge --no-edit upstream/main
+  MERGE_STATUS=$?
+  set -e
+  if [[ ${MERGE_STATUS} -ne 0 ]]; then
+    echo ""
+    echo "上游合并失败，可能是原作者这次改动和绿色补丁发生了冲突。"
+    echo "本次已停止，避免装进异常版本。"
+    exit ${MERGE_STATUS}
+  fi
+else
+  echo "连接原作者仓库失败，先继续使用本地已有版本。"
 fi
 
 echo "[3/7] 重新套用莫兰迪绿..."
@@ -79,10 +93,10 @@ if ! git diff --cached --quiet; then
 fi
 
 echo "[4/7] 回写到你的绿色仓库..."
-if command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; then
+if command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1 && [[ ${FETCH_ORIGIN_STATUS} -eq 0 ]]; then
   git push origin HEAD:main
 else
-  echo "未检测到 GitHub 登录，本次先只在本机安装绿色最新版，不回写 GitHub。"
+  echo "本次不回写 GitHub，先只在本机安装绿色最新版。"
 fi
 
 echo "[5/7] 安装依赖..."
