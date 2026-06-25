@@ -344,7 +344,7 @@ export default memo(function AgentCapabilitiesPanel({
                                             onMouseDown={retainFocusOnMouseDown}
                                             className="flex w-full items-center gap-2 rounded-md px-2 py-1 text-left hover:bg-[var(--hover-bg)] transition-colors"
                                         >
-                                            <Sparkles className="h-3 w-3 shrink-0 text-amber-500" />
+                                            <Sparkles className="h-3 w-3 shrink-0 text-[var(--accent-warm)]" />
                                             <p className="min-w-0 flex-1 truncate text-sm text-[var(--ink)]">{item.name}</p>
                                         </button>
                                     </ItemTooltip>

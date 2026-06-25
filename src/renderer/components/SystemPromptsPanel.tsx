@@ -584,7 +584,7 @@ const SystemPromptsPanel = forwardRef<SystemPromptsPanelRef, SystemPromptsPanelP
                                             className="group flex cursor-pointer flex-col gap-1.5 rounded-xl bg-[var(--paper-elevated)] px-4 py-3.5 text-left transition-shadow hover:shadow-sm"
                                         >
                                             <div className="flex items-center gap-2">
-                                                <Sparkles className="h-4 w-4 shrink-0 text-amber-500" />
+                                                <Sparkles className="h-4 w-4 shrink-0 text-[var(--accent-warm)]" />
                                                 <h4 className="text-base font-semibold text-[var(--ink)]">智能生成</h4>
                                                 <span className="rounded-full bg-[var(--accent-warm-subtle)] px-2 py-0.5 text-xs font-medium text-[var(--accent)]">推荐</span>
                                             </div>
@@ -599,7 +599,7 @@ const SystemPromptsPanel = forwardRef<SystemPromptsPanelRef, SystemPromptsPanelP
                                         className="group flex cursor-pointer flex-col gap-1.5 rounded-xl bg-[var(--paper-elevated)] px-4 py-3.5 text-left transition-shadow hover:shadow-sm"
                                     >
                                         <div className="flex items-center gap-2">
-                                            <FolderArchive className="h-4 w-4 shrink-0 text-amber-500" />
+                                            <FolderArchive className="h-4 w-4 shrink-0 text-[var(--accent-warm)]" />
                                             <h4 className="text-base font-semibold text-[var(--ink)]">从模板库添加</h4>
                                         </div>
                                         <p className="text-sm leading-relaxed text-[var(--ink-muted)]">
@@ -612,7 +612,7 @@ const SystemPromptsPanel = forwardRef<SystemPromptsPanelRef, SystemPromptsPanelP
                                         className="group flex cursor-pointer flex-col gap-1.5 rounded-xl bg-[var(--paper-elevated)] px-4 py-3.5 text-left transition-shadow hover:shadow-sm"
                                     >
                                         <div className="flex items-center gap-2">
-                                            <Edit2 className="h-4 w-4 shrink-0 text-amber-500" />
+                                            <Edit2 className="h-4 w-4 shrink-0 text-[var(--accent-warm)]" />
                                             <h4 className="text-base font-semibold text-[var(--ink)]">手动创建</h4>
                                         </div>
                                         <p className="text-sm leading-relaxed text-[var(--ink-muted)]">

@@ -176,35 +176,35 @@
      同时驱动 text-xs/sm/base/lg/... utility）。 */
 
   /* ========== Colors: Ink (Text) ========== */
-  --ink: #1c1612;
-  --ink-secondary: #2e2825;
-  --ink-muted: #6f6156;
-  --ink-subtle: #a69a90;
-  --ink-faint: #c4b8ad;
+  --ink: #22312a;
+  --ink-secondary: #34453c;
+  --ink-muted: #62786b;
+  --ink-subtle: #92a79a;
+  --ink-faint: #bacbc1;
 
   /* ========== Colors: Paper (Background) ========== */
-  --paper: #faf6ee;
-  --paper-elevated: #fffcf7;
+  --paper: #edf3ee;
+  --paper-elevated: #f8fbf8;
   --message-user-bg: #fffefa;
-  --paper-inset: #e8dccf;
+  --paper-inset: #d6e1d8;
   /* #333 渐变端点 0-alpha 孪生色：渐变里禁止 `transparent` 关键字（= rgba(0,0,0,0)，
      插值不做 premultiply 的引擎——macOS 27 beta WebKit 的 oklab 渐变路径实测如此——
      会让渐变中段穿过半透明黑 → 灰黑涂抹横条）。淡出一律用同色 0-alpha 端点；
      改上面的 paper token 时 MUST 同步这里（eslint 封禁 to-/from-/via-transparent 兜底）。 */
-  --paper-a0: rgb(250 246 238 / 0);
-  --paper-elevated-a0: rgb(255 252 247 / 0);
+  --paper-a0: rgb(237 243 238 / 0);
+  --paper-elevated-a0: rgb(248 251 248 / 0);
   --message-user-bg-a0: rgb(255 254 250 / 0);
-  --paper-inset-a0: rgb(232 220 207 / 0);
-  --hover-bg: rgba(194, 109, 58, 0.07); /* 通用列表项 hover：7% 暖棕 accent，与整体棕色调一致 */
+  --paper-inset-a0: rgb(214 225 216 / 0);
+  --hover-bg: rgba(104, 138, 116, 0.10); /* 通用列表项 hover：7% 暖棕 accent，与整体棕色调一致 */
 
   /* ========== Colors: Accent ========== */
-  --accent: #c26d3a;
-  --accent-warm: #c26d3a;
-  --accent-warm-hover: #e18a58;
-  --accent-warm-subtle: rgba(194, 109, 58, 0.08);
-  --accent-warm-muted: rgba(194, 109, 58, 0.15);
-  --accent-cool: #2e6f5e;
-  --accent-cool-hover: #3d8a75;
+  --accent: #688a74;
+  --accent-warm: #688a74;
+  --accent-warm-hover: #7ca08a;
+  --accent-warm-subtle: rgba(104, 138, 116, 0.12);
+  --accent-warm-muted: rgba(104, 138, 116, 0.22);
+  --accent-cool: #4f6f60;
+  --accent-cool-hover: #628271;
 
   /* ========== Colors: Heartbeat ========== */
   --heartbeat: #c75050;
@@ -212,29 +212,29 @@
   --heartbeat-border: rgba(199, 80, 80, 0.20);
 
   /* ========== Colors: Semantic ========== */
-  --success: #2d8a5e;
-  --success-bg: #e2f0e8;
+  --success: #5c8468;
+  --success-bg: #e1ece4;
   --error: #dc2626;
   --error-bg: #fee2e2;
   --error-hover: #b91c1c;
   /* Faint error tint for focus rings / glows (mirrors --accent-warm-subtle). */
   --error-subtle: rgba(220, 38, 38, 0.07);
   /* #333 0-alpha 孪生色，与 --accent-warm-subtle 同步 */
-  --accent-warm-subtle-a0: rgba(194, 109, 58, 0);
+  --accent-warm-subtle-a0: rgba(104, 138, 116, 0);
   --warning: #d97706;
   --warning-bg: #fef3c7;
   --info: #4a7ab5;
   --info-bg: #e4ecf4;
 
   /* ========== Colors: Button ========== */
-  --button-primary-bg: #c26d3a;
-  --button-primary-bg-hover: #b05e2d;
+  --button-primary-bg: #688a74;
+  --button-primary-bg-hover: #5a7a65;
   --button-primary-text: #ffffff;
-  --button-dark-bg: #1c1612;
-  --button-dark-bg-hover: #3a3532;
-  --button-secondary-bg: #e8dccf;
-  --button-secondary-bg-hover: #ddd0c2;
-  --button-secondary-text: #1c1612;
+  --button-dark-bg: #22312a;
+  --button-dark-bg-hover: #304139;
+  --button-secondary-bg: #d6e1d8;
+  --button-secondary-bg-hover: #cad8cd;
+  --button-secondary-text: #22312a;
 
   /* ========== Colors: Floating Ball ========== */
   --fb-surface-peek: rgb(253 250 244 / 0.15);
@@ -265,9 +265,9 @@
   --fb-scroll-thumb: rgb(166 154 144 / 0.50);
 
   /* ========== Colors: Border ========== */
-  --line: rgb(28 22 18 / 0.10);
-  --line-strong: rgb(28 22 18 / 0.18);
-  --line-subtle: rgb(28 22 18 / 0.06);
+  --line: rgb(34 49 42 / 0.10);
+  --line-strong: rgb(34 49 42 / 0.18);
+  --line-subtle: rgb(34 49 42 / 0.06);
 
   /* ========== Spacing ========== */
   --space-0: 0;
@@ -300,11 +300,11 @@
   --shadow-xl: 0 24px 48px rgb(28 22 18 / 0.20);
 
   /* ========== Focus ========== */
-  --focus-border: #1c1612;
+  --focus-border: #4f6f60;
 
   /* ========== Toggle ========== */
   --toggle-thumb: #ffffff;
-  --toggle-off-bg: rgb(28 22 18 / 0.18);
+  --toggle-off-bg: rgb(34 49 42 / 0.18);
 
   /* ========== Code Block ========== */
   --code-bg: #1e1e1e;
@@ -325,32 +325,32 @@
    ============================================================ */
 .dark {
   /* ========== Colors: Ink (Light text on dark bg) ========== */
-  --ink: #e4dcd4;
-  --ink-secondary: #cfc5ba;
-  --ink-muted: #968a7e;
-  --ink-subtle: #685c52;
-  --ink-faint: #4a4038;
+  --ink: #e6eee8;
+  --ink-secondary: #c8d5cd;
+  --ink-muted: #96a89b;
+  --ink-subtle: #607266;
+  --ink-faint: #435248;
 
   /* ========== Colors: Paper (Dark backgrounds) ========== */
-  --paper: #1a1614;
-  --paper-elevated: #242018;
+  --paper: #18211b;
+  --paper-elevated: #212b24;
   --message-user-bg: #2a251d;
-  --paper-inset: #12100e;
+  --paper-inset: #121813;
   /* #333 0-alpha 孪生色（同 light 块注释），与上面三个 token 同步维护 */
-  --paper-a0: rgb(26 22 20 / 0);
-  --paper-elevated-a0: rgb(36 32 24 / 0);
+  --paper-a0: rgb(24 33 27 / 0);
+  --paper-elevated-a0: rgb(33 43 36 / 0);
   --message-user-bg-a0: rgb(42 37 29 / 0);
-  --paper-inset-a0: rgb(18 16 14 / 0);
-  --hover-bg: rgba(194, 109, 58, 0.12);
+  --paper-inset-a0: rgb(18 24 19 / 0);
+  --hover-bg: rgba(151, 181, 163, 0.16);
 
   /* ========== Colors: Accent ========== */
-  --accent: #d4803f;
-  --accent-warm: #d4803f;
-  --accent-warm-hover: #e89860;
-  --accent-warm-subtle: rgba(212, 128, 63, 0.12);
-  --accent-warm-muted: rgba(212, 128, 63, 0.20);
-  --accent-cool: #4aad8a;
-  --accent-cool-hover: #5ec49e;
+  --accent: #97b5a3;
+  --accent-warm: #97b5a3;
+  --accent-warm-hover: #aac4b4;
+  --accent-warm-subtle: rgba(151, 181, 163, 0.16);
+  --accent-warm-muted: rgba(151, 181, 163, 0.24);
+  --accent-cool: #769483;
+  --accent-cool-hover: #8cac9a;
 
   /* ========== Colors: Heartbeat ========== */
   --heartbeat: #d46060;
@@ -358,29 +358,29 @@
   --heartbeat-border: rgba(212, 96, 96, 0.22);
 
   /* ========== Colors: Semantic (brighter for dark bg readability) ========== */
-  --success: #4aad7a;
-  --success-bg: rgba(74, 173, 122, 0.15);
+  --success: #8fb89d;
+  --success-bg: rgba(143, 184, 157, 0.18);
   --error: #ef4444;
   --error-bg: rgba(239, 68, 68, 0.15);
   --error-hover: #dc2626;
   /* Faint error tint for focus rings / glows (mirrors --accent-warm-subtle). */
   --error-subtle: rgba(239, 68, 68, 0.12);
   /* #333 0-alpha 孪生色，与 --accent-warm-subtle 同步 */
-  --accent-warm-subtle-a0: rgba(212, 128, 63, 0);
+  --accent-warm-subtle-a0: rgba(151, 181, 163, 0);
   --warning: #f59e0b;
   --warning-bg: rgba(245, 158, 11, 0.15);
   --info: #6b9fd4;
   --info-bg: rgba(107, 159, 212, 0.15);
 
   /* ========== Colors: Button ========== */
-  --button-primary-bg: #d4803f;
-  --button-primary-bg-hover: #c27030;
+  --button-primary-bg: #97b5a3;
+  --button-primary-bg-hover: #83a190;
   --button-primary-text: #ffffff;
-  --button-dark-bg: #443e36;
-  --button-dark-bg-hover: #564e44;
-  --button-secondary-bg: #302a22;
-  --button-secondary-bg-hover: #3a342c;
-  --button-secondary-text: #e4dcd4;
+  --button-dark-bg: #324038;
+  --button-dark-bg-hover: #405047;
+  --button-secondary-bg: #273029;
+  --button-secondary-bg-hover: #313b34;
+  --button-secondary-text: #e6eee8;
 
   /* ========== Colors: Floating Ball ========== */
   --fb-surface-peek: rgb(26 22 20 / 0.22);
@@ -411,9 +411,9 @@
   --fb-scroll-thumb: rgb(150 138 126 / 0.55);
 
   /* ========== Colors: Border ========== */
-  --line: rgb(228 220 212 / 0.10);
-  --line-strong: rgb(228 220 212 / 0.18);
-  --line-subtle: rgb(228 220 212 / 0.06);
+  --line: rgb(230 238 232 / 0.10);
+  --line-strong: rgb(230 238 232 / 0.18);
+  --line-subtle: rgb(230 238 232 / 0.06);
 
   /* ========== Shadows (pure black + higher opacity for dark bg) ========== */
   --shadow-xs: 0 1px 2px rgb(0 0 0 / 0.12);
@@ -426,8 +426,8 @@
   --focus-border: var(--accent);
 
   /* ========== Toggle ========== */
-  --toggle-thumb: #e4dcd4;
-  --toggle-off-bg: rgb(228 220 212 / 0.18);
+  --toggle-thumb: #e6eee8;
+  --toggle-off-bg: rgb(230 238 232 / 0.18);
 
   /* ========== Code Block ========== */
   --code-bg: #141210;
@@ -462,8 +462,8 @@ body {
 :root:not(.dark) body {
   background:
     /* #333: 同色 0-alpha 端点，禁用 `transparent` 关键字（见 paper token 区注释） */
-    radial-gradient(1200px 700px at 82% -10%, #efd0bd 0%, rgb(239 208 189 / 0) 55%),
-    radial-gradient(900px 600px at -10% 110%, #cdddd5 0%, rgb(205 221 213 / 0) 55%),
+    radial-gradient(1200px 700px at 82% -10%, #d7e4da 0%, rgb(215 228 218 / 0) 55%),
+    radial-gradient(900px 600px at -10% 110%, #c1d4c7 0%, rgb(193 212 199 / 0) 55%),
     linear-gradient(120deg, rgb(255 255 255 / 0.5), rgb(255 255 255 / 0)), var(--paper);
 }
 
@@ -471,8 +471,8 @@ body {
 .dark body {
   background:
     /* #333: 同色 0-alpha 端点，禁用 `transparent` 关键字（见 paper token 区注释） */
-    radial-gradient(1200px 700px at 82% -10%, #2a2018 0%, rgb(42 32 24 / 0) 55%),
-    radial-gradient(900px 600px at -10% 110%, #1a2420 0%, rgb(26 36 32 / 0) 55%),
+    radial-gradient(1200px 700px at 82% -10%, #24332a 0%, rgb(36 51 42 / 0) 55%),
+    radial-gradient(900px 600px at -10% 110%, #1a2a20 0%, rgb(26 42 32 / 0) 55%),
     var(--paper);
 }
 

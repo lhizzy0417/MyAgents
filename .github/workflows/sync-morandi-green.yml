@@ -1,0 +1,50 @@
+name: Sync Morandi Green
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '25 18 * * *'
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out fork
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Merge upstream and re-apply Morandi theme
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git remote add upstream https://github.com/hAcKlyc/MyAgents.git 2>/dev/null || git remote set-url upstream https://github.com/hAcKlyc/MyAgents.git
+          git fetch upstream main
+          git merge --no-edit upstream/main
+
+          node scripts/myagents-morandi/apply-theme.mjs "$GITHUB_WORKSPACE"
+
+          git add -A
+
+          if ! git diff --cached --quiet; then
+            git commit -m "chore(sync): refresh morandi green from upstream"
+          fi
+
+          if [ "$(git rev-list --count origin/main..HEAD)" -gt 0 ]; then
+            git push origin HEAD:main
+          else
+            echo "No new upstream commits or theme changes to push."
+          fi

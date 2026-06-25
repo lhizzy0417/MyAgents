@@ -11,13 +11,13 @@ import { listen } from '@tauri-apps/api/event';
 
 /** Dark terminal theme — warm black background, for dark mode */
 export const TERMINAL_DARK_THEME = {
-  background: '#1a1614',      // --paper (dark)
+  background: '#18211b',      // --paper (dark)
   foreground: '#d4c8bc',
-  cursor: '#c26d3a',          // --accent-warm
+  cursor: '#688a74',          // --accent-warm
   cursorAccent: '#1a1614',
-  selectionBackground: 'rgba(194, 109, 58, 0.25)',
+  selectionBackground: 'rgba(104, 138, 116, 0.25)',
   selectionForeground: undefined,
-  selectionInactiveBackground: 'rgba(194, 109, 58, 0.15)',
+  selectionInactiveBackground: 'rgba(104, 138, 116, 0.15)',
 
   // ANSI 16 colors — dark mode (bright colors for dark background)
   black: '#2a2420',
@@ -41,13 +41,13 @@ export const TERMINAL_DARK_THEME = {
 
 /** Light terminal theme — warm paper background, for light mode */
 export const TERMINAL_LIGHT_THEME = {
-  background: '#f0ebe3',      // slightly deeper than --paper (#faf6ee), distinguishes from surrounding UI
+  background: '#e6efe8',      // slightly deeper than --paper (#faf6ee), distinguishes from surrounding UI
   foreground: '#1c1612',      // --ink
-  cursor: '#c26d3a',          // --accent-warm (shared across both themes)
+  cursor: '#97b5a3',          // --accent-warm (shared across both themes)
   cursorAccent: '#f0ebe3',
-  selectionBackground: 'rgba(194, 109, 58, 0.18)',  // --accent-warm-muted
+  selectionBackground: 'rgba(104, 138, 116, 0.18)',  // --accent-warm-muted
   selectionForeground: undefined,
-  selectionInactiveBackground: 'rgba(194, 109, 58, 0.10)',
+  selectionInactiveBackground: 'rgba(104, 138, 116, 0.10)',
 
   // ANSI 16 colors — light mode (darker/more saturated for light background readability)
   black: '#1c1612',            // --ink

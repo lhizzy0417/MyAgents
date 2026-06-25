@@ -503,7 +503,7 @@ export function SkillCard({ skill, onClick, onToggleEnabled }: {
                 <h4 className="min-w-0 flex-1 truncate text-sm font-semibold text-[var(--ink)]">
                     {skill.name}
                 </h4>
-                <Sparkles className="h-3.5 w-3.5 shrink-0 text-amber-500" />
+                <Sparkles className="h-3.5 w-3.5 shrink-0 text-[var(--accent-warm)]" />
                 {skill.author && (
                     <span className="shrink-0 rounded-full bg-[var(--paper-inset)] px-2 py-0.5 text-xs font-medium tracking-[0.04em] text-[var(--ink-muted)]">
                         {skill.author}
