@@ -3,6 +3,7 @@ import { resolveEffectiveConfig } from '../../shared/types/agent';
 import type { SessionMetadata } from '../types/session';
 import type { RuntimeType } from '../../shared/types/runtime';
 import { coerceModelForRuntime, coercePermissionModeForRuntime } from '../../shared/types/runtime';
+import type { ProviderRoute } from '../../shared/providerRoute';
 
 /**
  * Effective runtime config for a single query (v0.1.69).
@@ -17,6 +18,7 @@ export interface ResolvedSessionConfig {
   permissionMode: string | undefined;
   mcpEnabledServers: string[] | undefined;
   providerId: string | undefined;
+  providerRoute: ProviderRoute | undefined;
   providerEnvJson: string | undefined;
 }
 
@@ -64,6 +66,7 @@ export function resolveSessionConfig(
         permissionMode: agent.permissionMode,
         mcpEnabledServers: agent.mcpEnabledServers,
         providerId: agent.providerId,
+        providerRoute: undefined,
         providerEnvJson: agent.providerEnvJson,
       };
     }
@@ -74,6 +77,7 @@ export function resolveSessionConfig(
       permissionMode: eff.permissionMode,
       mcpEnabledServers: eff.mcpEnabledServers,
       providerId: eff.providerId,
+      providerRoute: undefined,
       providerEnvJson: eff.providerEnvJson,
     };
   }
@@ -131,7 +135,12 @@ export function resolveSessionConfig(
     model,
     permissionMode,
     mcpEnabledServers: snapshotOwnsConfig ? meta?.mcpEnabledServers : (meta?.mcpEnabledServers ?? agent.mcpEnabledServers),
-    providerId: snapshotOwnsConfig ? meta?.providerId : (meta?.providerId ?? agent.providerId),
-    providerEnvJson: snapshotOwnsConfig ? meta?.providerEnvJson : (meta?.providerEnvJson ?? agent.providerEnvJson),
+    providerId: runtime === 'builtin'
+      ? (snapshotOwnsConfig ? meta?.providerId : (meta?.providerId ?? agent.providerId))
+      : undefined,
+    providerRoute: runtime === 'builtin' && snapshotOwnsConfig ? meta?.providerRoute : undefined,
+    providerEnvJson: runtime === 'builtin'
+      ? (snapshotOwnsConfig ? meta?.providerEnvJson : (meta?.providerEnvJson ?? agent.providerEnvJson))
+      : undefined,
   };
 }

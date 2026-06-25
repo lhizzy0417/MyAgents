@@ -9,6 +9,8 @@ import { useCloseLayer } from '@/hooks/useCloseLayer';
 import type { IssueQueryParams } from '@/pages/space/spaceHelpers';
 import { SPACE_VISIBLE_REFRESH_TTL_MS, type SpaceActions } from '@/pages/space/spaceStore';
 
+const CREATE_TAG_OPTION_VALUE = '__create_tag__';
+
 function basename(path: string): string {
   return path.split(/[\\/]/).pop() || path;
 }
@@ -30,6 +32,7 @@ export function CreateIssueDialog({
 }) {
   const toast = useToast();
   const titleInputRef = useRef<HTMLInputElement | null>(null);
+  const newTagInputRef = useRef<HTMLInputElement | null>(null);
   const submittingRef = useRef(false);
   const [title, setTitle] = useState('');
   const [body, setBody] = useState('');
@@ -50,15 +53,38 @@ export function CreateIssueDialog({
   }, []);
 
   useEffect(() => {
+    if (!newTagOpen) return;
+    window.setTimeout(() => newTagInputRef.current?.focus(), 0);
+  }, [newTagOpen]);
+
+  useEffect(() => {
     if (tagId && !tags.some((item) => item.id === tagId)) {
       setTagId(tags[0]?.id ?? '');
     }
   }, [tagId, tags]);
 
   const tagOptions = useMemo<SelectOption[]>(
-    () => [{ value: '', label: '无标签' }, ...tags.map((item) => ({ value: item.id, label: item.name }))],
-    [tags],
+    () => [
+      ...(admin
+        ? [{
+            value: CREATE_TAG_OPTION_VALUE,
+            label: '新 tag',
+            icon: <Plus className="h-3.5 w-3.5 text-[var(--accent-warm)]" />,
+          }]
+        : []),
+      { value: '', label: '无标签' },
+      ...tags.map((item) => ({ value: item.id, label: item.name })),
+    ],
+    [admin, tags],
   );
+
+  const handleTagChange = (value: string) => {
+    if (value === CREATE_TAG_OPTION_VALUE) {
+      setNewTagOpen(true);
+      return;
+    }
+    setTagId(value);
+  };
 
   const pickFiles = async () => {
     try {
@@ -120,13 +146,13 @@ export function CreateIssueDialog({
   };
 
   return (
-    <OverlayBackdrop onClose={onClose} className="z-[220] items-center justify-center bg-black/30 p-7 backdrop-blur-sm">
+    <OverlayBackdrop onClose={onClose} className="z-[220] items-center justify-center bg-black/30 p-8 backdrop-blur-sm">
       <form
         onSubmit={(event) => {
           event.preventDefault();
           void submit();
         }}
-        className="grid min-h-[520px] w-[min(1080px,calc(100vw-120px))] max-w-full grid-rows-[auto_minmax(0,1fr)_auto] rounded-[var(--radius-2xl)] border border-[var(--line)] bg-[var(--paper-elevated)]/95 px-6 py-5 shadow-xl"
+        className="grid h-[min(660px,calc(100vh-112px))] min-h-[500px] w-[min(980px,calc(100vw-160px))] max-w-full grid-rows-[auto_minmax(0,1fr)_auto] rounded-[var(--radius-2xl)] border border-[var(--line)] bg-[var(--paper-elevated)]/95 px-5 py-4 shadow-xl"
       >
         <div className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-4">
           <div className="flex min-h-[34px] items-center gap-2.5 text-base font-medium text-[var(--ink-muted)]">
@@ -147,18 +173,18 @@ export function CreateIssueDialog({
           </button>
         </div>
 
-        <div className="grid content-start gap-4 px-2.5 pb-5 pt-12">
+        <div className="grid min-h-0 grid-rows-[auto_minmax(0,1fr)_auto] gap-3 px-2 pb-4 pt-4">
           <input
             ref={titleInputRef}
             value={title}
             onChange={(event) => setTitle(event.target.value)}
-            className="w-full border-0 bg-transparent text-3xl font-semibold leading-tight text-[var(--ink)] outline-none placeholder:text-[var(--ink-muted)]/60"
+            className="w-full border-0 bg-transparent text-2xl font-semibold leading-snug text-[var(--ink)] outline-none placeholder:text-[var(--ink-muted)]/60"
             placeholder="Issue title"
           />
           <textarea
             value={body}
             onChange={(event) => setBody(event.target.value)}
-            className="min-h-40 w-full resize-none border-0 bg-transparent p-0 text-xl leading-8 text-[var(--ink-secondary)] outline-none placeholder:text-[var(--ink-muted)]/60"
+            className="h-full min-h-0 w-full resize-none border-0 bg-transparent p-0 text-base leading-7 text-[var(--ink-secondary)] outline-none placeholder:text-[var(--ink-muted)]/60"
             placeholder="Add description..."
           />
           {filePaths.length > 0 && (
@@ -183,57 +209,6 @@ export function CreateIssueDialog({
 
         <div className="grid grid-cols-[minmax(0,1fr)_auto] items-end gap-4 max-lg:grid-cols-1">
           <div className="flex min-w-0 flex-wrap items-center gap-2">
-            <span className="inline-flex min-h-10 items-center gap-2 rounded-full border border-[var(--line)] bg-[var(--paper-elevated)]/70 px-3 text-sm font-medium text-[var(--ink-muted)] shadow-sm">
-              <Hash className="h-4 w-4" />
-              <CustomSelect value={tagId} options={tagOptions} onChange={setTagId} compact className="w-32 [&>button]:border-0 [&>button]:bg-transparent [&>button]:p-0 [&>button]:shadow-none" />
-            </span>
-            {admin && (
-              newTagOpen ? (
-                <span className="inline-flex h-10 items-center gap-1 rounded-full border border-[var(--line)] bg-[var(--paper-elevated)]/80 px-2 shadow-sm">
-                  <input
-                    value={newTagName}
-                    onChange={(event) => setNewTagName(event.target.value)}
-                    onKeyDown={(event) => {
-                      if (event.key === 'Enter') {
-                        event.preventDefault();
-                        void createTag();
-                      }
-                    }}
-                    className="h-8 w-28 border-0 bg-transparent px-1 text-sm text-[var(--ink)] outline-none placeholder:text-[var(--ink-muted)]"
-                    placeholder="新 tag"
-                  />
-                  <button
-                    type="button"
-                    disabled={creatingTag || !newTagName.trim()}
-                    onClick={() => void createTag()}
-                    className="grid h-7 w-7 place-items-center rounded-full text-[var(--accent-warm)] transition-colors hover:bg-[var(--paper-inset)] disabled:cursor-wait disabled:opacity-60"
-                    aria-label="创建 tag"
-                  >
-                    {creatingTag ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Plus className="h-3.5 w-3.5" />}
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setNewTagOpen(false);
-                      setNewTagName('');
-                    }}
-                    className="grid h-7 w-7 place-items-center rounded-full text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
-                    aria-label="取消创建 tag"
-                  >
-                    <X className="h-3.5 w-3.5" />
-                  </button>
-                </span>
-              ) : (
-                <button
-                  type="button"
-                  onClick={() => setNewTagOpen(true)}
-                  className="inline-flex h-10 items-center gap-2 rounded-full border border-[var(--line)] bg-[var(--paper-elevated)]/80 px-3 text-sm font-semibold text-[var(--ink-muted)] shadow-sm transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
-                >
-                  <Plus className="h-4 w-4" />
-                  新 tag
-                </button>
-              )
-            )}
             <button
               type="button"
               onClick={() => void pickFiles()}
@@ -243,6 +218,47 @@ export function CreateIssueDialog({
               <Paperclip className="h-4 w-4" />
               附件
             </button>
+            <span className="inline-flex min-h-10 items-center gap-2 rounded-full border border-[var(--line)] bg-[var(--paper-elevated)]/70 px-3 text-sm font-medium text-[var(--ink-muted)] shadow-sm">
+              <Hash className="h-4 w-4" />
+              <CustomSelect value={tagId} options={tagOptions} onChange={handleTagChange} compact className="w-36 [&>button]:border-0 [&>button]:bg-transparent [&>button]:p-0 [&>button]:shadow-none" />
+            </span>
+            {admin && newTagOpen && (
+              <span className="inline-flex h-10 items-center gap-1 rounded-full border border-[var(--accent-warm-muted)] bg-[var(--accent-warm-subtle)] px-2 shadow-sm">
+                <input
+                  ref={newTagInputRef}
+                  value={newTagName}
+                  onChange={(event) => setNewTagName(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === 'Enter') {
+                      event.preventDefault();
+                      void createTag();
+                    }
+                  }}
+                  className="h-8 w-28 border-0 bg-transparent px-1 text-sm text-[var(--ink)] outline-none placeholder:text-[var(--ink-muted)]"
+                  placeholder="tag 名称"
+                />
+                <button
+                  type="button"
+                  disabled={creatingTag || !newTagName.trim()}
+                  onClick={() => void createTag()}
+                  className="grid h-7 w-7 place-items-center rounded-full text-[var(--accent-warm)] transition-colors hover:bg-[var(--paper-inset)] disabled:cursor-wait disabled:opacity-60"
+                  aria-label="创建 tag"
+                >
+                  {creatingTag ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Plus className="h-3.5 w-3.5" />}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setNewTagOpen(false);
+                    setNewTagName('');
+                  }}
+                  className="grid h-7 w-7 place-items-center rounded-full text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
+                  aria-label="取消创建 tag"
+                >
+                  <X className="h-3.5 w-3.5" />
+                </button>
+              </span>
+            )}
           </div>
           <div className="flex items-center gap-3.5 pb-0.5">
             <button
@@ -262,7 +278,7 @@ export function CreateIssueDialog({
               className="flex h-11 items-center gap-2 rounded-full bg-[var(--button-primary-bg)] px-6 text-sm font-semibold text-[var(--button-primary-text)] shadow-sm transition-colors hover:bg-[var(--button-primary-bg-hover)] disabled:cursor-wait disabled:opacity-70"
             >
               {submitting ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
-              创建 Issue
+              创建
             </button>
           </div>
         </div>

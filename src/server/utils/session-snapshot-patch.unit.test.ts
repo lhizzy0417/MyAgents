@@ -105,6 +105,71 @@ describe('buildSessionSnapshotPatchUpdates', () => {
     expect('providerEnvJson' in updates).toBe(false);
   });
 
+  it('normalizes concrete providerRoute into providerId/model and clears frozen env', () => {
+    const updates = buildSessionSnapshotPatchUpdates({
+      existing: metadata({
+        configSnapshotAt: '2026-06-24T00:30:00.000Z',
+        providerId: 'zhipu',
+        providerEnvJson: '{"providerId":"zhipu","apiKey":"frozen"}',
+      }),
+      payload: {
+        providerRoute: { kind: 'provider', providerId: 'deepseek', model: 'deepseek-v4-pro' },
+      },
+      nowIso: '2026-06-24T01:00:00.000Z',
+    });
+
+    expect(updates).toEqual({
+      providerRoute: { kind: 'provider', providerId: 'deepseek', model: 'deepseek-v4-pro' },
+      providerId: 'deepseek',
+      model: 'deepseek-v4-pro',
+      providerEnvJson: undefined,
+      configSnapshotAt: '2026-06-24T01:00:00.000Z',
+    });
+  });
+
+  it('does not persist providerEnvJson even when the same payload sends a concrete providerRoute', () => {
+    const updates = buildSessionSnapshotPatchUpdates({
+      existing: metadata({
+        configSnapshotAt: '2026-06-24T00:30:00.000Z',
+        providerId: 'zhipu',
+        providerEnvJson: '{"providerId":"zhipu","apiKey":"frozen"}',
+      }),
+      payload: {
+        providerRoute: { kind: 'provider', providerId: 'deepseek', model: 'deepseek-v4-pro' },
+        providerEnvJson: '{"providerId":"deepseek","apiKey":"must-not-stick"}',
+      },
+      nowIso: '2026-06-24T01:00:00.000Z',
+    });
+
+    expect(updates).toEqual({
+      providerRoute: { kind: 'provider', providerId: 'deepseek', model: 'deepseek-v4-pro' },
+      providerId: 'deepseek',
+      model: 'deepseek-v4-pro',
+      providerEnvJson: undefined,
+      configSnapshotAt: '2026-06-24T01:00:00.000Z',
+    });
+  });
+
+  it('clears provider identity when providerRoute is explicitly cleared', () => {
+    const updates = buildSessionSnapshotPatchUpdates({
+      existing: metadata({
+        configSnapshotAt: '2026-06-24T00:30:00.000Z',
+        providerId: 'zhipu',
+        providerRoute: { kind: 'provider', providerId: 'zhipu', model: 'glm-4.7' },
+        providerEnvJson: '{"providerId":"zhipu","apiKey":"frozen"}',
+      }),
+      payload: { providerRoute: null },
+      nowIso: '2026-06-24T01:00:00.000Z',
+    });
+
+    expect(updates).toEqual({
+      providerRoute: undefined,
+      providerId: undefined,
+      providerEnvJson: undefined,
+      configSnapshotAt: '2026-06-24T01:00:00.000Z',
+    });
+  });
+
   it('keeps base providerEnvJson during first promotion when provider does not change', () => {
     const updates = buildSessionSnapshotPatchUpdates({
       existing: metadata(),

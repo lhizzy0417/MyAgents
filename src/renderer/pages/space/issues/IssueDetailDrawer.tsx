@@ -1,8 +1,7 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Bot, ChevronDown, Copy, Download, FileText, Loader2, MessageSquare, Paperclip, Send, UploadCloud, X } from 'lucide-react';
 
 import { spaceErrorMessage, type SpaceAttachment, type SpaceRegisteredAgent, type SpaceSession } from '@/api/spaceCloud';
-import CustomSelect, { type SelectOption } from '@/components/CustomSelect';
 import OverlayBackdrop from '@/components/OverlayBackdrop';
 import { useToast } from '@/components/Toast';
 import type { Project } from '@/config/types';
@@ -11,6 +10,7 @@ import { copyPlainText } from '@/utils/markdownClipboard';
 import {
   buildIssueCommandPrompt,
   getIssueStatusOptions,
+  issueDisplayTitle,
   issueStatusLabel,
 } from '@/pages/space/spaceHelpers';
 import {
@@ -19,7 +19,6 @@ import {
   type SpaceIssueDetailState,
 } from '@/pages/space/spaceStore';
 import { formatBytes, formatTime, statusPillClass } from '@/pages/space/spaceUi';
-import { workspacePathsEqual } from '@/../shared/workspacePath';
 
 function basename(path: string): string {
   return path.split(/[/\\]/).pop() || path;
@@ -71,20 +70,19 @@ export function IssueDetailDrawer({
   const [attachmentUploading, setAttachmentUploading] = useState(false);
   const [downloadingAttachmentId, setDownloadingAttachmentId] = useState<string | null>(null);
   const [downloadedAttachmentPaths, setDownloadedAttachmentPaths] = useState<Record<string, string>>({});
-  const [attachmentWorkspacePath, setAttachmentWorkspacePath] = useState(projects[0]?.path ?? '');
+  const [downloadTargetAttachmentId, setDownloadTargetAttachmentId] = useState<string | null>(null);
   const [statusMenuOpen, setStatusMenuOpen] = useState(false);
   const [agentMenuOpen, setAgentMenuOpen] = useState(false);
   const [statusBusy, setStatusBusy] = useState(false);
   const [dispatchingAgentId, setDispatchingAgentId] = useState<string | null>(null);
+  const statusMenuRef = useRef<HTMLSpanElement | null>(null);
+  const agentMenuRef = useRef<HTMLDivElement | null>(null);
+  const downloadMenuRef = useRef<HTMLSpanElement | null>(null);
   const detail = detailState?.detail ?? null;
   const loading = detailState?.isLoading ?? true;
   const statusOptions = useMemo(
     () => getIssueStatusOptions({ session, issue: detail?.issue ?? null }),
     [detail?.issue, session],
-  );
-  const workspaceOptions = useMemo<SelectOption[]>(
-    () => projects.map((project) => ({ value: project.path, label: project.displayName || project.name || basename(project.path) })),
-    [projects],
   );
 
   useCloseLayer(() => {
@@ -101,17 +99,27 @@ export function IssueDetailDrawer({
 
   useEffect(() => {
     setDownloadedAttachmentPaths({});
+    setDownloadTargetAttachmentId(null);
   }, [issueId]);
 
   useEffect(() => {
-    if (projects.length === 0) {
-      if (attachmentWorkspacePath) setAttachmentWorkspacePath('');
-      return;
-    }
-    if (!attachmentWorkspacePath || !projects.some((project) => workspacePathsEqual(project.path, attachmentWorkspacePath))) {
-      setAttachmentWorkspacePath(projects[0]?.path ?? '');
-    }
-  }, [attachmentWorkspacePath, projects]);
+    if (!statusMenuOpen && !agentMenuOpen && !downloadTargetAttachmentId) return;
+    const handlePointerDown = (event: MouseEvent) => {
+      const target = event.target;
+      if (!(target instanceof Node)) return;
+      if (statusMenuOpen && statusMenuRef.current && !statusMenuRef.current.contains(target)) {
+        setStatusMenuOpen(false);
+      }
+      if (agentMenuOpen && agentMenuRef.current && !agentMenuRef.current.contains(target)) {
+        setAgentMenuOpen(false);
+      }
+      if (downloadTargetAttachmentId && downloadMenuRef.current && !downloadMenuRef.current.contains(target)) {
+        setDownloadTargetAttachmentId(null);
+      }
+    };
+    document.addEventListener('mousedown', handlePointerDown);
+    return () => document.removeEventListener('mousedown', handlePointerDown);
+  }, [agentMenuOpen, downloadTargetAttachmentId, statusMenuOpen]);
 
   const changeStatus = async (option: { value: string; kind: 'set-status' | 'close-own' }) => {
     if (!detail) return;
@@ -166,17 +174,18 @@ export function IssueDetailDrawer({
     }
   };
 
-  const downloadAttachment = async (attachment: SpaceAttachment) => {
-    if (!attachmentWorkspacePath) {
-      toast.error('没有可用 workspace，无法下载附件');
+  const downloadAttachment = async (attachment: SpaceAttachment, workspacePath: string) => {
+    if (!workspacePath) {
+      toast.error('请选择 Agent 工作区');
       return;
     }
+    setDownloadTargetAttachmentId(null);
     setDownloadingAttachmentId(attachment.id);
     try {
       const result = await actions.downloadIssueAttachment({
         issueId,
         attachmentId: attachment.id,
-        workspacePath: attachmentWorkspacePath,
+        workspacePath,
         fileName: attachment.name,
       });
       setDownloadedAttachmentPaths((paths) => ({ ...paths, [attachment.id]: result.fullPath }));
@@ -186,6 +195,18 @@ export function IssueDetailDrawer({
     } finally {
       setDownloadingAttachmentId(null);
     }
+  };
+
+  const requestAttachmentDownload = (attachment: SpaceAttachment) => {
+    if (projects.length === 0) {
+      toast.error('暂无可用 Agent 工作区');
+      return;
+    }
+    if (projects.length === 1) {
+      void downloadAttachment(attachment, projects[0].path);
+      return;
+    }
+    setDownloadTargetAttachmentId((current) => (current === attachment.id ? null : attachment.id));
   };
 
   const copyAttachmentCommand = async (attachment: SpaceAttachment) => {
@@ -266,7 +287,7 @@ export function IssueDetailDrawer({
             <div className="min-w-0 max-w-[760px] pb-8 max-xl:max-w-none">
               <article className="pb-14">
                 <div className="mb-4 flex flex-wrap items-center gap-2 text-xs font-semibold text-[var(--ink-subtle)]">
-                  <span className="relative">
+                  <span ref={statusMenuRef} className="relative">
                     {statusOptions.length > 0 ? (
                       <button
                         type="button"
@@ -307,7 +328,7 @@ export function IssueDetailDrawer({
                   ))}
                   <span>{formatTime(detail.issue.createdAt)}</span>
                 </div>
-                <h2 className="max-w-[30ch] text-3xl font-semibold leading-tight text-[var(--ink)]">{detail.issue.title}</h2>
+                <h2 className="max-w-[68ch] text-2xl font-semibold leading-snug text-[var(--ink)]">{issueDisplayTitle(detail.issue)}</h2>
                 <div className="mt-5 max-w-[66ch] whitespace-pre-wrap text-base leading-7 text-[var(--ink-secondary)]">{detail.issue.body}</div>
               </article>
 
@@ -396,20 +417,6 @@ export function IssueDetailDrawer({
                   <div className="border-t border-dashed border-[var(--line)] py-4 text-sm text-[var(--ink-muted)]">暂无附件</div>
                 ) : (
                   <div>
-                    {workspaceOptions.length > 0 ? (
-                      <CustomSelect
-                        value={attachmentWorkspacePath}
-                        options={workspaceOptions}
-                        onChange={setAttachmentWorkspacePath}
-                        triggerIcon={<Download className="h-3.5 w-3.5" />}
-                        className="mb-2"
-                        compact
-                      />
-                    ) : (
-                      <div className="mb-2 border-t border-dashed border-[var(--line)] pt-3 text-xs text-[var(--ink-muted)]">
-                        暂无可用 workspace
-                      </div>
-                    )}
                     {detail.attachments.map((attachment) => (
                       <div key={attachment.id} className="grid min-h-[48px] grid-cols-[18px_minmax(0,1fr)_auto] items-center gap-2 border-b border-dashed border-[var(--line-subtle)] py-1.5 text-sm text-[var(--ink-secondary)] first:border-t">
                         <Paperclip className="h-4 w-4" />
@@ -417,17 +424,36 @@ export function IssueDetailDrawer({
                           <span className="block truncate">{attachment.name}</span>
                           <small className="block text-xs text-[var(--ink-subtle)]">{formatBytes(attachment.sizeBytes)}</small>
                         </span>
-                        <span className="flex items-center gap-1">
+                        <span
+                          ref={downloadTargetAttachmentId === attachment.id ? downloadMenuRef : undefined}
+                          className="relative flex items-center gap-1"
+                        >
                           <button
                             type="button"
-                            disabled={!attachmentWorkspacePath || downloadingAttachmentId !== null}
-                            onClick={() => void downloadAttachment(attachment)}
+                            disabled={downloadingAttachmentId !== null}
+                            onClick={() => requestAttachmentDownload(attachment)}
                             className="grid h-8 w-8 place-items-center rounded-lg text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)] disabled:cursor-not-allowed disabled:opacity-55"
                             aria-label={`下载附件 ${attachment.name}`}
-                            title="下载附件"
+                            title={projects.length > 1 ? '选择下载工作区' : '下载附件'}
                           >
                             {downloadingAttachmentId === attachment.id ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}
                           </button>
+                          {downloadTargetAttachmentId === attachment.id && projects.length > 1 && (
+                            <div className="absolute right-0 top-full z-30 mt-2 w-56 rounded-xl border border-[var(--line)] bg-[var(--paper-elevated)] p-1.5 shadow-lg">
+                              <div className="px-2 pb-1 text-xs font-semibold text-[var(--ink-muted)]">下载到 Agent 工作区</div>
+                              {projects.map((project) => (
+                                <button
+                                  key={project.path}
+                                  type="button"
+                                  disabled={downloadingAttachmentId !== null}
+                                  onClick={() => void downloadAttachment(attachment, project.path)}
+                                  className="block h-9 w-full truncate rounded-lg px-2.5 text-left text-sm font-semibold text-[var(--ink-secondary)] transition-colors hover:bg-[var(--paper-inset)] disabled:cursor-wait disabled:opacity-60"
+                                >
+                                  {project.displayName || project.name || basename(project.path)}
+                                </button>
+                              ))}
+                            </div>
+                          )}
                           <button
                             type="button"
                             onClick={() => void copyAttachmentCommand(attachment)}
@@ -461,7 +487,7 @@ export function IssueDetailDrawer({
                 </h3>
                 <div className="grid gap-2">
                   {admin && (
-                    <div className="relative">
+                    <div ref={agentMenuRef} className="relative">
                       <button
                         type="button"
                         disabled={registeredAgents.length === 0 || dispatchingAgentId !== null}

@@ -1,16 +1,19 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  canResumeProviderHistoryForSwitch,
   isExistingSessionSwitch,
   isPinnedProviderUnavailable,
   isResetSessionBirth,
   resolveBuiltinPermissionMode,
   resolveCurrentProviderForSession,
+  resolveLegacyBuiltinSnapshotProviderId,
   resolveLauncherProvider,
   shouldDegradedLoad,
   shouldResetModelOnProviderChange,
   shouldSkipSnapshotWrite,
 } from './optionResolve';
+import { SUBSCRIPTION_PROVIDER_ID } from '../../shared/config-types';
 
 describe('resolveCurrentProviderForSession (#401)', () => {
   const pinned = { id: 'zhipu' };
@@ -50,6 +53,129 @@ describe('resolveCurrentProviderForSession (#401)', () => {
         fallbackProvider: fallback,
       }),
     ).toBe(pinned);
+  });
+});
+
+describe('resolveLegacyBuiltinSnapshotProviderId', () => {
+  const providers = [
+    {
+      id: 'volcengine-api',
+      type: 'api' as const,
+      models: [{ model: 'doubao-seed-2-0-pro-260215' }],
+    },
+    {
+      id: SUBSCRIPTION_PROVIDER_ID,
+      type: 'subscription' as const,
+      models: [{ model: 'claude-opus-4-7' }],
+    },
+    {
+      id: 'anthropic-api',
+      type: 'api' as const,
+      models: [{ model: 'claude-opus-4-7' }],
+    },
+  ];
+
+  it('keeps an explicit snapshot providerId when the provider owns the snapshot model', () => {
+    expect(resolveLegacyBuiltinSnapshotProviderId({
+      snapshotProviderId: 'volcengine-api',
+      snapshotModel: 'doubao-seed-2-0-pro-260215',
+      providers,
+    })).toBe('volcengine-api');
+  });
+
+  it('does not keep an explicit snapshot providerId when the model belongs to another provider', () => {
+    expect(resolveLegacyBuiltinSnapshotProviderId({
+      snapshotProviderId: 'anthropic-api',
+      snapshotModel: 'doubao-seed-2-0-pro-260215',
+      providers,
+    })).toBeUndefined();
+  });
+
+  it('keeps an explicit disabled providerId so the UI can report provider unavailable instead of guessing', () => {
+    expect(resolveLegacyBuiltinSnapshotProviderId({
+      snapshotProviderId: 'volcengine-api',
+      snapshotModel: 'doubao-seed-2-0-pro-260215',
+      providers: providers.map(provider => provider.id === 'volcengine-api'
+        ? { ...provider, enabled: false }
+        : provider),
+    })).toBe('volcengine-api');
+  });
+
+  it('recovers a missing providerId when exactly one credential-configured provider owns the snapshot model', () => {
+    expect(resolveLegacyBuiltinSnapshotProviderId({
+      snapshotModel: 'doubao-seed-2-0-pro-260215',
+      providers,
+      apiKeys: { 'volcengine-api': 'secret' },
+    })).toBe('volcengine-api');
+  });
+
+  it('does not use the current selected provider to break same-model family ambiguity', () => {
+    expect(resolveLegacyBuiltinSnapshotProviderId({
+      snapshotModel: 'claude-opus-4-7',
+      selectedProviderId: 'anthropic-api',
+      providers,
+      apiKeys: { 'anthropic-api': 'secret' },
+      providerVerifyStatus: {
+        [SUBSCRIPTION_PROVIDER_ID]: {
+          status: 'invalid',
+          verifiedAt: '2026-01-01T00:00:00.000Z',
+          accountEmail: 'user@example.com',
+        },
+      },
+    })).toBeUndefined();
+  });
+
+  it('treats subscription account evidence as credential-configured', () => {
+    expect(resolveLegacyBuiltinSnapshotProviderId({
+      snapshotModel: 'claude-opus-4-7',
+      providers,
+      providerVerifyStatus: {
+        [SUBSCRIPTION_PROVIDER_ID]: {
+          status: 'invalid',
+          verifiedAt: '2026-01-01T00:00:00.000Z',
+          accountEmail: 'user@example.com',
+        },
+      },
+    })).toBe(SUBSCRIPTION_PROVIDER_ID);
+  });
+
+  it('does not guess when the model has no credential-configured provider', () => {
+    expect(resolveLegacyBuiltinSnapshotProviderId({
+      snapshotModel: 'claude-opus-4-7',
+      providers,
+    })).toBeUndefined();
+  });
+});
+
+describe('canResumeProviderHistoryForSwitch', () => {
+  it('does not force a new session for unrecoverable legacy snapshot identity', () => {
+    expect(canResumeProviderHistoryForSwitch({
+      legacyCurrentProviderUnknown: true,
+      nextProviderEnv: {
+        providerId: 'deepseek',
+        baseUrl: 'https://api.deepseek.com/anthropic',
+        apiProtocol: 'anthropic',
+        model: 'deepseek-v4-pro',
+      },
+    })).toBe(true);
+  });
+
+  it('uses the normal provider-history whitelist once current provider identity is known', () => {
+    expect(canResumeProviderHistoryForSwitch({
+      legacyCurrentProviderUnknown: false,
+      currentProviderEnv: {
+        providerId: 'volcengine-api',
+        baseUrl: 'https://ark.cn-beijing.volces.com/api/compatible',
+        apiProtocol: 'openai',
+        model: 'doubao-seed-2-0-pro-260215',
+      },
+      nextProviderEnv: {
+        providerId: 'deepseek',
+        baseUrl: 'https://api.deepseek.com/anthropic',
+        apiProtocol: 'anthropic',
+        model: 'deepseek-v4-pro',
+      },
+    })).toBe(false);
   });
 });
 

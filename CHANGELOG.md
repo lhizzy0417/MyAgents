@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.2.41] - 2026-06-26
+
+> 本版继续收敛会话的 Provider / 模型身份，并让 custom MCP 删除变成真正的身份删除：历史会话、任务、定时任务和 Agent 里的旧引用不会再把已删除的 Provider / MCP 悄悄带回来；同时用量统计和 Codex 输入处理更可靠。
+
+### Changed
+
+- **会话 Provider / 模型身份更明确**：内置会话现在用 provider + model 作为成对身份保存，请求时再从当前配置解析 API Key / Base URL；历史会话缺少 provider 信息时，只在能唯一匹配到已配置凭据或订阅记录的供应商时自动修复，否则会要求用户重新选择模型，避免错路由。
+- **Task / Cron MCP override 支持显式“无 MCP”**：任务或定时任务可以区分“跟随 Agent”和“本任务不用任何 MCP”，删除 MCP 后也不会意外继承 Agent 的其它 MCP。
+
+### Fixed
+
+- **会话中切换 Provider / 模型不再过度受限**（[#406](https://github.com/hAcKlyc/MyAgents/issues/406)）：普通可兼容的 Provider / 模型切换可以留在当前会话；只有跨不兼容历史边界时才会新开会话。旧版 `model + configSnapshotAt` 但缺 provider 的会话也不会出现“看得到模型但发送/切换不正常”的状态。
+- **删除 custom MCP 后不再复活或自动重启用**（[#405](https://github.com/hAcKlyc/MyAgents/issues/405)）：Settings / CLI 删除 custom MCP 会级联清理全局配置、Agent/Bot legacy payload、Project、Session、Task 和 Cron 引用；旧 HTTP/SSE MCP 不会再从 Agent 残留配置提升回全局列表。
+- **重新添加同 ID MCP 不再继承旧任务/会话选择**：删除后再添加同名 MCP 时，历史 Session / Task / Cron / Project 不会因为旧引用自动启用这个新 identity。
+- **用量统计按 Provider 分开**：会话统计和用量面板会把不同 Provider 的 token / usage 分开记录，减少多供应商混用时的统计串线。
+- **Codex Runtime 接受引导后的输入更稳**：Codex 在接受用户 steering / 确认后会把后续输入拆到正确回合，减少指令混入上一轮或被错误消费的问题。
+
+---
+
 ## [0.2.40] - 2026-06-25
 
 > 本版聚焦会话配置身份和后台完成后的界面刷新：切换模型 / Provider、恢复历史会话、后台 completion 返回后，当前会话会更稳定地保留自己的模型、Provider、权限和标题状态；同时修复 Windows 路径格式差异带来的工作区配置查找问题。

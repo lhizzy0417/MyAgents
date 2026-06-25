@@ -1117,6 +1117,36 @@ impl CronTaskManager {
         atomic_save_tasks(&self.storage_path, &self.tasks).await
     }
 
+    pub async fn remove_mcp_server_references(&self, server_id: &str) -> Result<usize, String> {
+        let mut tasks = self.tasks.write().await;
+        let mut next = tasks.clone();
+        let mut updated = 0usize;
+
+        for task in next.values_mut() {
+            let Some(ids) = task.mcp_enabled_servers.as_mut() else {
+                continue;
+            };
+            let before = ids.len();
+            ids.retain(|id| id != server_id);
+            if ids.len() != before {
+                task.updated_at = Utc::now();
+                updated += 1;
+            }
+        }
+
+        if updated == 0 {
+            return Ok(0);
+        }
+
+        atomic_save_task_snapshot(
+            &self.storage_path,
+            next.values().cloned().collect::<Vec<_>>(),
+        )
+        .await?;
+        *tasks = next;
+        Ok(updated)
+    }
+
     /// PRD 0.2.5 R4 — fire one immediate execution of an existing cron task
     /// without changing its `status` / `next_execution_at` / any schedule
     /// fields. Fire-and-forget: returns as soon as the execution is dispatched.
@@ -1767,15 +1797,15 @@ impl CronTaskManager {
                 task.runtime_config = Some(rc_val.clone());
             }
         }
-        // PRD 0.2.4 §需求 4 — Task → CronTask projection of MCP override.
-        // Two-state semantics (mirrors `task.rs::update`):
-        //   null OR empty array  → clear (= follow workspace)
-        //   array of ids         → set as the per-task override
+        // Task → CronTask projection of MCP override:
+        //   null      → follow workspace
+        //   []        → explicitly no MCP
+        //   [ids...]  → explicit per-task override
         if let Some(mcp_val) = patch.get("mcpEnabledServers") {
             if mcp_val.is_null() {
                 task.mcp_enabled_servers = None;
             } else if let Ok(list) = serde_json::from_value::<Vec<String>>(mcp_val.clone()) {
-                task.mcp_enabled_servers = if list.is_empty() { None } else { Some(list) };
+                task.mcp_enabled_servers = Some(list);
             }
         }
         if let Some(delivery_val) = patch.get("delivery") {

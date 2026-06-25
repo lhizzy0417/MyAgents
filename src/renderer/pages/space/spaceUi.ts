@@ -9,7 +9,8 @@ export const PAPER_GRID_STYLE: CSSProperties = {
 };
 
 export const SPACE_BACKGROUND_STYLE: CSSProperties = {
-  background: 'linear-gradient(180deg, var(--paper-elevated), var(--paper) 42%, var(--paper-inset)), var(--paper)',
+  background:
+    'linear-gradient(180deg, var(--paper-elevated), var(--paper) 48%, color-mix(in srgb, var(--paper) 86%, var(--paper-inset)) 100%), var(--paper)',
 };
 
 export function formatTime(value?: string | null): string {

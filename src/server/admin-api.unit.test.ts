@@ -12,6 +12,10 @@ const agentSessionMocks = vi.hoisted(() => ({
   forceReloadActiveSession: vi.fn(),
 }));
 
+const managementApiMocks = vi.hoisted(() => ({
+  managementApi: vi.fn(async (): Promise<Record<string, unknown>> => ({ ok: true, taskUpdated: 0, cronUpdated: 0 })),
+}));
+
 vi.mock('./agent-session', () => ({
   SDK_RESERVED_MCP_NAMES: new Set<string>(),
   getAgentState: () => ({ agentDir: agentSessionMocks.agentDir }),
@@ -26,6 +30,11 @@ vi.mock('./sse', () => ({
   broadcast: vi.fn(),
 }));
 
+vi.mock('./utils/management-api-client', () => ({
+  ADMIN_LOOPBACK_TIMEOUT_MS: 10_000,
+  managementApi: managementApiMocks.managementApi,
+}));
+
 let scratch: string;
 let prevHome: string | undefined;
 let prevUserProfile: string | undefined;
@@ -38,6 +47,10 @@ function readConfig(): Record<string, unknown> {
   return JSON.parse(readFileSync(join(scratch, '.myagents', 'config.json'), 'utf-8')) as Record<string, unknown>;
 }
 
+function readJson(path: string): Record<string, unknown>[] {
+  return JSON.parse(readFileSync(path, 'utf-8')) as Record<string, unknown>[];
+}
+
 beforeEach(() => {
   scratch = mkdtempSync(join(tmpdir(), 'myagents-admin-api-'));
   mkdirSync(join(scratch, '.myagents'), { recursive: true });
@@ -45,8 +58,11 @@ beforeEach(() => {
   prevUserProfile = process.env.USERPROFILE;
   process.env.HOME = scratch;
   process.env.USERPROFILE = scratch;
+  vi.resetModules();
   agentSessionMocks.agentDir = undefined;
   agentSessionMocks.setMcpServers.mockClear();
+  managementApiMocks.managementApi.mockClear();
+  managementApiMocks.managementApi.mockResolvedValue({ ok: true, taskUpdated: 0, cronUpdated: 0 });
 });
 
 afterEach(() => {
@@ -101,5 +117,242 @@ describe('admin-api MCP project scope', () => {
     expect(agentSessionMocks.setMcpServers).toHaveBeenCalledWith([
       expect.objectContaining({ id: 'win-custom' }),
     ]);
+  });
+});
+
+describe('admin-api MCP remove/disable legacy HTTP servers', () => {
+  const remoteHttp = {
+    id: 'yuandian-law',
+    name: 'YuanDian Law',
+    type: 'http',
+    url: 'https://mcp.example.com/yuandian-law',
+    headers: { Authorization: 'Bearer token' },
+    isBuiltin: false,
+  };
+
+  it('removes HTTP MCP definitions from global config and Agent legacy payloads', async () => {
+    const { handleMcpRemove } = await import('./admin-api');
+    writeJson(join(scratch, '.myagents', 'config.json'), {
+      mcpServers: [remoteHttp],
+      mcpEnabledServers: ['yuandian-law'],
+      mcpServerEnv: { 'yuandian-law': { TOKEN: 'secret' } },
+      mcpServerArgs: { 'yuandian-law': ['--stale'] },
+      agents: [{
+        id: 'agent-1',
+        name: 'Agent',
+        enabled: true,
+        workspacePath: '/tmp/workspace',
+        permissionMode: 'plan',
+        channels: [],
+        mcpEnabledServers: ['yuandian-law'],
+        mcpServersJson: JSON.stringify([remoteHttp]),
+      }],
+    });
+
+    const result = await handleMcpRemove({ id: 'yuandian-law' });
+    const config = readConfig();
+    const agent = (config.agents as Array<Record<string, unknown>>)[0];
+
+    expect(result.success).toBe(true);
+    expect(config.mcpServers).toEqual([]);
+    expect(config.mcpEnabledServers).toEqual([]);
+    expect(config.mcpServerEnv).toEqual({});
+    expect(config.mcpServerArgs).toEqual({});
+    expect(agent.mcpEnabledServers).toEqual([]);
+    expect(agent.mcpServersJson).toBeUndefined();
+  });
+
+  it('removes Agent-only legacy HTTP MCP servers after Admin API load-boundary promotion', async () => {
+    const { handleMcpRemove } = await import('./admin-api');
+    writeJson(join(scratch, '.myagents', 'config.json'), {
+      mcpServers: [],
+      mcpEnabledServers: [],
+      agents: [{
+        id: 'agent-1',
+        name: 'Agent',
+        enabled: true,
+        workspacePath: '/tmp/workspace',
+        permissionMode: 'plan',
+        channels: [],
+        mcpEnabledServers: ['yuandian-law'],
+        mcpServersJson: JSON.stringify([remoteHttp]),
+      }],
+    });
+
+    const result = await handleMcpRemove({ id: 'yuandian-law' });
+    const config = readConfig();
+    const agent = (config.agents as Array<Record<string, unknown>>)[0];
+
+    expect(result.success).toBe(true);
+    expect(config.mcpServers).toEqual([]);
+    expect(config.mcpEnabledServers).toEqual([]);
+    expect(agent.mcpEnabledServers).toEqual([]);
+    expect(agent.mcpServersJson).toBeUndefined();
+  });
+
+  it('cascades custom MCP remove across config, projects, sessions, legacy Bot payloads, and Rust stores', async () => {
+    const { handleMcpRemove } = await import('./admin-api');
+    writeJson(join(scratch, '.myagents', 'config.json'), {
+      mcpServers: [remoteHttp],
+      mcpEnabledServers: ['yuandian-law', 'keep'],
+      mcpServerEnv: { 'yuandian-law': { TOKEN: 'secret' } },
+      mcpServerArgs: { 'yuandian-law': ['--stale'] },
+      launcherLastUsed: { mcpEnabledServers: ['yuandian-law', 'keep'] },
+      agents: [{
+        id: 'agent-1',
+        name: 'Agent',
+        enabled: true,
+        workspacePath: '/tmp/workspace',
+        permissionMode: 'plan',
+        channels: [],
+        mcpEnabledServers: ['yuandian-law'],
+        mcpServersJson: JSON.stringify([remoteHttp]),
+      }],
+      imBotConfigs: [{
+        id: 'bot-1',
+        mcpEnabledServers: ['yuandian-law'],
+        mcpServersJson: JSON.stringify([remoteHttp]),
+      }],
+    });
+    writeJson(join(scratch, '.myagents', 'projects.json'), [{
+      id: 'project-1',
+      name: 'Project',
+      path: '/tmp/workspace',
+      mcpEnabledServers: ['yuandian-law'],
+    }]);
+    writeJson(join(scratch, '.myagents', 'sessions.json'), [{
+      id: 'session-1',
+      agentDir: '/tmp/workspace',
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      mcpEnabledServers: ['yuandian-law'],
+    }]);
+    managementApiMocks.managementApi.mockResolvedValueOnce({ ok: true, taskUpdated: 1, cronUpdated: 2 });
+
+    const result = await handleMcpRemove({ id: 'yuandian-law' });
+    const config = readConfig();
+    const project = readJson(join(scratch, '.myagents', 'projects.json'))[0];
+    const session = readJson(join(scratch, '.myagents', 'sessions.json'))[0];
+    const agent = (config.agents as Array<Record<string, unknown>>)[0];
+    const bot = (config.imBotConfigs as Array<Record<string, unknown>>)[0];
+
+    expect(result.success).toBe(true);
+    expect(result.data).toMatchObject({ taskUpdated: 1, cronUpdated: 2, projectUpdated: 1, sessionUpdated: 1 });
+    expect(config.mcpServers).toEqual([]);
+    expect(config.mcpEnabledServers).toEqual(['keep']);
+    expect(config.mcpServerEnv).toEqual({});
+    expect(config.mcpServerArgs).toEqual({});
+    expect((config.launcherLastUsed as Record<string, unknown>).mcpEnabledServers).toEqual(['keep']);
+    expect(agent.mcpEnabledServers).toEqual([]);
+    expect(agent.mcpServersJson).toBeUndefined();
+    expect(bot.mcpEnabledServers).toEqual([]);
+    expect(bot.mcpServersJson).toBeUndefined();
+    expect(project.mcpEnabledServers).toEqual([]);
+    expect(session.mcpEnabledServers).toEqual([]);
+    expect(managementApiMocks.managementApi).toHaveBeenCalledWith('/api/mcp/remove-references', 'POST', { serverId: 'yuandian-law' });
+  });
+
+  it('keeps AppConfig definition when Rust Task/Cron cleanup fails', async () => {
+    const { handleMcpRemove } = await import('./admin-api');
+    writeJson(join(scratch, '.myagents', 'config.json'), {
+      mcpServers: [remoteHttp],
+      mcpEnabledServers: ['yuandian-law'],
+    });
+    writeJson(join(scratch, '.myagents', 'projects.json'), [{
+      id: 'project-1',
+      name: 'Project',
+      path: '/tmp/workspace',
+      mcpEnabledServers: ['yuandian-law'],
+    }]);
+    managementApiMocks.managementApi.mockResolvedValueOnce({
+      ok: false,
+      error: 'Task store unavailable',
+      recoveryHint: { recoveryCommand: 'myagents status', message: 'retry later' },
+    });
+
+    const result = await handleMcpRemove({ id: 'yuandian-law' });
+    const config = readConfig();
+    const project = readJson(join(scratch, '.myagents', 'projects.json'))[0];
+
+    expect(result.success).toBe(false);
+    expect(result.recoveryHint).toEqual({ recoveryCommand: 'myagents status', message: 'retry later' });
+    expect((config.mcpServers as Array<Record<string, unknown>>).map(s => s.id)).toEqual(['yuandian-law']);
+    expect(config.mcpEnabledServers).toEqual(['yuandian-law']);
+    expect(project.mcpEnabledServers).toEqual([]);
+  });
+
+  it('keeps AppConfig definition when session snapshot cleanup cannot be written', async () => {
+    const { handleMcpRemove } = await import('./admin-api');
+    writeJson(join(scratch, '.myagents', 'config.json'), {
+      mcpServers: [remoteHttp],
+      mcpEnabledServers: ['yuandian-law'],
+    });
+    writeJson(join(scratch, '.myagents', 'projects.json'), []);
+    writeJson(join(scratch, '.myagents', 'sessions.json'), [{
+      id: 'session-1',
+      agentDir: '/tmp/workspace',
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      mcpEnabledServers: ['yuandian-law'],
+    }]);
+    mkdirSync(join(scratch, '.myagents', 'sessions.json.tmp'));
+
+    const result = await handleMcpRemove({ id: 'yuandian-law' });
+    const config = readConfig();
+
+    expect(result.success).toBe(false);
+    expect((config.mcpServers as Array<Record<string, unknown>>).map(s => s.id)).toEqual(['yuandian-law']);
+    expect(config.mcpEnabledServers).toEqual(['yuandian-law']);
+    expect(managementApiMocks.managementApi).not.toHaveBeenCalled();
+  });
+
+  it('does not delete a new same-id definition added during cleanup-only remove', async () => {
+    const { handleMcpRemove } = await import('./admin-api');
+    writeJson(join(scratch, '.myagents', 'config.json'), {
+      mcpServers: [],
+      mcpEnabledServers: ['yuandian-law'],
+    });
+    writeJson(join(scratch, '.myagents', 'projects.json'), []);
+    writeJson(join(scratch, '.myagents', 'sessions.json'), []);
+    managementApiMocks.managementApi.mockImplementationOnce(async () => {
+      writeJson(join(scratch, '.myagents', 'config.json'), {
+        mcpServers: [remoteHttp],
+        mcpEnabledServers: ['yuandian-law'],
+      });
+      return { ok: true, taskUpdated: 0, cronUpdated: 0 };
+    });
+
+    const result = await handleMcpRemove({ id: 'yuandian-law' });
+    const config = readConfig();
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('re-added during cleanup-only remove');
+    expect((config.mcpServers as Array<Record<string, unknown>>).map(s => s.id)).toEqual(['yuandian-law']);
+    expect(config.mcpEnabledServers).toEqual(['yuandian-law']);
+  });
+
+  it('disables Agent-only legacy HTTP MCP servers without letting promotion re-enable them', async () => {
+    const { handleMcpDisable } = await import('./admin-api');
+    writeJson(join(scratch, '.myagents', 'config.json'), {
+      mcpServers: [],
+      mcpEnabledServers: [],
+      agents: [{
+        id: 'agent-1',
+        name: 'Agent',
+        enabled: true,
+        workspacePath: '/tmp/workspace',
+        permissionMode: 'plan',
+        channels: [],
+        mcpEnabledServers: ['yuandian-law'],
+        mcpServersJson: JSON.stringify([remoteHttp]),
+      }],
+    });
+
+    const result = await handleMcpDisable({ id: 'yuandian-law', scope: 'both' });
+    const config = readConfig();
+
+    expect(result.success).toBe(true);
+    expect((config.mcpServers as Array<Record<string, unknown>>).map(s => s.id)).toEqual(['yuandian-law']);
+    expect(config.mcpEnabledServers).toEqual([]);
   });
 });

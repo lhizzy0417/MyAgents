@@ -207,6 +207,7 @@ Tab2 apiPost() ──► getSessionPort(session_456) ──► Rust proxy ──
 |------|------|--------|
 | `/api/cron/*`（9 条） | CronTask CRUD + 调度控制 | CLI、`im-cron-tool.ts` |
 | `/api/task/*`（13 条） | Task Center 任务 CRUD + run/rerun + doc 读写 | CLI、`admin-api.ts` |
+| `/api/mcp/remove-references` | Task/Cron 中删除 custom MCP identity 的持久引用 | `admin-api.ts` MCP remove cascade |
 | `/api/thought/*`（2 条） | 想法 create / list | CLI、`admin-api.ts` |
 | `/api/im/*` + `/api/im-bridge/*` | IM Bot 唤醒 + 媒体下发 + Plugin Bridge 回调 | Node.js / 社区插件 Bridge |
 | `/api/plugin/*`（3 条） | OpenClaw 插件 CRUD | CLI |
@@ -382,7 +383,7 @@ SDK subprocess → ANTHROPIC_BASE_URL=127.0.0.1:${sidecarPort}
 
 **模型别名映射：** 子 Agent 指定 `model: "sonnet"` 时，SDK 通过 `ANTHROPIC_DEFAULT_SONNET_MODEL` 解析为供应商模型。三个别名变量：`ANTHROPIC_DEFAULT_{SONNET,OPUS,HAIKU}_MODEL`。
 
-**Provider Self-Resolve：** IM/Cron Session 的 Provider 和 Model 从磁盘自 resolve，不依赖前端 `/api/provider/set`。解析链：`agent.providerId → config.defaultProviderId → persisted snapshot`。
+**Provider Self-Resolve：** IM/Cron Session 的 Provider 和 Model 从磁盘自 resolve，不依赖前端 `/api/provider/set`。owned builtin session 的 canonical 身份是 `providerRoute`（providerId + model），请求时再从当前配置 materialize `ProviderEnv`；旧数据解析链兼容 `providerRoute → legacy providerId/model → providerEnvJson fallback → agent/default`，不得把 apiKey/baseUrl 作为新 snapshot 身份写回。
 
 详见 `tech_docs/third_party_providers.md`。
 

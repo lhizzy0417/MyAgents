@@ -86,44 +86,44 @@ export function AgentsWorkspace({
 
   return (
     <>
-      <div className="grid min-h-0 flex-1 grid-rows-[58px_minmax(0,1fr)]">
-        <section className="grid grid-cols-[minmax(0,1fr)_auto_auto] items-center gap-3 border-b border-[var(--line)] bg-[var(--paper-elevated)]/60 px-5 py-2.5 backdrop-blur-md">
-          <div className="flex min-w-0 items-center gap-2.5 font-semibold text-[var(--ink-secondary)]">
+      <div className="grid min-h-0 flex-1 grid-rows-[auto_minmax(0,1fr)]">
+        <section className="flex min-h-12 items-center gap-2.5 border-b border-[var(--line)] bg-[var(--paper-elevated)]/60 px-5 py-1.5 backdrop-blur-md">
+          <div className="mr-auto flex min-w-0 items-center gap-2 text-sm font-semibold text-[var(--ink-secondary)]">
             <Bot className="h-4 w-4 shrink-0" />
-            <span>Registered Agents</span>
+            <span>Agents</span>
+            <span className="rounded-md bg-[var(--paper-inset)] px-2 py-0.5 text-xs font-semibold text-[var(--ink-muted)]">{agents.length}</span>
             <small className="truncate text-xs font-medium text-[var(--ink-muted)]">登记本地工作区，订阅并响应云端派发</small>
           </div>
-          <div className="flex items-center gap-2">
+          <button
+            type="button"
+            disabled={processing || !hasAssignableAgent}
+            onClick={() => void process()}
+            className="flex h-9 shrink-0 items-center gap-2 rounded-xl bg-[var(--button-secondary-bg)] px-3 text-sm font-semibold text-[var(--button-secondary-text)] transition-colors hover:bg-[var(--button-secondary-bg-hover)] disabled:cursor-wait disabled:opacity-70"
+          >
+            {processing ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
+            同步
+          </button>
+          <button
+            type="button"
+            onClick={() => void onRefresh()}
+            className="grid h-9 w-9 shrink-0 place-items-center rounded-xl bg-transparent text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
+            aria-label="刷新"
+            title="刷新"
+          >
+            <RefreshCw className="h-4 w-4" />
+          </button>
+          {admin && (
             <button
               type="button"
-              disabled={processing || !hasAssignableAgent}
-              onClick={() => void process()}
-              className="flex h-10 items-center gap-2 rounded-xl bg-[var(--button-secondary-bg)] px-3 text-sm font-semibold text-[var(--button-secondary-text)] transition-colors hover:bg-[var(--button-secondary-bg-hover)] disabled:cursor-wait disabled:opacity-70"
+              onClick={onRegister}
+              className="flex h-9 shrink-0 items-center gap-2 rounded-xl bg-[var(--button-primary-bg)] px-4 text-sm font-semibold text-[var(--button-primary-text)] transition-colors hover:bg-[var(--button-primary-bg-hover)]"
             >
-              {processing ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
-              同步派发
+              <Plus className="h-4 w-4" />
+              登记
             </button>
-            <button
-              type="button"
-              onClick={() => void onRefresh()}
-              className="flex h-10 items-center gap-2 rounded-xl bg-[var(--button-secondary-bg)] px-3 text-sm font-semibold text-[var(--button-secondary-text)] transition-colors hover:bg-[var(--button-secondary-bg-hover)]"
-            >
-              <RefreshCw className="h-4 w-4" />
-              刷新
-            </button>
-            {admin && (
-              <button
-                type="button"
-                onClick={onRegister}
-                className="flex h-10 items-center gap-2 rounded-xl bg-[var(--button-primary-bg)] px-4 text-sm font-semibold text-[var(--button-primary-text)] transition-colors hover:bg-[var(--button-primary-bg-hover)]"
-              >
-                <Plus className="h-4 w-4" />
-                登记 Agent
-              </button>
-            )}
-          </div>
+          )}
         </section>
-        <main className="min-h-0 overflow-y-auto p-[18px_28px_24px]">
+        <main className="min-h-0 overflow-y-auto px-6 pb-8 pt-3">
           {agents.length === 0 ? (
             <div className="grid h-40 place-items-center rounded-[20px] border border-dashed border-[var(--line)] bg-[var(--paper-elevated)]/40 text-sm text-[var(--ink-muted)]">
               <div className="text-center">
@@ -143,10 +143,6 @@ export function AgentsWorkspace({
             </div>
           ) : (
             <div className="max-w-[1180px]">
-              <div className="mb-2 grid h-10 grid-cols-[minmax(0,1fr)_auto] items-center text-xs font-semibold text-[var(--ink-muted)]">
-                <span>{agents.length} registered agents</span>
-                <span>owner/admin 可登记，member 只读</span>
-              </div>
               <div className="border-y border-[var(--line-subtle)]">
                 {agents.map((agent) => (
                   <article key={agent.id} className="border-b border-[var(--line-subtle)] px-2 py-3 last:border-b-0">

@@ -76,6 +76,16 @@ export function issueStatusLabel(status: string): string {
   return status.replaceAll('_', ' ');
 }
 
+function normalizeIssueStatusToken(value: string): string {
+  return value.trim().toLowerCase().replace(/\s+/g, '_');
+}
+
+export function issueDisplayTitle(issue: Pick<SpaceIssue, 'status' | 'title'>): string {
+  return issue.title.replace(/^\[([^\]]+)\]\s*/, (match, rawStatus: string) => (
+    normalizeIssueStatusToken(rawStatus) === normalizeIssueStatusToken(issue.status) ? '' : match
+  ));
+}
+
 export function buildIssueCommandPrompt(args: { spaceName: string; issueId: string }): string {
   return [
     `这是来自「${args.spaceName}」团队空间的 issue。`,

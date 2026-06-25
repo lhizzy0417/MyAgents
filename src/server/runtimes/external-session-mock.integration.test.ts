@@ -12,6 +12,8 @@ import type {
   UnifiedEventCallback,
 } from './types';
 
+const broadcastEvents: Array<{ event: string; data: unknown }> = [];
+
 type TurnScript =
   | { kind: 'success'; text: string; includeTool?: boolean; completeDelayMs?: number }
   | { kind: 'failure'; error: string }
@@ -44,10 +46,13 @@ class FakeRuntime implements AgentRuntime {
   private callback: UnifiedEventCallback | null = null;
   private readonly timers = new Set<ReturnType<typeof setTimeout>>();
 
-  constructor(private readonly scripts: TurnScript[], options: { realtimeSteering?: boolean } = {}) {
+  constructor(private readonly scripts: TurnScript[], options: { realtimeSteering?: boolean; rejectSteer?: boolean } = {}) {
     if (options.realtimeSteering) {
       this.steerMessage = async (_process, message, _images, steerOptions) => {
         this.steeredMessages.push({ message, clientUserMessageId: steerOptions?.clientUserMessageId });
+        if (options.rejectSteer) {
+          throw new Error('fake steer rejected');
+        }
       };
     }
   }
@@ -180,7 +185,7 @@ let previousRuntime: string | undefined;
 
 async function createHarness(
   scripts: TurnScript[],
-  options: { realtimeSteering?: boolean; config?: Record<string, unknown> } = {},
+  options: { realtimeSteering?: boolean; rejectSteer?: boolean; config?: Record<string, unknown> } = {},
 ): Promise<Harness> {
   vi.resetModules();
   const home = mkdtempSync(join(tmpdir(), 'myagents-external-mock-'));
@@ -195,13 +200,25 @@ async function createHarness(
   process.env.USERPROFILE = home;
   process.env.MYAGENTS_RUNTIME = 'codex';
 
-  const runtime = new FakeRuntime(scripts, { realtimeSteering: options.realtimeSteering });
+  const runtime = new FakeRuntime(scripts, {
+    realtimeSteering: options.realtimeSteering,
+    rejectSteer: options.rejectSteer,
+  });
   vi.doMock('./factory', () => ({
     getCurrentRuntimeType: () => 'codex',
     getExternalRuntime: () => runtime,
     isExternalRuntime: (type: RuntimeType | undefined) => Boolean(type && type !== 'builtin'),
     isRuntimeSupported: () => true,
   }));
+  vi.doMock('../sse', async (importOriginal) => {
+    const actual = await importOriginal<typeof import('../sse')>();
+    return {
+      ...actual,
+      broadcast: (event: string, data: unknown) => {
+        broadcastEvents.push({ event, data });
+      },
+    };
+  });
 
   const [{ getSessionEngine }, externalSession, sessionStore] = await Promise.all([
     import('../session-engine'),
@@ -229,6 +246,7 @@ function restoreEnv(): void {
   else process.env.USERPROFILE = previousUserProfile;
   if (previousRuntime === undefined) delete process.env.MYAGENTS_RUNTIME;
   else process.env.MYAGENTS_RUNTIME = previousRuntime;
+  broadcastEvents.length = 0;
 }
 
 afterEach(async () => {
@@ -246,6 +264,7 @@ afterEach(async () => {
   }
   restoreEnv();
   vi.doUnmock('./factory');
+  vi.doUnmock('../sse');
 });
 
 function desktopRequest(sessionId: string, workspacePath: string, text: string): DesktopMessageRequest {
@@ -361,6 +380,14 @@ describe('external SessionEngine with fake runtime', () => {
 
     expect(harness.runtime.sentMessages).toEqual(['first']);
     expect(harness.runtime.steeredMessages[0]).toMatchObject({ message: 'second' });
+    const started = broadcastEvents.find(
+      (item) => item.event === 'queue:started'
+        && (item.data as { userMessage?: { content?: string } }).userMessage?.content === 'second',
+    );
+    expect(started?.data).toMatchObject({
+      midTurnBreak: true,
+      userMessage: { content: 'second' },
+    });
 
     await expect(harness.engine.waitIdle(2_000, 10)).resolves.toBe(true);
     const persisted = harness.sessionStore.getSessionData(sessionId);
@@ -370,6 +397,50 @@ describe('external SessionEngine with fake runtime', () => {
     ]);
     expect(persisted?.messages.filter((message) => message.role === 'assistant')).toHaveLength(1);
     expect(harness.engine.getLatestAssistantResult().latestResult).toBe('single steered answer');
+  });
+
+  it('does not split the active stream when realtime Codex steering is rejected', async () => {
+    const harness = await createHarness([
+      { kind: 'success', text: 'answer after rejected steer', completeDelayMs: 80 },
+    ], {
+      realtimeSteering: true,
+      rejectSteer: true,
+    });
+    const sessionId = 'session-realtime-steer-rejected';
+    const workspacePath = join(harness.home, 'workspace');
+
+    await harness.engine.sendDesktopMessage(desktopRequest(sessionId, workspacePath, 'first'));
+    await waitFor(() => harness.runtime.sentMessages.includes('first'), 'first dispatch');
+    const second = await harness.engine.sendDesktopMessage(desktopRequest(sessionId, workspacePath, 'second'));
+
+    expect(second).toMatchObject({
+      success: true,
+      queued: true,
+      isInFlight: true,
+      deliveryMode: 'realtime',
+    });
+    await waitFor(() => harness.runtime.steeredMessages.length === 1, 'rejected realtime steer dispatch');
+    expect(harness.runtime.steeredMessages[0]).toMatchObject({ message: 'second' });
+    await waitFor(
+      () => broadcastEvents.some((item) => item.event === 'chat:agent-error'),
+      'rejected realtime steer error broadcast',
+    );
+    const started = broadcastEvents.find(
+      (item) => item.event === 'queue:started'
+        && (item.data as { userMessage?: { content?: string } }).userMessage?.content === 'second',
+    );
+    expect(started).toBeUndefined();
+    expect(broadcastEvents.find(
+      (item) => item.event === 'chat:messages-retracted'
+        && (item.data as { messageIds?: string[] }).messageIds?.length === 1,
+    )).toBeDefined();
+
+    await expect(harness.engine.waitIdle(2_000, 10)).resolves.toBe(true);
+    const persisted = harness.sessionStore.getSessionData(sessionId);
+    expect(persisted?.messages.filter((message) => message.role === 'user').map((message) => message.content)).toEqual([
+      'first',
+    ]);
+    expect(harness.engine.getLatestAssistantResult().latestResult).toBe('answer after rejected steer');
   });
 
   it('keeps Codex steering-capable runtimes on turn boundaries when configured for turn response', async () => {

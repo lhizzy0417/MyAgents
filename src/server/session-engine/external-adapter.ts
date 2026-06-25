@@ -136,6 +136,7 @@ export function createExternalSessionEngine(): SessionEngine {
         agentNames: null,
         permissionMode: getExternalSessionPermissionMode(),
         providerId: null,
+        providerRoute: null,
         reasoningEffort: getExternalSessionReasoningEffort() ?? 'default',
       };
     },

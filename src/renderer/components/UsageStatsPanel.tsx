@@ -16,12 +16,17 @@ const RANGE_LABELS: Record<TimeRange, string> = {
     '60d': '60天',
 };
 
+type ProviderDisplayInfo = {
+    vendor: string;
+    name: string;
+};
+
 export default function UsageStatsPanel() {
     const [stats, setStats] = useState<GlobalStats | null>(null);
     const [isLoading, setIsLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
     const [range, setRange] = useState<TimeRange>('30d');
-    const [modelVendorMap, setModelVendorMap] = useState<Record<string, string>>({});
+    const [providerInfoMap, setProviderInfoMap] = useState<Record<string, ProviderDisplayInfo>>({});
 
     useEffect(() => {
         let cancelled = false;
@@ -36,16 +41,14 @@ export default function UsageStatsPanel() {
                 ]);
                 if (cancelled) return;
 
-                // Build modelId → vendor mapping
-                const mapping: Record<string, string> = {};
+                const mapping: Record<string, ProviderDisplayInfo> = {};
                 for (const provider of providers) {
-                    for (const m of provider.models) {
-                        if (!mapping[m.model]) {
-                            mapping[m.model] = provider.vendor;
-                        }
-                    }
+                    mapping[provider.id] = {
+                        vendor: provider.vendor,
+                        name: provider.name,
+                    };
                 }
-                setModelVendorMap(mapping);
+                setProviderInfoMap(mapping);
 
                 if (data) {
                     setStats(data);
@@ -111,7 +114,7 @@ export default function UsageStatsPanel() {
                     <DailyTrendChart daily={stats.daily} totalTokens={totalTokens} />
 
                     {/* Model Distribution Table */}
-                    <ModelTable byModel={stats.byModel} totalTokens={totalTokens} modelVendorMap={modelVendorMap} />
+                    <ModelTable byModel={stats.byModel} totalTokens={totalTokens} providerInfoMap={providerInfoMap} />
                 </>
             ) : null}
         </div>
@@ -367,10 +370,10 @@ function DailyTrendChart({ daily, totalTokens }: { daily: GlobalStats['daily']; 
 const ALL_VENDOR = '全部';
 const OTHER_VENDOR = '其他';
 
-function ModelTable({ byModel, totalTokens, modelVendorMap }: {
+function ModelTable({ byModel, totalTokens, providerInfoMap }: {
     byModel: GlobalStats['byModel'];
     totalTokens: number;
-    modelVendorMap: Record<string, string>;
+    providerInfoMap: Record<string, ProviderDisplayInfo>;
 }) {
     const [selectedVendor, setSelectedVendor] = useState(ALL_VENDOR);
 
@@ -390,8 +393,8 @@ function ModelTable({ byModel, totalTokens, modelVendorMap }: {
     // Derive vendor list from models that have data
     const vendorSet = new Set<string>();
     let hasOther = false;
-    for (const [modelId] of models) {
-        const vendor = modelVendorMap[modelId];
+    for (const [, data] of models) {
+        const vendor = data.providerId ? providerInfoMap[data.providerId]?.vendor : undefined;
         if (vendor) {
             vendorSet.add(vendor);
         } else {
@@ -404,8 +407,8 @@ function ModelTable({ byModel, totalTokens, modelVendorMap }: {
     // Filter models by selected vendor
     const filteredModels = selectedVendor === ALL_VENDOR
         ? models
-        : models.filter(([modelId]) => {
-            const vendor = modelVendorMap[modelId];
+        : models.filter(([, data]) => {
+            const vendor = data.providerId ? providerInfoMap[data.providerId]?.vendor : undefined;
             if (selectedVendor === OTHER_VENDOR) return !vendor;
             return vendor === selectedVendor;
         });
@@ -465,10 +468,18 @@ function ModelTable({ byModel, totalTokens, modelVendorMap }: {
                         </tr>
                     </thead>
                     <tbody className="divide-y divide-[var(--line)]">
-                        {filteredModels.map(([model, data]) => (
-                            <tr key={model}>
+                        {filteredModels.map(([key, data]) => {
+                            const providerInfo = data.providerId ? providerInfoMap[data.providerId] : undefined;
+                            const providerLabel = providerInfo?.name ?? data.providerId;
+                            return (
+                            <tr key={key}>
                                 <td className="px-4 py-2 text-[var(--ink)]">
-                                    {model}
+                                    <div>{data.model ?? key}</div>
+                                    {providerLabel && (
+                                        <div className="mt-0.5 text-xs text-[var(--ink-muted)]">
+                                            {providerLabel}
+                                        </div>
+                                    )}
                                 </td>
                                 <td className="px-4 py-2 text-right font-medium text-[var(--ink)]">
                                     {formatTokens(data.inputTokens + data.outputTokens)}
@@ -486,7 +497,8 @@ function ModelTable({ byModel, totalTokens, modelVendorMap }: {
                                     {data.count}
                                 </td>
                             </tr>
-                        ))}
+                            );
+                        })}
                     </tbody>
                 </table>
             </div>

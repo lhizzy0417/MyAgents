@@ -912,6 +912,8 @@ export async function updateSessionMetadata(
         | 'mcpEnabledServers'
         | 'enabledPluginIds'
         | 'providerId'
+        | 'providerRoute'
+        | 'providerRouteRepairedAt'
         | 'providerEnvJson'
         | 'configSnapshotAt'
         | 'materializationState'
@@ -963,6 +965,30 @@ export async function updateSessionMetadata(
         }
     });
     return result;
+}
+
+export async function removeMcpServerFromSessionSnapshots(serverId: string): Promise<number> {
+    ensureStorageDir();
+    let updatedCount = 0;
+    await withSessionsLock(async () => {
+        const all = readSessionsIndexForWrite();
+        const next = all.map(session => {
+            if (!Array.isArray(session.mcpEnabledServers) || !session.mcpEnabledServers.includes(serverId)) {
+                return session;
+            }
+            updatedCount++;
+            return {
+                ...session,
+                mcpEnabledServers: session.mcpEnabledServers.filter(id => id !== serverId),
+            };
+        });
+
+        if (updatedCount === 0) {
+            return;
+        }
+        atomicWriteSessionsFile(JSON.stringify(next, null, 2));
+    });
+    return updatedCount;
 }
 
 /**

@@ -31,13 +31,14 @@ interface CustomSelectProps {
      * Trigger size — controls the closed-state padding + font size:
      *   'compact' (default when `compact={true}`): 12px / px-2 py-1
      *   'sm'      (default): 12px / px-3 py-2 — fine-print fields, dense forms
+     *   'toolbar':           14px / px-3 py-1.5 — dense page/header filters
      *   'md':                14px / px-3 py-2.5 — primary fields the user
      *                        focuses on (e.g. workspace picker in dispatch
      *                        dialog where the active workspace is the most
      *                        important context to read at a glance).
      * `compact` prop kept for back-compat; `size` is the modern API.
      */
-    size?: 'sm' | 'md';
+    size?: 'sm' | 'toolbar' | 'md';
     compact?: boolean;
     footerAction?: {
         label: string;
@@ -77,7 +78,9 @@ export default function CustomSelect({
                     compact
                         ? 'px-2 py-1 text-xs'
                         : size === 'md'
-                            ? 'px-3 py-2.5 text-sm'
+                          ? 'px-3 py-2.5 text-sm'
+                          : size === 'toolbar'
+                            ? 'px-3 py-1.5 text-sm'
                             : 'px-3 py-2 text-xs'
                 }`}
             >
@@ -131,7 +134,7 @@ export default function CustomSelect({
                                 // what the closed trigger shows. Default `size='sm'`
                                 // keeps the legacy `text-xs` (12px) for dense forms.
                                 className={`flex w-full items-center gap-2 px-3 py-1.5 text-left transition-colors ${
-                                    size === 'md' ? 'text-sm' : 'text-xs'
+                                    size === 'md' || size === 'toolbar' ? 'text-sm' : 'text-xs'
                                 } ${
                                     option.value === value
                                         ? 'text-[var(--accent-warm)]'
@@ -162,7 +165,7 @@ export default function CustomSelect({
                                     footerAction.onClick();
                                 }}
                                 className={`flex w-full items-center gap-2 px-3 py-1.5 text-left text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)] ${
-                                    size === 'md' ? 'text-sm' : 'text-xs'
+                                    size === 'md' || size === 'toolbar' ? 'text-sm' : 'text-xs'
                                 }`}
                             >
                                 {footerAction.icon && (

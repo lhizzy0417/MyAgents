@@ -400,13 +400,9 @@ export function TaskAdvancedConfigEditor(props: Props) {
     [effectiveRuntime],
   );
 
-  // Toggle a single MCP server in the override list (PRD 0.2.4 §需求 4).
-  //
-  // Two-state model — "follow Agent" (`undefined`) vs. "override with this
-  // explicit list" (`[a, b, ...]`). Dropping the last item collapses back
-  // to `undefined` so an emptied list never lingers as a meaningless
-  // "explicit empty" — Rust's `update` treats `Some(vec![])` as a clear
-  // anyway, so collapsing here keeps the wire/storage shapes 1:1.
+  // Toggle a single MCP server in the override list.
+  // `undefined` follows Agent; `[]` is an explicit no-MCP override. The
+  // "恢复跟随 Agent" button is the only path that clears back to undefined.
   const toggleMcp = (id: string) => {
     if (mcpEnabledServers === undefined) {
       setMcpEnabledServers([id]);
@@ -414,9 +410,7 @@ export function TaskAdvancedConfigEditor(props: Props) {
     }
     if (mcpEnabledServers.includes(id)) {
       const next = mcpEnabledServers.filter((s) => s !== id);
-      // Last item dropped → revert to "follow Agent" rather than
-      // persisting `[]` (which the backend coerces to follow anyway).
-      setMcpEnabledServers(next.length === 0 ? undefined : next);
+      setMcpEnabledServers(next);
     } else {
       setMcpEnabledServers([...mcpEnabledServers, id]);
     }

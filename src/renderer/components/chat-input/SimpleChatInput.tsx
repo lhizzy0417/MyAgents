@@ -96,6 +96,9 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
   agentDir: _agentDir,
   provider,
   providers = [],
+  providerAvailable,
+  availableProviderIds,
+  providerUnavailableMessage,
   onProviderChange,
   selectedModel,
   onBuiltinModelSelect,
@@ -210,11 +213,15 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
   // cron-modal open time instead — see Chat.tsx::handleOpenCronSettings.
 
   // Ref for current provider availability — used in handleKeyDown without adding deps
-  const isCurrentProviderAvailable = provider ? isProviderAvailable(provider, apiKeys, providerVerifyStatus) : false;
+  const isCurrentProviderAvailable = providerAvailable ?? (provider ? isProviderAvailable(provider, apiKeys, providerVerifyStatus) : false);
   // External runtimes (Claude Code / Codex) authenticate via their own CLI — no MyAgents provider required.
   const canSendMessage = isExternalRuntime || isCurrentProviderAvailable;
   const canSendMessageRef = useRef(canSendMessage);
   canSendMessageRef.current = canSendMessage;
+  const availableProviderIdSet = useMemo(
+    () => availableProviderIds ? new Set(availableProviderIds) : null,
+    [availableProviderIds],
+  );
 
   // Send-key preference (Enter vs ⌘/Ctrl+Enter). Shared with AI 小助理 / 问题反馈
   // via @/utils/chatSendKey. Mirrored to a ref so the big handleKeyDown callback
@@ -1973,7 +1980,9 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                     })}
                   </>
                 ) : (() => {
-                  const availableProviders = (providers ?? []).filter(p => isProviderAvailable(p, apiKeys, providerVerifyStatus));
+                  const availableProviders = availableProviderIdSet
+                    ? (providers ?? []).filter(p => availableProviderIdSet.has(p.id))
+                    : (providers ?? []).filter(p => isProviderAvailable(p, apiKeys, providerVerifyStatus));
                   if (availableProviders.length === 0) {
                     return (
                       <button
@@ -2167,7 +2176,7 @@ const SimpleChatInput = memo(forwardRef<SimpleChatInputHandle, SimpleChatInputPr
                   onClick={handleSend}
                   disabled={!canSendMessage || (!inputValue.trim() && images.length === 0)}
                   className="rounded-lg bg-[var(--accent)] p-2 text-white transition-colors hover:bg-[var(--accent-warm-hover)] disabled:bg-[var(--ink-muted)]/15 disabled:text-[var(--ink-muted)]/60"
-                  title={!canSendMessage ? '请前往设置页面设置模型供应商' : sendHintLabel(sendShortcut, isMac)}
+                  title={!canSendMessage ? (providerUnavailableMessage ?? '请前往设置页面设置模型供应商') : sendHintLabel(sendShortcut, isMac)}
                 >
                   <Send className="h-4 w-4" />
                 </button>

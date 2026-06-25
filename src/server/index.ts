@@ -66,6 +66,7 @@ import { basename, dirname, isAbsolute, join, relative, resolve, extname, sep } 
 import { tmpdir, homedir } from 'os';
 import { randomUUID } from 'crypto';
 import { elapsedMs, emitPerfTrace, nowMs } from './utils/perf-trace';
+import { addMessageUsageToByModel, type UsageByModel } from './utils/usage-stats';
 // adm-zip lazy-loaded at its one call site below (/api/skill/upload with zip
 // content) — saves ~30ms of module-init cost when users never upload skills.
 import {
@@ -110,7 +111,7 @@ import { isPendingSessionId } from '../shared/constants';
 import { parseAgentFrontmatter, parseFullAgentContent, serializeAgentContent } from '../shared/agentCommands';
 import { scanAgents, readWorkspaceConfig, writeWorkspaceConfig, loadEnabledAgents, readAgentMeta, writeAgentMeta, findAgent } from './agents/agent-loader';
 import type { AgentFrontmatter, AgentMeta, AgentWorkspaceConfig } from '../shared/agentTypes';
-import type { McpServerDefinition, BackgroundAgentPermissionMode } from '../shared/config-types';
+import { SUBSCRIPTION_PROVIDER_ID, type McpServerDefinition, type BackgroundAgentPermissionMode } from '../shared/config-types';
 import { ensureDirSync, ensureDir, isDirEntry } from './utils/fs-utils';
 import {
   setCronTaskContext,
@@ -529,13 +530,14 @@ import {
   updateSessionMetadata,
   getAttachmentPath,
 } from './SessionStore';
-import { decodeProviderEnvSnapshot, findAgentByWorkspacePath, findProvider, getAllMcpServers, getEffectiveMcpServers, isProviderDisabled, loadConfig, resolveImProviderEnv, resolveProviderEnv, resolveWorkspaceConfig } from './utils/admin-config';
+import { decodeProviderEnvSnapshot, findAgentByWorkspacePath, findProvider, getAllMcpServers, getEffectiveMcpServers, getEnabledMcpServerIds, isProviderDisabled, loadConfig, resolveImProviderEnv, resolveProviderEnv, resolveWorkspaceConfig } from './utils/admin-config';
 import { snapshotForOwnedSession } from './utils/session-snapshot';
 import { buildSessionSnapshotPatchUpdates } from './utils/session-snapshot-patch';
 import { resolveSessionConfig } from './utils/resolve-session-config';
 import { resolveLastRealUserMessagePreview, shrinkSessionMessagesForClient } from './utils/session-message-preview';
 import type { AgentConfig } from '../shared/types/agent';
 import type { SessionMetadata } from './types/session';
+import { createConcreteProviderRoute, isConcreteProviderRoute, type ProviderRoute } from '../shared/providerRoute';
 import { initLogger, getLoggerDiagnostics, withLogContext, setStdioBrokenProbe } from './logger';
 // `isStdioBroken` / `markStdioBroken` are defined above (in the crash-
 // diagnostics block) and consumed by `setStdioBrokenProbe` below to wire
@@ -651,6 +653,7 @@ type SendMessagePayload = {
   // #324 — reasoning effort setting ('default' | level). Omitted by IM/Cron
   // callers (keep current session value); desktop sends its picker state.
   reasoningEffort?: string;
+  providerRoute?: ProviderRoute;
   /** Per-turn analytics attribution; floating_ball also selects the desktop floating surface. */
   analyticsSource?: TurnAnalyticsSource;
   // 'subscription' = explicit switch to Anthropic subscription (from desktop)
@@ -845,8 +848,9 @@ type CronExecutePayload = {
    */
   providerIntent?: 'followAgent' | 'subscription' | 'explicit';
   /**
-   * Per-task MCP enable list override (PRD 0.2.4 §需求 4).
+   * Per-task MCP enable list override.
    * `undefined` = follow workspace MCP (`config.agents[].mcpEnabledServers`).
+   * `[]` = explicitly run with no MCP servers.
    * `[id, id, ...]` = enable only these MCP server ids for this task.
    * Sidecar applies via `setMcpServers()` before `enqueueUserMessage`.
    */
@@ -2263,6 +2267,7 @@ async function main() {
         const runtimeSessionId = getRuntimeSessionIdForRequest();
         const permissionMode = payload?.permissionMode ?? 'auto';
         const model = payload?.model;
+        const providerRoute = payload?.providerRoute;
         const providerEnv = payload?.providerEnv;
         const reasoningEffort = typeof payload?.reasoningEffort === 'string' ? payload.reasoningEffort : undefined;
         const analyticsSource: TurnAnalyticsSource | undefined =
@@ -2291,6 +2296,7 @@ async function main() {
             permissionMode,
             backgroundAgentPermissionMode: payload?.backgroundAgentPermissionMode,
             model: model ?? undefined,
+            providerRoute,
             providerEnv,
             reasoningEffort,
             sessionId: runtimeSessionId,
@@ -2606,6 +2612,7 @@ async function main() {
           const intent = payload.providerIntent ?? 'followAgent';
           let effectiveModel = model;
           let effectiveProviderEnv: ProviderEnv | 'subscription' | undefined = providerEnv;
+          let effectiveProviderRoute: ProviderRoute | undefined;
           let effectiveRuntimeConfig = payload.runtimeConfig;
 
           if (payload.providerId) {
@@ -2621,6 +2628,9 @@ async function main() {
               return jsonResponse({ success: false, error: errMsg }, 400);
             }
             if (payload.model) effectiveModel = payload.model;
+            if (payload.model) {
+              effectiveProviderRoute = createConcreteProviderRoute(payload.providerId, payload.model);
+            }
             // Issue #204: defense-in-depth for external-runtime tasks landing
             // on a non-followAgent intent. Always construct (not gated on
             // existence), and let canonical `runtimeConfig.model` win over
@@ -2638,7 +2648,21 @@ async function main() {
               if (sessionMeta && agent) {
                 const resolved = resolveSessionConfig(sessionMeta, agent, undefined, 'owned');
                 if (resolved.model !== undefined) effectiveModel = resolved.model;
-                if (resolved.providerEnvJson) {
+                if (isConcreteProviderRoute(resolved.providerRoute)) {
+                  effectiveProviderRoute = resolved.providerRoute;
+                  effectiveModel = resolved.providerRoute.model;
+                  try {
+                    effectiveProviderEnv = resolved.providerRoute.kind === 'subscription'
+                      ? 'subscription'
+                      : resolveCronProviderRouting(resolved.providerRoute.providerId);
+                  } catch (e) {
+                    const errMsg = e instanceof Error ? e.message : String(e);
+                    console.error(`[cron] execute followAgent: providerRoute resolution failed for '${resolved.providerRoute.providerId}': ${errMsg}`);
+                    clearCronTaskContext(currentSessionId);
+                    resetInteractionScenario();
+                    return jsonResponse({ success: false, error: errMsg }, 400);
+                  }
+                } else if (resolved.providerEnvJson) {
                   // Snapshot gate: disabled providers must not bypass the global enablement
                   // contract via stale providerEnvJson. decodeProviderEnvSnapshot returns
                   // undefined → caller fails loud (cron Task → Blocked at next layer).
@@ -2695,8 +2719,8 @@ async function main() {
               }
             }
             // Backward-compat with the pre-#119 pragmatic fix — see /cron/execute-sync above.
-            if (payload.model) effectiveModel = payload.model;
-            if (payload.providerEnv) effectiveProviderEnv = payload.providerEnv;
+            if (!effectiveProviderRoute && payload.model) effectiveModel = payload.model;
+            if (!effectiveProviderRoute && payload.providerEnv) effectiveProviderEnv = payload.providerEnv;
           } else if (intent === 'subscription') {
             // PRD 0.2.9 R1 — pass the explicit 'subscription' sentinel (NOT
             // undefined) so `enqueueUserMessage` clears the session's current
@@ -2704,6 +2728,9 @@ async function main() {
             // agent-session.ts:5381-5383 treats undefined as "keep current".
             effectiveProviderEnv = 'subscription';
             if (payload.model) effectiveModel = payload.model;
+            if (payload.model) {
+              effectiveProviderRoute = createConcreteProviderRoute(SUBSCRIPTION_PROVIDER_ID, payload.model);
+            }
             // Issue #204: defense-in-depth for external-runtime tasks landing
             // on a non-followAgent intent. Always construct (not gated on
             // existence), and let canonical `runtimeConfig.model` win over
@@ -2762,6 +2789,7 @@ async function main() {
             model: engine.kind === 'external'
               ? getRuntimeConfigModel(effectiveRuntimeConfig ?? null)
               : effectiveModel,
+            providerRoute: engine.kind === 'builtin' ? effectiveProviderRoute : undefined,
             providerEnv: engine.kind === 'builtin' ? effectiveProviderEnv : undefined,
             reasoningEffort: engine.kind === 'external'
               ? getRuntimeConfigReasoningEffort(effectiveRuntimeConfig ?? null, cronRuntimeType)
@@ -2852,15 +2880,28 @@ async function main() {
           if (payload.providerId) {
             cronSnapshot.providerId = payload.providerId;
             cronSnapshot.providerEnvJson = undefined;
-            if (payload.model) cronSnapshot.model = payload.model;
+            if (payload.model) {
+              cronSnapshot.model = payload.model;
+              cronSnapshot.providerRoute = createConcreteProviderRoute(payload.providerId, payload.model);
+            } else {
+              cronSnapshot.model = undefined;
+              cronSnapshot.providerRoute = undefined;
+            }
           } else {
             const cronIntent = payload.providerIntent ?? 'followAgent';
             if (cronIntent === 'subscription') {
-              cronSnapshot.providerId = undefined;
+              cronSnapshot.providerId = SUBSCRIPTION_PROVIDER_ID;
               cronSnapshot.providerEnvJson = undefined;
-              if (payload.model) cronSnapshot.model = payload.model;
+              if (payload.model) {
+                cronSnapshot.model = payload.model;
+                cronSnapshot.providerRoute = createConcreteProviderRoute(SUBSCRIPTION_PROVIDER_ID, payload.model);
+              } else {
+                cronSnapshot.model = undefined;
+                cronSnapshot.providerRoute = undefined;
+              }
             } else if (cronIntent === 'explicit' && payload.providerEnv) {
               cronSnapshot.providerId = undefined;
+              cronSnapshot.providerRoute = undefined;
               cronSnapshot.providerEnvJson = JSON.stringify(payload.providerEnv);
               if (payload.model) cronSnapshot.model = payload.model;
             }
@@ -2955,6 +2996,7 @@ async function main() {
 
         let effectiveModel = model;
         let effectiveProviderEnv: ProviderEnv | 'subscription' | undefined = providerEnv;
+        let effectiveProviderRoute: ProviderRoute | undefined;
         let effectiveRuntimeConfig = payload.runtimeConfig;
 
         if (payload.providerId) {
@@ -2969,6 +3011,9 @@ async function main() {
             return jsonResponse({ success: false, error: errMsg }, 400);
           }
           if (payload.model) effectiveModel = payload.model;
+          if (payload.model) {
+            effectiveProviderRoute = createConcreteProviderRoute(payload.providerId, payload.model);
+          }
           // Issue #204: defense-in-depth for external-runtime tasks landing
           // on a non-followAgent intent. Always construct (not gated on
           // existence), and let canonical `runtimeConfig.model` win over
@@ -2988,7 +3033,21 @@ async function main() {
             if (sessionMeta && agent) {
               const resolved = resolveSessionConfig(sessionMeta, agent, undefined, 'owned');
               if (resolved.model !== undefined) effectiveModel = resolved.model;
-              if (resolved.providerEnvJson) {
+              if (isConcreteProviderRoute(resolved.providerRoute)) {
+                effectiveProviderRoute = resolved.providerRoute;
+                effectiveModel = resolved.providerRoute.model;
+                try {
+                  effectiveProviderEnv = resolved.providerRoute.kind === 'subscription'
+                    ? 'subscription'
+                    : resolveCronProviderRouting(resolved.providerRoute.providerId);
+                } catch (e) {
+                  const errMsg = e instanceof Error ? e.message : String(e);
+                  console.error(`[cron] execute-sync followAgent: providerRoute resolution failed for '${resolved.providerRoute.providerId}': ${errMsg}`);
+                  clearCronTaskContext(effectiveSessionId);
+                  resetInteractionScenario();
+                  return jsonResponse({ success: false, error: errMsg }, 400);
+                }
+              } else if (resolved.providerEnvJson) {
                 // Snapshot gate: see /cron/execute above. decodeProviderEnvSnapshot
                 // refuses the snapshot when providerId is globally disabled.
                 const decoded = decodeProviderEnvSnapshot(resolved.providerEnvJson, resolved.providerId);
@@ -3048,13 +3107,16 @@ async function main() {
           // still has explicit payload.* values — without it, those tasks
           // regress to following the agent snapshot they explicitly tried
           // to override.
-          if (payload.model) effectiveModel = payload.model;
-          if (payload.providerEnv) effectiveProviderEnv = payload.providerEnv;
+          if (!effectiveProviderRoute && payload.model) effectiveModel = payload.model;
+          if (!effectiveProviderRoute && payload.providerEnv) effectiveProviderEnv = payload.providerEnv;
         } else if (intent === 'subscription') {
           // PRD 0.2.9 R1 — explicit 'subscription' sentinel, not undefined.
           // See /cron/execute above for the full rationale.
           effectiveProviderEnv = 'subscription';
           if (payload.model) effectiveModel = payload.model;
+          if (payload.model) {
+            effectiveProviderRoute = createConcreteProviderRoute(SUBSCRIPTION_PROVIDER_ID, payload.model);
+          }
           // Issue #204: defense-in-depth for external-runtime tasks landing
           // on a non-followAgent intent. Always construct (not gated on
           // existence), and let canonical `runtimeConfig.model` win over
@@ -3180,7 +3242,10 @@ async function main() {
             // already matches `currentMcpServers` it's a cheap no-op.
             let target: McpServerDefinition[];
             if (payload.mcpEnabledServers !== undefined) {
-              const overrideIds = new Set(payload.mcpEnabledServers);
+              const globalEnabledIds = new Set(getEnabledMcpServerIds());
+              const overrideIds = new Set(
+                payload.mcpEnabledServers.filter((id) => globalEnabledIds.has(id)),
+              );
               // Prefer `currentMcpServers` (set by frontend's /api/mcp/set)
               // when its IDs cover all override IDs. Sidecar's
               // `getAllMcpServers()` and the renderer's mcpService produce
@@ -3234,6 +3299,7 @@ async function main() {
             model: engine.kind === 'external'
               ? getRuntimeConfigModel(effectiveRuntimeConfig ?? null)
               : effectiveModel,
+            providerRoute: engine.kind === 'builtin' ? effectiveProviderRoute : undefined,
             providerEnv: engine.kind === 'builtin' ? effectiveProviderEnv : undefined,
             runtimeConfig: effectiveRuntimeConfig ?? null,
             timeoutMs: 3600000,
@@ -3355,13 +3421,7 @@ async function main() {
           // Single pass through messages: aggregate summary + daily + byModel together so
           // they're guaranteed to agree about what falls inside the range.
           const dailyMap: Record<string, { inputTokens: number; outputTokens: number; messageCount: number }> = {};
-          const byModel: Record<string, {
-            inputTokens: number;
-            outputTokens: number;
-            cacheReadTokens: number;
-            cacheCreationTokens: number;
-            count: number;
-          }> = {};
+          const byModel: UsageByModel = {};
 
           for (const s of sessions) {
             const sessionData = getSessionData(s.id);
@@ -3400,29 +3460,7 @@ async function main() {
               dailyMap[date].outputTokens += msg.usage.outputTokens ?? 0;
               dailyMap[date].messageCount++;
 
-              // byModel aggregation
-              if (msg.usage.modelUsage) {
-                for (const [model, mu] of Object.entries(msg.usage.modelUsage)) {
-                  if (!byModel[model]) {
-                    byModel[model] = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0, count: 0 };
-                  }
-                  byModel[model].inputTokens += mu.inputTokens ?? 0;
-                  byModel[model].outputTokens += mu.outputTokens ?? 0;
-                  byModel[model].cacheReadTokens += mu.cacheReadTokens ?? 0;
-                  byModel[model].cacheCreationTokens += mu.cacheCreationTokens ?? 0;
-                  byModel[model].count++;
-                }
-              } else {
-                const model = msg.usage.model || 'unknown';
-                if (!byModel[model]) {
-                  byModel[model] = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0, count: 0 };
-                }
-                byModel[model].inputTokens += msg.usage.inputTokens ?? 0;
-                byModel[model].outputTokens += msg.usage.outputTokens ?? 0;
-                byModel[model].cacheReadTokens += msg.usage.cacheReadTokens ?? 0;
-                byModel[model].cacheCreationTokens += msg.usage.cacheCreationTokens ?? 0;
-                byModel[model].count++;
-              }
+              addMessageUsageToByModel(byModel, msg, s.providerId);
             }
           }
 
@@ -3570,13 +3608,7 @@ async function main() {
         }
 
         // Group stats by model
-        const byModel: Record<string, {
-          inputTokens: number;
-          outputTokens: number;
-          cacheReadTokens: number;
-          cacheCreationTokens: number;
-          count: number;
-        }> = {};
+        const byModel: UsageByModel = {};
 
         // Build message details
         const messageDetails: Array<{
@@ -3597,42 +3629,7 @@ async function main() {
               ? msg.content.slice(0, 100)
               : JSON.stringify(msg.content).slice(0, 100);
           } else if (msg.role === 'assistant' && msg.usage) {
-            // Use modelUsage for per-model breakdown if available, fallback to single model
-            if (msg.usage.modelUsage) {
-              for (const [model, stats] of Object.entries(msg.usage.modelUsage)) {
-                if (!byModel[model]) {
-                  byModel[model] = {
-                    inputTokens: 0,
-                    outputTokens: 0,
-                    cacheReadTokens: 0,
-                    cacheCreationTokens: 0,
-                    count: 0,
-                  };
-                }
-                byModel[model].inputTokens += stats.inputTokens ?? 0;
-                byModel[model].outputTokens += stats.outputTokens ?? 0;
-                byModel[model].cacheReadTokens += stats.cacheReadTokens ?? 0;
-                byModel[model].cacheCreationTokens += stats.cacheCreationTokens ?? 0;
-                byModel[model].count++;
-              }
-            } else {
-              // Fallback for older messages without modelUsage
-              const model = msg.usage.model || 'unknown';
-              if (!byModel[model]) {
-                byModel[model] = {
-                  inputTokens: 0,
-                  outputTokens: 0,
-                  cacheReadTokens: 0,
-                  cacheCreationTokens: 0,
-                  count: 0,
-                };
-              }
-              byModel[model].inputTokens += msg.usage.inputTokens ?? 0;
-              byModel[model].outputTokens += msg.usage.outputTokens ?? 0;
-              byModel[model].cacheReadTokens += msg.usage.cacheReadTokens ?? 0;
-              byModel[model].cacheCreationTokens += msg.usage.cacheCreationTokens ?? 0;
-              byModel[model].count++;
-            }
+            addMessageUsageToByModel(byModel, msg, session.providerId);
 
             // Message details always use aggregate values
             messageDetails.push({
@@ -3702,6 +3699,7 @@ async function main() {
           mcpEnabledServers?: string[] | null;
           enabledPluginIds?: string[] | null;
           providerId?: string | null;
+          providerRoute?: ProviderRoute | null;
           providerEnvJson?: string | null;
         }
 
@@ -3726,6 +3724,7 @@ async function main() {
           'mcpEnabledServers',
           'enabledPluginIds',
           'providerId',
+          'providerRoute',
           'providerEnvJson',
         ]);
         const touchedRecencyField = (Object.keys(payload) as Array<keyof PatchPayload>)
@@ -7620,7 +7619,11 @@ async function main() {
           if (typeof snapshot.providerId === 'string') {
             patch.providerId = snapshot.providerId;
           }
-          if (typeof snapshot.providerEnvJson === 'string') {
+          const route = snapshot.providerRoute;
+          if (isConcreteProviderRoute(route as ProviderRoute | null | undefined)) {
+            patch.providerRoute = route as ProviderRoute;
+          }
+          if (!patch.providerRoute && typeof snapshot.providerEnvJson === 'string') {
             patch.providerEnvJson = snapshot.providerEnvJson;
           }
 
@@ -8165,6 +8168,7 @@ async function main() {
             let resolvedPermissionMode: PermissionMode = (payload.permissionMode as PermissionMode) ?? 'plan';
             let resolvedModel: string | undefined = payload.model ?? undefined;
             let resolvedReasoningEffort: string | undefined;
+            let resolvedProviderRoute: ProviderRoute | undefined;
             // (#237) Re-resolve providerEnv from canonical `providerId` on disk
             // instead of trusting the blob Rust forwarded. Rust caches
             // `provider_env_json` as an Arc at bot start and replays it on every
@@ -8192,6 +8196,9 @@ async function main() {
               // Agent/channel config".
               resolvedPermissionMode = snapshotResolvedConfig.permissionMode as PermissionMode;
               resolvedModel = snapshotResolvedConfig.model;
+              resolvedProviderRoute = isConcreteProviderRoute(snapshotResolvedConfig.providerRoute)
+                ? snapshotResolvedConfig.providerRoute
+                : undefined;
               resolvedProviderEnv = snapshotResolvedConfig.providerEnv as ProviderEnv | undefined;
               resolvedReasoningEffort = snapshotResolvedConfig.reasoningEffort;
             }
@@ -8206,7 +8213,8 @@ async function main() {
               scenario: imScenario,
               permissionMode: resolvedPermissionMode,
               model: resolvedModel,
-              providerEnv: resolvedProviderEnv,
+              providerRoute: resolvedProviderRoute,
+              providerEnv: resolvedProviderRoute ? undefined : resolvedProviderEnv,
               reasoningEffort: resolvedReasoningEffort,
               metadataBirthPending: payload.metadataBirthPending === true,
               metadata,

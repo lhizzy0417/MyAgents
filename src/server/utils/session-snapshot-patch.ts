@@ -1,5 +1,6 @@
 import type { SessionMetadata } from '../types/session';
 import { getDefaultRuntimePermissionMode, type RuntimeType } from '../../shared/types/runtime';
+import { isConcreteProviderRoute } from '../../shared/providerRoute';
 
 type SessionSnapshotPatchKey =
   | 'model'
@@ -8,6 +9,7 @@ type SessionSnapshotPatchKey =
   | 'mcpEnabledServers'
   | 'enabledPluginIds'
   | 'providerId'
+  | 'providerRoute'
   | 'providerEnvJson';
 
 export type SessionSnapshotPatchPayload = {
@@ -21,6 +23,7 @@ const SNAPSHOT_KEYS = [
   'mcpEnabledServers',
   'enabledPluginIds',
   'providerId',
+  'providerRoute',
   'providerEnvJson',
 ] as const satisfies ReadonlyArray<keyof SessionSnapshotPatchPayload>;
 
@@ -88,12 +91,27 @@ export function buildSessionSnapshotPatchUpdates(args: {
     wroteSnapshotField = true;
   }
 
+  if (hasOwnSnapshotPayloadKey(args.payload, 'providerRoute')) {
+    const route = args.payload.providerRoute;
+    if (isConcreteProviderRoute(route)) {
+      explicit.providerId = route.providerId;
+      explicit.model = route.model;
+      explicit.providerEnvJson = undefined;
+    } else if (route === null) {
+      explicit.providerId = undefined;
+      explicit.providerEnvJson = undefined;
+    }
+  }
+
   if (
     hasOwnSnapshotPayloadKey(args.payload, 'providerId') &&
     !hasOwnSnapshotPayloadKey(args.payload, 'providerEnvJson') &&
     normalizeProviderId(args.payload.providerId) !== providerIdBeforePatch(args)
   ) {
     explicit.providerEnvJson = undefined;
+    if (!hasOwnSnapshotPayloadKey(args.payload, 'providerRoute')) {
+      explicit.providerRoute = undefined;
+    }
     wroteSnapshotField = true;
   }
 

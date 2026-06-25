@@ -27,6 +27,9 @@ import type { TerminalReason } from '../../shared/terminalReason';
 import type { SessionMetadata } from '@/api/sessionClient';
 import type { ContextUsage } from '../../shared/types/context-usage';
 import type { SlashCommand } from '../../shared/slashCommands';
+import type { ProviderRoute } from '../../shared/providerRoute';
+
+type ChatProviderEnv = { providerId?: string; providerName?: string; baseUrl?: string; apiKey?: string; authType?: 'auth_token' | 'api_key' | 'both' | 'auth_token_clear_api_key'; apiProtocol?: 'anthropic' | 'openai'; maxOutputTokens?: number; maxOutputTokensParamName?: 'max_tokens' | 'max_completion_tokens' | 'max_output_tokens'; upstreamFormat?: 'chat_completions' | 'responses'; modelAliases?: { sonnet?: string; opus?: string; haiku?: string } };
 
 export interface AdoptMigratedSessionOptions {
     /**
@@ -182,7 +185,7 @@ export interface TabContextValue extends TabState {
     isConnected: boolean;
 
     // Chat actions
-    sendMessage: (text: string, images?: ImageAttachment[], permissionMode?: PermissionMode, model?: string, providerEnv?: { providerId?: string; providerName?: string; baseUrl?: string; apiKey?: string; authType?: 'auth_token' | 'api_key' | 'both' | 'auth_token_clear_api_key'; apiProtocol?: 'anthropic' | 'openai'; maxOutputTokens?: number; maxOutputTokensParamName?: 'max_tokens' | 'max_completion_tokens' | 'max_output_tokens'; upstreamFormat?: 'chat_completions' | 'responses'; modelAliases?: { sonnet?: string; opus?: string; haiku?: string } }, isCron?: boolean, reasoningEffort?: string) => Promise<boolean>;
+    sendMessage: (text: string, images?: ImageAttachment[], permissionMode?: PermissionMode, model?: string, providerEnv?: ChatProviderEnv, isCron?: boolean, reasoningEffort?: string, providerRoute?: ProviderRoute) => Promise<boolean>;
     stopResponse: () => Promise<boolean>;
     loadSession: (sessionId: string, options?: { skipLoadingReset?: boolean }) => Promise<boolean>;
     /** Prepend the next page of older messages. Safe to call repeatedly — guarded internally. */

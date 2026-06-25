@@ -303,10 +303,13 @@ export interface TaskUpdateInput {
    *  `runtime: undefined` deserializes to `None` server-side which the
    *  apply path leaves untouched. Symmetric with `clearProviderOverride`. */
   clearRuntimeOverride?: boolean;
-  /** Per-task MCP enable list override. Empty array clears (= follow
-   *  Agent); a populated array snapshots the chosen server ids. Rust
-   *  `update_task` normalises an empty vec → None on persistence. */
+  /** Per-task MCP enable list override. `undefined` leaves the existing value
+   *  unchanged, `[]` explicitly runs with no MCP, and a populated array
+   *  snapshots the chosen server ids. Use `clearMcpOverride` to follow Agent. */
   mcpEnabledServers?: string[];
+  /** Reset MCP override to follow Agent/workspace. Distinct from
+   *  `mcpEnabledServers: []`, which explicitly runs with no MCP. */
+  clearMcpOverride?: boolean;
   tags?: string[];
   notification?: NotificationConfig;
   /**

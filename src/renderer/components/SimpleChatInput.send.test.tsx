@@ -72,6 +72,42 @@ describe('SimpleChatInput send paths', () => {
     expect(onSend).toHaveBeenCalledWith('chat hello', undefined);
   });
 
+  it('honors parent provider availability for subscription sessions with local account evidence', async () => {
+    const user = userEvent.setup();
+    const subscriptionProvider = {
+      id: 'anthropic-sub',
+      name: 'Anthropic',
+      vendor: 'Anthropic',
+      cloudProvider: '模型官方',
+      type: 'subscription',
+      primaryModel: 'claude-sonnet-4-6',
+      isBuiltin: true,
+      config: {},
+      models: [{ model: 'claude-sonnet-4-6', modelName: 'Claude Sonnet 4.6' }],
+    } as Provider;
+    const onSend = renderInput({
+      runtime: 'builtin',
+      provider: subscriptionProvider,
+      providers: [subscriptionProvider],
+      providerAvailable: true,
+      availableProviderIds: ['anthropic-sub'],
+      selectedModel: 'claude-sonnet-4-6',
+      providerVerifyStatus: {
+        'anthropic-sub': {
+          status: 'invalid',
+          accountEmail: 'user@example.com',
+          verifiedAt: '2026-01-01T00:00:00.000Z',
+        },
+      },
+    });
+
+    const textarea = screen.getByPlaceholderText('输入消息，使用 @ 引用文件，/ 使用技能...');
+    await user.type(textarea, 'subscription hello');
+    await user.click(screen.getByTitle(/发送/));
+
+    expect(onSend).toHaveBeenCalledWith('subscription hello', undefined);
+  });
+
   it('emits provider-scoped builtin model selections from the model menu', async () => {
     const user = userEvent.setup();
     const onBuiltinModelSelect = vi.fn();

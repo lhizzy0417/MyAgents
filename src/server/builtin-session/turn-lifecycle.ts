@@ -353,11 +353,13 @@ export function createBuiltinTurnLifecycle(deps: BuiltinTurnLifecycleDeps): Buil
     const turnStartTime = getCurrentTurnStartTime();
     const durationMs = turnStartTime ? Date.now() - turnStartTime : 0;
     const currentTurnUsage = getCurrentTurnUsage();
+    const providerAnalytics = getCurrentTurnProviderAnalytics() ?? deps.buildTurnProviderAnalytics(deps.getProviderEnv());
     const currentTurnToolCount = getCurrentTurnToolCount();
     stampTurnUsageOnPendingAssistant({
       usage: currentTurnUsage,
       toolCount: currentTurnToolCount,
       durationMs: durationMs || undefined,
+      providerId: providerAnalytics.provider_id ?? undefined,
     });
 
     const hasResultText = resultText.trim().length > 0;
@@ -498,7 +500,7 @@ export function createBuiltinTurnLifecycle(deps: BuiltinTurnLifecycleDeps): Buil
         platform: scenario.type === 'im' ? scenario.platform : null,
         runtime: 'builtin',
         model: finalTurnUsage.model ?? null,
-        ...(getCurrentTurnProviderAnalytics() ?? deps.buildTurnProviderAnalytics(deps.getProviderEnv())),
+        ...providerAnalytics,
         input_tokens: finalTurnUsage.inputTokens,
         output_tokens: finalTurnUsage.outputTokens,
         cache_read_tokens: finalTurnUsage.cacheReadTokens,

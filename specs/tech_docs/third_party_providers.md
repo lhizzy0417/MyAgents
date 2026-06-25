@@ -92,25 +92,34 @@ interface Provider {
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │ Chat.tsx                                                     │
-│  - 从 apiKeys[provider.id] 获取 API Key                     │
-│  - 从 provider.config.baseUrl 获取端点                       │
-│  - 构建 providerEnv: { baseUrl, apiKey }                    │
+│  - 用户选择 provider/model                                  │
+│  - 新写入路径持久化 ProviderRoute: {providerId, model}      │
+│  - 不持久化 apiKey/baseUrl/modelAliases                     │
 └──────────────────────────┬──────────────────────────────────┘
                            │ POST /chat/send
                            ▼
 ┌─────────────────────────────────────────────────────────────┐
-│ server/index.ts                                              │
-│  - 解析 providerEnv 并传递给 enqueueUserMessage             │
+│ session-engine/builtin-adapter.ts                            │
+│  - 校验 ProviderRoute 与本次 model 一致                     │
+│  - 调 admin-config materialize ProviderEnv                  │
+│  - subscription route → 'subscription' sentinel              │
 └──────────────────────────┬──────────────────────────────────┘
                            │
                            ▼
 ┌─────────────────────────────────────────────────────────────┐
 │ agent-session.ts                                             │
-│  - 存储到 currentProviderEnv 模块变量                        │
+│  - 存储运行时 currentProviderEnv（非持久身份）              │
 │  - buildClaudeSessionEnv() 设置环境变量                      │
 │  - SDK query() 使用这些环境变量                             │
 └─────────────────────────────────────────────────────────────┘
 ```
+
+### ProviderRoute vs ProviderEnv
+
+- `ProviderRoute` 是会话持久身份，只保存 provider/model：`{kind:'provider', providerId, model}` 或 `{kind:'subscription', providerId:'anthropic-sub', model}`。
+- `ProviderEnv` 是请求运行时派生物，包含 `baseUrl`、`apiKey`、`authType`、`modelAliases`；只能从当前配置即时 materialize，不能作为新会话身份写回 `sessions.json`。
+- `providerEnvJson` 只读兼容旧数据：没有 `providerRoute` 的历史 session 才允许 fallback 读取。新写入路径必须写 `providerRoute`，并省略/清空 `providerEnvJson`。
+- `model + configSnapshotAt` 旧 session 缺 provider 时，只在“声明该 model 且本地有凭据/账号证据”的 provider 中修复。API provider 看非空 API key；Anthropic subscription 看 valid 状态、`accountEmail` 或 `verifiedAt` 任一存在。多个候选或没有候选时，不猜默认 provider，要求用户在模型选择器重新选择。
 
 ---
 

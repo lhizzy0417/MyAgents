@@ -84,16 +84,16 @@ export function SpaceSidebar({
     <aside className="grid w-80 shrink-0 grid-rows-[minmax(0,1fr)_auto] gap-3.5 border-r border-[var(--line)] bg-[var(--paper)]/70 p-3.5">
       <div className="min-h-0 overflow-y-auto">
         <details className="group/space mb-2.5 border-b border-[var(--line-subtle)] pb-2.5" open>
-          <summary className="grid min-h-11 cursor-pointer list-none grid-cols-[36px_minmax(0,1fr)_auto] items-center gap-2.5 rounded-xl px-2 py-1.5 text-left transition-colors hover:bg-[var(--paper-elevated)]/70 [&::-webkit-details-marker]:hidden">
-            <img src={myagentsWebLogo} alt="" className="h-9 w-9 rounded-xl shadow-sm" />
+          <summary className="grid min-h-10 cursor-pointer list-none grid-cols-[32px_minmax(0,1fr)_auto] items-center gap-2 rounded-xl px-2 py-1.5 text-left transition-colors hover:bg-[var(--paper-elevated)]/70 [&::-webkit-details-marker]:hidden">
+            <img src={myagentsWebLogo} alt="" className="h-8 w-8 rounded-lg shadow-sm" />
             <span className="min-w-0">
               <span className="flex min-w-0 items-center gap-2">
-                <strong className="truncate text-base font-semibold text-[var(--ink)]">{session.space.name}</strong>
-                <span className="rounded-md bg-[var(--paper-inset)] px-2 py-1 text-xs font-semibold lowercase text-[var(--ink-muted)]">
+                <strong className="truncate text-sm font-semibold text-[var(--ink)]">{session.space.name}</strong>
+                <span className="rounded-md bg-[var(--paper-inset)] px-1.5 py-0.5 text-xs font-semibold lowercase text-[var(--ink-muted)]">
                   {roleLabel(session.membership.role)}
                 </span>
               </span>
-              <span className="mt-0.5 flex items-center gap-2 text-xs font-medium text-[var(--ink-muted)]">
+              <span className="mt-0.5 flex items-center gap-1.5 text-xs font-medium text-[var(--ink-muted)]">
                 <span className="h-1.5 w-1.5 rounded-full bg-[var(--success)] ring-4 ring-[var(--success-bg)]" />
                 <span>Official Space</span>
                 <span>开放加入</span>
@@ -101,7 +101,7 @@ export function SpaceSidebar({
             </span>
             <ChevronDown className="h-4 w-4 -rotate-90 text-[var(--ink-muted)] transition-transform group-open/space:rotate-0" />
           </summary>
-          <nav className="grid gap-1 pt-1 pl-6" aria-label={session.space.name}>
+          <nav className="grid gap-1 pt-1 pl-5" aria-label={session.space.name}>
             {communityItems.map((item) => {
               const Icon = item.icon;
               const selected = mode === item.mode;
@@ -110,16 +110,16 @@ export function SpaceSidebar({
                   key={item.mode}
                   type="button"
                   onClick={() => onSpaceTabChange(item.mode)}
-                  className={`grid min-h-9 w-full grid-cols-[18px_minmax(0,1fr)_auto] items-center gap-2.5 rounded-lg px-2.5 text-left text-sm font-semibold transition-colors ${
+                  className={`grid min-h-8 w-full grid-cols-[16px_minmax(0,1fr)_auto] items-center gap-2 rounded-lg px-2.5 text-left text-xs font-semibold transition-colors ${
                     selected
                       ? 'bg-[var(--accent-warm-subtle)] text-[var(--accent-warm)]'
                       : 'text-[var(--ink-muted)] hover:bg-[var(--hover-bg)] hover:text-[var(--ink)]'
                   }`}
                 >
-                  <Icon className="h-4 w-4 shrink-0" />
+                  <Icon className="h-3.5 w-3.5 shrink-0" />
                   <span className="truncate">{item.label}</span>
                   {typeof item.count === 'number' && (
-                    <span className="rounded-md bg-[var(--paper-inset)] px-2 py-1 text-xs font-semibold text-[var(--ink-muted)]">{item.count}</span>
+                    <span className="rounded-md bg-[var(--paper-inset)] px-1.5 py-0.5 text-xs font-semibold text-[var(--ink-muted)]">{item.count}</span>
                   )}
                 </button>
               );
@@ -133,9 +133,9 @@ export function SpaceSidebar({
           type="button"
           onClick={() => setAccountMenuOpen((value) => !value)}
           aria-expanded={accountMenuOpen}
-          className="flex h-10 w-full items-center gap-2 rounded-xl border border-[var(--line-subtle)] bg-[var(--paper-elevated)]/60 px-3 text-left text-sm font-semibold text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-elevated)] hover:text-[var(--ink)]"
+          className="flex h-9 w-full items-center gap-2 rounded-xl border border-[var(--line-subtle)] bg-[var(--paper-elevated)]/60 px-3 text-left text-xs font-semibold text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-elevated)] hover:text-[var(--ink)]"
         >
-          <User className="h-4 w-4 shrink-0" />
+          <User className="h-3.5 w-3.5 shrink-0" />
           <span className="min-w-0 flex-1 truncate">{session.user.email}</span>
           <ChevronDown className="h-3.5 w-3.5 shrink-0" />
         </button>
@@ -154,9 +154,9 @@ export function SpaceSidebar({
               setAccountMenuOpen(false);
               onLogout();
             }}
-            className="flex h-9 w-full items-center gap-2 rounded-lg px-2 text-left text-sm font-semibold text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
+            className="flex h-8 w-full items-center gap-2 rounded-lg px-2 text-left text-xs font-semibold text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
           >
-            <LogOut className="h-4 w-4" />
+            <LogOut className="h-3.5 w-3.5" />
             退出登录
           </button>
         </div>

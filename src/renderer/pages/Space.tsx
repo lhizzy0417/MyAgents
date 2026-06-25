@@ -17,7 +17,6 @@ import { useToast } from '@/components/Toast';
 import { useConfig } from '@/hooks/useConfig';
 import {
   buildIssueQueryKey,
-  isClosedIssue,
   isSpaceAdmin,
   type IssueQueryParams,
 } from '@/pages/space/spaceHelpers';
@@ -58,7 +57,7 @@ export default function Space({ isActive }: { isActive: boolean }) {
   const [mode, setMode] = useState<ViewMode>('issues');
   const [issueQ, setIssueQ] = useState('');
   const [selectedTag, setSelectedTag] = useState('');
-  const [selectedStatus, setSelectedStatus] = useState('');
+  const [selectedStatus, setSelectedStatus] = useState('open');
   const [issueDetailId, setIssueDetailId] = useState<string | null>(null);
   const [createIssueOpen, setCreateIssueOpen] = useState(false);
   const [selectedSkillId, setSelectedSkillId] = useState<string | null>(null);
@@ -90,12 +89,6 @@ export default function Space({ isActive }: { isActive: boolean }) {
     () => [{ value: '', label: '全部标签' }, ...tags.map((tag) => ({ value: tag.id, label: tag.name }))],
     [tags],
   );
-
-  const issueMetrics = useMemo(() => {
-    const open = issues.filter((issue) => !isClosedIssue(issue.status)).length;
-    const inProgress = issues.filter((issue) => issue.status === 'in_progress').length;
-    return { open, inProgress, total: issues.length };
-  }, [issues]);
 
   useEffect(() => {
     issueQueryRef.current = issueQuery;
@@ -359,7 +352,7 @@ export default function Space({ isActive }: { isActive: boolean }) {
 
   return (
     <div className="relative h-full overflow-hidden bg-[var(--paper)]" style={SPACE_BACKGROUND_STYLE}>
-      <div aria-hidden className="pointer-events-none absolute inset-0 opacity-30" style={PAPER_GRID_STYLE} />
+      <div aria-hidden className="pointer-events-none absolute inset-0 opacity-20" style={PAPER_GRID_STYLE} />
       <div className="relative z-10 flex h-full min-h-0">
         <SpaceSidebar
           session={session}
@@ -376,13 +369,10 @@ export default function Space({ isActive }: { isActive: boolean }) {
               admin={admin}
               issues={issues}
               issuesLoading={issuesLoading}
-              issueMetrics={issueMetrics}
-              events={spaceData.events.items}
               issueQ={issueQ}
               selectedTag={selectedTag}
               selectedStatus={selectedStatus}
               tagOptions={tagOptions}
-              tags={tags}
               activeIssueId={issueDetailId}
               onQueryChange={setIssueQ}
               onTagChange={setSelectedTag}

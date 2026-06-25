@@ -24,6 +24,30 @@ function writeProjects(projects: Array<Record<string, unknown>>): void {
   );
 }
 
+function writeCustomProvider(provider: Record<string, unknown>): void {
+  const dir = join(scratch, '.myagents', 'providers');
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(
+    join(dir, `${String(provider.id)}.json`),
+    JSON.stringify(provider, null, 2),
+    'utf-8',
+  );
+}
+
+function customApiProvider(id: string, model: string, baseUrl: string): Record<string, unknown> {
+  return {
+    id,
+    name: id,
+    vendor: id,
+    cloudProvider: id,
+    type: 'api',
+    primaryModel: model,
+    isBuiltin: false,
+    config: { baseUrl },
+    models: [{ model, modelName: model, modelSeries: model }],
+  };
+}
+
 beforeEach(() => {
   scratch = mkdtempSync(join(tmpdir(), 'myagents-workspace-perm-'));
   mkdirSync(join(scratch, '.myagents'), { recursive: true });
@@ -299,6 +323,67 @@ describe('resolveWorkspaceConfig runtime-aware model snapshots', () => {
     expect(resolved.providerEnv?.apiKey).toBe('sk-test-deepseek');
     expect(resolved.providerEnv?.baseUrl).toBe('https://api.deepseek.com/anthropic');
     expect(resolved.model).not.toBe('MiniMax-M2.7');
+  });
+
+  it('auto-repairs model-only owned snapshots using only credential-configured API providers', async () => {
+    const workspacePath = join(scratch, 'workspace');
+    writeCustomProvider(customApiProvider('route-a', 'shared-model', 'https://a.example.com'));
+    writeCustomProvider(customApiProvider('route-b', 'shared-model', 'https://b.example.com'));
+    writeConfig({
+      providerApiKeys: {
+        'route-a': 'sk-route-a',
+      },
+      agents: [],
+    });
+    writeProjects([]);
+
+    const { resolveWorkspaceConfig } = await import('../utils/admin-config');
+    const resolved = resolveWorkspaceConfig(workspacePath, {
+      id: 'session-model-only',
+      agentDir: workspacePath,
+      title: 'Model Only',
+      createdAt: '2026-06-23T00:00:00.000Z',
+      lastActiveAt: '2026-06-23T00:00:00.000Z',
+      runtime: 'builtin',
+      model: 'shared-model',
+      configSnapshotAt: '2026-06-23T00:00:00.000Z',
+    } as SessionMetadata, { includeMcp: false });
+
+    expect(resolved.providerRoute).toEqual({ kind: 'provider', providerId: 'route-a', model: 'shared-model' });
+    expect(resolved.providerEnv?.providerId).toBe('route-a');
+    expect(resolved.providerEnv?.apiKey).toBe('sk-route-a');
+    expect(resolved.providerEnv?.baseUrl).toBe('https://a.example.com');
+  });
+
+  it('treats Anthropic subscription account evidence as credential-configured for model-only repair', async () => {
+    const workspacePath = join(scratch, 'workspace');
+    writeConfig({
+      providerVerifyStatus: {
+        'anthropic-sub': {
+          status: 'invalid',
+          verifiedAt: '2026-01-01T00:00:00.000Z',
+          accountEmail: 'user@example.com',
+        },
+      },
+      agents: [],
+    });
+    writeProjects([]);
+
+    const { resolveWorkspaceConfig } = await import('../utils/admin-config');
+    const resolved = resolveWorkspaceConfig(workspacePath, {
+      id: 'session-subscription-model-only',
+      agentDir: workspacePath,
+      title: 'Subscription',
+      createdAt: '2026-06-23T00:00:00.000Z',
+      lastActiveAt: '2026-06-23T00:00:00.000Z',
+      runtime: 'builtin',
+      model: 'claude-sonnet-4-6',
+      configSnapshotAt: '2026-06-23T00:00:00.000Z',
+    } as SessionMetadata, { includeMcp: false });
+
+    expect(resolved.providerRoute).toEqual({ kind: 'subscription', providerId: 'anthropic-sub', model: 'claude-sonnet-4-6' });
+    expect(resolved.providerEnv).toBeUndefined();
+    expect(resolved.model).toBe('claude-sonnet-4-6');
   });
 
   it("preserves external-runtime snapshot reasoningEffort='default' over agent non-default", async () => {
