@@ -120,6 +120,7 @@ export type BuiltinRestartReason =
 export type QueueDeliveryMode = 'realtime' | 'turn';
 
 export type TurnProviderAnalytics = {
+  provider_id?: string | null;
   provider_name: string | null;
   api_protocol: 'anthropic' | 'openai' | null;
   provider_base_url: string | null;

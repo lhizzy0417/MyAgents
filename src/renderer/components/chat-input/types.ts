@@ -44,6 +44,9 @@ export interface SimpleChatInputProps {
   agentDir?: string;
   provider?: Provider | null;
   providers?: Provider[];
+  providerAvailable?: boolean;
+  availableProviderIds?: string[];
+  providerUnavailableMessage?: string;
   onProviderChange?: (providerId: string, targetModel?: string) => void;
   selectedModel?: string;
   onBuiltinModelSelect?: (selection: { providerId: string; model: string }) => void;

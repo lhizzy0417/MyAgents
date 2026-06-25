@@ -9,6 +9,7 @@ import type { SessionMessage } from '../types/session';
 import type { ExternalRuntimeConfigPatch, ImagePayload } from '../runtimes/types';
 import type { ExternalConfigSource } from '../runtimes/external-session';
 import type { InboxTurnMeta } from '../inbox/types';
+import type { ProviderRoute } from '../../shared/providerRoute';
 
 export type SessionEngineKind = 'builtin' | 'external';
 
@@ -22,6 +23,7 @@ export type DesktopMessageRequest = {
   permissionMode?: PermissionMode;
   backgroundAgentPermissionMode?: BackgroundAgentPermissionMode;
   model?: string;
+  providerRoute?: ProviderRoute;
   providerEnv?: ProviderEnv | 'subscription';
   reasoningEffort?: string;
   sessionId: string;
@@ -49,6 +51,7 @@ export type ImMessageRequest = {
   scenario: InteractionScenario;
   permissionMode?: string;
   model?: string;
+  providerRoute?: ProviderRoute;
   providerEnv?: ProviderEnv | 'subscription';
   reasoningEffort?: string;
   runtimeConfig?: RuntimeConfig | null;
@@ -83,6 +86,7 @@ export type BackgroundMessageRequest = {
   scenario: InteractionScenario;
   permissionMode?: string;
   model?: string;
+  providerRoute?: ProviderRoute;
   providerEnv?: ProviderEnv | 'subscription';
   reasoningEffort?: string;
   metadata?: { source: SessionSource; sourceId?: string; senderName?: string };
@@ -97,6 +101,7 @@ export type InjectedTurnRequest = {
   model?: string;
   reasoningEffort?: string;
   providerEnv?: ProviderEnv | 'subscription';
+  providerRoute?: ProviderRoute;
   runtimeConfig?: RuntimeConfig | null;
   metadata?: { source: SessionSource; sourceId?: string; senderName?: string };
   timeoutMs: number;
@@ -168,6 +173,7 @@ export type SessionEngineConfigSnapshot = {
   agentNames: string[] | null;
   permissionMode: string | null;
   providerId: string | null;
+  providerRoute?: ProviderRoute | null;
   reasoningEffort: string | null;
 };
 
@@ -185,6 +191,7 @@ export type SessionEngineSnapshotMaterializePatch = {
   mcpEnabledServers?: string[] | null;
   enabledPluginIds?: string[] | null;
   providerId?: string | null;
+  providerRoute?: ProviderRoute | null;
   providerEnvJson?: string | null;
 };
 

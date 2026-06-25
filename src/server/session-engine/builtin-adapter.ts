@@ -44,9 +44,11 @@ import {
   switchToSession,
   waitForSessionIdle,
 } from '../agent-session';
-import type { MessageWire, PermissionMode } from '../agent-session';
+import type { MessageWire, PermissionMode, ProviderEnv } from '../agent-session';
 import type { AgentDefinition } from '@anthropic-ai/claude-agent-sdk';
 import type { CancelReason } from '../utils/cancellation';
+import { createConcreteProviderRoute, isConcreteProviderRoute, type ProviderRoute } from '../../shared/providerRoute';
+import { materializeProviderRouteEnv } from '../utils/admin-config';
 import type {
   DesktopAdmissionResult,
   DesktopMessageRequest,
@@ -62,6 +64,42 @@ import { getSessionData } from '../SessionStore';
 import { getLatestAssistantResultFromMessages, NO_TEXT_RESPONSE } from '../inbox/latest-result';
 import { shrinkReplayContentForClient } from '../utils/session-message-preview';
 import type { SessionMessage } from '../types/session';
+
+function providerEnvForRouteRequest(request: {
+  providerRoute?: ProviderRoute;
+  providerEnv?: ProviderEnv | 'subscription';
+  model?: string;
+}): { providerEnv: ProviderEnv | 'subscription' | undefined; model?: string; error?: string; status?: number } {
+  if (!request.providerRoute) {
+    return { providerEnv: request.providerEnv, model: request.model };
+  }
+  if (!isConcreteProviderRoute(request.providerRoute)) {
+    return {
+      providerEnv: undefined,
+      error: 'Provider/model selection is incomplete. Select a provider-model pair before sending.',
+      status: 409,
+    };
+  }
+  if (request.model && request.model !== request.providerRoute.model) {
+    return {
+      providerEnv: undefined,
+      error: `ProviderRoute/model mismatch: route model "${request.providerRoute.model}" does not match request model "${request.model}".`,
+      status: 409,
+    };
+  }
+  if (request.providerRoute.kind === 'subscription') {
+    return { providerEnv: 'subscription', model: request.providerRoute.model };
+  }
+  const providerEnv = materializeProviderRouteEnv(request.providerRoute);
+  if (!providerEnv) {
+    return {
+      providerEnv: undefined,
+      error: `Provider "${request.providerRoute.providerId}" is unavailable or missing an API key.`,
+      status: 409,
+    };
+  }
+  return { providerEnv, model: request.providerRoute.model };
+}
 
 function getLatestBuiltinResult(): string {
   let latestResult = getLastBuiltinAssistantText();
@@ -161,6 +199,7 @@ export function createBuiltinSessionEngine(): SessionEngine {
 
     getSessionConfigSnapshot() {
       const model = getSessionModel();
+      const providerId = getSessionProviderId();
       const mcpServers = getMcpServers();
       const agents = getAgents();
       return {
@@ -170,7 +209,8 @@ export function createBuiltinSessionEngine(): SessionEngine {
         mcpServerIds: mcpServers?.map(s => s.id) ?? null,
         agentNames: agents ? Object.keys(agents) : null,
         permissionMode: getSessionPermissionMode(),
-        providerId: getSessionProviderId(),
+        providerId,
+        providerRoute: model && providerId ? createConcreteProviderRoute(providerId, model) : null,
         reasoningEffort: getSessionReasoningEffort() ?? 'default',
       };
     },
@@ -200,12 +240,16 @@ export function createBuiltinSessionEngine(): SessionEngine {
       if (request.backgroundAgentPermissionMode) {
         setBackgroundAgentPermissionMode(request.backgroundAgentPermissionMode);
       }
+      const routed = providerEnvForRouteRequest(request);
+      if (routed.error) {
+        return { success: false, error: routed.error, status: routed.status };
+      }
       const result = await enqueueUserMessage(
         request.text,
         request.images,
         request.permissionMode,
-        request.model,
-        request.providerEnv,
+        routed.model,
+        routed.providerEnv,
         request.reasoningEffort,
         { source: 'desktop' },
         undefined,
@@ -227,12 +271,16 @@ export function createBuiltinSessionEngine(): SessionEngine {
 
     async enqueueImMessage(request: ImMessageRequest): Promise<ImAdmissionResult> {
       setInteractionScenario(request.scenario);
+      const routed = providerEnvForRouteRequest(request);
+      if (routed.error) {
+        return { success: false, error: routed.error, status: routed.status };
+      }
       const result = await enqueueUserMessage(
         request.message,
         request.images,
         request.permissionMode as PermissionMode | undefined,
-        request.model,
-        request.providerEnv,
+        routed.model,
+        routed.providerEnv,
         request.reasoningEffort,
         request.metadata,
         request.requestId,
@@ -252,12 +300,16 @@ export function createBuiltinSessionEngine(): SessionEngine {
 
     async enqueueBackgroundMessage(request) {
       setInteractionScenario(request.scenario);
+      const routed = providerEnvForRouteRequest(request);
+      if (routed.error) {
+        return { success: false, error: routed.error, status: routed.status };
+      }
       const result = await enqueueUserMessage(
         request.text,
         request.images,
         request.permissionMode as PermissionMode | undefined,
-        request.model,
-        request.providerEnv,
+        routed.model,
+        routed.providerEnv,
         request.reasoningEffort,
         request.metadata,
       );
@@ -285,12 +337,16 @@ export function createBuiltinSessionEngine(): SessionEngine {
       setInteractionScenario(request.scenario);
       getAndClearLastAgentError();
       const injectedTurnId = randomUUID();
+      const routed = providerEnvForRouteRequest(request);
+      if (routed.error) {
+        return { success: false, enqueued: false, error: routed.error, status: routed.status };
+      }
       const enqueueResult = await enqueueUserMessage(
         request.prompt,
         [],
         request.permissionMode as PermissionMode | undefined,
-        request.model,
-        request.providerEnv,
+        routed.model,
+        routed.providerEnv,
         request.reasoningEffort,
         request.metadata,
         undefined,

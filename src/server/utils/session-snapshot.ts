@@ -7,6 +7,7 @@ import {
 } from '../../shared/types/runtime';
 import { coerceReasoningEffortSettingForRuntime } from '../../shared/reasoningEffort';
 import type { SessionMetadata } from '../types/session';
+import { createConcreteProviderRoute, type ProviderRoute } from '../../shared/providerRoute';
 
 /**
  * Session config snapshot helpers (v0.1.69).
@@ -51,6 +52,7 @@ export type OwnedSessionSnapshot = Pick<
   | 'mcpEnabledServers'
   | 'enabledPluginIds'
   | 'providerId'
+  | 'providerRoute'
   | 'providerEnvJson'
 >;
 // #324 — `reasoningEffort` is a DOCUMENTED divergence from the Rust mirror
@@ -143,11 +145,16 @@ export function snapshotForOwnedSession(
   const snapshotAgent = agentForSnapshotRuntime(agent, options);
   const runtime = snapshotAgent.runtime ?? 'builtin';
   const isExternal = runtime !== 'builtin';
+  const model = isExternal
+    ? coerceModelForRuntime(snapshotAgent.runtimeConfig?.model, runtime)
+    : snapshotAgent.model;
+  const providerId = isExternal ? undefined : snapshotAgent.providerId;
+  const providerRoute: ProviderRoute | undefined = providerId && model
+    ? createConcreteProviderRoute(providerId, model)
+    : undefined;
   return {
     runtime,
-    model: isExternal
-      ? coerceModelForRuntime(snapshotAgent.runtimeConfig?.model, runtime)
-      : snapshotAgent.model,
+    model,
     // #324 — same runtime-aware dispatch as model (issue #224 rationale).
     reasoningEffort: isExternal
       ? coerceReasoningEffortSettingForRuntime(snapshotAgent.runtimeConfig?.reasoningEffort, runtime)
@@ -157,8 +164,9 @@ export function snapshotForOwnedSession(
       : snapshotAgent.permissionMode,
     mcpEnabledServers: snapshotAgent.mcpEnabledServers ? [...snapshotAgent.mcpEnabledServers] : undefined,
     enabledPluginIds: snapshotAgent.enabledPluginIds ? [...snapshotAgent.enabledPluginIds] : undefined,
-    providerId: snapshotAgent.providerId,
-    providerEnvJson: snapshotAgent.providerEnvJson,
+    providerId,
+    providerRoute,
+    providerEnvJson: isExternal || providerRoute ? undefined : snapshotAgent.providerEnvJson,
     configSnapshotAt: new Date().toISOString(),
   };
 }

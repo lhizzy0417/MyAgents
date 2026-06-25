@@ -77,46 +77,39 @@ export function SkillsWorkspace({
   };
 
   return (
-    <div className="grid min-h-0 flex-1 grid-rows-[58px_minmax(0,1fr)]">
-      <section className="grid grid-cols-[minmax(0,1fr)_auto_auto] items-center gap-3 border-b border-[var(--line)] bg-[var(--paper-elevated)]/60 px-5 py-2.5 backdrop-blur-md">
-        <div className="flex min-w-0 items-center gap-2.5 font-semibold text-[var(--ink-secondary)]">
+    <div className="grid min-h-0 flex-1 grid-rows-[auto_minmax(0,1fr)]">
+      <section className="flex min-h-12 items-center gap-2.5 border-b border-[var(--line)] bg-[var(--paper-elevated)]/60 px-5 py-1.5 backdrop-blur-md">
+        <div className="mr-auto flex min-w-0 items-center gap-2 text-sm font-semibold text-[var(--ink-secondary)]">
           <Package className="h-4 w-4 shrink-0" />
-          <span>官方 Skill 空间</span>
+          <span>Skills</span>
+          <span className="rounded-md bg-[var(--paper-inset)] px-2 py-0.5 text-xs font-semibold text-[var(--ink-muted)]">{skills.length}</span>
           <small className="truncate text-xs font-medium text-[var(--ink-muted)]">默认列表，点击后进入安装详情</small>
         </div>
-        <div className="flex items-center gap-2">
-          {admin && (
+        {admin && (
           <button
             type="button"
             disabled={uploading}
             onClick={() => void uploadSkill()}
-            className="flex h-10 items-center gap-2 rounded-xl bg-[var(--button-secondary-bg)] px-3 text-sm font-semibold text-[var(--button-secondary-text)] transition-colors hover:bg-[var(--button-secondary-bg-hover)] disabled:cursor-wait disabled:opacity-70"
+            className="flex h-9 shrink-0 items-center gap-2 rounded-xl bg-[var(--button-secondary-bg)] px-3 text-sm font-semibold text-[var(--button-secondary-text)] transition-colors hover:bg-[var(--button-secondary-bg-hover)] disabled:cursor-wait disabled:opacity-70"
           >
             {uploading ? <Loader2 className="h-4 w-4 animate-spin" /> : <UploadCloud className="h-4 w-4" />}
-            上传 Skill
+            上传
           </button>
-          )}
-          <button
-            type="button"
-            onClick={() => void onRefresh()}
-            className="flex h-10 items-center gap-2 rounded-xl bg-[var(--button-secondary-bg)] px-3 text-sm font-semibold text-[var(--button-secondary-text)] transition-colors hover:bg-[var(--button-secondary-bg-hover)]"
-          >
-            <RefreshCw className="h-4 w-4" />
-            刷新
-          </button>
-        </div>
+        )}
+        <button
+          type="button"
+          onClick={() => void onRefresh()}
+          className="grid h-9 w-9 shrink-0 place-items-center rounded-xl bg-transparent text-[var(--ink-muted)] transition-colors hover:bg-[var(--paper-inset)] hover:text-[var(--ink)]"
+          aria-label="刷新"
+          title="刷新"
+        >
+          {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
+        </button>
       </section>
 
       {screen === 'list' || !selected ? (
-        <main className="min-h-0 overflow-y-auto px-6 pb-8 pt-5">
+        <main className="min-h-0 overflow-y-auto px-6 pb-8 pt-3">
           <section className="mx-auto max-w-[1280px]" aria-label="Skill list">
-            <div className="mb-3 grid min-h-9 grid-cols-[minmax(0,1fr)_auto] items-center gap-3 text-xs font-semibold text-[var(--ink-muted)]">
-              <strong className="text-base font-semibold text-[var(--ink-secondary)]">{skills.length} skills</strong>
-              <span className="inline-flex items-center gap-2">
-                {loading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
-                官方上传 · 点击查看详情
-              </span>
-            </div>
             <div className="border-y border-[var(--line-subtle)]">
               {skills.length === 0 && loading ? (
                 <div className="grid gap-0">

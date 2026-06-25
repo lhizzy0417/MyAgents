@@ -5,6 +5,32 @@
  * standing up React.
  */
 import type { PermissionMode } from '@/config/types';
+import {
+  canResumeAcrossProviderBoundary,
+  type ProviderHistoryEnv,
+  type ProviderHistoryPolicy,
+} from '../../shared/providerHistory';
+import type { ProviderVerifyStatus } from '../../shared/config-types';
+import {
+  isConcreteProviderRoute,
+  resolveLegacyModelOnlyProviderRoute,
+} from '../../shared/providerRoute';
+
+type ProviderWithModels = {
+  id: string;
+  type?: 'api' | 'subscription';
+  enabled?: boolean;
+  models?: ReadonlyArray<{ model?: string | null }>;
+};
+
+function nonEmpty(value?: string | null): string | undefined {
+  const trimmed = value?.trim();
+  return trimmed ? trimmed : undefined;
+}
+
+function providerHasModel(provider: ProviderWithModels, model: string): boolean {
+  return provider.models?.some(entry => entry.model === model) ?? false;
+}
 
 /**
  * #244 — permission mode for a builtin-runtime send/display.
@@ -111,6 +137,73 @@ export function resolveCurrentProviderForSession<T>(args: {
   if (!args.sessionSnapshotOwnsConfig) return args.fallbackProvider;
   if (!args.selectedProviderId) return undefined;
   return args.selectedProviderAvailable ? args.selectedProvider : undefined;
+}
+
+/**
+ * v0.2.40 compatibility: some owned builtin snapshots were promoted with
+ * `model + configSnapshotAt` but without `providerId`. Provider-scoped model
+ * selection needs the missing provider identity, so recover it from the model
+ * registry only when the answer is deterministic.
+ */
+export function resolveLegacyBuiltinSnapshotProviderId(args: {
+  snapshotProviderId?: string | null;
+  snapshotModel?: string | null;
+  selectedProviderId?: string | null;
+  providers: ReadonlyArray<ProviderWithModels>;
+  apiKeys?: Record<string, string | null | undefined>;
+  providerVerifyStatus?: Record<string, ProviderVerifyStatus | undefined>;
+}): string | undefined {
+  const explicitProviderId = nonEmpty(args.snapshotProviderId);
+  const model = nonEmpty(args.snapshotModel);
+  if (explicitProviderId) {
+    const provider = args.providers.find(candidate => candidate.id === explicitProviderId);
+    if (!provider) return undefined;
+    if (model && (provider.models?.length ?? 0) > 0 && !providerHasModel(provider, model)) {
+      return undefined;
+    }
+    return explicitProviderId;
+  }
+
+  if (!model) return undefined;
+  const route = resolveLegacyModelOnlyProviderRoute({
+    model,
+    providers: args.providers.map(provider => ({
+      ...provider,
+      type: provider.type ?? 'api',
+      models: provider.models?.map(entry => ({
+        model: entry.model ?? '',
+        modelName: entry.model ?? '',
+        modelSeries: entry.model ?? '',
+      })) ?? [],
+    })),
+    credentials: {
+      apiKeys: args.apiKeys,
+      verifyStatus: args.providerVerifyStatus,
+    },
+  });
+  return isConcreteProviderRoute(route) ? route.providerId : undefined;
+}
+
+/**
+ * Legacy snapshots with no recoverable provider are historical data with
+ * incomplete identity, not proof that the transcript belongs to Anthropic's
+ * signed-history family. The force-new-session dialog is a whitelist safety
+ * mechanism; when the current boundary is unknown, do not invent a boundary.
+ */
+export function canResumeProviderHistoryForSwitch(args: {
+  currentProviderEnv?: ProviderHistoryEnv;
+  nextProviderEnv?: ProviderHistoryEnv;
+  legacyCurrentProviderUnknown: boolean;
+  policy?: ProviderHistoryPolicy;
+}): boolean {
+  if (args.legacyCurrentProviderUnknown && !args.currentProviderEnv) {
+    return true;
+  }
+  return canResumeAcrossProviderBoundary(
+    args.currentProviderEnv,
+    args.nextProviderEnv,
+    args.policy,
+  );
 }
 
 /**

@@ -3,7 +3,7 @@
 //! Backstory: every IM session is created with `snapshotForImSession()` in
 //! `src/server/utils/session-snapshot.ts`, which stores ONLY the session's
 //! `runtime` and leaves `model / permissionMode / mcpEnabledServers /
-//! providerId / providerEnvJson / configSnapshotAt` undefined — the D4
+//! providerId / providerRoute / providerEnvJson / configSnapshotAt` undefined — the D4
 //! "live-follow agent config" policy. Works fine while runtime is stable.
 //!
 //! Runtime change is the one config delta D4 cannot live-follow: an SDK
@@ -43,6 +43,8 @@ use crate::sidecar::{release_session_sidecar, ManagedSidecarManager, SidecarOwne
 use crate::utils::file_lock::{with_file_lock, FileLockOptions};
 use crate::{ulog_info, ulog_warn};
 
+const SUBSCRIPTION_PROVIDER_ID: &str = "anthropic-sub";
+
 /// 6-field payload of "the agent config that was active when the session was
 /// detached". MUST stay aligned with the TS Pick in
 /// `src/server/utils/session-snapshot.ts::OwnedSessionSnapshot` (sans
@@ -61,6 +63,7 @@ pub struct OwnedSessionSnapshot {
     permission_mode: Option<String>,
     mcp_enabled_servers: Option<Vec<String>>,
     provider_id: Option<String>,
+    provider_route: Option<Value>,
     provider_env_json: Option<String>,
 }
 
@@ -84,11 +87,29 @@ impl OwnedSessionSnapshot {
         if let Some(ref pid) = self.provider_id {
             obj.insert("providerId".into(), json!(pid));
         }
-        if let Some(ref penv) = self.provider_env_json {
-            obj.insert("providerEnvJson".into(), json!(penv));
+        if let Some(ref route) = self.provider_route {
+            obj.insert("providerRoute".into(), route.clone());
+        }
+        if self.provider_route.is_none() {
+            if let Some(ref penv) = self.provider_env_json {
+                obj.insert("providerEnvJson".into(), json!(penv));
+            }
         }
         Value::Object(obj)
     }
+}
+
+fn provider_route_json(provider_id: Option<&str>, model: Option<&str>) -> Option<Value> {
+    let provider_id = provider_id?;
+    let model = model?;
+    if provider_id.is_empty() || model.is_empty() {
+        return None;
+    }
+    Some(json!({
+        "kind": if provider_id == SUBSCRIPTION_PROVIDER_ID { "subscription" } else { "provider" },
+        "providerId": provider_id,
+        "model": model,
+    }))
 }
 
 fn enabled_mcp_ids_from_servers_json(raw: Option<&str>) -> Option<Vec<String>> {
@@ -117,26 +138,47 @@ fn enabled_mcp_ids_from_servers_json(raw: Option<&str>) -> Option<Vec<String>> {
 /// snapshot at function entry (before any `patch.*` is applied to the agent's
 /// RwLocks) and pass it to `freeze_and_rotate_for_runtime_change`.
 pub async fn build_snapshot_from_agent_state(agent: &AgentInstance) -> OwnedSessionSnapshot {
+    let runtime_value = agent.runtime.read().await.clone();
     let mcp_servers_json = agent.mcp_servers_json.read().await.clone();
+    let model_value = agent.current_model.read().await.clone();
+    let provider_env_value = agent.current_provider_env.read().await.clone();
+    let is_external = runtime_value != "builtin";
+    let live_provider_id = provider_env_value
+        .as_ref()
+        .and_then(|v| v.get("providerId"))
+        .and_then(|v| v.as_str())
+        .map(String::from);
+    let provider_id_for_snapshot = if is_external {
+        None
+    } else {
+        live_provider_id.or_else(|| {
+            if provider_env_value.is_none() && model_value.is_some() {
+                Some(SUBSCRIPTION_PROVIDER_ID.to_string())
+            } else {
+                None
+            }
+        })
+    };
     OwnedSessionSnapshot {
-        runtime: agent.runtime.read().await.clone(),
-        model: agent.current_model.read().await.clone(),
+        runtime: runtime_value,
+        model: model_value.clone(),
         permission_mode: Some(agent.permission_mode.read().await.clone()),
         // mcp_servers_json is the runtime payload: the selected server
         // definitions already filtered by the global safety gate. Snapshot only
         // stores ids, matching `snapshotForOwnedSession.mcpEnabledServers`.
         mcp_enabled_servers: enabled_mcp_ids_from_servers_json(mcp_servers_json.as_deref()),
-        // provider_id / provider_env_json — see module-level note: provider_id
-        // is currently NOT hot-reloaded into AgentInstance (no Arc<RwLock>),
-        // so we use the boot-time value from agent.config. provider_env IS
-        // hot-reloaded so we read from the live RwLock and serialize.
-        provider_id: agent.config.provider_id.clone(),
-        provider_env_json: agent
-            .current_provider_env
-            .read()
-            .await
-            .as_ref()
-            .map(|v| v.to_string()),
+        // Provider identity is derived from live runtime state. Agent.config.provider_id
+        // is boot-time data and can be stale after settings edits.
+        provider_id: provider_id_for_snapshot.clone(),
+        provider_route: provider_route_json(
+            provider_id_for_snapshot.as_deref(),
+            model_value.as_deref(),
+        ),
+        provider_env_json: if is_external {
+            None
+        } else {
+            provider_env_value.as_ref().map(|v| v.to_string())
+        },
     }
 }
 
@@ -151,26 +193,46 @@ pub async fn build_snapshot_from_channel_state(
     current_model: &tokio::sync::RwLock<Option<String>>,
     permission_mode: &tokio::sync::RwLock<String>,
     mcp_servers_json: &tokio::sync::RwLock<Option<String>>,
-    provider_id: Option<String>,
+    _provider_id: Option<String>,
     current_provider_env: &tokio::sync::RwLock<Option<Value>>,
 ) -> OwnedSessionSnapshot {
     let runtime_value = runtime.read().await.clone();
+    let model_value = current_model.read().await.clone();
     let mcp_servers_json_value = mcp_servers_json.read().await.clone();
+    let provider_env_value = current_provider_env.read().await.clone();
     let is_external = runtime_value != "builtin";
+    let live_provider_id = provider_env_value
+        .as_ref()
+        .and_then(|v| v.get("providerId"))
+        .and_then(|v| v.as_str())
+        .map(String::from);
+    let provider_id_for_snapshot = if is_external {
+        None
+    } else {
+        live_provider_id.or_else(|| {
+            if provider_env_value.is_none() && model_value.is_some() {
+                Some(SUBSCRIPTION_PROVIDER_ID.to_string())
+            } else {
+                None
+            }
+        })
+    };
+    let route = if is_external {
+        None
+    } else {
+        provider_route_json(provider_id_for_snapshot.as_deref(), model_value.as_deref())
+    };
     OwnedSessionSnapshot {
         runtime: runtime_value,
-        model: current_model.read().await.clone(),
+        model: model_value,
         permission_mode: Some(permission_mode.read().await.clone()),
         mcp_enabled_servers: enabled_mcp_ids_from_servers_json(mcp_servers_json_value.as_deref()),
-        provider_id: if is_external { None } else { provider_id },
+        provider_id: provider_id_for_snapshot,
+        provider_route: route,
         provider_env_json: if is_external {
             None
         } else {
-            current_provider_env
-                .read()
-                .await
-                .as_ref()
-                .map(|v| v.to_string())
+            provider_env_value.as_ref().map(|v| v.to_string())
         },
     }
 }

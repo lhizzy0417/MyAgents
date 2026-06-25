@@ -288,6 +288,7 @@ describe('session-engine selector and adapters', () => {
       agentNames: ['helper'],
       permissionMode: 'auto',
       providerId: 'sensenova',
+      providerRoute: { kind: 'provider', providerId: 'sensenova', model: 'claude-sonnet' },
       reasoningEffort: 'default',
     });
     expect(engine.getHeldImConfigSnapshot()).toEqual({
@@ -324,6 +325,7 @@ describe('session-engine selector and adapters', () => {
       agentNames: null,
       permissionMode: 'no-restrictions',
       providerId: null,
+      providerRoute: null,
       reasoningEffort: 'medium',
     });
     expect(engine.getHeldImConfigSnapshot()).toEqual({

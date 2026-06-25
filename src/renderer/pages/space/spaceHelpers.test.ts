@@ -7,6 +7,7 @@ import {
   buildIssueQueryKey,
   formatAgentSecondaryLabel,
   getIssueStatusOptions,
+  issueDisplayTitle,
   isClosedIssue,
 } from './spaceHelpers';
 
@@ -67,6 +68,12 @@ describe('space issue helpers', () => {
     ]);
     expect(getIssueStatusOptions({ session: session('member', 'other-user'), issue: issue() })).toEqual([]);
     expect(getIssueStatusOptions({ session: session('member'), issue: issue({ status: 'closed' }) })).toEqual([]);
+  });
+
+  it('strips duplicated status prefixes from issue display titles', () => {
+    expect(issueDisplayTitle(issue({ title: '[open] Seed issue 1' }))).toBe('Seed issue 1');
+    expect(issueDisplayTitle(issue({ title: '[triaged] Seed issue 2' }))).toBe('[triaged] Seed issue 2');
+    expect(issueDisplayTitle(issue({ status: 'in_progress', title: '[in progress] Seed issue 3' }))).toBe('Seed issue 3');
   });
 
   it('formats agent workspace labels through project identity first', () => {

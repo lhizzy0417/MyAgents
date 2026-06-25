@@ -2,6 +2,7 @@ import { randomUUID } from 'crypto';
 import type { RuntimeType } from '../../shared/types/runtime';
 import type { ContextUsage } from '../../shared/types/context-usage';
 import { deriveSessionTitle } from '../../shared/sessionTitle';
+import type { ProviderRoute } from '../../shared/providerRoute';
 
 /**
  * Session statistics for tracking usage
@@ -91,6 +92,10 @@ export interface SessionMetadata {
     enabledPluginIds?: string[];
     /** Snapshot providerId. For owned sessions, undefined means "not pinned". */
     providerId?: string;
+    /** Snapshot provider/model route identity. This is the canonical builtin provider identity. */
+    providerRoute?: ProviderRoute;
+    /** Last time a legacy route was deterministically repaired. Diagnostic only. */
+    providerRouteRepairedAt?: string;
     /** Snapshot provider env JSON (credentials). For owned sessions, undefined means re-resolve from providerId. */
     providerEnvJson?: string;
     /** ISO8601 snapshot creation timestamp. Presence marks "this session is locked" — used
@@ -160,6 +165,8 @@ export interface MessageUsage {
     outputTokens: number;
     cacheReadTokens?: number;
     cacheCreationTokens?: number;
+    /** Provider used for this turn. Legacy messages may omit it and fall back to session metadata. */
+    providerId?: string;
     /** Primary model (for backwards compatibility and simple display) */
     model?: string;
     /** Per-model breakdown (for detailed statistics) */

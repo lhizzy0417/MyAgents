@@ -24,6 +24,7 @@
 import type { PermissionMode, Project, McpServerDefinition } from '@/config/types';
 import type { AgentConfig } from '@/../shared/types/agent';
 import type { RuntimeConfig } from '@/../shared/types/runtime';
+import { createConcreteProviderRoute, type ProviderRoute } from '@/../shared/providerRoute';
 
 export interface BuiltinModelSelection {
   providerId: string;
@@ -122,6 +123,7 @@ export interface PersistInputOptionParams {
  *  from session types) to keep this helper free of session schema deps. */
 export interface SessionSnapshotPatch {
   providerId?: string | null;
+  providerRoute?: ProviderRoute | null;
   model?: string | null;
   /** #324 — persisted literally (incl. 'default', which meaningfully pins the
    *  session back to default over a non-default agent value). */
@@ -133,6 +135,10 @@ export interface SessionSnapshotPatch {
    *  the env live from `providerId`. Same-provider builtin model edits must not
    *  clear it because owned sessions treat frozen env as part of exact identity. */
   providerEnvJson?: string | null;
+}
+
+function routeFromBuiltinSelection(selection: BuiltinModelSelection): ProviderRoute {
+  return createConcreteProviderRoute(selection.providerId, selection.model);
 }
 
 /**
@@ -286,12 +292,12 @@ function buildSnapshotPatch(params: PersistInputOptionParams): SessionSnapshotPa
 
   if (!isExternalRuntime && fields.builtinSelection !== undefined) {
     patch.providerId = fields.builtinSelection.providerId;
+    patch.providerRoute = routeFromBuiltinSelection(fields.builtinSelection);
     patch.model = fields.builtinSelection.model;
-    if (fields.builtinProviderEnvPolicy === 'clear-stale-provider-env') {
-      patch.providerEnvJson = null;
-    }
+    patch.providerEnvJson = null;
   } else if (fields.providerId !== undefined) {
     patch.providerId = fields.providerId;
+    patch.providerRoute = null;
     // #300: the session's frozen `providerEnvJson` was captured for the OLD
     // provider. Once providerId changes it is stale credentials (e.g. a deepseek
     // baseUrl/apiKey/modelAliases blob living under a skywork-ai providerId).

@@ -167,10 +167,15 @@ export default function SessionStatsModal({
                                             </thead>
                                             <tbody className="divide-y divide-[var(--line)]">
                                                 {Object.entries(stats.byModel).map(
-                                                    ([model, data]) => (
-                                                        <tr key={model}>
+                                                    ([key, data]) => (
+                                                        <tr key={key}>
                                                             <td className="px-4 py-2 text-[var(--ink)]">
-                                                                {model}
+                                                                <div>{data.model ?? key}</div>
+                                                                {data.providerId && (
+                                                                    <div className="mt-0.5 text-xs text-[var(--ink-muted)]">
+                                                                        {data.providerId}
+                                                                    </div>
+                                                                )}
                                                             </td>
                                                             <td className="px-4 py-2 text-right text-[var(--ink-muted)]">
                                                                 {formatTokens(data.inputTokens)}

@@ -161,7 +161,8 @@ export interface CronTaskConfig {
   delivery?: CronDelivery;
   /**
    * Per-task MCP enable list (PRD 0.2.4 §需求 4). Mirrors
-   * `Task.mcp_enabled_servers` override; `undefined` = follow workspace MCP.
+   * `Task.mcp_enabled_servers` override; `undefined` = follow workspace MCP,
+   * `[]` = explicitly no MCP.
    *
    * Why this matters for the launcher cron handoff perf path: the in-tab
    * pre-warm sets `currentMcpServers` to the Tab's effective MCP set. When

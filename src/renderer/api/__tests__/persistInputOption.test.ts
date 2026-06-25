@@ -40,6 +40,7 @@ describe('persistInputOptionChange — disk write fanout', () => {
     // sidecar re-resolves the env live from the new providerId (no stale creds).
     expect(m.patchSnapshot).toHaveBeenCalledWith({
       providerId: 'deepseek',
+      providerRoute: null,
       model: 'deepseek-chat',
       providerEnvJson: null,
     });
@@ -102,12 +103,13 @@ describe('persistInputOptionChange — disk write fanout', () => {
     });
     expect(m.patchSnapshot).toHaveBeenCalledWith({
       providerId: 'skywork-ai',
+      providerRoute: null,
       model: 'skywork-ai/skyclaw-v1',
       providerEnvJson: null,
     });
   });
 
-  it('#401: writes provider-scoped builtinSelection atomically while preserving same-provider env', async () => {
+  it('#401: writes provider-scoped builtinSelection atomically as providerRoute', async () => {
     const m = makeMocks();
     await persistInputOptionChange({
       workspaceId: 'ws-1',
@@ -135,12 +137,14 @@ describe('persistInputOptionChange — disk write fanout', () => {
     });
     expect(m.patchSnapshot).toHaveBeenCalledWith({
       providerId: 'zhipu',
+      providerRoute: { kind: 'provider', providerId: 'zhipu', model: 'glm-4.7-air' },
       model: 'glm-4.7-air',
       permissionMode: 'fullAgency',
+      providerEnvJson: null,
     });
   });
 
-  it('#401: clears providerEnvJson only when builtin selection crosses provider boundary', async () => {
+  it('#401: clears providerEnvJson when builtin selection writes a concrete route', async () => {
     const m = makeMocks();
     await persistInputOptionChange({
       workspaceId: 'ws-1',
@@ -157,7 +161,30 @@ describe('persistInputOptionChange — disk write fanout', () => {
 
     expect(m.patchSnapshot).toHaveBeenCalledWith({
       providerId: 'deepseek',
+      providerRoute: { kind: 'provider', providerId: 'deepseek', model: 'deepseek-v4-pro' },
       model: 'deepseek-v4-pro',
+      providerEnvJson: null,
+    });
+  });
+
+  it('writes Anthropic subscription selection as subscription route', async () => {
+    const m = makeMocks();
+    await persistInputOptionChange({
+      workspaceId: 'ws-1',
+      agentId: 'agent-1',
+      isExternalRuntime: false,
+      fields: {
+        builtinSelection: { providerId: 'anthropic-sub', model: 'claude-sonnet-4-6' },
+      },
+      patchProject: m.patchProject,
+      patchAgentConfig: m.patchAgentConfig,
+      patchSnapshot: m.patchSnapshot,
+    });
+
+    expect(m.patchSnapshot).toHaveBeenCalledWith({
+      providerId: 'anthropic-sub',
+      providerRoute: { kind: 'subscription', providerId: 'anthropic-sub', model: 'claude-sonnet-4-6' },
+      model: 'claude-sonnet-4-6',
       providerEnvJson: null,
     });
   });

@@ -36,7 +36,8 @@ interface SessionMetadata {
     mcpEnabledServers?: string[];
     enabledPluginIds?: string[];
     providerId?: string;
-    providerEnvJson?: string;
+    providerRoute?: ProviderRoute; // canonical builtin provider/model identity
+    providerEnvJson?: string;      // read-only legacy fallback; new route snapshots do not persist env
     configSnapshotAt?: string;  // 存在即 owned snapshot；读侧不得用 Agent 补 owned 缺字段
     materializationState?: 'prepared'; // pending->real 两阶段 materialize 隐藏行
     materializationSourceSessionId?: string; // prepared 来源 pending id
@@ -53,7 +54,11 @@ interface SessionStats {
 
 `configSnapshotAt` 是配置权威边界：存在时，session snapshot 拥有当前会话配置；缺字段不是“自动读 Agent 默认值”的许可。Agent/Project 只作为新 session 模板、legacy/no-snapshot 兼容源、以及 IM 无 Tab owner live-follow 源。
 
-`providerEnvJson` 是 owned snapshot 身份的一部分：同 provider 的模型切换必须保留 frozen env（自定义 baseUrl / apiKey / alias 仍属于该会话）；只有 providerId 真正改变且调用方没有显式提供新 env 时，PATCH 才清空它，让 sidecar 按新的 providerId 重新解析 live env。第一轮把 legacy/no-snapshot session promote 成 owned snapshot 时，baseline + 显式 patch 必须基于最新 metadata 写入，避免并发 config edit 用旧 baseline 覆盖已提交字段。
+`providerRoute` 是 owned builtin snapshot 的 canonical provider/model 身份。它只持久化 `{kind, providerId, model}`，不持久化 `baseUrl`、`apiKey`、`authType`、`modelAliases` 等运行时 env。真正发起请求时，Sidecar 用 `providerRoute` + 当前磁盘配置 materialize 出 `ProviderEnv`；subscription route materialize 为 `'subscription'` sentinel，API route 必须能从当前配置解析出 API key，否则本次发送失败并提示用户修复配置。
+
+`providerEnvJson` 已降级为 read-only legacy fallback：只有没有 concrete `providerRoute` 的旧 session 才会读取它。新写入路径（Tab snapshot、session freeze、IM detach、cron new-session snapshot）必须写 `providerRoute` 并清空/省略 `providerEnvJson`，避免把密钥、baseUrl 或 alias 冻结进历史会话。第一轮把 legacy/no-snapshot session promote 成 owned snapshot 时，baseline + 显式 patch 必须基于最新 metadata 写入，避免并发 config edit 用旧 baseline 覆盖已提交字段。
+
+旧 `model + configSnapshotAt` 但缺 provider 身份的 session 只做确定性自修复：在“声明了该 model 且本地有凭据/账号证据”的 provider 集合里匹配。API provider 的凭据证据是非空 `apiKeys[providerId]`；Anthropic subscription 的账号证据是 verify status valid、或记录过 `accountEmail`、或记录过 `verifiedAt`。修复不检查 provider enabled，也不实时校验 token/余额。唯一候选则静默写回 `providerRoute`；多个或没有候选时，前端模型选择器进入“需重新选择模型”的状态，发送会被拦截，用户感知是需要手动重新选一次模型，而不是消息无响应或错路由。
 
 ### Session ID 前缀约定
 

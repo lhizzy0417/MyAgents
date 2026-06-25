@@ -18,6 +18,13 @@ pub(super) async fn atomic_save_tasks(
     };
     // Lock released here
 
+    atomic_save_task_snapshot(storage_path, tasks_snapshot).await
+}
+
+pub(super) async fn atomic_save_task_snapshot(
+    storage_path: &PathBuf,
+    tasks_snapshot: Vec<CronTask>,
+) -> Result<(), String> {
     let store = CronTaskStore {
         tasks: tasks_snapshot,
     };

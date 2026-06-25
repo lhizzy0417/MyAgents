@@ -1669,6 +1669,7 @@ export default function Settings({ initialSection, initialMcpId, initialSelect, 
     const handleDeleteMcp = async (serverId: string) => {
         try {
             await deleteCustomMcpServer(serverId);
+            await refreshConfig();
             setMcpServersState(prev => prev.filter(s => s.id !== serverId));
             setMcpEnabledIds(prev => prev.filter(id => id !== serverId));
 

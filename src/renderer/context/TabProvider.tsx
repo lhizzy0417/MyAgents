@@ -49,6 +49,7 @@ import type { ContextUsage } from '../../shared/types/context-usage';
 import type { TerminalReason } from '../../shared/terminalReason';
 import type { SlashCommand } from '../../shared/slashCommands';
 import type { LogEntry } from '@/types/log';
+import type { ProviderRoute } from '../../shared/providerRoute';
 import { parsePartialJson } from '@/utils/parsePartialJson';
 import { subscribeFrontendLogs, setCurrentTabId } from '@/utils/frontendLogger';
 import { getTabServerUrl, proxyFetch, isTauri, getSessionActivation, getSessionPort, ensureSessionSidecar, resetTabServerUrlCache, setActiveCorrelation } from '@/api/tauriClient';
@@ -3339,6 +3340,7 @@ export default function TabProvider({
         // #324 — reasoning effort setting ('default' | level); send-time safety
         // net mirroring `model` (the /api/reasoning-effort/set push is primary).
         reasoningEffort?: string,
+        providerRoute?: ProviderRoute,
     ): Promise<boolean> => {
         const trimmed = text.trim();
         if (!trimmed && (!images || images.length === 0)) return false;
@@ -3395,14 +3397,7 @@ export default function TabProvider({
         // When no providerEnv is given (subscription mode), send 'subscription' explicitly
         // so enqueueUserMessage knows this is an intentional switch, not "I don't know".
         // IM/Cron callers omit the field entirely (undefined = "keep current provider").
-        postJson<{
-            success: boolean;
-            error?: string;
-            queued?: boolean;
-            queueId?: string;
-            isInFlight?: boolean;
-            deliveryMode?: 'realtime' | 'turn';
-        }>('/chat/send', {
+        const sendPayload = {
             text: trimmed,
             images: imageData,
             sessionId: currentSessionIdRef.current ?? sessionId,
@@ -3414,8 +3409,18 @@ export default function TabProvider({
             backgroundAgentPermissionMode: appConfigRef.current?.backgroundAgentPermissionMode ?? 'inherit',
             model,
             reasoningEffort,
-            providerEnv: providerEnv ?? 'subscription',
-        }).then((response) => {
+            providerRoute,
+            ...(providerRoute ? {} : { providerEnv: providerEnv ?? 'subscription' }),
+        };
+
+        postJson<{
+            success: boolean;
+            error?: string;
+            queued?: boolean;
+            queueId?: string;
+            isInFlight?: boolean;
+            deliveryMode?: 'realtime' | 'turn';
+        }>('/chat/send', sendPayload).then((response) => {
             if (response.success) {
                 trackTabEvent('message_send', {
                     runtime: analyticsMetaRef.current.runtime,

@@ -127,6 +127,7 @@ import { imEventBus, type ImEventType } from './utils/im-event-bus';
 import { imRequestRegistry } from './utils/im-request-registry';
 import { mirrorIfChannelBound, type MirrorImage } from './utils/im-mirror';
 import { normalizeClaudeTranscriptCleanupPeriodDays, SUBSCRIPTION_PROVIDER_ID } from '../shared/config-types';
+import { createConcreteProviderRoute, isConcreteProviderRoute } from '../shared/providerRoute';
 import type {
   ContentBlock,
   MessageWire,
@@ -880,6 +881,7 @@ let watchdogFired = false;
 // drop or surface B.
 
 const SUBSCRIPTION_PROVIDER_ANALYTICS: TurnProviderAnalytics = {
+  provider_id: 'anthropic-sub',
   provider_name: 'Anthropic (订阅)',
   api_protocol: 'anthropic',
   provider_base_url: 'https://api.anthropic.com',
@@ -890,6 +892,7 @@ function buildTurnProviderAnalytics(providerEnv: ProviderEnv | undefined): TurnP
   if (!providerEnv) return SUBSCRIPTION_PROVIDER_ANALYTICS;
   const protocol = providerEnv.apiProtocol ?? 'anthropic';
   return {
+    provider_id: providerEnv.providerId ?? null,
     provider_name: providerEnv.providerName ?? providerEnv.providerId ?? null,
     api_protocol: protocol,
     provider_base_url: providerEnv.baseUrl ?? 'https://api.anthropic.com',
@@ -4336,7 +4339,7 @@ async function materializeInitialPromptSessionMetadata(initialPromptText: string
 
 type DesktopSnapshotPatch = Pick<
   SessionMetadata,
-  'model' | 'reasoningEffort' | 'permissionMode' | 'mcpEnabledServers' | 'enabledPluginIds' | 'providerId' | 'providerEnvJson'
+  'model' | 'reasoningEffort' | 'permissionMode' | 'mcpEnabledServers' | 'enabledPluginIds' | 'providerId' | 'providerRoute' | 'providerEnvJson'
 >;
 type OwnedFreezeSnapshotPatch = Partial<Pick<
   SessionMetadata,
@@ -4364,6 +4367,7 @@ function applyDesktopSnapshotPatch(
   apply('mcpEnabledServers', patch.mcpEnabledServers);
   apply('enabledPluginIds', patch.enabledPluginIds);
   apply('providerId', patch.providerId);
+  apply('providerRoute', patch.providerRoute);
   apply('providerEnvJson', patch.providerEnvJson);
   if (wroteSnapshot) {
     meta.configSnapshotAt = new Date().toISOString();
@@ -4391,6 +4395,7 @@ function buildDesktopSnapshotMetadataPatch(
   apply('mcpEnabledServers', patch.mcpEnabledServers);
   apply('enabledPluginIds', patch.enabledPluginIds);
   apply('providerId', patch.providerId);
+  apply('providerRoute', patch.providerRoute);
   apply('providerEnvJson', patch.providerEnvJson);
   if (!wroteSnapshot) return null;
   updates.configSnapshotAt = new Date().toISOString();
@@ -4401,6 +4406,7 @@ async function restoreBuiltinConfigFromOwnedMetadata(meta: SessionMetadata): Pro
   if (!agentDir || isExternalRuntime(getCurrentRuntimeType())) return;
   const { resolveWorkspaceConfig } = await import('./utils/admin-config');
   const resolved = resolveWorkspaceConfig(agentDir, meta, { includeMcp: false });
+  await repairOwnedProviderRouteIfNeeded(meta, resolved.providerRoute);
   configSetModel(resolved.model);
   configSetProviderEnv(resolved.providerEnv);
   configSetReasoningEffort(normalizeReasoningEffort(resolved.reasoningEffort));
@@ -4412,19 +4418,44 @@ async function restoreBuiltinConfigFromOwnedMetadata(meta: SessionMetadata): Pro
   console.log(`[agent] restored owned metadata config: model=${resolved.model ?? 'default'}, provider=${resolved.providerEnv?.baseUrl ?? 'subscription/none'}, effort=${configState.currentReasoningEffort ?? 'default'}, permission=${resolved.permissionMode ?? 'default'}`);
 }
 
-function serializeProviderEnvSnapshot(providerEnv: ProviderEnv | undefined): string | undefined {
-  if (!providerEnv) return undefined;
-  try {
-    return JSON.stringify(providerEnv);
-  } catch (error) {
-    console.warn('[agent] failed to serialize provider env while freezing session:', error);
-    return undefined;
-  }
+async function repairOwnedProviderRouteIfNeeded(
+  observedMeta: SessionMetadata,
+  providerRoute: SessionMetadata['providerRoute'] | undefined,
+): Promise<void> {
+  if (!observedMeta.configSnapshotAt || observedMeta.providerRoute || !isConcreteProviderRoute(providerRoute)) return;
+  const observed = {
+    runtime: observedMeta.runtime,
+    model: observedMeta.model,
+    providerId: observedMeta.providerId,
+    providerEnvJson: observedMeta.providerEnvJson,
+    configSnapshotAt: observedMeta.configSnapshotAt,
+  };
+  await updateSessionMetadata(
+    observedMeta.id,
+    {
+      providerRoute,
+      providerId: providerRoute.providerId,
+      model: providerRoute.model,
+      providerEnvJson: undefined,
+      providerRouteRepairedAt: new Date().toISOString(),
+    },
+    current =>
+      !current.providerRoute
+      && current.runtime === observed.runtime
+      && current.model === observed.model
+      && current.providerId === observed.providerId
+      && current.providerEnvJson === observed.providerEnvJson
+      && current.configSnapshotAt === observed.configSnapshotAt,
+  );
 }
 
 function buildOwnedFreezeSnapshotPatch(overrides?: OwnedFreezeSnapshotPatch): OwnedFreezeSnapshotPatch & Pick<SessionMetadata, 'configSnapshotAt'> {
   const currentMcpServers = configState.currentMcpServers;
   const currentProviderEnv = configState.currentProviderEnv;
+  const currentProviderId = currentProviderEnv?.providerId ?? (configState.currentModel ? SUBSCRIPTION_PROVIDER_ID : undefined);
+  const currentProviderRoute = currentProviderId && configState.currentModel
+    ? createConcreteProviderRoute(currentProviderId, configState.currentModel)
+    : undefined;
   const patch: OwnedFreezeSnapshotPatch & Pick<SessionMetadata, 'configSnapshotAt'> = {
     runtime: getCurrentRuntimeType(),
     ...(configState.currentModel ? { model: configState.currentModel } : {}),
@@ -4432,13 +4463,14 @@ function buildOwnedFreezeSnapshotPatch(overrides?: OwnedFreezeSnapshotPatch): Ow
     ...(configState.currentPermissionMode ? { permissionMode: configState.currentPermissionMode } : {}),
     ...(currentMcpServers !== null ? { mcpEnabledServers: currentMcpServers.map(server => server.id) } : {}),
     ...(configState.currentEnabledPluginIds !== null ? { enabledPluginIds: [...configState.currentEnabledPluginIds] } : {}),
-    ...(currentProviderEnv?.providerId ? { providerId: currentProviderEnv.providerId } : {}),
-    ...(currentProviderEnv ? { providerEnvJson: serializeProviderEnvSnapshot(currentProviderEnv) } : {}),
+    ...(currentProviderId ? { providerId: currentProviderId } : {}),
+    ...(currentProviderRoute ? { providerRoute: currentProviderRoute } : {}),
     ...overrides,
     configSnapshotAt: new Date().toISOString(),
   };
   if (patch.runtime && isExternalRuntime(patch.runtime)) {
     delete patch.providerId;
+    delete patch.providerRoute;
     delete patch.providerEnvJson;
     delete patch.enabledPluginIds;
   } else if (patch.enabledPluginIds === undefined) {
@@ -6975,6 +7007,9 @@ export async function initializeAgent(
       const resolved = resolveWorkspaceConfig(agentDir, initMeta, {
         includeMcp: shouldSelfResolveMcp,
       });
+      if (initMeta) {
+        await repairOwnedProviderRouteIfNeeded(initMeta, resolved.providerRoute);
+      }
       const restoreOwnedBuiltinConfig = Boolean(initMeta?.configSnapshotAt) && !isExternalRuntime(getCurrentRuntimeType());
       // Only self-resolve MCP for background authorities (IM/Cron/agent-channel)
       // with an initial prompt. Tab sessions must NOT self-resolve: the
@@ -7901,6 +7936,9 @@ export async function enqueueUserMessage(
         title,
         currentScenario.type,
       );
+      if (!isLiveFollowScenario(currentScenario.type)) {
+        Object.assign(sessionMeta, buildOwnedFreezeSnapshotPatch());
+      }
       await saveSessionMetadata(sessionMeta);
       setLazySessionMaterializationAllowed(false);
       console.log(`[agent] session ${sessionId} persisted to SessionStore (lazy, scenario=${currentScenario.type}, snapshot=${snapshotKind})`);

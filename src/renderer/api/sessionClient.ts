@@ -9,6 +9,7 @@ import {
     isTauri,
 } from './tauriClient';
 import type { ContextUsage } from '../../shared/types/context-usage';
+import type { ProviderRoute } from '../../shared/providerRoute';
 
 export interface SessionStats {
     messageCount: number;
@@ -23,7 +24,14 @@ export interface MessageUsage {
     outputTokens: number;
     cacheReadTokens?: number;
     cacheCreationTokens?: number;
+    providerId?: string;
     model?: string;
+    modelUsage?: Record<string, {
+        inputTokens: number;
+        outputTokens: number;
+        cacheReadTokens?: number;
+        cacheCreationTokens?: number;
+    }>;
 }
 
 export interface SessionMetadata {
@@ -70,6 +78,8 @@ export interface SessionMetadata {
     /** Snapshot Claude cc-plugin enabled list. */
     enabledPluginIds?: string[];
     providerId?: string;
+    providerRoute?: ProviderRoute;
+    providerRouteRepairedAt?: string;
     /** Credentials — server redacts to '[redacted]' in PATCH response (zero-trust) */
     providerEnvJson?: string;
     configSnapshotAt?: string;
@@ -112,6 +122,8 @@ export interface SessionDetailedStats {
         cacheReadTokens: number;
         cacheCreationTokens: number;
         count: number;
+        model?: string;
+        providerId?: string;
     }>;
     messageDetails: Array<{
         userQuery: string;
@@ -219,6 +231,7 @@ export async function updateSession(
         mcpEnabledServers?: string[] | null;
         enabledPluginIds?: string[] | null;
         providerId?: string | null;
+        providerRoute?: ProviderRoute | null;
         providerEnvJson?: string | null;
     }
 ): Promise<SessionMetadata | null> {
@@ -288,6 +301,8 @@ export interface GlobalStats {
         cacheReadTokens: number;
         cacheCreationTokens: number;
         count: number;
+        model?: string;
+        providerId?: string;
     }>;
 }
 

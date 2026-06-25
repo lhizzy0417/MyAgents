@@ -2246,17 +2246,6 @@ async function steerExternalMessageForDesktop(input: {
     return { queued: false, error: err instanceof Error ? err.message : String(err) };
   }
 
-  broadcast('queue:started', {
-    queueId: input.queueId,
-    userMessage: {
-      id: input.userMsg.id,
-      role: input.userMsg.role,
-      content: input.text,
-      timestamp: input.userMsg.timestamp,
-      attachments: input.userMsg.attachments,
-    },
-  });
-
   try {
     await active.runtime.steerMessage(
       active.process,
@@ -2264,6 +2253,17 @@ async function steerExternalMessageForDesktop(input: {
       resolvedImages && resolvedImages.length > 0 ? resolvedImages : undefined,
       { clientUserMessageId: input.userMsg.id },
     );
+    broadcast('queue:started', {
+      queueId: input.queueId,
+      midTurnBreak: true,
+      userMessage: {
+        id: input.userMsg.id,
+        role: input.userMsg.role,
+        content: input.text,
+        timestamp: input.userMsg.timestamp,
+        attachments: input.userMsg.attachments,
+      },
+    });
     return { queued: true };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);

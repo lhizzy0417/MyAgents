@@ -211,6 +211,7 @@ export function stampTurnUsageOnPendingAssistant(options: {
   usage: BuiltinTurnUsage;
   toolCount: number;
   durationMs?: number;
+  providerId?: string;
 }): void {
   const usageStampIndex = findTurnUsageStampIndex(
     transcriptState.messages,
@@ -223,6 +224,7 @@ export function stampTurnUsageOnPendingAssistant(options: {
     outputTokens: options.usage.outputTokens,
     cacheReadTokens: options.usage.cacheReadTokens || undefined,
     cacheCreationTokens: options.usage.cacheCreationTokens || undefined,
+    providerId: options.providerId,
     model: options.usage.model,
     modelUsage: options.usage.modelUsage,
   };

@@ -68,7 +68,9 @@ import { BROWSER_BLANK_URL } from '@/components/browserConstants';
 import { CUSTOM_EVENTS, isPendingSessionId } from '../../shared/constants';
 import { workspacePathsEqual } from '../../shared/workspacePath';
 import { coerceReasoningEffortForRuntime, reasoningEffortChoices } from '../../shared/reasoningEffort';
-import { canResumeAcrossProviderBoundary, type ProviderHistoryEnv } from '../../shared/providerHistory';
+import type { ProviderHistoryEnv } from '../../shared/providerHistory';
+import { createConcreteProviderRoute, hasProviderRouteCredential, isConcreteProviderRoute } from '../../shared/providerRoute';
+import type { ProviderRoute } from '../../shared/providerRoute';
 import type { CapabilityInitialSelect } from '../../shared/skillsTypes';
 import {
   buildRuntimeChangePatch,
@@ -84,7 +86,15 @@ import type { RuntimeType, RuntimeDetections, RuntimeConfig } from '../../shared
 import type { FilePreviewIntent, InitialMessage, SidecarConfigDisposition } from '@/types/tab';
 import type { FilePreviewFocusTarget } from '@/types/filePreview';
 import { shouldAutoSendInitialMessage } from '@/utils/initialMessageAutoSend';
-import { resolveBuiltinPermissionMode, resolveCurrentProviderForSession, isPinnedProviderUnavailable, shouldResetModelOnProviderChange, shouldSkipSnapshotWrite } from '@/utils/optionResolve';
+import {
+  canResumeProviderHistoryForSwitch,
+  resolveBuiltinPermissionMode,
+  resolveCurrentProviderForSession,
+  resolveLegacyBuiltinSnapshotProviderId,
+  isPinnedProviderUnavailable,
+  shouldResetModelOnProviderChange,
+  shouldSkipSnapshotWrite,
+} from '@/utils/optionResolve';
 // CronTaskConfig type is used via useCronTask hook
 
 import { getRichDocKind, isPreviewable, type RichDocKind } from '../../shared/fileTypes';
@@ -123,6 +133,11 @@ function getRuntimeDisplayLabel(runtime: RuntimeType | undefined): string {
     default:
       return 'MyAgents';
   }
+}
+
+function buildBuiltinProviderRoute(provider: Provider | undefined, model: string | undefined): ProviderRoute | undefined {
+  if (!provider || !model) return undefined;
+  return createConcreteProviderRoute(provider.id, model);
 }
 
 function coerceExternalRuntimeModelForUi(model: string | undefined, runtime: RuntimeType): string | undefined {
@@ -334,18 +349,57 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
   );
   const sessionSnapshotOwnsConfig = !!sessionMeta?.configSnapshotAt;
   const waitingForExistingSessionMeta = !!sessionId && !isPendingSessionId(sessionId) && !sessionMeta;
-  const selectedProviderExact = selectedProviderId ? providers.find(p => p.id === selectedProviderId) : undefined;
+  const sessionSnapshotRuntime = (sessionMeta?.runtime as RuntimeType | undefined) ?? 'builtin';
+  const concreteSessionProviderRoute = isConcreteProviderRoute(sessionMeta?.providerRoute)
+    ? sessionMeta.providerRoute
+    : undefined;
+  const legacyBuiltinSnapshotProviderId = sessionSnapshotOwnsConfig && sessionSnapshotRuntime === 'builtin'
+    ? (concreteSessionProviderRoute?.providerId ?? resolveLegacyBuiltinSnapshotProviderId({
+      snapshotProviderId: sessionMeta?.providerId,
+      snapshotModel: sessionMeta?.model,
+      selectedProviderId,
+      providers,
+      apiKeys,
+      providerVerifyStatus,
+    }))
+    : undefined;
+  const effectiveSelectedProviderId = sessionSnapshotOwnsConfig && sessionSnapshotRuntime === 'builtin'
+    ? legacyBuiltinSnapshotProviderId
+    : selectedProviderId;
+  const selectedProviderExact = effectiveSelectedProviderId ? providers.find(p => p.id === effectiveSelectedProviderId) : undefined;
   const selectedProviderAvailable = selectedProviderExact
-    ? isProviderAvailable(selectedProviderExact, apiKeys, providerVerifyStatus)
+    ? (
+      sessionSnapshotOwnsConfig && selectedProviderExact.type === 'subscription'
+        ? hasProviderRouteCredential(selectedProviderExact, { apiKeys, verifyStatus: providerVerifyStatus })
+        : isProviderAvailable(selectedProviderExact, apiKeys, providerVerifyStatus)
+    )
     : false;
-  const fallbackProvider = resolveProvider(selectedProviderId, providers, apiKeys, providerVerifyStatus);
+  const availableProviderIdsForInput = useMemo(() => providers
+    .filter(provider => provider.type === 'subscription'
+      ? provider.enabled !== false && hasProviderRouteCredential(provider, { apiKeys, verifyStatus: providerVerifyStatus })
+      : isProviderAvailable(provider, apiKeys, providerVerifyStatus))
+    .map(provider => provider.id), [providers, apiKeys, providerVerifyStatus]);
+  const fallbackProvider = resolveProvider(effectiveSelectedProviderId, providers, apiKeys, providerVerifyStatus);
   const currentProvider = resolveCurrentProviderForSession({
     sessionSnapshotOwnsConfig,
-    selectedProviderId,
+    selectedProviderId: effectiveSelectedProviderId,
     selectedProvider: selectedProviderExact,
     selectedProviderAvailable,
     fallbackProvider,
   });
+  const currentProviderForHistory = sessionSnapshotOwnsConfig
+    ? selectedProviderExact
+    : currentProvider;
+  const builtinSnapshotProviderHistoryUnknown = sessionSnapshotOwnsConfig
+    && sessionSnapshotRuntime === 'builtin'
+    && !!sessionMeta?.model
+    && !currentProviderForHistory;
+  const builtinSnapshotProviderSelectionIncomplete = sessionSnapshotOwnsConfig
+    && sessionSnapshotRuntime === 'builtin'
+    && !!sessionMeta?.model
+    && !effectiveSelectedProviderId;
+  const currentProviderAvailableForInput = builtinSnapshotProviderSelectionIncomplete
+    || (!!currentProvider && availableProviderIdsForInput.includes(currentProvider.id));
 
   // PERFORMANCE: Ref-stabilize object deps used in handleSendMessage
   // Prevents useCallback from creating new references when these objects change,
@@ -1299,7 +1353,8 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
     const provider = builtinSel
       ? providers.find(p => p.id === builtinSel.providerId) ?? currentProvider
       : currentProvider;
-    const providerEnv = buildProviderEnv(provider);
+    const providerRoute = buildBuiltinProviderRoute(provider, effectiveModel);
+    const providerEnv = providerRoute ? undefined : buildProviderEnv(provider);
 
     const autoSend = async () => {
       try {
@@ -1423,12 +1478,13 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
             launchMessage.images,
             effectivePermission,
             effectiveModel,
-            isExternalRuntime ? undefined : providerEnv,
+            isExternalRuntime || providerRoute ? undefined : providerEnv,
             undefined,
             // launch value directly — the setReasoningEffort above isn't
             // visible in this closure (same-render state), and the first
             // message must already carry the launcher's choice.
-            isExternalRuntime ? undefined : (launchMessage.reasoningEffort ?? reasoningEffort)
+            isExternalRuntime ? undefined : (launchMessage.reasoningEffort ?? reasoningEffort),
+            isExternalRuntime ? undefined : providerRoute,
           );
         }
 
@@ -1544,10 +1600,12 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
       // Send cron task message
       // Note: taskId, isFirstExecution, aiCanExit are available for future enhancements
       // (e.g., injecting cron context into system prompt)
-      const providerEnv = buildProviderEnv(currentProvider);
+      const providerRoute = buildBuiltinProviderRoute(currentProvider, effectiveModel);
+      const providerEnv = providerRoute ? undefined : buildProviderEnv(currentProvider);
       // Use effective model/permission (runtime-aware) — not the builtin values
-      await sendMessage(prompt, undefined, effectivePermissionMode, effectiveModel, isExternalRuntime ? undefined : providerEnv, true /* isCron */,
-        isExternalRuntime ? undefined : reasoningEffort);
+      await sendMessage(prompt, undefined, effectivePermissionMode, effectiveModel, isExternalRuntime || providerRoute ? undefined : providerEnv, true /* isCron */,
+        isExternalRuntime ? undefined : reasoningEffort,
+        isExternalRuntime ? undefined : providerRoute);
     },
     onComplete: (task, reason) => {
       console.log('[Chat] Cron task completed:', task.id, reason);
@@ -1986,7 +2044,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
   const pinnedProviderUnavailable = isPinnedProviderUnavailable({
     isOwnedSession,
     isExternalRuntime,
-    selectedProviderId,
+    selectedProviderId: effectiveSelectedProviderId,
     resolvedProviderId: currentProvider?.id,
     providersLoaded: providers.length > 0,
   });
@@ -2261,7 +2319,18 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
     const mode = snapshotIsExternal
       ? coerceExternalRuntimePermissionForUi(rawMode, snapshotRuntime)
       : rawMode;
-    const providerId = snapshotOwnsConfig ? sessionMeta.providerId : (sessionMeta.providerId ?? currentAgent?.providerId);
+    const providerId = snapshotOwnsConfig
+      ? (isConcreteProviderRoute(sessionMeta.providerRoute)
+        ? sessionMeta.providerRoute.providerId
+        : resolveLegacyBuiltinSnapshotProviderId({
+        snapshotProviderId: sessionMeta.providerId,
+        snapshotModel: sessionMeta.model,
+        selectedProviderId,
+        providers,
+        apiKeys,
+        providerVerifyStatus,
+      }))
+      : (sessionMeta.providerId ?? currentAgent?.providerId);
     const mcp = snapshotOwnsConfig ? sessionMeta.mcpEnabledServers : (sessionMeta.mcpEnabledServers ?? currentAgent?.mcpEnabledServers);
     const plugins = snapshotOwnsConfig
       ? (sessionMeta.enabledPluginIds ?? [])
@@ -2295,13 +2364,15 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
     } else if (snapshotOwnsConfig || mode) {
       setPermissionMode((mode as PermissionMode | undefined) ?? 'auto');
     }
-    if (!snapshotIsExternal && (snapshotOwnsConfig || providerId)) {
+    if (!snapshotIsExternal && providerId) {
       setSelectedProviderId(providerId);
+    } else if (!snapshotIsExternal && snapshotOwnsConfig && providers.length > 0) {
+      setSelectedProviderId(undefined);
     }
     if (mcp) setWorkspaceMcpEnabled(mcp);
     setWorkspaceEnabledPlugins(plugins);
   // eslint-disable-next-line react-hooks/exhaustive-deps -- currentAgent derived from config, listening to its identity would re-fire on unrelated agent changes
-  }, [sessionMeta, configPending]);
+  }, [sessionMeta, configPending, selectedProviderId, providers]);
 
   // 若 selectedModel 不在当前 provider 的 models 中（如模型已被删除），回退到 primaryModel 并更新项目
   useEffect(() => {
@@ -2670,15 +2741,21 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
   // (avoids useEffect race when user picks a specific model from a different provider).
   const handleProviderChange = useCallback(async (providerId: string, targetModel?: string) => {
     // Skip if selecting the same provider (compare against local state, not shared project)
-    if (selectedProviderId === providerId) {
+    if (effectiveSelectedProviderId === providerId) {
       // Provider unchanged but caller passed a specific model — treat as model change.
       // Same dual-write policy as handleModelChange (PRD §4.3 rule 2).
       if (targetModel) {
         if (targetModel === selectedModel) return;
-        const canResumeProviderHistory = canResumeAcrossProviderBoundary(
-          toProviderHistoryEnv(currentProvider, selectedModel),
-          toProviderHistoryEnv(currentProvider, targetModel),
-        );
+        const currentProviderHistoryEnv = currentProviderForHistory
+          ? toProviderHistoryEnv(currentProviderForHistory, selectedModel)
+          : undefined;
+        const canResumeProviderHistory = canResumeProviderHistoryForSwitch({
+          currentProviderEnv: currentProviderHistoryEnv,
+          nextProviderEnv: currentProviderForHistory
+            ? toProviderHistoryEnv(currentProviderForHistory, targetModel)
+            : undefined,
+          legacyCurrentProviderUnknown: builtinSnapshotProviderHistoryUnknown,
+        });
         if (!canResumeProviderHistory && messagesRef.current.length > 0) {
           setPendingProviderSwitch({ providerId, model: targetModel });
           return;
@@ -2699,10 +2776,13 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
 
     const newProvider = providers.find(p => p.id === providerId);
     const model = targetModel ?? newProvider?.primaryModel;
-    const canResumeProviderHistory = canResumeAcrossProviderBoundary(
-      toProviderHistoryEnv(currentProvider, selectedModel),
-      toProviderHistoryEnv(newProvider, model),
-    );
+    const canResumeProviderHistory = canResumeProviderHistoryForSwitch({
+      currentProviderEnv: currentProviderForHistory
+        ? toProviderHistoryEnv(currentProviderForHistory, selectedModel)
+        : undefined,
+      nextProviderEnv: toProviderHistoryEnv(newProvider, model),
+      legacyCurrentProviderUnknown: builtinSnapshotProviderHistoryUnknown,
+    });
 
     // Existing SDK transcripts only need a new tab when crossing provider-history
     // families. Ordinary third-party providers share a portable protocol family;
@@ -2734,7 +2814,18 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
     // Suppress the deferred provider-change useEffect — we've already set the correct model
     providerInitRef.current = true;
   // eslint-disable-next-line react-hooks/exhaustive-deps -- narrowed deps; messagesRef avoids dep on messages array
-  }, [selectedProviderId, selectedModel, providers, currentProvider?.id, currentProvider?.type, currentProvider?.config.baseUrl, currentProvider?.apiProtocol, effectivePermissionMode, persistTabConfigChange]);
+  }, [
+    effectiveSelectedProviderId,
+    selectedModel,
+    providers,
+    currentProviderForHistory?.id,
+    currentProviderForHistory?.type,
+    currentProviderForHistory?.config.baseUrl,
+    currentProviderForHistory?.apiProtocol,
+    builtinSnapshotProviderHistoryUnknown,
+    effectivePermissionMode,
+    persistTabConfigChange,
+  ]);
 
   const handleBuiltinModelSelect = useCallback(async (selection: BuiltinModelSelection) => {
     await handleProviderChange(selection.providerId, selection.model);
@@ -2753,11 +2844,16 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
     // Track model_switch event
     track('model_switch', { model });
 
-    const canResumeProviderHistory = canResumeAcrossProviderBoundary(
-      toProviderHistoryEnv(currentProvider, selectedModel),
-      toProviderHistoryEnv(currentProvider, model),
-    );
-    const currentProviderId = selectedProviderId ?? currentProvider?.id;
+    const canResumeProviderHistory = canResumeProviderHistoryForSwitch({
+      currentProviderEnv: currentProviderForHistory
+        ? toProviderHistoryEnv(currentProviderForHistory, selectedModel)
+        : undefined,
+      nextProviderEnv: currentProviderForHistory
+        ? toProviderHistoryEnv(currentProviderForHistory, model)
+        : undefined,
+      legacyCurrentProviderUnknown: builtinSnapshotProviderHistoryUnknown,
+    });
+    const currentProviderId = effectiveSelectedProviderId ?? currentProvider?.id;
     if (!canResumeProviderHistory && messagesRef.current.length > 0 && currentProviderId) {
       setPendingProviderSwitch({ providerId: currentProviderId, model });
       return;
@@ -2772,7 +2868,18 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
     if (!persisted) return;
     setSelectedModel(model);
   // eslint-disable-next-line react-hooks/exhaustive-deps -- narrowed deps; currentProvider fields cover toProviderHistoryEnv inputs
-  }, [selectedModel, currentProvider?.id, currentProvider?.type, currentProvider?.config.baseUrl, currentProvider?.apiProtocol, selectedProviderId, effectivePermissionMode, persistTabConfigChange]);
+  }, [
+    selectedModel,
+    currentProviderForHistory?.id,
+    currentProviderForHistory?.type,
+    currentProviderForHistory?.config.baseUrl,
+    currentProviderForHistory?.apiProtocol,
+    effectiveSelectedProviderId,
+    currentProvider?.id,
+    builtinSnapshotProviderHistoryUnknown,
+    effectivePermissionMode,
+    persistTabConfigChange,
+  ]);
 
   // External-runtime model change. Same dual-write policy as builtin
   // `handleModelChange`, routed through `runtimeModel` so the helper writes
@@ -2902,8 +3009,12 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
     // instead of routing to the wrong provider and resetting their model.
     if (pinnedProviderUnavailable) {
       toastRef.current.error(
-        `当前会话指定的 Provider「${selectedProviderId}」不可用（缺少 API Key 或已被禁用）。请在设置中补充密钥，或在模型选择器中切换 Provider 后再发送。`,
+        `当前会话指定的 Provider「${effectiveSelectedProviderId}」不可用（缺少 API Key 或已被禁用）。请在设置中补充密钥，或在模型选择器中切换 Provider 后再发送。`,
       );
+      return false;
+    }
+    if (builtinSnapshotProviderSelectionIncomplete) {
+      toastRef.current.warning('这个历史会话缺少 Provider 信息，请先在模型选择器里重新选择一次模型。');
       return false;
     }
 
@@ -2932,7 +3043,8 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
     try {
       // Build provider env from current provider config (read from refs for stability)
       // For subscription type, don't send providerEnv (use SDK's default auth)
-      const providerEnv = buildProviderEnv(currentProviderRef.current);
+      const providerRoute = buildBuiltinProviderRoute(currentProviderRef.current, effectiveModel);
+      const providerEnv = providerRoute ? undefined : buildProviderEnv(currentProviderRef.current);
 
       // If cron mode is enabled and task hasn't started yet, start the task
       const cron = cronStateRef.current;
@@ -2994,7 +3106,8 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
       // Use effective model/permission (runtime-aware) — not the builtin values
       await sendMessage(text, images, effectivePermissionMode, effectiveModel, isExternalRuntime ? undefined : providerEnv, undefined,
         // #324 — builtin only: external runtimes apply effort via /api/reasoning-effort/set
-        isExternalRuntime ? undefined : reasoningEffort);
+        isExternalRuntime ? undefined : reasoningEffort,
+        isExternalRuntime ? undefined : providerRoute);
     } catch (error) {
       const errorMessage = {
         id: `error-${crypto.randomUUID()}`,
@@ -3010,7 +3123,7 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
       }
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps -- toastRef/currentProviderRef/apiKeysRef/cronStateRef are refs (stable); scrollToBottom/setMessages/setIsLoading/setSessionState are stable
-  }, [sessionState, isLoading, queuedMessages.length, startCronTask, sendMessage, effectivePermissionMode, effectiveModel, reasoningEffort, isExternalRuntime, isCrossRuntimeSession, scrollToBottom, pinnedProviderUnavailable, selectedProviderId]);
+  }, [sessionState, isLoading, queuedMessages.length, startCronTask, sendMessage, effectivePermissionMode, effectiveModel, reasoningEffort, isExternalRuntime, isCrossRuntimeSession, scrollToBottom, pinnedProviderUnavailable, effectiveSelectedProviderId, builtinSnapshotProviderSelectionIncomplete]);
 
   // Ref-stabilize handleSendMessage for handleRetry (avoids frequent re-creation)
   const handleSendMessageRef = useRef(handleSendMessage);
@@ -3461,10 +3574,22 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
   // PRD 0.2.32 — 智能压缩入口（builtin only）。用与正常发送完全相同的已解析
   // model/permission/providerEnv 发送 `/compact`（实测可触发内置压缩），避免误切 provider。
   const handleCompactContext = useCallback(() => {
-    const providerEnv = buildProviderEnv(currentProviderRef.current);
+    if (pinnedProviderUnavailable) {
+      toastRef.current.error(
+        `当前会话指定的 Provider「${effectiveSelectedProviderId}」不可用（缺少 API Key 或已被禁用）。请在设置中补充密钥，或在模型选择器中切换 Provider 后再发送。`,
+      );
+      return;
+    }
+    if (builtinSnapshotProviderSelectionIncomplete) {
+      toastRef.current.warning('这个历史会话缺少 Provider 信息，请先在模型选择器里重新选择一次模型。');
+      return;
+    }
+    const providerRoute = buildBuiltinProviderRoute(currentProviderRef.current, effectiveModel);
+    const providerEnv = providerRoute ? undefined : buildProviderEnv(currentProviderRef.current);
     void sendMessage('/compact', undefined, effectivePermissionMode, effectiveModel, isExternalRuntime ? undefined : providerEnv, undefined,
-      isExternalRuntime ? undefined : reasoningEffort);
-  }, [sendMessage, effectivePermissionMode, effectiveModel, reasoningEffort, isExternalRuntime, buildProviderEnv]);
+      isExternalRuntime ? undefined : reasoningEffort,
+      isExternalRuntime ? undefined : providerRoute);
+  }, [sendMessage, effectivePermissionMode, effectiveModel, reasoningEffort, isExternalRuntime, buildProviderEnv, builtinSnapshotProviderSelectionIncomplete, pinnedProviderUnavailable, effectiveSelectedProviderId]);
 
   // PRD 0.2.32 — context 用量指示器 slot。自取数（内部 useTabState 订阅 contextUsage），
   // 数据不经 SimpleChatInput props；useMemo 让 slot identity 在流式期间稳定，不打穿
@@ -4268,6 +4393,11 @@ export default function Chat({ onBack, onNewSession, onSwitchSession, onOpenSess
             sdkSlashCommands={visibleSdkSlashCommands}
             provider={currentProvider}
             providers={providers}
+            providerAvailable={currentProviderAvailableForInput}
+            availableProviderIds={availableProviderIdsForInput}
+            providerUnavailableMessage={builtinSnapshotProviderSelectionIncomplete
+              ? '请先在模型选择器里重新选择一次模型'
+              : undefined}
             onProviderChange={handleProviderChange}
             selectedModel={isExternalRuntime ? runtimeModel : selectedModel}
             onBuiltinModelSelect={isExternalRuntime ? undefined : handleBuiltinModelSelect}

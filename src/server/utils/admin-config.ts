@@ -22,7 +22,8 @@ import { resolve } from 'path';
 import { getHomeDirOrNull } from './platform';
 import { stripBom } from '../../shared/utils';
 import { workspacePathsEqual } from '../../shared/workspacePath';
-import type { McpServerDefinition } from '../../shared/config-types';
+import { promoteAgentMcpJsonToGlobal } from '../../shared/mcpConfig';
+import type { McpServerDefinition, ProviderVerifyStatus } from '../../shared/config-types';
 import { applyProviderEnablementAndOrder, isProviderEnabled, PRESET_MCP_SERVERS, PRESET_PROVIDERS } from '../../shared/config-types';
 import {
   coerceModelForRuntime,
@@ -35,6 +36,12 @@ import type { SessionMetadata } from '../types/session';
 import { coerceReasoningEffortSettingForRuntime } from '../../shared/reasoningEffort';
 import { ensureDirSync } from './fs-utils';
 import { withFileLock, FileBusyError } from './file-lock';
+import {
+  isConcreteProviderRoute,
+  resolveExplicitProviderRoute,
+  resolveLegacyModelOnlyProviderRoute,
+  type ProviderRoute,
+} from '../../shared/providerRoute';
 
 // ---------------------------------------------------------------------------
 // Paths
@@ -66,6 +73,15 @@ export class ConfigBusyError extends Error {
   }
 }
 
+export class ProjectsBusyError extends Error {
+  readonly code = 'PROJECTS_BUSY';
+
+  constructor(message = 'Projects busy: could not acquire projects.json.lock within 5000ms; retry') {
+    super(message);
+    this.name = 'ProjectsBusyError';
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Minimal types (mirrors renderer/config/types.ts — only the fields we touch)
 // ---------------------------------------------------------------------------
@@ -86,7 +102,7 @@ export interface AdminAppConfig {
   // Provider
   defaultProviderId?: string;
   providerApiKeys?: Record<string, string>;
-  providerVerifyStatus?: Record<string, { status: string; verifiedAt?: string }>;
+  providerVerifyStatus?: Record<string, ProviderVerifyStatus>;
   providerOrder?: string[];
   disabledProviderIds?: string[];
   // Agent
@@ -148,14 +164,21 @@ export function loadConfig(): AdminAppConfig {
   }
   try {
     const raw = readFileSync(configPath, 'utf-8');
-    return JSON.parse(stripBom(raw)) as AdminAppConfig;
+    const config = JSON.parse(stripBom(raw)) as AdminAppConfig;
+    // Keep Admin API/CLI reads aligned with renderer and Rust IM config
+    // readers: legacy Agent-only HTTP/SSE definitions are part of the MCP
+    // catalogue until the user explicitly removes or disables them.
+    promoteAgentMcpJsonToGlobal(config);
+    return config;
   } catch {
     // Malformed JSON — try .bak fallback
     const bakPath = configPath + '.bak';
     if (existsSync(bakPath)) {
       try {
         console.warn('[admin-config] config.json parse failed, falling back to .bak');
-        return JSON.parse(stripBom(readFileSync(bakPath, 'utf-8'))) as AdminAppConfig;
+        const config = JSON.parse(stripBom(readFileSync(bakPath, 'utf-8'))) as AdminAppConfig;
+        promoteAgentMcpJsonToGlobal(config);
+        return config;
       } catch { /* bak also corrupt */ }
     }
     console.error('[admin-config] config.json and .bak both unreadable, returning empty config');
@@ -275,6 +298,58 @@ export function saveProjects(projects: ProjectSlim[]): void {
     renameSync(tmpPath, path);
   } catch (err) {
     try { unlinkSync(tmpPath); } catch { /* ignore — tmp may not exist */ }
+    throw err;
+  }
+}
+
+/**
+ * Cross-process serialized read-modify-write on projects.json.
+ * New Admin API mutations should use this helper instead of open-coded
+ * loadProjects() + saveProjects(), because Settings, CLI, and background
+ * owner code can all mutate workspace metadata.
+ */
+export async function atomicModifyProjects(
+  modifier: (projects: ProjectSlim[]) => ProjectSlim[] | Promise<ProjectSlim[]>
+): Promise<ProjectSlim[]> {
+  const projectsPath = getProjectsPath();
+  const configDir = getConfigDir();
+
+  if (!existsSync(configDir)) {
+    ensureDirSync(configDir);
+  }
+
+  try {
+    return await withFileLock(
+      {
+        lockPath: projectsPath + '.lock',
+        timeoutMs: CONFIG_LOCK_TIMEOUT_MS,
+        staleMs: CONFIG_LOCK_STALE_MS,
+      },
+      async () => {
+        const projects = loadProjects();
+        const before = JSON.stringify(projects);
+        const modified = await modifier(projects);
+
+        if (JSON.stringify(modified) === before) {
+          return modified;
+        }
+
+        const tmpPath = projectsPath + '.tmp';
+        writeFileSynced(tmpPath, JSON.stringify(modified, null, 2));
+        try {
+          renameSync(tmpPath, projectsPath);
+          fsyncDir(configDir);
+        } catch (err) {
+          try { unlinkSync(tmpPath); } catch { /* ignore — tmp may not exist */ }
+          throw err;
+        }
+        return modified;
+      }
+    );
+  } catch (err) {
+    if (err instanceof FileBusyError) {
+      throw new ProjectsBusyError();
+    }
     throw err;
   }
 }
@@ -429,6 +504,30 @@ export function isProviderDisabled(providerId: string, config?: AdminAppConfig):
   return !!provider && !isProviderEnabled(provider);
 }
 
+function providersForRouteResolution(config: AdminAppConfig): Array<{
+  id: string;
+  type: 'api' | 'subscription';
+  enabled?: boolean;
+  models: Array<{ model: string; modelName: string; modelSeries: string }>;
+}> {
+  return getAllEffectiveProviders(config).map(provider => {
+    const models = Array.isArray(provider.models) ? provider.models : [];
+    return {
+      id: provider.id,
+      type: provider.type === 'subscription' ? 'subscription' : 'api',
+      enabled: provider.enabled === false ? false : true,
+      models: models
+        .map(model => {
+          if (!model || typeof model !== 'object') return undefined;
+          const value = (model as Record<string, unknown>).model;
+          if (typeof value !== 'string' || !value.trim()) return undefined;
+          return { model: value, modelName: value, modelSeries: value };
+        })
+        .filter((model): model is { model: string; modelName: string; modelSeries: string } => Boolean(model)),
+    };
+  });
+}
+
 // ---------------------------------------------------------------------------
 // Provider resolution (Sidecar self-resolve — eliminates dependency on providerEnvJson snapshots)
 // ---------------------------------------------------------------------------
@@ -515,6 +614,45 @@ export function resolveProviderEnv(
   }
 
   return result;
+}
+
+export function materializeProviderRouteEnv(
+  route: ProviderRoute | null | undefined,
+  config?: AdminAppConfig,
+): ResolvedProviderEnv | undefined {
+  if (!isConcreteProviderRoute(route)) return undefined;
+  if (route.kind === 'subscription') return undefined;
+  return resolveProviderEnv(route.providerId, config);
+}
+
+function resolveOwnedBuiltinProviderRoute(args: {
+  sessionMeta?: SessionMetadata | null;
+  config: AdminAppConfig;
+}): ProviderRoute | undefined {
+  const { sessionMeta, config } = args;
+  if (!sessionMeta) return undefined;
+  if (isConcreteProviderRoute(sessionMeta.providerRoute)) {
+    return sessionMeta.providerRoute;
+  }
+  const providers = providersForRouteResolution(config);
+  if (sessionMeta.providerId) {
+    return resolveExplicitProviderRoute({
+      providerId: sessionMeta.providerId,
+      model: sessionMeta.model,
+      providers,
+    });
+  }
+  if (sessionMeta.configSnapshotAt) {
+    return resolveLegacyModelOnlyProviderRoute({
+      model: sessionMeta.model,
+      providers,
+      credentials: {
+        apiKeys: config.providerApiKeys,
+        verifyStatus: config.providerVerifyStatus,
+      },
+    });
+  }
+  return undefined;
 }
 
 // ---------------------------------------------------------------------------
@@ -659,6 +797,7 @@ export function decodeProviderEnvSnapshot(
 export interface WorkspaceResolvedConfig {
   mcpServers: McpServerDefinition[];
   providerEnv: ResolvedProviderEnv | undefined;
+  providerRoute: ProviderRoute | undefined;
   model: string | undefined;
   permissionMode: string;
   /** #324 — reasoning effort setting ('default' | level | undefined). Raw chain
@@ -735,39 +874,6 @@ export function resolveWorkspaceConfig(
     }
   }
 
-  // --- Resolve Provider ---
-  // Priority: session.providerId → agent.providerId → config.defaultProviderId → persisted snapshot
-  let providerEnv: ResolvedProviderEnv | undefined;
-  const providerId = snapshotOwnsConfig
-    ? sessionMeta?.providerId
-    : (sessionMeta?.providerId
-      || (agent?.providerId as string | undefined)
-      || (config.defaultProviderId as string | undefined));
-  if (providerId) {
-    providerEnv = resolveProviderEnv(providerId, config);
-  }
-  // Snapshot env wins: if the session froze providerEnvJson, prefer that — even if
-  // the providerId still resolves cleanly today, the session's intent was the snapshot
-  // value (e.g., a custom baseUrl that has since been edited at the agent level).
-  // EXCEPT when providerId is globally disabled — decodeProviderEnvSnapshot enforces this.
-  //
-  // #300 residual: a session whose providerId was changed BEFORE the renderer fix
-  // (persistInputOption.ts clears providerEnvJson on providerId change) can hold a
-  // providerEnvJson belonging to the OLD provider (e.g. deepseek creds under a
-  // skywork-ai providerId). For such pre-fix snapshots this branch still hands the
-  // stale env to headless/pre-warm callers. It cannot be auto-distinguished from a
-  // legitimately-frozen custom baseUrl (the blob carries no providerId tag), so it is
-  // NOT auto-healed here; the session self-heals on its next provider/model change.
-  // See issue #300 — a desktop-scoped scrub migration is the follow-up if needed.
-  if (sessionMeta?.providerEnvJson) {
-    const decoded = decodeProviderEnvSnapshot(sessionMeta.providerEnvJson, providerId, config);
-    if (decoded) providerEnv = decoded;
-  } else if (!snapshotOwnsConfig && !providerEnv && agent?.providerEnvJson) {
-    // Backward-compat: legacy sessions without a snapshot fall back to agent's persisted env
-    const decoded = decodeProviderEnvSnapshot(agent.providerEnvJson as string, providerId, config);
-    if (decoded) providerEnv = decoded;
-  }
-
   const resolvedRuntime: RuntimeType = normalizeRuntime(
     (sessionMeta?.runtime as string | undefined) ?? (agent?.runtime as string | undefined),
   );
@@ -777,12 +883,52 @@ export function resolveWorkspaceConfig(
     reasoningEffort?: string;
   } | undefined;
 
+  // --- Resolve Provider ---
+  // Priority: session.providerId → agent.providerId → config.defaultProviderId → persisted snapshot
+  let providerEnv: ResolvedProviderEnv | undefined;
+  let providerRoute: ProviderRoute | undefined;
+  let providerId: string | undefined;
+  if (resolvedRuntime === 'builtin' && snapshotOwnsConfig) {
+    providerRoute = resolveOwnedBuiltinProviderRoute({ sessionMeta, config });
+    providerId = isConcreteProviderRoute(providerRoute) ? providerRoute.providerId : sessionMeta?.providerId;
+    providerEnv = isConcreteProviderRoute(providerRoute)
+      ? materializeProviderRouteEnv(providerRoute, config)
+      : (providerId ? resolveProviderEnv(providerId, config) : undefined);
+  } else if (resolvedRuntime === 'builtin') {
+    providerId = sessionMeta?.providerId
+      || (agent?.providerId as string | undefined)
+      || (config.defaultProviderId as string | undefined);
+    if (providerId) {
+      const route = resolveExplicitProviderRoute({
+        providerId,
+        model: sessionMeta?.model ?? (agent?.model as string | undefined),
+        providers: providersForRouteResolution(config),
+      });
+      providerRoute = isConcreteProviderRoute(route) ? route : undefined;
+      providerEnv = resolveProviderEnv(providerId, config);
+    }
+  }
+  // Legacy env fallback: once a canonical providerRoute exists, live materialization
+  // wins and the old providerEnvJson blob must not override it. Only route-less
+  // historical data may still decode providerEnvJson for back-compat.
+  // decodeProviderEnvSnapshot still enforces the global disable gate.
+  if (sessionMeta?.providerEnvJson && !isConcreteProviderRoute(providerRoute)) {
+    const decoded = decodeProviderEnvSnapshot(sessionMeta.providerEnvJson, providerId, config);
+    if (decoded) providerEnv = decoded;
+  } else if (!snapshotOwnsConfig && !providerEnv && agent?.providerEnvJson) {
+    // Backward-compat: legacy sessions without a snapshot fall back to agent's persisted env
+    const decoded = decodeProviderEnvSnapshot(agent.providerEnvJson as string, providerId, config);
+    if (decoded) providerEnv = decoded;
+  }
+
   // --- Resolve Model ---
   // Runtime-aware priority:
   // - builtin: session.model → agent.model → provider primary model
   // - external: session.model → agent.runtimeConfig.model → runtime default
   const rawModel = resolvedRuntime === 'builtin'
-    ? (snapshotOwnsConfig ? sessionMeta?.model : (sessionMeta?.model ?? (agent?.model as string | undefined) ?? undefined))
+    ? (snapshotOwnsConfig
+      ? (isConcreteProviderRoute(providerRoute) ? providerRoute.model : sessionMeta?.model)
+      : (sessionMeta?.model ?? (agent?.model as string | undefined) ?? undefined))
     : (snapshotOwnsConfig ? sessionMeta?.model : (sessionMeta?.model ?? agentRuntimeConfig?.model));
   let model = coerceModelForRuntime(rawModel, resolvedRuntime);
   if (resolvedRuntime !== 'builtin'
@@ -875,5 +1021,5 @@ export function resolveWorkspaceConfig(
     );
   }
 
-  return { mcpServers, providerEnv, model, permissionMode, reasoningEffort };
+  return { mcpServers, providerEnv, providerRoute, model, permissionMode, reasoningEffort };
 }

@@ -213,9 +213,9 @@ pub struct CronTask {
     /// Runtime-scoped config snapshot for external Runtime tasks.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime_config: Option<serde_json::Value>,
-    /// Per-task MCP enable list override (PRD 0.2.4 §需求 4). Snapshot from
-    /// the parent Task at projection time. `None` = follow workspace MCP
-    /// config; `Some([...])` = enable only these server ids for the task.
+    /// Per-task MCP enable list override. Snapshot from the parent Task at
+    /// projection time. `None` = follow workspace MCP config; `Some([])` =
+    /// explicitly no MCP; `Some([...])` = enable only these server ids.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mcp_enabled_servers: Option<Vec<String>>,
     /// Last error message (if any)
@@ -305,8 +305,8 @@ pub struct CronTaskConfig {
     pub runtime: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime_config: Option<serde_json::Value>,
-    /// Per-task MCP enable list snapshot (PRD 0.2.4 §需求 4). Mirrors the
-    /// `Task.mcp_enabled_servers` override; `None` = follow workspace MCP.
+    /// Per-task MCP enable list snapshot. Mirrors the `Task.mcp_enabled_servers`
+    /// override; `None` = follow workspace MCP, `Some([])` = explicitly no MCP.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mcp_enabled_servers: Option<Vec<String>>,
     // ===== IM Bot cron fields (v0.1.21) =====
